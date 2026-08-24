@@ -1,5 +1,7 @@
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   CapcutError,
   DEFAULT_ROOT,
@@ -18,6 +20,12 @@ import {
 const HELP = `capcutctl — transactional CapCut timeline control
 
 Usage:
+  capcutctl cut VIDEO [--keep 0,2-9] [--project NAME] [--lang ar]
+                      — talking-head cleanup: transcribe, energy-sync, strip dead
+                        air, review table. Re-run with --keep to build.
+  capcutctl qa --project NAME --times 3,9,15 [--guide 960] [--out DIR]
+                      — composite real frames; doctor cannot see the picture.
+
   capcutctl projects [--root PATH] [--json]
   capcutctl new --project NAME [--media FILE] [--scenes 0:6,6:12,12:18]
                 [--from TEMPLATE] [--blank] [--canvas 1080x1920] [--fps 30] [--dry-run]
@@ -102,9 +110,17 @@ const EXAMPLE_SPEC = {
   ]
 };
 
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+
 export async function main(argv) {
+  const command = argv[0];
+  if (command === 'cut' || command === 'qa') {
+    const script = path.join(HERE, '..', 'tools', command === 'cut' ? 'aroll.py' : 'frame_qa.py');
+    const r = spawnSync('python3', [script, ...argv.slice(1)], { stdio: 'inherit' });
+    if (r.error) throw new CapcutError(`could not run ${script}: ${r.error.message}`, { exitCode: 2 });
+    process.exit(r.status ?? 1);
+  }
   const args = parseArgs(argv);
-  const command = args._[0];
   if (!command || args.help || command === 'help') return print(HELP);
   const root = args.root ? path.resolve(args.root) : DEFAULT_ROOT;
 
