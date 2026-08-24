@@ -23,10 +23,14 @@ Usage:
   capcutctl cut VIDEO [--keep 0,2-9] [--project NAME] [--lang ar]
                       — talking-head cleanup: transcribe, energy-sync, strip dead
                         air, review table. Re-run with --keep to build.
-  capcutctl qa --project NAME --times 3,9,15 [--guide 960] [--out DIR]
-                      — composite real frames; doctor cannot see the picture.
+  capcutctl qa --project NAME --times 3,9,15 [--guide 960] [--sheet] [--label L]
+                      — composite real frames (+ a labelled contact sheet).
+  capcutctl find "agent running" --media FILE [--shows|--says] [--context]
+                      — when is it on screen / when was it said.
 
   capcutctl projects [--root PATH] [--json]
+  capcutctl rm --project NAME [--dry-run]      — to .recycle_bin, registry entry dropped
+  capcutctl close                              — quit CapCut and wait for it to exit
   capcutctl new --project NAME [--media FILE] [--scenes 0:6,6:12,12:18]
                 [--from TEMPLATE] [--blank] [--canvas 1080x1920] [--fps 30] [--dry-run]
   capcutctl inspect --project NAME_OR_PATH [--root PATH] [--json]
@@ -114,8 +118,9 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 
 export async function main(argv) {
   const command = argv[0];
-  if (command === 'cut' || command === 'qa') {
-    const script = path.join(HERE, '..', 'tools', command === 'cut' ? 'aroll.py' : 'frame_qa.py');
+  if (command === 'cut' || command === 'qa' || command === 'find') {
+    const tool = { cut: 'aroll.py', qa: 'frame_qa.py', find: 'find.py' }[command];
+    const script = path.join(HERE, '..', 'tools', tool);
     const r = spawnSync('python3', [script, ...argv.slice(1)], { stdio: 'inherit' });
     if (r.error) throw new CapcutError(`could not run ${script}: ${r.error.message}`, { exitCode: 2 });
     process.exit(r.status ?? 1);
@@ -129,6 +134,16 @@ export async function main(argv) {
     const p = presets();
     return print(Object.entries(p.layouts).map(([name, l]) => ({ name, description: l.description }))
       .concat([{ name: 'background', description: p.background.description }]), true);
+  }
+  if (command === 'close') {
+    const { closeCapcut } = await import('./create.mjs');
+    return print(closeCapcut(), true);
+  }
+  if (command === 'rm') {
+    if (!args.project) throw new CapcutError('rm requires --project NAME.', { exitCode: 2 });
+    const { removeProject } = await import('./create.mjs');
+    return print(removeProject(args.project, { root, dryRun: Boolean(args.dryRun),
+                                               forceRunning: Boolean(args.forceRunning) }), true);
   }
   if (command === 'new') {
     if (!args.project) throw new CapcutError('new requires --project NAME.', { exitCode: 2 });

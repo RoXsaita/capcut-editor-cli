@@ -345,3 +345,73 @@ export function createProject(name, options = {}) {
     ...registration
   };
 }
+
+/**
+ * Delete a draft the way CapCut does: move it to .recycle_bin and drop its registry
+ * entry. Doing this by hand means `rm -rf` plus a hand-edited root_meta_info.json —
+ * unrecoverable, and one slip corrupts the whole draft library.
+ */
+export function removeProject(name, options = {}) {
+  const root = options.root ? path.resolve(options.root) : DEFAULT_ROOT;
+  assertCapcutClosed({ forceRunning: options.forceRunning });
+  const projectDir = resolveProject(name, root);
+  const label = path.basename(projectDir);
+  if (path.resolve(projectDir) === path.resolve(root)) {
+    throw new CapcutError('refusing to remove the drafts root itself.', { exitCode: 2 });
+  }
+
+  const bin = path.join(root, '.recycle_bin');
+  let dest = path.join(bin, label);
+  for (let n = 2; fs.existsSync(dest); n++) dest = path.join(bin, `${label} (${n})`);
+
+  const registry = path.join(root, 'root_meta_info.json');
+  let removedEntries = 0;
+  if (fs.existsSync(registry)) {
+    const meta = readJson(registry);
+    const before = (meta.all_draft_store || []).length;
+    meta.all_draft_store = (meta.all_draft_store || [])
+      .filter(e => path.resolve(e.draft_fold_path || '') !== path.resolve(projectDir));
+    removedEntries = before - meta.all_draft_store.length;
+    if (!options.dryRun && removedEntries) {
+      fs.copyFileSync(registry, `${registry}.bak_capcutctl`);
+      const staged = `${registry}.capcutctl-staged`;
+      fs.writeFileSync(staged, stableJson(meta));
+      readJson(staged);
+      fs.renameSync(staged, registry);
+    }
+  }
+  if (!options.dryRun) {
+    fs.mkdirSync(bin, { recursive: true });
+    fs.renameSync(projectDir, dest);
+  }
+  return { removed: projectDir, recycled: dest, registryEntriesRemoved: removedEntries,
+           dryRun: Boolean(options.dryRun), restore: `mv "${dest}" "${projectDir}"` };
+}
+
+/** Quit CapCut and wait for it to actually exit. */
+export function closeCapcut({ timeoutMs = 25000 } = {}) {
+  const running = () => {
+    try { return execFileSync('pgrep', ['-x', 'CapCut'], { encoding: 'utf8' }).trim().split('\n').filter(Boolean); }
+    catch { return []; }
+  };
+  const before = running();
+  if (!before.length) return { wasRunning: false, closed: true };
+  try {
+    execFileSync('osascript', ['-e', 'tell application "CapCut" to quit'], { encoding: 'utf8', timeout: timeoutMs });
+  } catch (error) {
+    // -128 is the user cancelling CapCut's own "save?" dialog
+    if (running().length) {
+      throw new CapcutError(
+        `CapCut is still running (${running().join(', ')}) — the quit was refused or cancelled. `
+        + 'Quit it yourself, then re-run.', { code: 'CAPCUT_RUNNING', exitCode: 2, details: { error: error.message } }
+      );
+    }
+  }
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!running().length) return { wasRunning: true, closed: true, pids: before };
+    execFileSync('sleep', ['0.4']);
+  }
+  throw new CapcutError(`CapCut did not exit within ${timeoutMs / 1000}s (pids ${running().join(', ')}).`,
+                        { code: 'CAPCUT_RUNNING', exitCode: 2 });
+}

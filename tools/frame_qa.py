@@ -138,6 +138,27 @@ def render(proj, tl, t, z="track"):
     return canvas, rows, W, H
 
 
+def contact_sheet(tiles, out, tile_w=240, pad=6, bar=22):
+    """
+    Every review in this project ended with a labelled grid of frames, and every one of
+    them was a throwaway PIL script. It is the single most repeated thing here.
+    """
+    ims = []
+    for path, label in tiles:
+        im = Image.open(path).convert("RGB")
+        h = max(1, round(im.height * tile_w / im.width))
+        ims.append((im.resize((tile_w, h), Image.LANCZOS), label))
+    rows = max(i.height for i, _ in ims)
+    sheet = Image.new("RGB", (len(ims) * (tile_w + pad) + pad, rows + bar + pad * 2), (18, 18, 18))
+    d = ImageDraw.Draw(sheet)
+    for i, (im, label) in enumerate(ims):
+        x = pad + i * (tile_w + pad)
+        sheet.paste(im, (x, bar + pad))
+        d.text((x + 2, 5), str(label)[:44], fill=(255, 235, 90))
+    sheet.save(out)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--project", required=True)
@@ -147,10 +168,16 @@ def main():
     ap.add_argument("--guide", type=float, action="append", default=[],
                     help="draw a horizontal guide at this y (repeatable); 960 = the half line")
     ap.add_argument("--rects-only", action="store_true")
+    ap.add_argument("--sheet", nargs="?", const="sheet.png", default=None,
+                    help="also write a labelled contact sheet of every rendered frame")
+    ap.add_argument("--label", action="append", default=[],
+                    help="caption for the Nth frame (repeatable); defaults to the timecode")
+    ap.add_argument("--width", type=int, default=240, help="tile width in the contact sheet")
     a = ap.parse_args()
     proj, tl, path = load_project(a.project)
     print(f"timeline: {path}")
     os.makedirs(a.out, exist_ok=True)
+    tiles = []
     for t in [float(x) for x in a.times.split(",")]:
         img, rows, W, H = render(proj, tl, t, a.z)
         print(f"\n=== t={t}  z={a.z}  canvas {W}x{H}")
@@ -169,6 +196,11 @@ def main():
         f = os.path.join(a.out, f"t{t:g}.png")
         img.convert("RGB").save(f)
         print(f"  -> {f}")
+        tiles.append((f, a.label[len(tiles)] if len(tiles) < len(a.label) else f"t={t:g}"))
+
+    if a.sheet and tiles:
+        out = a.sheet if os.path.isabs(a.sheet) else os.path.join(a.out, a.sheet)
+        print(f"\n  -> {contact_sheet(tiles, out, a.width)}")
 
 
 if __name__ == "__main__":
