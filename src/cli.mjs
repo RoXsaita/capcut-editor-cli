@@ -42,10 +42,14 @@ Usage:
   capcutctl apply --project NAME_OR_PATH --spec FILE [--dry-run] [--force-running] [--no-backup]
   capcutctl init-spec [--output FILE]
 
-  capcutctl scenes --project NAME_OR_PATH [--track N]
+  capcutctl scenes --project NAME_OR_PATH [--track N] [--transcript]
   capcutctl layout split-screen --project NAME_OR_PATH --segments IDS|--at SECONDS [--track N] [--dry-run]
   capcutctl layout circle       --project NAME_OR_PATH --segments IDS|--at SECONDS [--track N] [--dry-run]
   capcutctl layout background   --project NAME_OR_PATH [--at SECONDS] [--include-template] [--dry-run]
+  capcutctl layout broll        --project NAME_OR_PATH --at SECONDS --track N --row ROW [--scale S]
+  capcutctl polish              --project NAME_OR_PATH [--lead 0.14] [--dry-run]
+                      — his transitions + matching SFX on every cut, measured from
+                        Hermes-agent / Higgsfield Refund / Content System / IKEA Refund
   capcutctl layout list
 
 Layouts are exact, measured geometry (presets/layouts.json) — not judgement:
@@ -70,7 +74,8 @@ function parseArgs(argv) {
     const token = argv[i];
     if (!token.startsWith('--')) { result._.push(token); continue; }
     const key = token.slice(2).replace(/-([a-z])/g, (_, char) => char.toUpperCase());
-    if (['json', 'dryRun', 'forceRunning', 'noBackup', 'help', 'noOverlay', 'blank', 'includeTemplate', 'newTimelineId'].includes(key)) result[key] = true;
+    if (['json', 'dryRun', 'forceRunning', 'noBackup', 'help', 'noOverlay', 'blank', 'includeTemplate', 'newTimelineId',
+         'transcript', 'noTransitions', 'noSeam'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
       result[key] = argv[++i];
@@ -181,7 +186,14 @@ export async function main(argv) {
   }
   if (command === 'scenes') {
     const { describeScenes } = await import('./layouts.mjs');
-    return print(describeScenes(projectDir, args.track == null ? null : Number(args.track)), true);
+    return print(describeScenes(projectDir, args.track == null ? null : Number(args.track),
+                                Boolean(args.transcript)), true);
+  }
+  if (command === 'polish') {
+    const spec = { version: 1, name: 'polish',
+                   operations: [{ op: 'polish', ...(args.lead ? { lead: Number(args.lead) } : {}),
+                                  ...(args.noTransitions ? { noTransitions: true } : {}) }] };
+    return print(applySpec(projectDir, spec, options), true);
   }
   if (command === 'layout') {
     const name = args._[1];
@@ -191,6 +203,7 @@ export async function main(argv) {
       segments: args.segments ? String(args.segments).split(',').map(s => s.trim()).filter(Boolean) : null,
       at: args.at ? String(args.at).split(',').map(Number) : null,
       track: args.track == null ? null : Number(args.track),
+      row: args.row, scale: args.scale, seam: args.noSeam ? false : undefined,
       overlay: args.noOverlay ? false : undefined,
       includeTemplate: Boolean(args.includeTemplate)
     });

@@ -2,7 +2,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { opLayoutApply, opLayoutBackground } from './layouts.mjs';
+import { opLayoutApply, opLayoutBackground, opLayoutBroll } from './layouts.mjs';
+import { opPolish } from './polish.mjs';
 
 export const DEFAULT_ROOT = path.join(
   process.env.HOME || '',
@@ -572,6 +573,8 @@ export function applyOperations(doc, operations, context) {
     else if (op.op === 'timeline.set') result = opTimelineSet(doc, op);
     else if (op.op === 'layout.apply') result = opLayoutApply(doc, op, context);
     else if (op.op === 'layout.background') result = opLayoutBackground(doc, op, context);
+    else if (op.op === 'layout.broll') result = opLayoutBroll(doc, op, context);
+    else if (op.op === 'polish') result = opPolish(doc, op, context);
     else throw new CapcutError(`Unsupported operation: ${op.op}`, { code: 'UNSUPPORTED_OPERATION' });
     results.push({ index, op: op.op, ...result });
   }
@@ -741,7 +744,7 @@ export function applySpec(projectDir, spec, options = {}) {
   const operations = clone(spec.operations || []);
   for (const op of operations) {
     if (['segment.clone', 'material.clone', 'track.clone'].includes(op.op) && !op.id) op.id = uuid();
-    if (op.op.startsWith('layout.') && !op.__seed) op.__seed = uuid();
+    if ((op.op.startsWith('layout.') || op.op === 'polish') && !op.__seed) op.__seed = uuid();
   }
   return executeTransaction(projectDir, groups => groups.map(group => ({
     group: group.name,
@@ -777,11 +780,43 @@ export function restoreProjectSnapshot(projectDir, snapshotNameOrPath, options =
   }
 }
 
+/**
+ * CapCut re-saves a material under an id it already used, differing only in noise
+ * (an audio_fade object, a crop corner of 0.9999999999999997). Structurally that is a
+ * CONFLICTING_MATERIAL_ID error even though every copy points at the same file. Collapse
+ * them — but only when they are the same LOGICAL material, so a genuine id collision
+ * between two different clips is still reported rather than silently merged.
+ */
+function dedupeMaterials(doc) {
+  const merged = [];
+  for (const [kind, values] of Object.entries(doc.materials || {})) {
+    if (!Array.isArray(values)) continue;
+    const seen = new Map();
+    const keep = [];
+    for (const value of values) {
+      if (!value?.id) { keep.push(value); continue; }
+      const prev = seen.get(value.id);
+      if (!prev) { seen.set(value.id, value); keep.push(value); continue; }
+      const same = ['path', 'width', 'height', 'duration', 'type', 'name']
+        .every(k => JSON.stringify(prev[k]) === JSON.stringify(value[k]));
+      if (same) merged.push({ kind, id: value.id });
+      else keep.push(value);                       // a real collision: leave it for doctor
+    }
+    doc.materials[kind] = keep;
+  }
+  return merged;
+}
+
 export function syncMirrors(projectDir, options = {}) {
-  return executeTransaction(projectDir, groups => {
-    for (const group of groups) group.doc = clone(group.doc);
+  const merged = [];
+  const result = executeTransaction(projectDir, groups => {
+    for (const group of groups) {
+      group.doc = clone(group.doc);
+      if (options.dedupe !== false) merged.push(...dedupeMaterials(group.doc).map(m => ({ ...m, group: group.name })));
+    }
     return groups.map(group => ({ group: group.name, mirrors: group.mirrors }));
   }, { ...options, forceWriteAll: true, label: options.label || 'sync' });
+  return { ...result, mergedDuplicateMaterials: merged.length, merged };
 }
 
 export function inspectProject(projectDir) {

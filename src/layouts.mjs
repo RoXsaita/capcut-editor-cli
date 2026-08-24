@@ -355,7 +355,25 @@ function activeDoc(projectDir) {
 const round3 = v => Math.round(v * 1000) / 1000;
 
 /** Human-readable scene list, so you can pick what to restyle without opening CapCut. */
-export function describeScenes(projectDir, trackFilter = null) {
+/** Join each scene to what is being said over it. */
+function transcriptFor(mediaPath) {
+  const cache = path.join(os.homedir(), 'Downloads', '.video-index');
+  const stem = path.basename(mediaPath).replace(/\.[^.]+$/, '');
+  let file = null;
+  try {
+    for (const n of fs.readdirSync(cache).sort()) {
+      if (n.startsWith(stem) && n.includes('.whisper')) { file = path.join(cache, n); break; }
+    }
+    if (!file) {
+      const legacy = path.join(cache, `${stem.split('-')[0]}_transcript_ar.json`);
+      if (fs.existsSync(legacy)) file = legacy;
+    }
+  } catch { return null; }
+  if (!file) return null;
+  return JSON.parse(fs.readFileSync(file, 'utf8')).segments || [];
+}
+
+export function describeScenes(projectDir, trackFilter = null, withTranscript = false) {
   const doc = activeDoc(projectDir);
   const config = presets();
   const rows = [];
@@ -377,6 +395,22 @@ export function describeScenes(projectDir, trackFilter = null) {
       scale: segment.clip?.scale?.x,
       transformY: segment.clip?.transform?.y
     });
+  }
+  if (withTranscript) {
+    const byMedia = new Map();
+    for (const { segment, track } of allSegments(doc)) {
+      if (track.type !== 'video') continue;
+      const mat = (doc.materials?.videos || []).find(m => m.id === segment.material_id);
+      if (!mat?.path || mat.type === 'photo') continue;
+      if (!byMedia.has(mat.path)) byMedia.set(mat.path, transcriptFor(mat.path));
+      const segs = byMedia.get(mat.path);
+      const row = rows.find(r => r.id === segment.id);
+      if (!segs || !row) continue;
+      const sr = segment.source_timerange || { start: 0, duration: 0 };
+      const a = sr.start / 1e6, b = (sr.start + sr.duration) / 1e6;
+      row.says = segs.filter(x => x.start < b && x.end > a).map(x => x.text.trim()).join(' ').trim() || null;
+      row.source = [Math.round(a * 100) / 100, Math.round(b * 100) / 100];
+    }
   }
   return rows.sort((a, b) => a.start - b.start || a.track - b.track);
 }
@@ -420,6 +454,70 @@ function resolveIds(projectDir, opts = {}, required = true) {
  * Turn `layout <name> --segments|--at` into a normal v1 spec, so layouts ride the
  * same transaction, snapshot, mirror-sync and doctor path as every other edit.
  */
+/**
+ * Place a B-roll clip in the TOP half of a split screen, framed on a chosen source row.
+ *
+ *   displayed height = 1920 * s / fitK ... in canvas terms the clip is (sw,sh) fitted then
+ *   scaled, so a source row R lands at canvas y = clipTop + R*k0*s. Solving for the row to
+ *   sit at the centre of the top half (y=480) gives the transform; the mask line that cuts
+ *   the clip at y=960 then falls out as centreY = -ty/s.
+ *
+ * The window is clamped inside the frame: a window running off the top or bottom leaves
+ * blank canvas behind the B-roll, which is the one thing the look must never have.
+ */
+export function brollFocus({ sourceWidth, sourceHeight, row, scale, canvas = [1080, 1920] }) {
+  const [W, H] = canvas;
+  const k0 = Math.min(W / sourceWidth, H / sourceHeight);
+  const fillScale = (W / sourceWidth) / k0;              // scale at which the clip is exactly canvas-wide
+  // a hand-typed fill scale is usually a rounding hair under the exact one; snap it up
+  // rather than refuse, and only complain when the clip would genuinely show background.
+  let s = scale || fillScale;
+  let snapped = false;
+  if (s < fillScale) {
+    if (s > fillScale * 0.99) { s = fillScale; snapped = true; }
+    else {
+      throw new CapcutError(
+        `scale ${s.toFixed(5)} leaves the clip ${(sourceWidth * k0 * s).toFixed(0)}px wide on a ${W}px canvas — `
+        + `that is blank background either side. Minimum is ${fillScale.toFixed(5)}.`,
+        { code: 'BROLL_TOO_SMALL', exitCode: 2 });
+    }
+  }
+  const visibleRows = (H / 2) / (k0 * s);
+  const clamped = Math.max(visibleRows / 2, Math.min(sourceHeight - visibleRows / 2, row));
+  const ty = ((H / 4) - (H / 2) * s + clamped * k0 * s) / (H / 2);
+  return {
+    clip: { scale: { x: s, y: s }, transform: { x: 0, y: round6(ty) }, rotation: 0,
+            flip: { horizontal: false, vertical: false }, alpha: 1 },
+    mask: { width: 0.28, height: 0, centerX: 0, centerY: round6(-ty / s), rotation: 0,
+            feather: 0, expansion: 0, roundCorner: 0, invert: false, aspectRatio: 1 },
+    scale: s, snapped, row: clamped, clamped: Math.abs(clamped - row) > 0.5,
+    window: [Math.round(clamped - visibleRows / 2), Math.round(clamped + visibleRows / 2)],
+  };
+}
+const round6 = v => Math.round(v * 1e6) / 1e6;
+
+/** Frame an existing B-roll segment on a source row, and cut it at the seam. */
+export function opLayoutBroll(doc, op) {
+  SEED = op.__seed || null;
+  const found = selectSegments(doc, op.selector || {});
+  if (!found.length) throw new CapcutError(`layout.broll: no segment matched ${JSON.stringify(op.selector)}.`, { code: 'SELECTOR_EMPTY' });
+  const out = [];
+  for (const entry of (op.all ? found : found.slice(0, 1))) {
+    const seg = entry.segment;
+    const mat = (doc.materials?.videos || []).find(m => m.id === seg.material_id);
+    if (!mat?.width || !mat?.height) throw new CapcutError(`layout.broll: material for ${seg.id} has no dimensions.`, { code: 'MISSING_MATERIAL_SOURCE' });
+    const cc = doc.canvas_config || {};
+    const g = brollFocus({ sourceWidth: mat.width, sourceHeight: mat.height,
+                           row: op.row, scale: op.scale, canvas: [cc.width || 1080, cc.height || 1920] });
+    seg.clip = clone(g.clip);
+    seg.uniform_scale = { on: true, value: 1.0 };
+    if (op.seam === false) { seg.enable_video_mask = false; }
+    else applyMask(doc, seg, presets().layouts['split-screen'].subject.maskTemplate, g.mask);
+    out.push({ id: seg.id, scale: g.scale, row: g.row, window: g.window, clamped: g.clamped });
+  }
+  return { changed: out.length, framed: out };
+}
+
 export function buildLayoutSpec(projectDir, name, opts = {}) {
   if (name === 'background') {
     const base = opts.includeTemplate ? { op: 'layout.background', includeTemplate: true } : { op: 'layout.background' };
@@ -427,9 +525,17 @@ export function buildLayoutSpec(projectDir, name, opts = {}) {
     const operations = ids.length ? ids.map(id => ({ ...base, selector: { id } })) : [base];
     return { version: 1, name: 'layout-background', operations };
   }
+  if (name === 'broll') {
+    if (opts.row == null) throw new CapcutError('layout broll requires --row (the source row to frame on).', { exitCode: 2 });
+    const ids = resolveIds(projectDir, opts, true);
+    return { version: 1, name: 'layout-broll',
+             operations: ids.map(id => ({ op: 'layout.broll', selector: { id },
+                                          row: Number(opts.row), scale: opts.scale ? Number(opts.scale) : undefined,
+                                          seam: opts.seam })) };
+  }
   const config = presets();
   if (!config.layouts[name]) {
-    throw new CapcutError(`Unknown layout "${name}". Known: ${Object.keys(config.layouts).join(', ')}, background`, { code: 'UNKNOWN_LAYOUT', exitCode: 2 });
+    throw new CapcutError(`Unknown layout "${name}". Known: ${Object.keys(config.layouts).join(', ')}, broll, background`, { code: 'UNKNOWN_LAYOUT', exitCode: 2 });
   }
   const ids = resolveIds(projectDir, opts, true);
   return {
