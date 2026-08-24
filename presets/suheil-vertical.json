@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "name": "suheil-vertical",
+  "canvas": {
+    "width": 1080,
+    "height": 1920,
+    "fps": 30,
+    "ratio": "9:16"
+  },
+  "layouts": {
+    "card": {
+      "stack": [
+        "solid_background",
+        "aligned_blurred_talking_head",
+        "indigo_card",
+        "raw_screen_recording",
+        "aligned_circular_talking_head",
+        "white_ring",
+        "capcut_effects_and_callouts"
+      ],
+      "pixelGeometry": {
+        "screen": { "left": 108, "top": 360, "width": 864, "height": 1200 },
+        "indigoFrame": { "left": -27, "top": 240, "width": 1134, "height": 1440 },
+        "whiteRing": { "left": 94, "top": 116, "width": 292, "height": 519 },
+        "avatar": { "left": 138, "top": 275, "width": 205, "height": 205, "borderRadius": 103 },
+        "avatarSourceFrame": { "left": 138, "top": 195, "width": 205, "height": 364 }
+      }
+    },
+    "fullFace": {
+      "remove": ["card", "blur_duplicate", "pip", "ring"],
+      "reason": "Fallback when the spoken claim has no directly matching screen event."
+    },
+    "split": {
+      "recommendedFor": ["landscape desktop", "gameplay", "wide browser recording"],
+      "rule": "Use native CapCut clip transforms and masks; never pre-render the layout."
+    }
+  },
+  "editingRules": {
+    "rawMediaOnly": true,
+    "hardCutsByDefault": true,
+    "captionsByDefault": false,
+    "mapsRequired": ["screen_map_current", "spoken_map_current", "visual_map_current", "EDL_current"],
+    "qa": ["handoff_frames", "zoom_holds", "one_second_grid", "final_frame"]
+  }
+}

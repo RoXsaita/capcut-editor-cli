@@ -1,0 +1,17 @@
+{
+  "name": "capcut-editor-cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Transactional, CapCut-native timeline editor and validator.",
+  "bin": {
+    "capcutctl": "./bin/capcutctl.mjs"
+  },
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check bin/capcutctl.mjs && node --check src/core.mjs && node --check src/cli.mjs && node --check src/layouts.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

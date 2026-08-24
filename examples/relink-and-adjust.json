@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "name": "relink-and-adjust",
+  "operations": [
+    {
+      "op": "material.relink",
+      "selector": { "id": "MATERIAL-ID" },
+      "path": "/absolute/path/to/raw-screen-recording.mp4",
+      "localize": true,
+      "fileName": "screen-recording.mp4"
+    },
+    {
+      "op": "segment.patch",
+      "selector": { "id": "SEGMENT-ID" },
+      "set": {
+        "volume": 0,
+        "clip": {
+          "scale": { "x": 0.801, "y": 0.801 },
+          "transform": { "x": 0, "y": -0.05814 },
+          "rotation": 0,
+          "alpha": 1
+        }
+      }
+    },
+    {
+      "op": "mask.patch",
+      "segment": { "id": "SEGMENT-ID" },
+      "mask": { "name": "Circle" },
+      "set": {
+        "config": {
+          "width": 1.0032193406262426,
+          "height": 0.5618028307506959,
+          "centerX": 0,
+          "centerY": -0.04329882358536104,
+          "feather": 0,
+          "expansion": 0
+        }
+      }
+    }
+  ]
+}
