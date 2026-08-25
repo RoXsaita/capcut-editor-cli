@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { opLayoutApply, opLayoutBackground, opLayoutBroll } from './layouts.mjs';
 import { opPolish, principalTrack } from './polish.mjs';
 import { opPace } from './pace.mjs';
+import { opSignature } from './signature.mjs';
 
 export const DEFAULT_ROOT = path.join(
   process.env.HOME || '',
@@ -643,6 +644,7 @@ export function applyOperations(doc, operations, context) {
     else if (op.op === 'layout.broll') result = opLayoutBroll(doc, op, context);
     else if (op.op === 'polish') result = opPolish(doc, op, context);
     else if (op.op === 'pace') result = opPace(doc, op, context);
+    else if (op.op === 'signature') result = opSignature(doc, op, context);
     else throw new CapcutError(`Unsupported operation: ${op.op}`, { code: 'UNSUPPORTED_OPERATION' });
     results.push({ index, op: op.op, ...result });
   }

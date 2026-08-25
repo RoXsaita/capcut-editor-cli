@@ -47,6 +47,12 @@ Usage:
   capcutctl layout circle       --project NAME_OR_PATH --segments IDS|--at SECONDS [--track N] [--dry-run]
   capcutctl layout background   --project NAME_OR_PATH [--at SECONDS] [--include-template] [--dry-run]
   capcutctl layout broll        --project NAME_OR_PATH --at SECONDS --track N --row ROW [--scale S]
+  capcutctl brands              list known brands, their spoken aliases, and which have a logo
+  capcutctl logo                --project NAME_OR_PATH --at S --brand NAME [--scale] [--hold] [--pos x,y]
+  capcutctl endcard             --project NAME_OR_PATH [--text Follow] [--at S]
+  capcutctl zoom                --project NAME_OR_PATH --at S[,S...] | --auto  [--to 1.15] [--hold 1.6]
+  capcutctl wrap                --project NAME_OR_PATH --words TRANSCRIPT.json [--text Follow] [--plan]
+                                brand logos from what he says + the endcard, in one pass
   capcutctl pace                --project NAME_OR_PATH [--track N] [--max 100]
                                 no flags = print the plan; --auto applies it
                                 --at T --speed X | --at T --cover IN-OUT for one clip
@@ -72,6 +78,8 @@ Safety defaults:
   • validates media, IDs, refs, timing, masks, and mirror drift
 `;
 
+const r2 = n => Math.round(n * 100) / 100;
+
 function parseArgs(argv) {
   const result = { _: [] };
   for (let i = 0; i < argv.length; i++) {
@@ -79,7 +87,7 @@ function parseArgs(argv) {
     if (!token.startsWith('--')) { result._.push(token); continue; }
     const key = token.slice(2).replace(/-([a-z])/g, (_, char) => char.toUpperCase());
     if (['json', 'dryRun', 'forceRunning', 'noBackup', 'help', 'noOverlay', 'blank', 'includeTemplate', 'newTimelineId',
-         'transcript', 'noTransitions', 'noSeam', 'auto'].includes(key)) result[key] = true;
+         'transcript', 'noTransitions', 'noSeam', 'auto', 'plan', 'noSfx', 'noZoom'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
       result[key] = argv[++i];
@@ -143,6 +151,16 @@ export async function main(argv) {
     const p = presets();
     return print(Object.entries(p.layouts).map(([name, l]) => ({ name, description: l.description }))
       .concat([{ name: 'background', description: p.background.description }]), true);
+  }
+  if (command === 'brands') {
+    const { brandPresets } = await import('./signature.mjs');
+    const rows = Object.entries(brandPresets().brands).map(([name, b]) => ({
+      brand: name, aliases: b.aliases,
+      logo: b.logo || null, usable: Boolean(b.logo && fs.existsSync(b.logo)),
+    }));
+    return print({ usable: rows.filter(r => r.usable).map(r => r.brand),
+                   needsATransparentPng: rows.filter(r => !r.usable).map(r => r.brand),
+                   brands: rows }, true);
   }
   if (command === 'close') {
     const { closeCapcut } = await import('./create.mjs');
@@ -223,6 +241,68 @@ export async function main(argv) {
       ...(args.max ? { max: Number(args.max) } : {}),
       ...(args.minGap ? { minGap: Number(args.minGap) } : {}) }] };
     return print(applySpec(projectDir, spec, options), true);
+  }
+  if (command === 'logo' || command === 'endcard' || command === 'zoom' || command === 'wrap') {
+    const sig = await import('./signature.mjs');
+    const op = { op: 'signature', ...(args.noSfx ? { noSfx: true } : {}) };
+
+    if (command === 'logo') {
+      if (args.at == null || !args.brand) throw new CapcutError('logo requires --at SECONDS and --brand NAME (see `capcutctl brands`).', { exitCode: 2 });
+      const b = sig.brandPresets().brands[args.brand];
+      if (!b) throw new CapcutError(`unknown brand "${args.brand}". See \`capcutctl brands\`.`, { exitCode: 2 });
+      op.logos = [{ brand: args.brand, at: Number(args.at), logo: args.logo || b.logo,
+                    ...(args.scale ? { scale: Number(args.scale) } : {}),
+                    ...(args.hold ? { hold: Number(args.hold) } : {}),
+                    ...(args.pos ? { pos: String(args.pos).split(',').map(Number) } : {}) }];
+    }
+    if (command === 'endcard') {
+      op.endcard = { ...(args.text ? { text: args.text } : {}),
+                     ...(args.at != null ? { at: Number(args.at) } : {}),
+                     ...(args.hold ? { hold: Number(args.hold) } : {}),
+                     ...(args.scale ? { scale: Number(args.scale) } : {}) };
+    }
+    if (command === 'zoom') {
+      if (args.auto) {
+        const { loadProject } = await import('./core.mjs');
+        const doc = loadProject(projectDir).groups.find(g => g.name === 'root').doc;
+        const scenes = sig.talkingHeadScenes(doc, args.track == null ? null : Number(args.track),
+                                             args.minLength ? Number(args.minLength) : 2.5);
+        if (!scenes.length) throw new CapcutError('no full-face scenes found (every principal clip carries a mask).', { exitCode: 2 });
+        // fire a little after the cut, so the push reads as a move and not as the cut itself
+        args.at = scenes.map(s => (s.start + 0.4).toFixed(2)).join(',');
+        if (args.plan) return print({ talkingHeadScenes: scenes, zoomAt: args.at.split(',').map(Number) }, true);
+      }
+      if (args.at == null) throw new CapcutError('zoom requires --at SECONDS (comma-separated), or --auto.', { exitCode: 2 });
+      op.zooms = String(args.at).split(',').map(Number).map(at => ({ at,
+        ...(args.to ? { to: Number(args.to) } : {}),
+        ...(args.hold != null ? { hold: Number(args.hold) } : {}) }));
+    }
+
+    if (command === 'wrap') {
+      const { loadProject } = await import('./core.mjs');
+      const state = loadProject(projectDir);
+      const doc = state.groups.find(g => g.name === 'root').doc;
+      const mapper = sig.sourceToTimeline(doc, args.track == null ? null : Number(args.track));
+      let hits = [];
+      if (args.transcript === true) {
+        throw new CapcutError('wrap takes --words FILE (a word-level transcript json), not a bare --transcript.', { exitCode: 2 });
+      }
+      if (args.words) {
+        const tr = readJson(path.resolve(args.words));
+        hits = sig.detectBrands(tr, mapper, { only: args.only ? String(args.only).split(',') : null });
+      }
+      const missing = hits.filter(h => !h.logo || !fs.existsSync(h.logo));
+      hits = hits.filter(h => h.logo && fs.existsSync(h.logo));
+      op.logos = hits;
+      op.endcard = { ...(args.text ? { text: args.text } : {}) };
+      if (args.noZoom) op.zooms = [];
+      else if (args.zoomAt) op.zooms = String(args.zoomAt).split(',').map(Number).map(at => ({ at }));
+      else op.zooms = sig.talkingHeadScenes(doc).map(s => ({ at: r2(s.start + 0.4) }));
+      if (args.plan) return print({ detected: hits, skippedNoLogo: missing.map(m => m.brand),
+                                    endcard: op.endcard, zooms: op.zooms || [] }, true);
+      if (missing.length) process.stderr.write(`note: no logo asset for ${missing.map(m => m.brand).join(', ')} — skipped\n`);
+    }
+    return print(applySpec(projectDir, { version: 1, name: command, operations: [op] }, options), true);
   }
   if (command === 'polish') {
     const spec = { version: 1, name: 'polish',
