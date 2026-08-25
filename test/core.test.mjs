@@ -6,6 +6,7 @@ import test from 'node:test';
 
 import {
   CapcutError,
+  applyOperations,
   applySpec,
   doctor,
   inspectProject,
@@ -262,4 +263,33 @@ test('inspect reports root and active timeline separately', () => {
   assert.equal(inspected.activeTimelineId, 'TIMELINE-ONE');
   assert.equal(inspected.groups.length, 2);
   assert.equal(inspected.groups[0].tracks[0].segments, 1);
+});
+
+test('segment.clone mints the same extra-material ids in every mirror document', () => {
+  const doc = () => ({
+    duration: 10_000_000,
+    materials: {
+      videos: [{ id: 'V', type: 'video', duration: 60_000_000 }],
+      canvases: [{ id: 'C', type: 'canvas_color' }],
+      speeds: [{ id: 'P', type: 'speed', speed: 1 }]
+    },
+    tracks: [
+      { id: 'T0', type: 'video', flag: 0, segments: [] },
+      { id: 'T1', type: 'video', flag: 2, name: 'content', segments: [{
+        id: 'S', material_id: 'V', extra_material_refs: ['C', 'P'],
+        target_timerange: { start: 0, duration: 2_000_000 },
+        source_timerange: { start: 0, duration: 2_000_000 },
+        clip: { scale: { x: 1, y: 1 } }
+      }] }
+    ]
+  });
+  // applyOperations runs once PER mirror. A raw uuid() in cloneExtraRefs gave each document
+  // different ids for the same extras; both stayed internally valid, so doctor never saw it.
+  const op = { op: 'segment.clone', from: { id: 'S' }, id: 'NEW', target: { start: 3, duration: 2 }, __seed: 'FIXED' };
+  const root = doc(), timeline = doc();
+  applyOperations(root, [op], { group: 'root' });
+  applyOperations(timeline, [op], { group: 'timeline:x' });
+  const refs = d => d.tracks[1].segments.find(s => s.id === 'NEW').extra_material_refs;
+  assert.deepEqual(refs(root), refs(timeline));
+  assert.equal(new Set(refs(root)).size, 2, 'two extras must not collapse onto one id');
 });

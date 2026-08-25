@@ -6,6 +6,10 @@ import { opLayoutApply, opLayoutBackground, opLayoutBroll } from './layouts.mjs'
 import { opPolish, principalTrack } from './polish.mjs';
 import { opPace } from './pace.mjs';
 import { opSignature } from './signature.mjs';
+import {
+  opClipAdd, opReplaceMedia, opScaleKeyframe,
+  opClipShift, opClipTrim, opClipFade, commitPreservedSlides
+} from './add.mjs';
 
 export const DEFAULT_ROOT = path.join(
   process.env.HOME || '',
@@ -26,6 +30,12 @@ export class CapcutError extends Error {
 
 export const clone = value => JSON.parse(JSON.stringify(value));
 export const uuid = () => crypto.randomUUID().toUpperCase();
+/** A UUID derived from an op's seed, so both mirror documents mint the same one. */
+export const seededId = (seed, key) => {
+  if (!seed) return uuid();
+  const h = crypto.createHash('sha256').update(`${seed}|${key}`).digest('hex').toUpperCase();
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
+};
 export const nowStamp = () => new Date().toISOString().replace(/[:.]/g, '-');
 export const sha256 = data => crypto.createHash('sha256').update(data).digest('hex');
 export const stableJson = value => `${JSON.stringify(value, null, 2)}\n`;
@@ -435,14 +445,20 @@ function ensureMaterialArray(doc, kind) {
   return doc.materials[kind];
 }
 
-function cloneExtraRefs(doc, template, segmentId) {
+/**
+ * `seed` is required: applyOperations runs once per mirror document, so a raw uuid() here gave
+ * root and the timeline DIFFERENT ids for the same cloned extras. Each document stayed
+ * internally consistent, so doctor passed and the drift was invisible — the same failure the
+ * op-level __seed was introduced to stop, just one level down.
+ */
+function cloneExtraRefs(doc, template, segmentId, seed) {
   const index = materialIndex(doc);
   const refs = [];
-  for (const oldId of template.extra_material_refs || []) {
+  for (const [i, oldId] of (template.extra_material_refs || []).entries()) {
     const indexed = index.get(oldId);
     if (!indexed) continue;
     const copied = clone(indexed.value);
-    copied.id = uuid();
+    copied.id = seededId(seed, `extra:${i}:${oldId}:${segmentId}`);
     if (copied.bind_segment_id === template.id || copied.bind_segment_id === '') copied.bind_segment_id = segmentId;
     ensureMaterialArray(doc, indexed.kind).push(copied);
     refs.push(copied.id);
@@ -510,7 +526,7 @@ function opSegmentClone(doc, op) {
   const destination = resolveTrack(doc, op.track || { index: templates[0].trackIndex });
   const copied = clone(template);
   copied.id = op.id || uuid();
-  copied.extra_material_refs = cloneExtraRefs(doc, template, copied.id);
+  copied.extra_material_refs = cloneExtraRefs(doc, template, copied.id, op.__seed);
   copied.keyframe_refs = [];
   copied.common_keyframes = [];
   if (op.material) {
@@ -544,7 +560,7 @@ function opMaskPatch(doc, op) {
   return { changed };
 }
 
-function localizeMedia(projectDir, source, fileName, { dryRun = false } = {}) {
+export function localizeMedia(projectDir, source, fileName, { dryRun = false } = {}) {
   if (!fs.existsSync(source)) throw new CapcutError(`Source media does not exist: ${source}`, { code: 'MISSING_SOURCE' });
   const mediaDir = path.join(projectDir, 'Resources', 'CapcutctlMedia');
   const safe = (fileName || path.basename(source)).replace(/[^a-zA-Z0-9._-]/g, '_');
@@ -645,6 +661,12 @@ export function applyOperations(doc, operations, context) {
     else if (op.op === 'polish') result = opPolish(doc, op, context);
     else if (op.op === 'pace') result = opPace(doc, op, context);
     else if (op.op === 'signature') result = opSignature(doc, op, context);
+    else if (op.op === 'clip.add') result = opClipAdd(doc, op, context);
+    else if (op.op === 'replace.media') result = opReplaceMedia(doc, op, context);
+    else if (op.op === 'keyframe.scale') result = opScaleKeyframe(doc, op, context);
+    else if (op.op === 'clip.shift') result = opClipShift(doc, op, context);
+    else if (op.op === 'clip.trim') result = opClipTrim(doc, op, context);
+    else if (op.op === 'clip.fade') result = opClipFade(doc, op, context);
     else throw new CapcutError(`Unsupported operation: ${op.op}`, { code: 'UNSUPPORTED_OPERATION' });
     results.push({ index, op: op.op, ...result });
   }
@@ -766,7 +788,10 @@ export function executeTransaction(projectDir, mutator, {
   label = 'edit',
   forceWriteAll = false
 } = {}) {
-  assertCapcutClosed({ forceRunning });
+  // A dry run writes nothing, so refusing it while CapCut is open cost a quit-and-relaunch
+  // just to see a plan — and his loop is "look in CapCut, then edit". Reads can be torn by an
+  // auto-save; that yields a parse error or a stale plan, never a damaged project.
+  assertCapcutClosed({ forceRunning: forceRunning || dryRun });
   const state = loadProject(projectDir);
   const working = state.groups.map(group => ({ ...group, doc: clone(group.doc) }));
   const result = mutator(working);
@@ -813,17 +838,23 @@ export function applySpec(projectDir, spec, options = {}) {
   if (spec.version !== 1) throw new CapcutError(`Unsupported spec version: ${spec.version}`, { code: 'SPEC_VERSION' });
   const operations = clone(spec.operations || []);
   for (const op of operations) {
-    if (['segment.clone', 'material.clone', 'track.clone'].includes(op.op) && !op.id) op.id = uuid();
+    if (['segment.clone', 'material.clone', 'track.clone', 'clip.add'].includes(op.op) && !op.id) op.id = uuid();
     // Every op gets one, not a whitelist of ops. Each document in the group is edited
     // independently, so an op that mints ids must mint the SAME ids in each pass or the
     // mirrors drift apart. This was a per-op list and adding `signature` without adding it
     // here produced exactly that drift — silently, until doctor caught it.
     if (!op.__seed) op.__seed = uuid();
   }
-  return executeTransaction(projectDir, groups => groups.map(group => ({
+  // One object shared by every op AND by both document passes. Endcard sliding needs it:
+  // each op used to re-read created.json and measure from the ORIGINAL window, so two ops in
+  // one spec slid the endcard twice.
+  const shared = {};
+  const tx = executeTransaction(projectDir, groups => groups.map(group => ({
     group: group.name,
-    operations: applyOperations(group.doc, operations, { projectDir, group: group.name, dryRun: Boolean(options.dryRun) })
+    operations: applyOperations(group.doc, operations, { projectDir, group: group.name, shared, dryRun: Boolean(options.dryRun) })
   })), { ...options, label: options.label || spec.name || 'apply' });
+  if (tx.committed) commitPreservedSlides(shared);
+  return tx;
 }
 
 export function restoreProjectSnapshot(projectDir, snapshotNameOrPath, options = {}) {

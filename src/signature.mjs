@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +10,76 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const US = s => Math.round(s * 1e6);
 const S = us => us / 1e6;
 const r3 = n => Math.round(n * 1000) / 1000;
+
+/**
+ * Real pixel dimensions, or null. CapCut lays out from material width/height, not the file,
+ * so getting this wrong renders the logo at the template's aspect (the 1280x276 speck).
+ *
+ * Reads PNG / JPEG / GIF / WebP headers directly, then falls back to `sips`. Checking only
+ * four signature bytes and trusting offsets 16/20 was not enough: a truncated or non-PNG file
+ * that merely starts with the magic yielded {width: 0, height: 0}, and a 0x0 material commits
+ * cleanly because validateDocument does not check dimensions. `brands.json` ships a .webp,
+ * so "PNG only" was never sufficient either.
+ */
+export function imageSize(file) {
+  if (!file || !fs.existsSync(file)) return null;
+  const size = headerSize(file) || sipsSize(file);
+  return size && size.width > 0 && size.height > 0 ? size : null;
+}
+
+function headerSize(file) {
+  let buf;
+  try { buf = fs.readFileSync(file); } catch { return null; }
+  if (buf.length < 24) return null;
+  const png = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+  if (png.every((b, i) => buf[i] === b) && buf.toString('ascii', 12, 16) === 'IHDR') {
+    return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+  }
+  if (buf.toString('ascii', 0, 3) === 'GIF') {
+    return { width: buf.readUInt16LE(6), height: buf.readUInt16LE(8) };
+  }
+  if (buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') {
+    const kind = buf.toString('ascii', 12, 16);
+    if (kind === 'VP8X') return { width: buf.readUIntLE(24, 3) + 1, height: buf.readUIntLE(27, 3) + 1 };
+    if (kind === 'VP8 ') return { width: buf.readUInt16LE(26) & 0x3fff, height: buf.readUInt16LE(28) & 0x3fff };
+    return null;                                       // VP8L and friends: let sips answer
+  }
+  if (buf[0] === 0xFF && buf[1] === 0xD8) {            // JPEG: walk to the first SOF marker
+    let i = 2;
+    while (i + 9 < buf.length) {
+      if (buf[i] !== 0xFF) { i++; continue; }
+      const marker = buf[i + 1];
+      if (marker >= 0xC0 && marker <= 0xCF && ![0xC4, 0xC8, 0xCC].includes(marker)) {
+        return { height: buf.readUInt16BE(i + 5), width: buf.readUInt16BE(i + 7) };
+      }
+      i += 2 + buf.readUInt16BE(i + 2);
+    }
+  }
+  return null;
+}
+
+function sipsSize(file) {
+  try {
+    const out = execFileSync('sips', ['-g', 'pixelWidth', '-g', 'pixelHeight', file], { encoding: 'utf8' });
+    const width = Number(out.match(/pixelWidth:\s*(\d+)/)?.[1]);
+    const height = Number(out.match(/pixelHeight:\s*(\d+)/)?.[1]);
+    return width && height ? { width, height } : null;
+  } catch { return null; }
+}
+
+/**
+ * 0.36 was tuned against logoMaterialTemplate 1280×276, which FIT-fills canvas
+ * width. Keep that on-canvas WIDTH for any asset so old --scale numbers still
+ * mean "36% of the fitted box". Square logos get their real height (the speck
+ * was the template's 276px height, not the scale).
+ */
+export function logoScaleFor(sw, sh, requested, canvas = { width: 1080, height: 1920 }, template = { width: 1280, height: 276 }) {
+  const fitW = (w, h) => w * Math.min(canvas.width / w, canvas.height / h);
+  const ref = fitW(template.width, template.height);
+  const fit = fitW(sw, sh);
+  if (!fit) return requested;
+  return requested * (ref / fit);
+}
 
 let SIG = null, BRANDS = null;
 export function sigPresets() {
@@ -195,9 +266,25 @@ export function opSignature(doc, op, context = {}) {
     mat.path = l.logo;
     mat.material_name = path.basename(l.logo);
     mat.local_material_id = mint(`lm:${key}`);
+    const px = imageSize(l.logo);
+    const tplW = p.logoMaterialTemplate.width || 1280;
+    const tplH = p.logoMaterialTemplate.height || 276;
+    // Falling back to the template's 1280x276 is the exact bug this probe exists to fix, and
+    // it fails silently — the logo just renders as a squashed strip. Refuse instead.
+    if (!px) {
+      throw new CapcutError(
+        `Could not read the pixel size of ${path.basename(l.logo)}. CapCut lays out from the `
+        + 'material dimensions, so guessing them renders the logo at the wrong aspect. '
+        + 'Convert it to PNG, or check the file is a real image.',
+        { code: 'LOGO_SIZE_UNKNOWN', exitCode: 2 });
+    }
+    mat.width = px.width;
+    mat.height = px.height;
     arr(doc, 'videos').push(mat);
 
-    const scale = l.scale ?? rules.logoDefaultScale;
+    const requested = l.scale ?? rules.logoDefaultScale;
+    const scale = logoScaleFor(px.width, px.height, requested,
+      doc.canvas_config || { width: 1080, height: 1920 }, { width: tplW, height: tplH });
     const hold = l.hold ?? rules.logoHoldSeconds;
     const seg = clone(p.logoSegmentTemplate);
     seg.id = mint(`seg:${key}`);

@@ -40,9 +40,21 @@ Usage:
   capcutctl restore --project NAME_OR_PATH --snapshot NAME [--force-running] [--no-backup]
   capcutctl sync --project NAME_OR_PATH [--dry-run] [--force-running] [--no-backup]
   capcutctl apply --project NAME_OR_PATH --spec FILE [--dry-run] [--force-running] [--no-backup]
+  capcutctl add --project NAME --media FILE --at S --dur S --track NAME|N
+                [--src S] [--cover IN-OUT] [--volume 0] [--desc TEXT] [--localize]
+  capcutctl replace-media --project NAME --file FILE --at S --track NAME|N [--retime] [--localize]
+  capcutctl trim --project NAME --at S --track NAME|N --src IN-OUT | --start S --dur S
+  capcutctl shift --project NAME --at S --track NAME|N --by SECONDS
+  capcutctl remove --project NAME --at S --track NAME|N
+  capcutctl volume --project NAME --at S --track NAME|N --level 0
+  capcutctl fade --project NAME --at S --track NAME|N [--in 0.08] [--out 0.12]
+  capcutctl keyframe --project NAME --at S --track NAME|N [--to 2.4] [--hold 1.6] [--plan]
+  capcutctl preview --project NAME --out preview.mp4 [--fps 6]
+  capcutctl diff --project NAME --against NAME|--snapshot NAME
+  capcutctl harvest [--root PATH] [--projects A,B] [--out FILE]
   capcutctl init-spec [--output FILE]
 
-  capcutctl scenes --project NAME_OR_PATH [--track N] [--transcript]
+  capcutctl scenes --project NAME_OR_PATH [--track N] [--transcript] [--name SUBSTR]
   capcutctl layout split-screen --project NAME_OR_PATH --segments IDS|--at SECONDS [--track N] [--dry-run]
   capcutctl layout circle       --project NAME_OR_PATH --segments IDS|--at SECONDS [--track N] [--dry-run]
   capcutctl layout background   --project NAME_OR_PATH [--at SECONDS] [--include-template] [--dry-run]
@@ -89,7 +101,7 @@ function parseArgs(argv) {
     if (!token.startsWith('--')) { result._.push(token); continue; }
     const key = token.slice(2).replace(/-([a-z])/g, (_, char) => char.toUpperCase());
     if (['json', 'dryRun', 'forceRunning', 'noBackup', 'help', 'noOverlay', 'blank', 'includeTemplate', 'newTimelineId',
-         'transcript', 'noTransitions', 'noSeam', 'auto', 'plan', 'noSfx', 'noZoom'].includes(key)) result[key] = true;
+         'transcript', 'noTransitions', 'noSeam', 'auto', 'plan', 'noSfx', 'noZoom', 'retime', 'localize'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
       result[key] = argv[++i];
@@ -135,6 +147,25 @@ const EXAMPLE_SPEC = {
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
+
+/**
+ * `--track` is a name or an index everywhere. `layout` parsed it with Number(), so the
+ * `layout broll --track broll` line that `add` prints as the next step resolved to NaN and
+ * matched nothing — and `add`'s primary form is the named one.
+ */
+async function trackIndex(projectDir, spec) {
+  if (spec == null || spec === '') return null;
+  if (/^\d+$/.test(String(spec))) return Number(spec);
+  const { loadProject } = await import('./core.mjs');
+  const doc = loadProject(projectDir).groups.find(g => g.name === 'root').doc;
+  const index = (doc.tracks || []).findIndex(t => t.type === 'video' && t.name === String(spec));
+  if (index < 0) {
+    throw new CapcutError(`no video track named "${spec}". Run \`capcutctl inspect\` to list them.`,
+      { code: 'TRACK_MISSING', exitCode: 2 });
+  }
+  return index;
+}
+
 export async function main(argv) {
   const command = argv[0];
   if (command === 'cut' || command === 'qa' || command === 'find') {
@@ -153,6 +184,14 @@ export async function main(argv) {
     const p = presets();
     return print(Object.entries(p.layouts).map(([name, l]) => ({ name, description: l.description }))
       .concat([{ name: 'background', description: p.background.description }]), true);
+  }
+  if (command === 'harvest') {
+    const { harvestDrafts, writeHarvest, DEFAULT_HARVEST } = await import('./harvest.mjs');
+    const names = args.projects ? String(args.projects).split(',').map(s => s.trim()).filter(Boolean) : undefined;
+    const catalogue = harvestDrafts(root, names);
+    const dest = args.out ? path.resolve(args.out) : DEFAULT_HARVEST;
+    if (!args.plan) writeHarvest(catalogue, dest);
+    return print({ wrote: args.plan ? null : dest, ...catalogue }, true);
   }
   if (command === 'brands') {
     const { brandPresets } = await import('./signature.mjs');
@@ -210,8 +249,15 @@ export async function main(argv) {
   }
   if (command === 'scenes') {
     const { describeScenes } = await import('./layouts.mjs');
-    return print(describeScenes(projectDir, args.track == null ? null : Number(args.track),
-                                Boolean(args.transcript)), true);
+    let rows = describeScenes(projectDir, args.track == null ? null : Number(args.track),
+                              Boolean(args.transcript));
+    if (args.name) {
+      const needle = String(args.name).toLowerCase();
+      rows = rows.filter(r => (r.desc || '').toLowerCase().includes(needle)
+        || (r.media || '').toLowerCase().includes(needle)
+        || (r.id || '').toLowerCase().includes(needle));
+    }
+    return print(rows, true);
   }
   if (command === 'pace') {
     const { pacePlan } = await import('./pace.mjs');
@@ -322,17 +368,177 @@ export async function main(argv) {
     if (name === 'audit' || (name === 'auto' && args.plan)) {
       const { loadProject } = await import('./core.mjs');
       const doc = loadProject(projectDir).groups.find(g => g.name === 'root').doc;
-      return print(layoutsMod.layoutAudit(doc, args.track == null ? null : Number(args.track)), true);
+      return print(layoutsMod.layoutAudit(doc, await trackIndex(projectDir, args.track)), true);
     }
     const spec = buildLayoutSpec(projectDir, name, {
       segments: args.segments ? String(args.segments).split(',').map(s => s.trim()).filter(Boolean) : null,
       at: args.at ? String(args.at).split(',').map(Number) : null,
-      track: args.track == null ? null : Number(args.track),
+      track: await trackIndex(projectDir, args.track),
       row: args.row, scale: args.scale, seam: args.noSeam ? false : undefined,
       overlay: args.noOverlay ? false : undefined,
       includeTemplate: Boolean(args.includeTemplate)
     });
     return print(applySpec(projectDir, spec, options), true);
+  }
+  if (command === 'add') {
+    if (!args.media) throw new CapcutError('add requires --media FILE.', { exitCode: 2 });
+    if (args.at == null || args.dur == null) throw new CapcutError('add requires --at SECONDS and --dur SECONDS.', { exitCode: 2 });
+    if (args.track == null) throw new CapcutError('add requires --track NAME (creates) or --track N (existing).', { exitCode: 2 });
+    const { probeMedia } = await import('./create.mjs');
+    let probe;
+    try {
+      probe = probeMedia(path.resolve(args.media));
+    } catch (e) {
+      if (args.width && args.height && args.mediaDuration != null) {
+        probe = { width: Number(args.width), height: Number(args.height), duration: Math.round(Number(args.mediaDuration) * 1e6) };
+      } else throw e;
+    }
+    let cover = null;
+    if (args.cover) {
+      const [a, b] = String(args.cover).split(/[-:,]/).map(Number);
+      if (!(b > a)) throw new CapcutError('--cover expects IN-OUT in source seconds.', { exitCode: 2 });
+      cover = [a, b];
+    }
+    const op = {
+      op: 'clip.add',
+      media: path.resolve(args.media),
+      at: Number(args.at),
+      duration: Number(args.dur),
+      // default to the START of the media, not the timeline position — `add --at 30`
+      // used to begin 30s into a file the user had just picked.
+      src: args.src != null ? Number(args.src) : (cover ? cover[0] : 0),
+      srcDur: args.srcDur != null ? Number(args.srcDur) : undefined,
+      cover,
+      track: args.track,
+      volume: args.volume != null ? Number(args.volume) : 1,
+      desc: args.desc || '',
+      width: probe.width,
+      height: probe.height,
+      mediaDuration: probe.duration,
+      localize: Boolean(args.localize)
+    };
+    const result = applySpec(projectDir, { version: 1, name: 'add', operations: [op] }, options);
+    const added = (result.result || []).find(g => g.group === 'root')?.operations?.[0];
+    if (added?.id) {
+      added.layout = `capcutctl layout broll --project ${args.project} --at ${added.at} --track ${added.track}`;
+    }
+    return print(result, true);
+  }
+  if (command === 'replace-media') {
+    const file = args.file || args.media;
+    if (!file) throw new CapcutError('replace-media requires --file FILE.', { exitCode: 2 });
+    if (args.at == null && !args.segments) throw new CapcutError('replace-media requires --at SECONDS or --segments ID.', { exitCode: 2 });
+    const { probeMedia } = await import('./create.mjs');
+    const { loadProject } = await import('./core.mjs');
+    let selector;
+    if (args.segments) selector = { id: String(args.segments).split(',')[0].trim() };
+    else {
+      const doc = loadProject(projectDir).groups.find(g => g.name === 'root').doc;
+      const us = Math.round(Number(args.at) * 1e6);
+      const hits = [];
+      for (const [ti, track] of (doc.tracks || []).entries()) {
+        if (track.type !== 'video') continue;
+        if (/^\d+$/.test(String(args.track || '')) && ti !== Number(args.track)) continue;
+        if (args.track && !/^\d+$/.test(String(args.track)) && track.name !== String(args.track)) continue;
+        for (const s of track.segments || []) {
+          const tr = s.target_timerange;
+          if (tr && tr.start <= us && us < tr.start + tr.duration) hits.push(s);
+        }
+      }
+      if (hits.length !== 1) {
+        throw new CapcutError(`replace-media: ${hits.length} clips cover ${args.at}s. Pass --track NAME|N or --segments ID.`, { exitCode: 2 });
+      }
+      selector = { id: hits[0].id };
+    }
+    let probe;
+    try {
+      probe = probeMedia(path.resolve(file));
+    } catch (e) {
+      if (args.width && args.height && args.mediaDuration != null) {
+        probe = { width: Number(args.width), height: Number(args.height), duration: Math.round(Number(args.mediaDuration) * 1e6) };
+      } else throw e;
+    }
+    const op = {
+      op: 'replace.media',
+      selector,
+      path: path.resolve(file),
+      retime: Boolean(args.retime),
+      width: probe.width,
+      height: probe.height,
+      mediaDuration: probe.duration
+    };
+    return print(applySpec(projectDir, { version: 1, name: 'replace-media', operations: [op] }, options), true);
+  }
+  if (command === 'trim' || command === 'shift' || command === 'remove' || command === 'volume' || command === 'keyframe' || command === 'fade') {
+    const { loadProject } = await import('./core.mjs');
+    const { resolveClip } = await import('./add.mjs');
+    const doc = loadProject(projectDir).groups.find(g => g.name === 'root').doc;
+    const selector = args.segments
+      ? { id: String(args.segments).split(',')[0].trim() }
+      : { id: resolveClip(doc, { at: args.at != null ? Number(args.at) : undefined, track: args.track, id: args.id }).segment.id };
+    if (command === 'remove') {
+      return print(applySpec(projectDir, { version: 1, name: 'remove', operations: [{ op: 'segment.remove', selector }] }, options), true);
+    }
+    if (command === 'volume') {
+      if (args.level == null) throw new CapcutError('volume requires --level 0..1', { exitCode: 2 });
+      return print(applySpec(projectDir, { version: 1, name: 'volume', operations: [{ op: 'segment.patch', selector, set: { volume: Number(args.level) } }] }, options), true);
+    }
+    if (command === 'trim') {
+      let src = null;
+      if (args.src) {
+        const [a, b] = String(args.src).split(/[-:,]/).map(Number);
+        if (!(b > a)) throw new CapcutError('--src expects IN-OUT in source seconds', { exitCode: 2 });
+        src = [a, b];
+      } else if (args.start != null && args.dur != null) {
+        src = [Number(args.start), Number(args.start) + Number(args.dur)];
+      } else {
+        throw new CapcutError('trim requires --src IN-OUT or --start S --dur S', { exitCode: 2 });
+      }
+      return print(applySpec(projectDir, { version: 1, name: 'trim', operations: [{ op: 'clip.trim', selector, src }] }, options), true);
+    }
+    if (command === 'shift') {
+      if (args.by == null) throw new CapcutError('shift requires --by SECONDS', { exitCode: 2 });
+      return print(applySpec(projectDir, { version: 1, name: 'shift', operations: [{
+        op: 'clip.shift', selector, by: Number(args.by)
+      }] }, options), true);
+    }
+    if (command === 'fade') {
+      const op = { op: 'clip.fade', selector,
+        in: args.in != null ? Number(args.in) : 0,
+        out: args.out != null ? Number(args.out) : 0 };
+      if (args.plan) return print(op, true);
+      return print(applySpec(projectDir, { version: 1, name: 'fade', operations: [op] }, options), true);
+    }
+    if (command === 'keyframe') {
+      const op = { op: 'keyframe.scale', selector, at: args.at != null ? Number(args.at) : undefined,
+        to: args.to != null ? Number(args.to) : undefined, hold: args.hold != null ? Number(args.hold) : undefined,
+        ramp: args.ramp != null ? Number(args.ramp) : undefined, track: args.track };
+      if (args.plan) {
+        return print(op, true);
+      }
+      return print(applySpec(projectDir, { version: 1, name: 'keyframe', operations: [op] }, options), true);
+    }
+  }
+  if (command === 'preview') {
+    const out = args.out || 'preview.mp4';
+    const script = path.join(HERE, '..', 'tools', 'frame_qa.py');
+    const r = spawnSync('python3', [script, '--project', projectDir, '--preview', path.resolve(out),
+      '--fps', String(args.fps || 6)], { stdio: 'inherit' });
+    if (r.error) throw new CapcutError(`could not run ${script}: ${r.error.message}`, { exitCode: 2 });
+    process.exit(r.status ?? 1);
+  }
+  if (command === 'diff') {
+    const { listSnapshots } = await import('./core.mjs');
+    const { summarizeProject, diffSummaries } = await import('./diff.mjs');
+    let otherDir = args.against ? resolveProject(args.against, root) : null;
+    if (args.snapshot && !otherDir) {
+      const snaps = listSnapshots(projectDir);
+      const hit = snaps.find(s => (s.name || s).includes(String(args.snapshot)));
+      if (!hit) throw new CapcutError(`no snapshot matching ${args.snapshot}`, { exitCode: 2 });
+      otherDir = hit.path || hit;
+    }
+    if (!otherDir) throw new CapcutError('diff requires --against NAME or --snapshot NAME', { exitCode: 2 });
+    return print(diffSummaries(summarizeProject(otherDir), summarizeProject(projectDir)), true);
   }
   if (command === 'apply') {
     if (!args.spec) throw new CapcutError('apply requires --spec FILE.', { exitCode: 2 });

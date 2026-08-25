@@ -22,15 +22,49 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
+import tempfile
+from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
 DRAFTS = os.path.expanduser("~/Movies/CapCut/User Data/Projects/com.lveditor.draft")
-_CACHE = {}
+
+# ffmpeg exits 0 and writes NO file when a seek lands past the last frame, so a
+# clamp 1ms off the end of a fully-consumed source yields a missing picture, not
+# a picture. Back every end-of-media clamp off by about one frame instead.
+_FRAME_EPS = 1.0 / 24
+
+# grab() memoises decoded frames. Sized for the 3-6 stills a QA run asks for it was
+# a plain dict; a default-fps --preview asks for ~1300 distinct stills and the same
+# dict grew to ~17GB RSS. Consecutive preview frames reuse the same handful of
+# images, so locality — an LRU on a byte budget — is all this ever needed.
+_CACHE = OrderedDict()
+_CACHE_BUDGET = 512 << 20      # bytes of decoded RGBA
+_CACHE_BYTES = 0
+
+
+def _cache_put(key, im):
+    global _CACHE_BYTES
+    n = im.width * im.height * 4
+    if n > _CACHE_BUDGET:
+        return                                       # one frame over budget: just don't keep it
+    _CACHE[key] = im
+    _CACHE_BYTES += n
+    while _CACHE_BYTES > _CACHE_BUDGET:
+        _, evicted = _CACHE.popitem(last=False)
+        _CACHE_BYTES -= evicted.width * evicted.height * 4
+
+
+def _cache_reset():
+    global _CACHE_BYTES
+    _CACHE.clear()
+    _CACHE_BYTES = 0
 
 
 def load_project(name):
@@ -53,9 +87,80 @@ def resolve(proj, p):
     return os.path.join(proj, p.split("##/", 1)[1]) if p.startswith("##_draftpath_placeholder") else p
 
 
+def source_span(segment):
+    """(start, duration) of a segment's source material, in seconds.
+
+    A null `source_timerange` means "play this material from its own beginning at
+    1x", so the fallback is 0 + the target duration — ELAPSED time. Falling back to
+    the target START hands back absolute timeline time, which is invisible for
+    stills (grab ignores `t` for png/jpg) and wrong for every video and gif.
+    """
+    tt = segment["target_timerange"]
+    st = segment.get("source_timerange") or {"start": 0, "duration": tt.get("duration", 0)}
+    return st["start"] / 1e6, st["duration"] / 1e6
+
+
+def source_time(segment, t):
+    """Timeline second `t` -> media second. Speed is source_dur / target_dur.
+
+    CapCut plays `source_timerange` across `target_timerange`. Ignoring that
+    ratio (the previous formula) shows the wrong frame on any ramped clip —
+    a 0.44× usage shot at t=63.5 read as the sidebar, while CapCut was still
+    on the 10% page.
+    """
+    tt = segment["target_timerange"]
+    tgt0, tgt_d = tt["start"] / 1e6, tt["duration"] / 1e6
+    src0, src_d = source_span(segment)
+    if tgt_d <= 0:
+        return src0
+    out = src0 + (t - tgt0) * (src_d / tgt_d)
+    hi = src0 + src_d
+    if hi <= src0:
+        return src0
+    # Stop ~a frame short of the source end (see _FRAME_EPS). The outer max() keeps
+    # that ceiling from falling BELOW src0 on a sub-millisecond segment, where the
+    # old `hi - 1e-3` returned a time before the segment even started.
+    return min(max(out, src0), max(src0, hi - _FRAME_EPS))
+
+
+def parse_expect(specs):
+    """Parse --expect SECONDS=phrase[|phrase]. A second SECONDS= that BEGINS a
+    phrase segment starts a new group (so '9.2=Build|45.5=Publish' is two
+    timestamps, not a phrase named '45.5=Publish').
+
+    The anchor matters: matching the marker anywhere silently ate real phrases —
+    '5=Claude 3.5=Sonnet' became {5: ['Claude'], 3.5: ['Sonnet']}, asserting two
+    things nobody asked about instead of the one thing they did.
+    """
+    out = {}
+    marker = re.compile(r'(?:^|\|)\s*(\d+(?:\.\d+)?)=')
+    for spec in specs:
+        spec = (spec or "").strip()
+        if "=" not in spec:
+            raise SystemExit(f"--expect wants SECONDS=phrase, got {spec!r}")
+        matches = list(marker.finditer(spec))
+        if not matches or matches[0].start() != 0:
+            raise SystemExit(f"--expect wants SECONDS=phrase, got {spec!r}")
+        for i, m in enumerate(matches):
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(spec)
+            rest = spec[m.end():end].strip("| \t")
+            phrases = [p for p in rest.split("|") if p]
+            if not phrases:
+                # An empty expectation drags its timestamp into --times and then asserts
+                # nothing — a check that can only pass. Refuse it.
+                raise SystemExit(f"--expect {spec!r}: {m.group(1)}= has no phrase to look for")
+            out.setdefault(float(m.group(1)), []).extend(phrases)
+    return out
+
+
+def times_close(a, b, eps=1e-6):
+    return abs(a - b) < eps
+
+
 def grab(path, t):
     key = (path, round(t, 3))
     if key in _CACHE:
+        _CACHE.move_to_end(key)
         return _CACHE[key].copy()
     if path.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
         im = Image.open(path).convert("RGBA")
@@ -64,9 +169,13 @@ def grab(path, t):
                            f"fqa_{hashlib.md5(repr(key).encode()).hexdigest()[:12]}.png")
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", str(max(0, t)), "-i", path,
                         "-frames:v", "1", tmp], check=True)
+        if not os.path.exists(tmp):
+            # ffmpeg seeking past the last frame exits 0 having written nothing, so
+            # check=True is not evidence that we got a picture.
+            raise SystemExit(f"no frame at t={t:.3f}s in {path} — seek is past the last frame")
         im = Image.open(tmp).convert("RGBA")
         os.remove(tmp)
-    _CACHE[key] = im
+    _cache_put(key, im)
     return im.copy()
 
 
@@ -132,7 +241,7 @@ def render(proj, tl, t, z="track"):
         if not os.path.exists(p):
             rows.append((ti, s["id"][:8], "MISSING:" + os.path.basename(m.get("path", "")), None))
             continue
-        st = (s.get("source_timerange") or {"start": 0})["start"] / 1e6 + (us - s["target_timerange"]["start"]) / 1e6
+        st = source_time(s, us / 1e6)
         blur, mask = False, None
         for r in s.get("extra_material_refs", []):
             kk, mm = idx.get(r, (None, None))
@@ -201,10 +310,23 @@ def check_expectations(path, wanted, languages="en-US,ar"):
     return all(found.values()), found, runs
 
 
+def report_frame(f, t, wanted, show_ocr, languages, failures):
+    """OCR one rendered frame, print PASS/FAIL per phrase, collect the misses."""
+    _, found, runs = check_expectations(f, wanted, languages)
+    if show_ocr:
+        for r in sorted(runs, key=lambda r: r["y"])[:20]:
+            print(f"       y={r['y']:.3f} {r['text'][:64]}")
+    for phrase, hit in found.items():
+        print(f"       {'PASS' if hit else 'FAIL'}  expected {phrase!r}")
+        if not hit:
+            failures.append((t, phrase))
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--project", required=True)
-    ap.add_argument("--times", required=True, help="comma-separated seconds")
+    ap.add_argument("--project")
+    ap.add_argument("--times", help="comma-separated seconds")
+    ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--out", default="qa")
     ap.add_argument("--z", choices=["track", "render_index"], default="track")
     ap.add_argument("--guide", type=float, action="append", default=[],
@@ -220,19 +342,40 @@ def main():
     ap.add_argument("--ocr", action="store_true", help="print the text found in each frame")
     ap.add_argument("--languages", default="en-US,ar")
     ap.add_argument("--width", type=int, default=240, help="tile width in the contact sheet")
+    ap.add_argument("--preview", nargs="?", const="preview.mp4", default=None,
+                    help="write a 6fps compositor proxy (optional path)")
+    ap.add_argument("--fps", type=float, default=6, help="preview frame rate (default 6)")
     a = ap.parse_args()
+    if a.selftest:
+        sys.exit(_selftest())
+    if a.preview:
+        if not a.project:
+            ap.error("--project is required")
+        if a.expect:
+            # --preview writes a movie, not per-timestamp stills, so there is nothing to
+            # OCR. Exiting 0 having verified none of the expectations is the failure mode
+            # the unmatched-timestamp check exists to prevent; refuse instead.
+            ap.error("--preview cannot check --expect (it renders a movie, not frames at "
+                     "--times); run the same --expect without --preview")
+        proj, tl, path = load_project(a.project)
+        print(f"timeline: {path}")
+        out = write_preview(proj, tl, a.preview, fps=a.fps, z=a.z)
+        print(f"  -> {out}")
+        return
+    if not a.project or not a.times:
+        ap.error("--project and --times are required")
     proj, tl, path = load_project(a.project)
     print(f"timeline: {path}")
     os.makedirs(a.out, exist_ok=True)
-    expectations = {}
-    for spec in a.expect:
-        if "=" not in spec:
-            raise SystemExit(f"--expect wants SECONDS=phrase, got {spec!r}")
-        when, phrases = spec.split("=", 1)
-        expectations.setdefault(float(when), []).extend(p for p in phrases.split("|") if p)
+    expectations = parse_expect(a.expect)
+    rendered = [float(x) for x in a.times.split(",") if x.strip() != ""]
     failures = []
     tiles = []
-    for t in [float(x) for x in a.times.split(",")]:
+    # An expectation whose timestamp is never rendered is a different failure from a
+    # phrase that was looked for and missing. Printing it as the latter read like an
+    # OCR miss and sent the last reader hunting for text that was never searched for.
+    unchecked = sorted(t for t in expectations if not any(times_close(t, u) for u in rendered))
+    for t in rendered:
         img, rows, W, H = render(proj, tl, t, a.z)
         print(f"\n=== t={t}  z={a.z}  canvas {W}x{H}")
         for ti, sid, nm, rc in rows:
@@ -241,7 +384,16 @@ def main():
             else:
                 x, y, w, h = rc
                 print(f"  trk{ti:<2} {sid} {nm:<34} x{x}..{x+w} y{y}..{y+h}  {w}x{h}")
+        wanted = [p for et, phrases in expectations.items() if times_close(et, t) for p in phrases]
         if a.rects_only:
+            # --rects-only skips the PNGs, never the assertions: this mode used to exit 0
+            # with --expect on the command line having checked nothing at all. OCR needs a
+            # file on disk, so give it a throwaway one rather than an output artefact.
+            if wanted or a.ocr:
+                with tempfile.TemporaryDirectory(prefix="fqa-rects-") as td:
+                    f = os.path.join(td, "frame.png")
+                    img.convert("RGB").save(f)
+                    report_frame(f, t, wanted, a.ocr, a.languages, failures)
             continue
         d = ImageDraw.Draw(img)
         for g in (a.guide or [H / 2]):
@@ -250,27 +402,267 @@ def main():
         f = os.path.join(a.out, f"t{t:g}.png")
         img.convert("RGB").save(f)
         print(f"  -> {f}")
-        if a.ocr or expectations.get(t):
-            wanted = expectations.get(t, [])
-            _, found, runs = check_expectations(f, wanted, a.languages)
-            if a.ocr:
-                for r in sorted(runs, key=lambda r: r["y"])[:20]:
-                    print(f"       y={r['y']:.3f} {r['text'][:64]}")
-            for phrase, hit in found.items():
-                print(f"       {'PASS' if hit else 'FAIL'}  expected {phrase!r}")
-                if not hit:
-                    failures.append((t, phrase))
+        if a.ocr or wanted:
+            report_frame(f, t, wanted, a.ocr, a.languages, failures)
         tiles.append((f, a.label[len(tiles)] if len(tiles) < len(a.label) else f"t={t:g}"))
 
     if a.sheet and tiles:
         out = a.sheet if os.path.isabs(a.sheet) else os.path.join(a.out, a.sheet)
         print(f"\n  -> {contact_sheet(tiles, out, a.width)}")
 
-    if failures:
-        print(f"\n{len(failures)} expectation(s) failed:")
+    if failures or unchecked:
+        print(f"\n{len(failures) + len(unchecked)} expectation(s) failed:")
+        for t in unchecked:
+            print(f"  t={t:g}  NOT CHECKED — no such timestamp in --times")
         for t, phrase in failures:
             print(f"  t={t:g}  {phrase!r} is not on screen")
         sys.exit(1)
+
+
+def preview_times(duration_s, fps=6):
+    """Inclusive 0 .. last-frame-inside-duration at `fps` stills/sec."""
+    if duration_s <= 0 or fps <= 0:
+        return []
+    step = 1.0 / fps
+    times = []
+    t = 0.0
+    last = max(0.0, duration_s - _FRAME_EPS)
+    while t < last - 1e-9:
+        times.append(round(t, 6))
+        t += step
+    if not times or times[-1] < last - step * 0.25:
+        times.append(round(last, 6))
+    return times
+
+
+def atempo_chain(speed):
+    """ffmpeg atempo is 0.5..100; chain for the rest. None if ~1x."""
+    if speed <= 0:
+        raise ValueError("speed must be positive")
+    if abs(speed - 1.0) < 1e-3:
+        return None
+    parts, s = [], float(speed)
+    while s > 100:
+        parts.append("atempo=100")
+        s /= 100.0
+    while s < 0.5:
+        parts.append("atempo=0.5")
+        s /= 0.5
+    parts.append(f"atempo={s:.6f}")
+    return ",".join(parts)
+
+
+def principal_video_track(tl):
+    """Gapless video track that starts at 0 and spans most of the timeline, else the longest."""
+    total = (tl.get("duration") or 0)
+    scored = []
+    longest = None
+    for i, tr in enumerate(tl.get("tracks") or []):
+        if tr.get("type") != "video":
+            continue
+        segs = sorted(tr.get("segments") or [], key=lambda s: s["target_timerange"]["start"])
+        if not segs:
+            continue
+        span = (segs[-1]["target_timerange"]["start"] + segs[-1]["target_timerange"]["duration"]
+                - segs[0]["target_timerange"]["start"])
+        if longest is None or span > longest[0]:
+            longest = (span, i, tr, segs)
+        cursor = segs[0]["target_timerange"]["start"]
+        gap = False
+        for s in segs:
+            if s["target_timerange"]["start"] - cursor > 20_000:
+                gap = True
+                break
+            cursor = s["target_timerange"]["start"] + s["target_timerange"]["duration"]
+        if gap or segs[0]["target_timerange"]["start"] > 20_000:
+            continue
+        if total and span < total * 0.9:
+            continue
+        scored.append((span, i, tr, segs))
+    if scored:
+        scored.sort(reverse=True)
+        return scored[0][1], scored[0][2], scored[0][3]
+    if longest:
+        return longest[1], longest[2], longest[3]
+    return None, None, []
+
+
+def write_preview(proj, tl, out_path, fps=6, z="track"):
+    """6fps compositor stills + timeline audio. Not a CapCut export."""
+    duration_s = (tl.get("duration") or 0) / 1e6
+    times = preview_times(duration_s, fps)
+    if not times:
+        raise SystemExit("preview: draft duration is 0")
+    out_path = os.path.abspath(out_path)
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    # A default --fps 6 pass over a 79s draft writes 478 full-size PNGs plus the wavs.
+    # Leaking that per invocation (>1GB) is what the finally is for.
+    tmp = tempfile.mkdtemp(prefix="capcutctl-preview-")
+    try:
+        frames_dir = os.path.join(tmp, "frames")
+        os.makedirs(frames_dir)
+        for i, t in enumerate(times):
+            img, _, _, _ = render(proj, tl, t, z)
+            img.convert("RGB").save(os.path.join(frames_dir, f"f{i:06d}.png"))
+        video = os.path.join(tmp, "video.mp4")
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(fps),
+             "-i", os.path.join(frames_dir, "f%06d.png"),
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", video],
+            check=True)
+        audio = _timeline_audio(proj, tl, tmp, duration_s)
+        if audio:
+            subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error", "-i", video, "-i", audio,
+                 "-c:v", "copy", "-c:a", "aac", "-shortest", out_path],
+                check=True)
+        else:
+            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", video, "-c", "copy", out_path],
+                           check=True)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return out_path
+
+
+def _timeline_audio(proj, tl, tmp, duration_s):
+    """Principal-video-track audio PLUS every `audio` track, mixed onto silence.
+
+    The whole point of --preview is hearing the seams, and the music and SFX live on
+    the audio tracks — reading only the principal video track dropped 28 segments and
+    13.5s of sound in GrokBuild-20260825 and made the seams silent.
+    """
+    idx = {}
+    for _k, v in (tl.get("materials") or {}).items():
+        if isinstance(v, list):
+            for m in v:
+                if isinstance(m, dict) and "id" in m:
+                    idx[m["id"]] = m
+    _, _track, segs = principal_video_track(tl)
+    sources = list(segs)
+    for tr in tl.get("tracks") or []:
+        if tr.get("type") == "audio":
+            sources += tr.get("segments") or []
+    if not sources:
+        return None
+    slices = []
+    for n, s in enumerate(sources):
+        mat = idx.get(s.get("material_id"))
+        if not mat:
+            continue
+        p = resolve(proj, mat.get("path", ""))
+        if not p or not os.path.exists(p):
+            continue
+        tt = s["target_timerange"]
+        # Same span/speed math as source_time — a second copy of it is how the
+        # original speed bug survived, and how the null fallback drifted apart.
+        src0, src_d = source_span(s)
+        tgt_d = tt["duration"] / 1e6
+        speed = src_d / tgt_d if tgt_d > 0 else 1.0
+        vol = s.get("volume")
+        vol = 1.0 if vol is None else float(vol)      # a muted segment is not a silent slice, it is no slice
+        if speed <= 0 or vol <= 0:
+            continue
+        wav = os.path.join(tmp, f"a{n:03d}.wav")
+        cmd = ["ffmpeg", "-y", "-loglevel", "error", "-ss", str(max(0, src0)), "-t", str(max(0.01, src_d)),
+               "-i", p]
+        af = [x for x in (atempo_chain(speed),) if x]
+        if abs(vol - 1.0) > 1e-3:
+            af.append(f"volume={vol:.6f}")
+        if af:
+            cmd += ["-af", ",".join(af)]
+        cmd += ["-ac", "1", "-ar", "44100", wav]
+        try:
+            subprocess.run(cmd, check=True)
+            slices.append((tt["start"] / 1e6, wav))
+        except subprocess.CalledProcessError:
+            continue
+    if not slices:
+        return None
+    # Mix onto a silent bed so gaps stay gaps.
+    bed = os.path.join(tmp, "bed.wav")
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+                    "-i", "anullsrc=r=44100:cl=mono", "-t", str(max(0.05, duration_s)), bed], check=True)
+    inputs = ["-i", bed]
+    filters = []
+    mix = ["[0:a]"]
+    for i, (start, wav) in enumerate(slices, start=1):
+        inputs += ["-i", wav]
+        delay_ms = max(0, round(start * 1000))
+        filters.append(f"[{i}:a]adelay={delay_ms}|{delay_ms}[d{i}]")
+        mix.append(f"[d{i}]")
+    n = 1 + len(slices)
+    filters.append("".join(mix) + f"amix=inputs={n}:dropout_transition=0:normalize=0[aout]")
+    mixed = os.path.join(tmp, "mix.wav")
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", *inputs,
+                    "-filter_complex", ";".join(filters), "-map", "[aout]", mixed], check=True)
+    return mixed
+
+
+def _selftest():
+    global _CACHE_BUDGET
+    ok = []
+    def check(name, cond):
+        ok.append(cond)
+        print(f"  {'PASS' if cond else 'FAIL'}  {name}")
+
+    def rejects(spec):
+        try:
+            parse_expect([spec])
+        except SystemExit:
+            return True
+        return False
+
+    seg = {
+        "target_timerange": {"start": 59_333_000, "duration": 8_634_000},
+        "source_timerange": {"start": 1_798_000_000, "duration": 3_801_761},
+    }
+    # 0.44× usage clip: 3.667s into the slot is still on the 10% page (~1800s),
+    # not 1798+3.667 = 1801.7 (the no-speed formula that showed the sidebar).
+    got = source_time(seg, 63.0)
+    check("speed-aware source time", abs(got - 1799.614) < 0.01)
+    check("1x is just an offset", abs(source_time(
+        {"target_timerange": {"start": 0, "duration": 5_000_000},
+         "source_timerange": {"start": 90_000_000, "duration": 5_000_000}}, 2.0) - 92.0) < 1e-9)
+
+    exp = parse_expect(["9.2=Build|45.5=Publish", "61=10%"])
+    check("second SECONDS= starts a new group", sorted(exp) == [9.2, 45.5, 61.0])
+    check("phrases stay with their timestamp", exp[9.2] == ["Build"] and exp[45.5] == ["Publish"])
+    check("pipe still joins phrases on one timestamp", parse_expect(["18=Read file|tower-defense"])[18.0] == ["Read file", "tower-defense"])
+    check("a marker mid-phrase is part of the phrase",
+          parse_expect(["5=Claude 3.5=Sonnet"]) == {5.0: ["Claude 3.5=Sonnet"]})
+    check("an expectation with no phrase is rejected", rejects("45.5=") and rejects("45.5=|"))
+    check("bad timestamps stay rejected",
+          all(rejects(x) for x in ("-5=Build", "1e3=Build", "9.2 = Build", "Build")))
+
+    # A null source_timerange is elapsed time, not timeline time.
+    check("null source range plays from the material start",
+          abs(source_time({"target_timerange": {"start": 40_000_000, "duration": 2_000_000}}, 41.0) - 1.0) < 1e-9)
+    # The end-of-source clamp stops a frame short, and never before the segment starts.
+    full = {"target_timerange": {"start": 0, "duration": 1_000_000},
+            "source_timerange": {"start": 0, "duration": 1_000_000}}
+    check("end-of-source clamp backs off a frame", abs(source_time(full, 1.0) - (1.0 - _FRAME_EPS)) < 1e-9)
+    tiny = {"target_timerange": {"start": 0, "duration": 500},
+            "source_timerange": {"start": 10_000_000, "duration": 500}}
+    check("sub-frame segment never seeks before its own start", source_time(tiny, 0.0005) >= 10.0)
+
+    saved, _CACHE_BUDGET = _CACHE_BUDGET, 1 << 20
+    _cache_reset()
+    for i in range(64):
+        _cache_put(("fake", i), Image.new("RGBA", (256, 256)))      # 256KB each, budget is 1MB
+    check("the frame cache evicts to stay inside its budget",
+          _CACHE_BYTES <= _CACHE_BUDGET and len(_CACHE) == 4)
+    _CACHE_BUDGET = saved
+    _cache_reset()
+
+    times = preview_times(1.0, fps=6)
+    check("preview starts at 0", times[0] == 0.0)
+    check("preview has ~6 fps for 1s", 6 <= len(times) <= 8)
+    check("1x atempo is a no-op", atempo_chain(1.0) is None)
+    check("slow atempo chains below 0.5", atempo_chain(0.44) == "atempo=0.5,atempo=0.880000")
+    check("very fast atempo chains", atempo_chain(250).startswith("atempo=100"))
+
+    print("selftest:", "all passed" if all(ok) else "FAILURES")
+    return 0 if all(ok) else 1
 
 
 if __name__ == "__main__":

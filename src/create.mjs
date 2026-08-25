@@ -52,7 +52,8 @@ export function probeMedia(file) {
     return { width, height, duration: Math.round(duration * 1e6) };
   } catch {
     throw new CapcutError(
-      `Could not probe ${path.basename(file)} with ffprobe. Pass --width, --height and --duration (seconds) instead.`,
+      `Could not probe ${path.basename(file)} with ffprobe. Pass --width, --height and `
+      + '--media-duration (seconds) instead.',
       { code: 'PROBE_FAILED', exitCode: 2 }
     );
   }
