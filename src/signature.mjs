@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CapcutError, clone, uuid, allSegments } from './core.mjs';
-import { principalTrack } from './polish.mjs';
+import { principalTrack, sfxPresets } from './polish.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const US = s => Math.round(s * 1e6);
@@ -322,7 +322,7 @@ function sigAudio() {
       let t = doc.tracks.find(x => x.type === 'audio' && x.name === name);
       if (t) return t;
       const tpl = doc.tracks.find(x => x.type === 'audio');
-      t = clone(tpl);
+      t = clone(tpl || sfxPresets().audioTrackTemplate);
       t.id = mintFn(`track:${name}`);
       t.name = name;
       t.segments = [];

@@ -1,0 +1,22 @@
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+exclude = ["tools/__pycache__"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "RUF"]
+ignore = [
+    # These are scripts with a deliberately dense style; `if not x: return` on one line
+    # reads better here than the two-line form, and reformatting working code to satisfy a
+    # linter is how bugs get introduced into things nobody was asking to change.
+    "E701", "E702",
+    # The A-roll tool transcribes Arabic. Flagging ا and ه as "did you mean l and o" is the
+    # check misfiring on the entire point of the file.
+    "RUF001", "RUF002", "RUF003",
+    # Long lines are already governed by line-length; this duplicates it for strings.
+    "E501",
+]
+
+[tool.vulture]
+min_confidence = 80
+paths = ["tools"]

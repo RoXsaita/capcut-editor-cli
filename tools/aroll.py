@@ -19,11 +19,21 @@ Whisper's word starts are contiguous-filled and lie by up to ~0.7s. Every seam d
 this project's history came from trusting them. Boundaries here come only from
 onset_after() and trough().
 """
-import argparse, json, os, re, shutil, subprocess, sys, tempfile, unicodedata
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import unicodedata
 from difflib import SequenceMatcher
+from itertools import pairwise
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from audio_index import AudioIndex, lint, SPEECH, SOFT   # noqa: E402
+from audio_index import SOFT, AudioIndex, lint
 
 FPS = 30.0
 FRAME = 1.0 / FPS
@@ -63,7 +73,7 @@ def transcribe(media, lang, model, cache_dir):
     cache = os.path.join(cache_dir, os.path.basename(media).rsplit(".", 1)[0] + f".whisper-{slug}.json")
     if os.path.exists(cache):
         print(f"  transcript: cached ({model})", file=sys.stderr)
-        return json.load(open(cache))
+        return json.loads(Path(cache).read_text())
 
     mlx = shutil.which("mlx_whisper")
     if mlx and "/" in model:
@@ -77,7 +87,7 @@ def transcribe(media, lang, model, cache_dir):
             out = os.path.join(tmp, "out.json")
             if proc.returncode != 0 or not os.path.exists(out):
                 raise SystemExit(f"mlx_whisper failed:\n{proc.stderr[-2000:]}")
-            result = json.load(open(out))
+            result = json.loads(Path(out).read_text())
     else:
         import whisper
         print(f"  transcribing with openai-whisper:{model} (lang={lang or 'auto'}) …", file=sys.stderr)
@@ -85,7 +95,7 @@ def transcribe(media, lang, model, cache_dir):
             media, language=lang, word_timestamps=True, verbose=False,
             condition_on_previous_text=False,      # stops one hallucination poisoning the rest
         )
-    json.dump(result, open(cache, "w"), ensure_ascii=False)
+    Path(cache).write_text(json.dumps(result, ensure_ascii=False))
     return result
 
 
@@ -228,7 +238,7 @@ def cmd_index(args):
     }
     path = args.out or os.path.join(os.path.dirname(media),
                                     os.path.basename(media).rsplit(".", 1)[0] + ".aroll.json")
-    json.dump(out, open(path, "w"), ensure_ascii=False, indent=1)
+    Path(path).write_text(json.dumps(out, ensure_ascii=False, indent=1))
     print_handout(out, path)
     return 0
 
@@ -252,12 +262,12 @@ def print_handout(data, path):
     print(f"\n{'='*78}\nA-ROLL HANDOUT — {os.path.basename(data['media'])}")
     print(f"source {data['source_duration']:.1f}s | speech {s['speech']:.1f}s | "
           f"dead air removed {s['dead_air_removed']:.1f}s | {s['beats']} beats")
-    print(f"takes: " + ", ".join(f"#{t['id']} ({len(t['beats'])} beats, {t['duration']:.1f}s)"
+    print("takes: " + ", ".join(f"#{t['id']} ({len(t['beats'])} beats, {t['duration']:.1f}s)"
                                  for t in data["takes"]))
     print(f"default keep: {len(data['default_keep'])} beats = {s['default_cut_duration']:.1f}s "
           f"(last take, last instance of every repeat)")
     if data["duplicate_groups"]:
-        print(f"\nrepeated lines — LAST instance wins:")
+        print("\nrepeated lines — LAST instance wins:")
         for g in data["duplicate_groups"]:
             print(f"   beats {g['members']}  \"{g['key'][:56]}\"")
     print(f"\n{'id':>3} {'take':>4} {'in':>8} {'out':>8} {'dur':>6}  {'keep':>4}  text")
@@ -321,7 +331,7 @@ def repair(idx, picked):
 
 
 def cmd_cut(args):
-    data = json.load(open(args.index))
+    data = json.loads(Path(args.index).read_text())
     beats = {b["id"]: b for b in data["beats"]}
     keep = parse_ids(args.keep) if args.keep else set(data["default_keep"])
     if args.drop:
@@ -338,12 +348,12 @@ def cmd_cut(args):
         repairs = repair(idx, picked)
         for r in repairs:
             print("  fixed: " + r)
-        for b, p in zip(keep, picked):
+        for b, p in zip(keep, picked, strict=True):
             beats[b]["src_in"], beats[b]["src_out"] = p["src_in"], p["src_out"]
 
     spans = [(f"b{p['id']}", p["src_in"], p["src_out"]) for p in picked]
     findings = lint(idx, spans, fps=data["fps"])
-    for (la, _, ea), (lb, sb, _) in zip(spans, spans[1:]):
+    for (la, _, ea), (lb, sb, _) in pairwise(spans):
         if sb < ea:
             findings.append(f"{la}->{lb} OVERLAP {ea - sb:.3f}s of source is used twice")
 
@@ -360,7 +370,7 @@ def cmd_cut(args):
     plan = {"media": data["media"], "kept": keep, "timeline": timeline,
             "duration": round(cursor, 3), "lint": findings, "scenes": scenes}
     plan_path = args.plan or args.index.replace(".aroll.json", ".plan.json")
-    json.dump(plan, open(plan_path, "w"), ensure_ascii=False, indent=1)
+    Path(plan_path).write_text(json.dumps(plan, ensure_ascii=False, indent=1))
 
     print(f"kept {len(keep)} beats -> {cursor:.2f}s (source {data['source_duration']:.1f}s)")
     for t in timeline:
@@ -420,7 +430,7 @@ def cmd_selftest(args):
     check("dead air splits one beat into two", len(spans) == 2)
 
     a1, b1 = snap(fake, 0.9, 2.1)
-    a2, b2 = snap(fake, 2.9, 4.1, floor=b1)
+    a2, _ = snap(fake, 2.9, 4.1, floor=b1)
     check("snap finds the onset", abs(a1 - (1.0 - LEAD_FRAMES * FRAME)) < 0.05)
     check("consecutive beats never overlap", a2 >= b1)
 
@@ -467,7 +477,7 @@ def main():
             sys.exit(0)
         print()
     elif not (args.keep or args.drop or args.project):
-        print_handout(json.load(open(args.index)), args.index)
+        print_handout(json.loads(Path(args.index).read_text()), args.index)
         sys.exit(0)
 
     args.plan = None

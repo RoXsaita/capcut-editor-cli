@@ -7,7 +7,12 @@ for a dark glyph on white (which is what every logo in the library is) and destr
 white-on-transparent mark, so the result is reported, not assumed: the printed opaque-pixel
 percentage is how you tell a real logo from a white rectangle.
 """
-import argparse, os, subprocess, sys, tempfile
+import argparse
+import os
+import subprocess
+import sys
+import tempfile
+
 
 def rasterize(svg, out, size=1024, threshold=246):
     try:

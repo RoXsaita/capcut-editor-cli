@@ -12,7 +12,13 @@ Build once, cache, then lint every cut plan before rendering.
     print(idx.strip(13.0, 14.0))                       # eyeball a seam
     for f in lint(idx, spans): print(f)                # machine-check the whole plan
 """
-import wave, struct, math, json, os, subprocess
+import json
+import math
+import os
+import struct
+import subprocess
+import wave
+from pathlib import Path
 
 SPEECH, SOFT, SIL = -28.0, -45.0, -55.0     # dB thresholds, tuned on this user's cam audio
 
@@ -24,9 +30,9 @@ class AudioIndex:
     # ---------- build / cache ----------
     @staticmethod
     def from_wav(wav, bin_ms=10):
-        w = wave.open(wav)
-        sr, nch = w.getframerate(), w.getnchannels()
-        s = struct.unpack("<%dh" % w.getnframes(), w.readframes(w.getnframes()))
+        with wave.open(wav) as w:
+            sr, nch = w.getframerate(), w.getnchannels()
+            s = struct.unpack(f"<{w.getnframes()}h", w.readframes(w.getnframes()))
         if nch > 1: s = s[::nch]
         n = int(bin_ms/1000*sr); out = []
         for i in range(0, len(s)-n, n):
@@ -39,7 +45,7 @@ class AudioIndex:
         cd = os.path.expanduser(cache_dir); os.makedirs(cd, exist_ok=True)
         key = os.path.join(cd, os.path.basename(media).rsplit(".",1)[0] + f".energy{bin_ms}.json")
         if os.path.exists(key):
-            d = json.load(open(key)); return AudioIndex(d["db"], d["bin"], media)
+            d = json.loads(Path(key).read_text()); return AudioIndex(d["db"], d["bin"], media)
         wav = media
         if not media.lower().endswith(".wav"):
             wav = os.path.join(cd, os.path.basename(media).rsplit(".",1)[0] + ".16k.wav")
@@ -47,7 +53,7 @@ class AudioIndex:
                 subprocess.run(["ffmpeg","-v","error","-y","-i",media,"-vn","-ac","1",
                                 "-ar","16000","-c:a","pcm_s16le",wav], check=True)
         idx = AudioIndex.from_wav(wav, bin_ms)
-        json.dump({"bin": idx.bin, "db": idx.db}, open(key,"w"))
+        Path(key).write_text(json.dumps({"bin": idx.bin, "db": idx.db}))
         return idx
 
     # ---------- queries ----------

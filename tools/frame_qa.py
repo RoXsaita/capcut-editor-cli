@@ -18,9 +18,16 @@ Usage:
     python3 frame_qa.py --project NAME --times 1.5,6,41.5 --out qa/
     python3 frame_qa.py --project NAME --times 6 --rects-only
 """
-import argparse, json, os, subprocess, sys, hashlib
-from PIL import Image, ImageFilter, ImageDraw
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import numpy as np
+from PIL import Image, ImageDraw, ImageFilter
 
 DRAFTS = os.path.expanduser("~/Movies/CapCut/User Data/Projects/com.lveditor.draft")
 _CACHE = {}
@@ -31,7 +38,7 @@ def load_project(name):
     meta = os.path.join(proj, "Timelines", "project.json")
     tl_id = None
     if os.path.exists(meta):
-        j = json.load(open(meta))
+        j = json.loads(Path(meta).read_text())
         tl_id = j.get("active_timeline_id") or j.get("activeTimelineId")
     if not tl_id:
         tls = [d for d in os.listdir(os.path.join(proj, "Timelines"))
@@ -39,7 +46,7 @@ def load_project(name):
         tl_id = tls[0] if tls else None
     path = (os.path.join(proj, "Timelines", tl_id, "draft_info.json")
             if tl_id else os.path.join(proj, "draft_info.json"))
-    return proj, json.load(open(path)), path
+    return proj, json.loads(Path(path).read_text()), path
 
 
 def resolve(proj, p):
@@ -54,7 +61,7 @@ def grab(path, t):
         im = Image.open(path).convert("RGBA")
     else:
         tmp = os.path.join(os.environ.get("TMPDIR", "/tmp"),
-                           "fqa_%s.png" % hashlib.md5(repr(key).encode()).hexdigest()[:12])
+                           f"fqa_{hashlib.md5(repr(key).encode()).hexdigest()[:12]}.png")
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", str(max(0, t)), "-i", path,
                         "-frames:v", "1", tmp], check=True)
         im = Image.open(tmp).convert("RGBA")
@@ -245,7 +252,7 @@ def main():
         print(f"  -> {f}")
         if a.ocr or expectations.get(t):
             wanted = expectations.get(t, [])
-            ok, found, runs = check_expectations(f, wanted, a.languages)
+            _, found, runs = check_expectations(f, wanted, a.languages)
             if a.ocr:
                 for r in sorted(runs, key=lambda r: r["y"])[:20]:
                     print(f"       y={r['y']:.3f} {r['text'][:64]}")

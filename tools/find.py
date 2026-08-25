@@ -11,7 +11,13 @@ This exists because doing it by hand got a shot wrong. A coarse OCR search repor
 does not start until 176. The B-roll sat on the wrong content until frames were checked.
 Runs are collapsed and reported with their FIRST STABLE second, not the first flicker.
 """
-import argparse, json, os, re, subprocess, sys
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -23,7 +29,7 @@ def load_ocr(media):
     path = os.path.join(CACHE, stem + ".ocr.json")
     if not os.path.exists(path):
         raise SystemExit(f"no OCR index for {stem}. Expected {path}")
-    return {int(k): v.lower() for k, v in json.load(open(path)).items()}
+    return {int(k): v.lower() for k, v in json.loads(Path(path).read_text()).items()}
 
 
 def load_transcript(media):
@@ -33,7 +39,7 @@ def load_transcript(media):
             return json.load(open(os.path.join(CACHE, name)))
     legacy = os.path.join(CACHE, stem.split("-")[0] + "_transcript_ar.json")
     if os.path.exists(legacy):
-        return json.load(open(legacy))
+        return json.loads(Path(legacy).read_text())
     raise SystemExit(f"no transcript for {stem}. Run `capcutctl cut {media}` first.")
 
 
