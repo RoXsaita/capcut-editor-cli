@@ -142,3 +142,44 @@ test('a missing logo asset is an error, not a silent skip', () => {
   assert.throws(() => opSignature(doc(), { logos: [{ brand: 'grok', at: 2, logo: '/nope/x.png' }] }),
     /NO_LOGO_ASSET|no logo file/);
 });
+
+import { layoutAudit } from '../src/layouts.mjs';
+
+test('layoutAudit derives the layout from what is under the clip, not from judgement', () => {
+  const d = doc();
+  // B-roll covering only the first two principal clips
+  d.tracks.splice(1, 0, { type: 'video', id: 'broll', segments: [
+    { id: 'b1', material_id: 'CAM', extra_material_refs: [],
+      target_timerange: { start: 0, duration: US(10) },
+      source_timerange: { start: 0, duration: US(10) }, clip: { scale: { x: 1, y: 1 } } },
+  ] });
+  const rows = layoutAudit(d);
+  assert.deepEqual(rows.map(r => [r.at, r.want]),
+    [[0, 'split-screen'], [5, 'split-screen'], [10, 'full-face'], [14, 'full-face'], [16, 'full-face']]);
+});
+
+test('layoutAudit flags only the clips whose look disagrees with their B-roll', () => {
+  const d = doc();
+  d.tracks.splice(1, 0, { type: 'video', id: 'broll', segments: [
+    { id: 'b1', material_id: 'CAM', extra_material_refs: [],
+      target_timerange: { start: 0, duration: US(10) },
+      source_timerange: { start: 0, duration: US(10) }, clip: { scale: { x: 1, y: 1 } } },
+  ] });
+  const rows = layoutAudit(d);
+  // clip 0 is masked and has B-roll -> correct. clip 1 is unmasked but has B-roll -> wrong.
+  assert.equal(rows[0].change, false);
+  assert.equal(rows[1].change, true);
+  // clips 3 and 4 are masked with nothing under them -> wrong
+  assert.deepEqual(rows.filter(r => r.change).map(r => r.at), [5, 14, 16]);
+});
+
+test('a layout plate does not count as B-roll under the face', () => {
+  const d = doc();
+  d.materials.videos.push({ id: 'PLATE', type: 'photo', path: '/a/bar.png' });
+  d.tracks.splice(1, 0, { type: 'video', id: 'bars', segments: [
+    { id: 'p1', material_id: 'PLATE', desc: 'layout:seam-bar', extra_material_refs: [],
+      target_timerange: { start: 0, duration: US(20) },
+      source_timerange: { start: 0, duration: US(20) }, clip: { scale: { x: 1, y: 1 } } },
+  ] });
+  assert.ok(layoutAudit(d).every(r => r.brollUnder === false));
+});

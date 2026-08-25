@@ -1,672 +1,695 @@
 {
-  "version": 1,
-  "canvas": {
-    "width": 1080,
-    "height": 1920
-  },
-  "geometryModel": {
-    "scale": "scale 1.0 == FIT whole source inside canvas: k0 = min(W/sw, H/sh); displayed = (sw*k0*scale.x, sh*k0*scale.y)",
-    "transform": "half-canvas units, y POSITIVE UP: centre = (W/2 + tx*W/2, H/2 - ty*H/2)",
-    "maskPosition": "centerX/centerY are half-CLIP units, y positive UP: (w/2 + cX*w/2, h/2 - cY*h/2)",
-    "maskSize": "width/height are full-clip fractions: x-diameter = width*w, y-diameter = height*h",
-    "zOrder": "track order (lower track index renders further back). render_index is preserved but not authoritative."
-  },
-  "source": "measured verbatim from grok-build-claude timeline 95243011-29AA-4583-8CCA-851C7A1C8C80",
-  "layouts": {
-    "split-screen": {
-      "description": "Subject fills the BOTTOM half from y=960; B-roll occupies the top half; indigo bar sits on the seam.",
-      "subject": {
-        "clip": {
-          "scale": {
-            "x": 1.0,
-            "y": 1.0
-          },
-          "transform": {
-            "x": 0.0,
-            "y": -0.5208333333333334
-          },
-          "rotation": 0.0,
-          "flip": {
-            "horizontal": false,
-            "vertical": false
-          },
-          "alpha": 1.0
-        },
-        "mask": {
-          "width": 0.28,
-          "height": 0.0,
-          "centerX": -0.004608294930875577,
-          "centerY": 0.5415114961139896,
-          "rotation": 180.0,
-          "feather": 0.0,
-          "expansion": 0.0,
-          "roundCorner": 0.0,
-          "invert": false,
-          "aspectRatio": 1.0
-        },
-        "maskTemplate": {
-          "type": "mask",
-          "category": "video",
-          "category_name": "",
-          "category_id": "",
-          "panel": "",
-          "is_old_version": false,
-          "resource_id": "7374020197990011409",
-          "constant_material_id": "653DAE0A-19B7-4B0B-9E91-1C22F2CDF902",
-          "name": "Split",
-          "resource_type": "line",
-          "path": "/Users/roxsa/Library/Containers/com.lemon.lvoverseas/Data/Movies/CapCut/User Data/Cache/effect/1068046523/4c6a0ef5de6a844342d40330e00c59eb",
-          "position_info": "",
-          "config": {
-            "width": 0.28,
-            "height": 0.0,
-            "centerX": -0.004608294930875577,
-            "centerY": 0.5415114961139896,
-            "rotation": 180.0,
-            "feather": 0.0,
-            "expansion": 0.0,
-            "roundCorner": 0.0,
-            "invert": false,
-            "aspectRatio": 1.0
-          },
-          "text_config": {
-            "content": "",
-            "font_name": "",
-            "font_path": "",
-            "font_resource_id": "",
-            "font_size": 15.0,
-            "bold_width": 0.0,
-            "italic_degree": 0,
-            "has_underline": false,
-            "line_gap": 0.0,
-            "char_spacing": 0.0,
-            "align_type": 15,
-            "scale": 1.0
-          },
-          "platform": "all",
-          "loader_work_space": "",
-          "track_segment": "",
-          "contour_path": null,
-          "source_platform": 0
-        }
-      },
-      "overlay": {
-        "asset": "suheilai-rect-indigo-1080x1920 (2).png",
-        "role": "seam-bar",
-        "clip": {
-          "scale": {
-            "x": 1.8272246516061672,
-            "y": 0.7521039538453399
-          },
-          "transform": {
-            "x": 0.0,
-            "y": -0.6036269430051813
-          },
-          "rotation": 0.0,
-          "flip": {
-            "horizontal": false,
-            "vertical": false
-          },
-          "alpha": 1.0
-        },
-        "renderIndexOffset": 1,
-        "segmentTemplate": {
-          "render_timerange": {
-            "start": 0,
-            "duration": 0
-          },
-          "desc": "",
-          "state": 0,
-          "speed": 1.0,
-          "is_loop": false,
-          "is_tone_modify": false,
-          "reverse": false,
-          "intensifies_audio": false,
-          "cartoon": false,
-          "volume": 1.0,
-          "last_nonzero_volume": 1.0,
-          "uniform_scale": {
-            "on": false,
-            "value": 1.0
-          },
-          "keyframe_refs": [],
-          "enable_lut": true,
-          "enable_adjust": true,
-          "enable_hsl": false,
-          "visible": true,
-          "group_id": "",
-          "enable_color_curves": true,
-          "enable_hsl_curves": true,
-          "hdr_settings": {
-            "mode": 1,
-            "intensity": 1.0,
-            "nits": 1000
-          },
-          "enable_color_wheels": true,
-          "track_attribute": 0,
-          "is_placeholder": false,
-          "template_id": "",
-          "enable_smart_color_adjust": false,
-          "template_scene": "default",
-          "common_keyframes": [],
-          "caption_info": null,
-          "responsive_layout": {
-            "enable": false,
-            "target_follow": "",
-            "size_layout": 0,
-            "horizontal_pos_layout": 0,
-            "vertical_pos_layout": 0
-          },
-          "enable_color_match_adjust": false,
-          "enable_color_correct_adjust": false,
-          "enable_adjust_mask": false,
-          "raw_segment_id": "",
-          "lyric_keyframes": null,
-          "enable_video_mask": true,
-          "digital_human_template_group_id": "",
-          "color_correct_alg_result": "",
-          "source": "segmentsourcenormal",
-          "enable_mask_stroke": false,
-          "enable_mask_shadow": false,
-          "enable_color_adjust_pro": false,
-          "segment_color_tag": ""
-        }
-      }
-    },
-    "circle": {
-      "description": "Subject as a circular avatar in the UPPER-LEFT, inside the white ring.",
-      "subject": {
-        "clip": {
-          "scale": {
-            "x": 0.18999999999999995,
-            "y": 0.18999999999999995
-          },
-          "transform": {
-            "x": -0.5559524128804151,
-            "y": 0.6442708333333333
-          },
-          "rotation": 0.0,
-          "flip": {
-            "horizontal": false,
-            "vertical": false
-          },
-          "alpha": 1.0
-        },
-        "mask": {
-          "width": 1.0032193406262426,
-          "height": 0.5618028307506959,
-          "centerX": 0.0,
-          "centerY": -0.04329882358536104,
-          "rotation": 0.0,
-          "feather": 0.0,
-          "expansion": 0.0,
-          "roundCorner": 0.0,
-          "invert": false,
-          "aspectRatio": 1.0
-        },
-        "maskTemplate": {
-          "type": "mask",
-          "category": "video",
-          "category_name": "",
-          "category_id": "",
-          "panel": "",
-          "is_old_version": false,
-          "resource_id": "7374021188315517456",
-          "constant_material_id": "28340A85-6C8B-4E6F-A950-0E76678C0DA6",
-          "name": "Circle",
-          "resource_type": "circle",
-          "path": "/Users/roxsa/Library/Containers/com.lemon.lvoverseas/Data/Movies/CapCut/User Data/Cache/effect/1068046525/3ab1c47350d987c8ad415497e020a38b",
-          "position_info": "",
-          "config": {
-            "width": 1.0032193406262426,
-            "height": 0.5618028307506959,
-            "centerX": 0.0,
-            "centerY": -0.04329882358536104,
-            "rotation": 0.0,
-            "feather": 0.0,
-            "expansion": 0.0,
-            "roundCorner": 0.0,
-            "invert": false,
-            "aspectRatio": 1.0
-          },
-          "text_config": {
-            "content": "",
-            "font_name": "",
-            "font_path": "",
-            "font_resource_id": "",
-            "font_size": 15.0,
-            "bold_width": 0.0,
-            "italic_degree": 0,
-            "has_underline": false,
-            "line_gap": 0.0,
-            "char_spacing": 0.0,
-            "align_type": 15,
-            "scale": 1.0
-          },
-          "platform": "all",
-          "loader_work_space": "",
-          "track_segment": "",
-          "contour_path": null,
-          "source_platform": 0
-        }
-      },
-      "overlay": {
-        "asset": "suheilai-circle-white-1080x1920.png",
-        "role": "white-ring",
-        "clip": {
-          "scale": {
-            "x": 0.2728009828009824,
-            "y": 0.2728009828009824
-          },
-          "transform": {
-            "x": -0.5559524128804151,
-            "y": 0.6328125
-          },
-          "rotation": 0.0,
-          "flip": {
-            "horizontal": false,
-            "vertical": false
-          },
-          "alpha": 1.0
-        },
-        "mask": {
-          "width": 0.8681592039800995,
-          "height": 0.48616915422885576,
-          "centerX": 0.01608984799212853,
-          "centerY": 0.0392156862745098,
-          "rotation": 0.0,
-          "feather": 0.0,
-          "expansion": 0.0,
-          "roundCorner": 0.0,
-          "invert": false,
-          "aspectRatio": 1.0
-        },
-        "maskTemplate": {
-          "type": "mask",
-          "category": "video",
-          "category_name": "",
-          "category_id": "",
-          "panel": "",
-          "is_old_version": false,
-          "resource_id": "7374021188315517456",
-          "constant_material_id": "28340A85-6C8B-4E6F-A950-0E76678C0DA6",
-          "name": "Circle",
-          "resource_type": "circle",
-          "path": "/Users/roxsa/Library/Containers/com.lemon.lvoverseas/Data/Movies/CapCut/User Data/Cache/effect/1068046525/3ab1c47350d987c8ad415497e020a38b",
-          "position_info": "",
-          "config": {
-            "width": 0.8681592039800995,
-            "height": 0.48616915422885576,
-            "centerX": 0.01608984799212853,
-            "centerY": 0.0392156862745098,
-            "rotation": 0.0,
-            "feather": 0.0,
-            "expansion": 0.0,
-            "roundCorner": 0.0,
-            "invert": false,
-            "aspectRatio": 1.0
-          },
-          "text_config": {
-            "content": "",
-            "font_name": "",
-            "font_path": "",
-            "font_resource_id": "",
-            "font_size": 15.0,
-            "bold_width": 0.0,
-            "italic_degree": 0,
-            "has_underline": false,
-            "line_gap": 0.0,
-            "char_spacing": 0.0,
-            "align_type": 15,
-            "scale": 1.0
-          },
-          "platform": "all",
-          "loader_work_space": "",
-          "track_segment": "",
-          "contour_path": null,
-          "source_platform": 0
-        },
-        "renderIndexOffset": 2,
-        "segmentTemplate": {
-          "render_timerange": {
-            "start": 0,
-            "duration": 0
-          },
-          "desc": "scene1 white circle frame",
-          "state": 0,
-          "speed": 1.0,
-          "is_loop": false,
-          "is_tone_modify": false,
-          "reverse": false,
-          "intensifies_audio": false,
-          "cartoon": false,
-          "volume": 1.0,
-          "last_nonzero_volume": 1.0,
-          "uniform_scale": {
-            "on": true,
-            "value": 1.0
-          },
-          "keyframe_refs": [],
-          "enable_lut": true,
-          "enable_adjust": true,
-          "enable_hsl": false,
-          "visible": true,
-          "group_id": "",
-          "enable_color_curves": true,
-          "enable_hsl_curves": true,
-          "hdr_settings": {
-            "mode": 1,
-            "intensity": 1.0,
-            "nits": 1000
-          },
-          "enable_color_wheels": true,
-          "track_attribute": 0,
-          "is_placeholder": false,
-          "template_id": "",
-          "enable_smart_color_adjust": false,
-          "template_scene": "default",
-          "common_keyframes": [],
-          "caption_info": null,
-          "responsive_layout": {
-            "enable": false,
-            "target_follow": "",
-            "size_layout": 0,
-            "horizontal_pos_layout": 0,
-            "vertical_pos_layout": 0
-          },
-          "enable_color_match_adjust": false,
-          "enable_color_correct_adjust": false,
-          "enable_adjust_mask": false,
-          "raw_segment_id": "",
-          "lyric_keyframes": null,
-          "enable_video_mask": true,
-          "digital_human_template_group_id": "",
-          "color_correct_alg_result": "",
-          "source": "segmentsourcenormal",
-          "enable_mask_stroke": false,
-          "enable_mask_shadow": false,
-          "enable_color_adjust_pro": false,
-          "segment_color_tag": ""
-        }
-      }
-    }
-  },
-  "background": {
-    "description": "Blurred, slightly enlarged copy of the subject placed BELOW it. Applied under circle scenes.",
+ "version": 1,
+ "canvas": {
+  "width": 1080,
+  "height": 1920
+ },
+ "geometryModel": {
+  "scale": "scale 1.0 == FIT whole source inside canvas: k0 = min(W/sw, H/sh); displayed = (sw*k0*scale.x, sh*k0*scale.y)",
+  "transform": "half-canvas units, y POSITIVE UP: centre = (W/2 + tx*W/2, H/2 - ty*H/2)",
+  "maskPosition": "centerX/centerY are half-CLIP units, y positive UP: (w/2 + cX*w/2, h/2 - cY*h/2)",
+  "maskSize": "width/height are full-clip fractions: x-diameter = width*w, y-diameter = height*h",
+  "zOrder": "track order (lower track index renders further back). render_index is preserved but not authoritative."
+ },
+ "source": "measured verbatim from grok-build-claude timeline 95243011-29AA-4583-8CCA-851C7A1C8C80",
+ "layouts": {
+  "split-screen": {
+   "description": "Subject fills the BOTTOM half from y=960; B-roll occupies the top half; indigo bar sits on the seam.",
+   "subject": {
     "clip": {
-      "scale": {
-        "x": 1.12,
-        "y": 1.12
-      },
-      "transform": {
-        "x": 0.0,
-        "y": 0.0
-      },
-      "rotation": 0.0,
-      "flip": {
-        "horizontal": false,
-        "vertical": false
-      },
-      "alpha": 0.72
+     "scale": {
+      "x": 1.0,
+      "y": 1.0
+     },
+     "transform": {
+      "x": 0.0,
+      "y": -0.5208333333333334
+     },
+     "rotation": 0.0,
+     "flip": {
+      "horizontal": false,
+      "vertical": false
+     },
+     "alpha": 1.0
     },
-    "effect": {
-      "effect_id": "7399464929830423813",
-      "resource_id": "7399464929830423813",
-      "name": "Blur",
-      "type": "video_effect",
-      "sub_type": 0,
-      "bind_segment_id": "3A713CA9-04E9-44C1-985A-E5735D4D7CE8",
-      "transparent_params": "",
-      "path": "/Users/roxsa/Library/Containers/com.lemon.lvoverseas/Data/Movies/CapCut/User Data/Cache/effect/7399464929830423813/2db7bf49d9349e308ef0f46c39b14abf",
-      "value": 1.0,
-      "category_id": "1111",
-      "category_name": "Video effects",
-      "platform": "all",
-      "apply_target_type": 0,
-      "source_platform": 1,
-      "version": "",
-      "item_effect_type": 0,
-      "adjust_params": [
-        {
-          "name": "effects_adjust_blur",
-          "value": 1.0,
-          "default_value": 0.5
-        }
-      ],
-      "time_range": null,
-      "formula_id": "",
-      "apply_time_range": null,
-      "render_index": 11000,
-      "track_render_index": 0,
-      "common_keyframes": [],
-      "request_id": "202604301546330000000000001740FAC",
-      "algorithm_artifact_path": "",
-      "disable_effect_faces": [],
-      "covering_relation_change": 0,
-      "enable_mask": true,
-      "effect_mask": [],
-      "enable_video_mask_stroke": true,
-      "enable_video_mask_shadow": true,
-      "aigc_current_artifact_path": "",
-      "aigc_current_artifact_cnt": 0,
-      "aigc_current_artifact_freeze_time": -1,
-      "aigc_current_artifact_freeze_progress": 0.0,
-      "sdk_extra": ""
+    "mask": {
+     "width": 0.28,
+     "height": 0.0,
+     "centerX": -0.004608294930875577,
+     "centerY": 0.5415114961139896,
+     "rotation": 180.0,
+     "feather": 0.0,
+     "expansion": 0.0,
+     "roundCorner": 0.0,
+     "invert": false,
+     "aspectRatio": 1.0
     },
-    "segmentTemplate": {
-      "render_timerange": {
-        "start": 0,
-        "duration": 0
-      },
-      "desc": "Aligned blurred talking-head background",
-      "state": 0,
-      "speed": 1.0,
-      "is_loop": false,
-      "is_tone_modify": false,
-      "reverse": false,
-      "intensifies_audio": false,
-      "cartoon": false,
-      "volume": 0.0,
-      "last_nonzero_volume": 1.0,
-      "uniform_scale": {
-        "on": true,
-        "value": 1.0
-      },
-      "keyframe_refs": [],
-      "enable_lut": true,
-      "enable_adjust": true,
-      "enable_hsl": false,
-      "visible": true,
-      "group_id": "",
-      "enable_color_curves": true,
-      "enable_hsl_curves": true,
-      "hdr_settings": {
-        "mode": 4,
-        "intensity": 1.0,
-        "nits": 1000
-      },
-      "enable_color_wheels": true,
-      "track_attribute": 0,
-      "is_placeholder": false,
-      "template_id": "",
-      "enable_smart_color_adjust": false,
-      "template_scene": "default",
-      "common_keyframes": [],
-      "caption_info": null,
-      "responsive_layout": {
-        "enable": false,
-        "target_follow": "",
-        "size_layout": 0,
-        "horizontal_pos_layout": 0,
-        "vertical_pos_layout": 0
-      },
-      "enable_color_match_adjust": false,
-      "enable_color_correct_adjust": false,
-      "enable_adjust_mask": false,
-      "raw_segment_id": "",
-      "lyric_keyframes": null,
-      "enable_video_mask": true,
-      "digital_human_template_group_id": "",
-      "color_correct_alg_result": "",
-      "source": "segmentsourcenormal",
-      "enable_mask_stroke": false,
-      "enable_mask_shadow": false,
-      "enable_color_adjust_pro": false,
-      "segment_color_tag": ""
+    "maskTemplate": {
+     "type": "mask",
+     "category": "video",
+     "category_name": "",
+     "category_id": "",
+     "panel": "",
+     "is_old_version": false,
+     "resource_id": "7374020197990011409",
+     "constant_material_id": "653DAE0A-19B7-4B0B-9E91-1C22F2CDF902",
+     "name": "Split",
+     "resource_type": "line",
+     "path": "/Users/roxsa/Library/Containers/com.lemon.lvoverseas/Data/Movies/CapCut/User Data/Cache/effect/1068046523/4c6a0ef5de6a844342d40330e00c59eb",
+     "position_info": "",
+     "config": {
+      "width": 0.28,
+      "height": 0.0,
+      "centerX": -0.004608294930875577,
+      "centerY": 0.5415114961139896,
+      "rotation": 180.0,
+      "feather": 0.0,
+      "expansion": 0.0,
+      "roundCorner": 0.0,
+      "invert": false,
+      "aspectRatio": 1.0
+     },
+     "text_config": {
+      "content": "",
+      "font_name": "",
+      "font_path": "",
+      "font_resource_id": "",
+      "font_size": 15.0,
+      "bold_width": 0.0,
+      "italic_degree": 0,
+      "has_underline": false,
+      "line_gap": 0.0,
+      "char_spacing": 0.0,
+      "align_type": 15,
+      "scale": 1.0
+     },
+     "platform": "all",
+     "loader_work_space": "",
+     "track_segment": "",
+     "contour_path": null,
+     "source_platform": 0
     }
+   },
+   "overlay": {
+    "asset": "suheilai-rect-indigo-1080x1920 (2).png",
+    "role": "seam-bar",
+    "clip": {
+     "scale": {
+      "x": 1.8272246516061672,
+      "y": 0.7521039538453399
+     },
+     "transform": {
+      "x": 0.0,
+      "y": -0.6036269430051813
+     },
+     "rotation": 0.0,
+     "flip": {
+      "horizontal": false,
+      "vertical": false
+     },
+     "alpha": 1.0
+    },
+    "renderIndexOffset": 1,
+    "segmentTemplate": {
+     "render_timerange": {
+      "start": 0,
+      "duration": 0
+     },
+     "desc": "",
+     "state": 0,
+     "speed": 1.0,
+     "is_loop": false,
+     "is_tone_modify": false,
+     "reverse": false,
+     "intensifies_audio": false,
+     "cartoon": false,
+     "volume": 1.0,
+     "last_nonzero_volume": 1.0,
+     "uniform_scale": {
+      "on": false,
+      "value": 1.0
+     },
+     "keyframe_refs": [],
+     "enable_lut": true,
+     "enable_adjust": true,
+     "enable_hsl": false,
+     "visible": true,
+     "group_id": "",
+     "enable_color_curves": true,
+     "enable_hsl_curves": true,
+     "hdr_settings": {
+      "mode": 1,
+      "intensity": 1.0,
+      "nits": 1000
+     },
+     "enable_color_wheels": true,
+     "track_attribute": 0,
+     "is_placeholder": false,
+     "template_id": "",
+     "enable_smart_color_adjust": false,
+     "template_scene": "default",
+     "common_keyframes": [],
+     "caption_info": null,
+     "responsive_layout": {
+      "enable": false,
+      "target_follow": "",
+      "size_layout": 0,
+      "horizontal_pos_layout": 0,
+      "vertical_pos_layout": 0
+     },
+     "enable_color_match_adjust": false,
+     "enable_color_correct_adjust": false,
+     "enable_adjust_mask": false,
+     "raw_segment_id": "",
+     "lyric_keyframes": null,
+     "enable_video_mask": true,
+     "digital_human_template_group_id": "",
+     "color_correct_alg_result": "",
+     "source": "segmentsourcenormal",
+     "enable_mask_stroke": false,
+     "enable_mask_shadow": false,
+     "enable_color_adjust_pro": false,
+     "segment_color_tag": ""
+    }
+   }
   },
-  "photoMaterialTemplate": {
-    "unique_id": "5a9f67ef216d717484d98e4fbf2574ed",
-    "type": "photo",
-    "duration": 10800000000,
-    "media_path": "",
-    "local_id": "",
-    "has_audio": false,
-    "reverse_path": "",
-    "intensifies_path": "",
-    "reverse_intensifies_path": "",
-    "intensifies_audio_path": "",
-    "cartoon_path": "",
-    "width": 1080,
-    "height": 1920,
-    "category_id": "",
-    "category_name": "",
-    "material_id": "",
-    "material_url": "",
-    "crop": {
-      "upper_left_x": 0.0,
-      "upper_left_y": 0.0,
-      "upper_right_x": 1.0,
-      "upper_right_y": 0.0,
-      "lower_left_x": 0.0,
-      "lower_left_y": 1.0,
-      "lower_right_x": 1.0,
-      "lower_right_y": 1.0
+  "circle": {
+   "description": "Subject as a circular avatar in the UPPER-LEFT, inside the white ring.",
+   "subject": {
+    "clip": {
+     "scale": {
+      "x": 0.18999999999999995,
+      "y": 0.18999999999999995
+     },
+     "transform": {
+      "x": -0.5559524128804151,
+      "y": 0.6442708333333333
+     },
+     "rotation": 0.0,
+     "flip": {
+      "horizontal": false,
+      "vertical": false
+     },
+     "alpha": 1.0
     },
-    "crop_ratio": "free",
-    "audio_fade": null,
-    "crop_scale": 1.0,
-    "extra_type_option": 0,
-    "stable": {
-      "stable_level": 0,
-      "matrix_path": "",
-      "time_range": {
-        "start": 0,
-        "duration": 0
-      }
+    "mask": {
+     "width": 1.0032193406262426,
+     "height": 0.5618028307506959,
+     "centerX": 0.0,
+     "centerY": -0.04329882358536104,
+     "rotation": 0.0,
+     "feather": 0.0,
+     "expansion": 0.0,
+     "roundCorner": 0.0,
+     "invert": false,
+     "aspectRatio": 1.0
     },
-    "matting": {
-      "flag": 0,
-      "path": "",
-      "interactiveTime": [],
-      "has_use_quick_brush": false,
-      "strokes": [],
-      "has_use_quick_eraser": false,
-      "expansion": 0,
-      "feather": 0,
-      "reverse": false,
-      "custom_matting_id": "",
-      "enable_matting_stroke": false,
-      "is_clould": false,
-      "mask_video_path": "",
-      "cloud_product_fps": 0.0
+    "maskTemplate": {
+     "type": "mask",
+     "category": "video",
+     "category_name": "",
+     "category_id": "",
+     "panel": "",
+     "is_old_version": false,
+     "resource_id": "7374021188315517456",
+     "constant_material_id": "28340A85-6C8B-4E6F-A950-0E76678C0DA6",
+     "name": "Circle",
+     "resource_type": "circle",
+     "path": "/Users/roxsa/Library/Containers/com.lemon.lvoverseas/Data/Movies/CapCut/User Data/Cache/effect/1068046525/3ab1c47350d987c8ad415497e020a38b",
+     "position_info": "",
+     "config": {
+      "width": 1.0032193406262426,
+      "height": 0.5618028307506959,
+      "centerX": 0.0,
+      "centerY": -0.04329882358536104,
+      "rotation": 0.0,
+      "feather": 0.0,
+      "expansion": 0.0,
+      "roundCorner": 0.0,
+      "invert": false,
+      "aspectRatio": 1.0
+     },
+     "text_config": {
+      "content": "",
+      "font_name": "",
+      "font_path": "",
+      "font_resource_id": "",
+      "font_size": 15.0,
+      "bold_width": 0.0,
+      "italic_degree": 0,
+      "has_underline": false,
+      "line_gap": 0.0,
+      "char_spacing": 0.0,
+      "align_type": 15,
+      "scale": 1.0
+     },
+     "platform": "all",
+     "loader_work_space": "",
+     "track_segment": "",
+     "contour_path": null,
+     "source_platform": 0
+    }
+   },
+   "overlay": {
+    "asset": "suheilai-circle-white-1080x1920.png",
+    "role": "white-ring",
+    "clip": {
+     "scale": {
+      "x": 0.2728009828009824,
+      "y": 0.2728009828009824
+     },
+     "transform": {
+      "x": -0.5559524128804151,
+      "y": 0.6328125
+     },
+     "rotation": 0.0,
+     "flip": {
+      "horizontal": false,
+      "vertical": false
+     },
+     "alpha": 1.0
     },
-    "source": 0,
-    "source_platform": 0,
-    "formula_id": "",
-    "check_flag": 62978047,
-    "video_algorithm": {
-      "algorithms": [],
-      "time_range": null,
-      "path": "",
-      "gameplay_configs": [],
-      "ai_in_painting_config": [],
-      "complement_frame_config": null,
-      "motion_blur_config": null,
-      "deflicker": null,
-      "noise_reduction": null,
-      "quality_enhance": null,
-      "super_resolution": null,
-      "ai_background_configs": [],
-      "smart_complement_frame": null,
-      "aigc_generate": null,
-      "aigc_generate_list": [],
-      "mouth_shape_driver": null,
-      "ai_expression_driven": null,
-      "ai_motion_driven": null,
-      "image_interpretation": null,
-      "story_video_modify_video_config": {
-        "task_id": "",
-        "is_overwrite_last_video": false,
-        "tracker_task_id": "",
-        "generate_id": "",
-        "generate_card_id": ""
-      },
-      "skip_algorithm_index": []
+    "mask": {
+     "width": 0.8681592039800995,
+     "height": 0.48616915422885576,
+     "centerX": 0.01608984799212853,
+     "centerY": 0.0392156862745098,
+     "rotation": 0.0,
+     "feather": 0.0,
+     "expansion": 0.0,
+     "roundCorner": 0.0,
+     "invert": false,
+     "aspectRatio": 1.0
     },
-    "is_unified_beauty_mode": false,
-    "is_set_beauty_mode": false,
-    "object_locked": null,
-    "smart_motion": null,
-    "multi_camera_info": null,
-    "freeze": null,
-    "picture_from": "none",
-    "picture_set_category_id": "",
-    "picture_set_category_name": "",
-    "team_id": "",
-    "origin_material_id": "",
-    "request_id": "",
-    "has_sound_separated": false,
-    "is_text_edit_overdub": false,
-    "is_ai_generate_content": false,
-    "aigc_type": "none",
-    "is_copyright": true,
-    "aigc_history_id": "",
-    "aigc_item_id": "",
-    "local_material_from": "",
-    "smart_match_info": null,
-    "beauty_face_preset_infos": [],
-    "beauty_body_preset_id": "",
-    "beauty_face_auto_preset": {
-      "preset_id": "",
-      "name": "",
-      "rate_map": "",
-      "scene": ""
+    "maskTemplate": {
+     "type": "mask",
+     "category": "video",
+     "category_name": "",
+     "category_id": "",
+     "panel": "",
+     "is_old_version": false,
+     "resource_id": "7374021188315517456",
+     "constant_material_id": "28340A85-6C8B-4E6F-A950-0E76678C0DA6",
+     "name": "Circle",
+     "resource_type": "circle",
+     "path": "/Users/roxsa/Library/Containers/com.lemon.lvoverseas/Data/Movies/CapCut/User Data/Cache/effect/1068046525/3ab1c47350d987c8ad415497e020a38b",
+     "position_info": "",
+     "config": {
+      "width": 0.8681592039800995,
+      "height": 0.48616915422885576,
+      "centerX": 0.01608984799212853,
+      "centerY": 0.0392156862745098,
+      "rotation": 0.0,
+      "feather": 0.0,
+      "expansion": 0.0,
+      "roundCorner": 0.0,
+      "invert": false,
+      "aspectRatio": 1.0
+     },
+     "text_config": {
+      "content": "",
+      "font_name": "",
+      "font_path": "",
+      "font_resource_id": "",
+      "font_size": 15.0,
+      "bold_width": 0.0,
+      "italic_degree": 0,
+      "has_underline": false,
+      "line_gap": 0.0,
+      "char_spacing": 0.0,
+      "align_type": 15,
+      "scale": 1.0
+     },
+     "platform": "all",
+     "loader_work_space": "",
+     "track_segment": "",
+     "contour_path": null,
+     "source_platform": 0
     },
-    "beauty_face_auto_preset_infos": [],
-    "beauty_body_auto_preset": null,
-    "live_photo_timestamp": -1,
-    "live_photo_cover_path": "",
-    "content_feature_info": null,
-    "corner_pin": null,
-    "surface_trackings": [],
-    "video_mask_stroke": {
-      "resource_id": "",
-      "path": "",
-      "type": "",
-      "color": "",
-      "size": 0.0,
-      "alpha": 0.0,
-      "distance": 0.0,
-      "texture": 0.0,
-      "horizontal_shift": 0.0,
-      "vertical_shift": 0.0
-    },
-    "video_mask_shadow": {
-      "resource_id": "",
-      "path": "",
-      "color": "",
-      "alpha": 0.0,
-      "blur": 0.0,
-      "distance": 0.0,
-      "angle": 0.0
-    },
-    "pre_applied_vip_materials": [],
-    "workflow_node_id": ""
+    "renderIndexOffset": 2,
+    "segmentTemplate": {
+     "render_timerange": {
+      "start": 0,
+      "duration": 0
+     },
+     "desc": "scene1 white circle frame",
+     "state": 0,
+     "speed": 1.0,
+     "is_loop": false,
+     "is_tone_modify": false,
+     "reverse": false,
+     "intensifies_audio": false,
+     "cartoon": false,
+     "volume": 1.0,
+     "last_nonzero_volume": 1.0,
+     "uniform_scale": {
+      "on": true,
+      "value": 1.0
+     },
+     "keyframe_refs": [],
+     "enable_lut": true,
+     "enable_adjust": true,
+     "enable_hsl": false,
+     "visible": true,
+     "group_id": "",
+     "enable_color_curves": true,
+     "enable_hsl_curves": true,
+     "hdr_settings": {
+      "mode": 1,
+      "intensity": 1.0,
+      "nits": 1000
+     },
+     "enable_color_wheels": true,
+     "track_attribute": 0,
+     "is_placeholder": false,
+     "template_id": "",
+     "enable_smart_color_adjust": false,
+     "template_scene": "default",
+     "common_keyframes": [],
+     "caption_info": null,
+     "responsive_layout": {
+      "enable": false,
+      "target_follow": "",
+      "size_layout": 0,
+      "horizontal_pos_layout": 0,
+      "vertical_pos_layout": 0
+     },
+     "enable_color_match_adjust": false,
+     "enable_color_correct_adjust": false,
+     "enable_adjust_mask": false,
+     "raw_segment_id": "",
+     "lyric_keyframes": null,
+     "enable_video_mask": true,
+     "digital_human_template_group_id": "",
+     "color_correct_alg_result": "",
+     "source": "segmentsourcenormal",
+     "enable_mask_stroke": false,
+     "enable_mask_shadow": false,
+     "enable_color_adjust_pro": false,
+     "segment_color_tag": ""
+    }
+   }
   },
-  "assetSearchPaths": [
-    "~/Downloads/Media/Images/2026",
-    "~/Downloads/Media/Images",
-    "~/Downloads"
-  ]
+  "full-face": {
+   "description": "Subject alone, filling the frame. No mask, no seam bar — the look of every unmasked principal clip in his projects.",
+   "subject": {
+    "clip": {
+     "scale": {
+      "x": 1.0,
+      "y": 1.0
+     },
+     "rotation": 0.0,
+     "transform": {
+      "x": 0.0,
+      "y": 0.0
+     },
+     "flip": {
+      "vertical": false,
+      "horizontal": false
+     },
+     "alpha": 1.0
+    },
+    "mask": null,
+    "maskTemplate": null
+   }
+  }
+ },
+ "background": {
+  "description": "Blurred, slightly enlarged copy of the subject placed BELOW it. Applied under circle scenes.",
+  "clip": {
+   "scale": {
+    "x": 1.12,
+    "y": 1.12
+   },
+   "transform": {
+    "x": 0.0,
+    "y": 0.0
+   },
+   "rotation": 0.0,
+   "flip": {
+    "horizontal": false,
+    "vertical": false
+   },
+   "alpha": 0.72
+  },
+  "effect": {
+   "effect_id": "7399464929830423813",
+   "resource_id": "7399464929830423813",
+   "name": "Blur",
+   "type": "video_effect",
+   "sub_type": 0,
+   "bind_segment_id": "3A713CA9-04E9-44C1-985A-E5735D4D7CE8",
+   "transparent_params": "",
+   "path": "/Users/roxsa/Library/Containers/com.lemon.lvoverseas/Data/Movies/CapCut/User Data/Cache/effect/7399464929830423813/2db7bf49d9349e308ef0f46c39b14abf",
+   "value": 1.0,
+   "category_id": "1111",
+   "category_name": "Video effects",
+   "platform": "all",
+   "apply_target_type": 0,
+   "source_platform": 1,
+   "version": "",
+   "item_effect_type": 0,
+   "adjust_params": [
+    {
+     "name": "effects_adjust_blur",
+     "value": 1.0,
+     "default_value": 0.5
+    }
+   ],
+   "time_range": null,
+   "formula_id": "",
+   "apply_time_range": null,
+   "render_index": 11000,
+   "track_render_index": 0,
+   "common_keyframes": [],
+   "request_id": "202604301546330000000000001740FAC",
+   "algorithm_artifact_path": "",
+   "disable_effect_faces": [],
+   "covering_relation_change": 0,
+   "enable_mask": true,
+   "effect_mask": [],
+   "enable_video_mask_stroke": true,
+   "enable_video_mask_shadow": true,
+   "aigc_current_artifact_path": "",
+   "aigc_current_artifact_cnt": 0,
+   "aigc_current_artifact_freeze_time": -1,
+   "aigc_current_artifact_freeze_progress": 0.0,
+   "sdk_extra": ""
+  },
+  "segmentTemplate": {
+   "render_timerange": {
+    "start": 0,
+    "duration": 0
+   },
+   "desc": "Aligned blurred talking-head background",
+   "state": 0,
+   "speed": 1.0,
+   "is_loop": false,
+   "is_tone_modify": false,
+   "reverse": false,
+   "intensifies_audio": false,
+   "cartoon": false,
+   "volume": 0.0,
+   "last_nonzero_volume": 1.0,
+   "uniform_scale": {
+    "on": true,
+    "value": 1.0
+   },
+   "keyframe_refs": [],
+   "enable_lut": true,
+   "enable_adjust": true,
+   "enable_hsl": false,
+   "visible": true,
+   "group_id": "",
+   "enable_color_curves": true,
+   "enable_hsl_curves": true,
+   "hdr_settings": {
+    "mode": 4,
+    "intensity": 1.0,
+    "nits": 1000
+   },
+   "enable_color_wheels": true,
+   "track_attribute": 0,
+   "is_placeholder": false,
+   "template_id": "",
+   "enable_smart_color_adjust": false,
+   "template_scene": "default",
+   "common_keyframes": [],
+   "caption_info": null,
+   "responsive_layout": {
+    "enable": false,
+    "target_follow": "",
+    "size_layout": 0,
+    "horizontal_pos_layout": 0,
+    "vertical_pos_layout": 0
+   },
+   "enable_color_match_adjust": false,
+   "enable_color_correct_adjust": false,
+   "enable_adjust_mask": false,
+   "raw_segment_id": "",
+   "lyric_keyframes": null,
+   "enable_video_mask": true,
+   "digital_human_template_group_id": "",
+   "color_correct_alg_result": "",
+   "source": "segmentsourcenormal",
+   "enable_mask_stroke": false,
+   "enable_mask_shadow": false,
+   "enable_color_adjust_pro": false,
+   "segment_color_tag": ""
+  }
+ },
+ "photoMaterialTemplate": {
+  "unique_id": "5a9f67ef216d717484d98e4fbf2574ed",
+  "type": "photo",
+  "duration": 10800000000,
+  "media_path": "",
+  "local_id": "",
+  "has_audio": false,
+  "reverse_path": "",
+  "intensifies_path": "",
+  "reverse_intensifies_path": "",
+  "intensifies_audio_path": "",
+  "cartoon_path": "",
+  "width": 1080,
+  "height": 1920,
+  "category_id": "",
+  "category_name": "",
+  "material_id": "",
+  "material_url": "",
+  "crop": {
+   "upper_left_x": 0.0,
+   "upper_left_y": 0.0,
+   "upper_right_x": 1.0,
+   "upper_right_y": 0.0,
+   "lower_left_x": 0.0,
+   "lower_left_y": 1.0,
+   "lower_right_x": 1.0,
+   "lower_right_y": 1.0
+  },
+  "crop_ratio": "free",
+  "audio_fade": null,
+  "crop_scale": 1.0,
+  "extra_type_option": 0,
+  "stable": {
+   "stable_level": 0,
+   "matrix_path": "",
+   "time_range": {
+    "start": 0,
+    "duration": 0
+   }
+  },
+  "matting": {
+   "flag": 0,
+   "path": "",
+   "interactiveTime": [],
+   "has_use_quick_brush": false,
+   "strokes": [],
+   "has_use_quick_eraser": false,
+   "expansion": 0,
+   "feather": 0,
+   "reverse": false,
+   "custom_matting_id": "",
+   "enable_matting_stroke": false,
+   "is_clould": false,
+   "mask_video_path": "",
+   "cloud_product_fps": 0.0
+  },
+  "source": 0,
+  "source_platform": 0,
+  "formula_id": "",
+  "check_flag": 62978047,
+  "video_algorithm": {
+   "algorithms": [],
+   "time_range": null,
+   "path": "",
+   "gameplay_configs": [],
+   "ai_in_painting_config": [],
+   "complement_frame_config": null,
+   "motion_blur_config": null,
+   "deflicker": null,
+   "noise_reduction": null,
+   "quality_enhance": null,
+   "super_resolution": null,
+   "ai_background_configs": [],
+   "smart_complement_frame": null,
+   "aigc_generate": null,
+   "aigc_generate_list": [],
+   "mouth_shape_driver": null,
+   "ai_expression_driven": null,
+   "ai_motion_driven": null,
+   "image_interpretation": null,
+   "story_video_modify_video_config": {
+    "task_id": "",
+    "is_overwrite_last_video": false,
+    "tracker_task_id": "",
+    "generate_id": "",
+    "generate_card_id": ""
+   },
+   "skip_algorithm_index": []
+  },
+  "is_unified_beauty_mode": false,
+  "is_set_beauty_mode": false,
+  "object_locked": null,
+  "smart_motion": null,
+  "multi_camera_info": null,
+  "freeze": null,
+  "picture_from": "none",
+  "picture_set_category_id": "",
+  "picture_set_category_name": "",
+  "team_id": "",
+  "origin_material_id": "",
+  "request_id": "",
+  "has_sound_separated": false,
+  "is_text_edit_overdub": false,
+  "is_ai_generate_content": false,
+  "aigc_type": "none",
+  "is_copyright": true,
+  "aigc_history_id": "",
+  "aigc_item_id": "",
+  "local_material_from": "",
+  "smart_match_info": null,
+  "beauty_face_preset_infos": [],
+  "beauty_body_preset_id": "",
+  "beauty_face_auto_preset": {
+   "preset_id": "",
+   "name": "",
+   "rate_map": "",
+   "scene": ""
+  },
+  "beauty_face_auto_preset_infos": [],
+  "beauty_body_auto_preset": null,
+  "live_photo_timestamp": -1,
+  "live_photo_cover_path": "",
+  "content_feature_info": null,
+  "corner_pin": null,
+  "surface_trackings": [],
+  "video_mask_stroke": {
+   "resource_id": "",
+   "path": "",
+   "type": "",
+   "color": "",
+   "size": 0.0,
+   "alpha": 0.0,
+   "distance": 0.0,
+   "texture": 0.0,
+   "horizontal_shift": 0.0,
+   "vertical_shift": 0.0
+  },
+  "video_mask_shadow": {
+   "resource_id": "",
+   "path": "",
+   "color": "",
+   "alpha": 0.0,
+   "blur": 0.0,
+   "distance": 0.0,
+   "angle": 0.0
+  },
+  "pre_applied_vip_materials": [],
+  "workflow_node_id": ""
+ },
+ "assetSearchPaths": [
+  "~/Downloads/Media/Images/2026",
+  "~/Downloads/Media/Images",
+  "~/Downloads"
+ ]
 }

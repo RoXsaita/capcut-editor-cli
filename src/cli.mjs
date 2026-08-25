@@ -60,6 +60,8 @@ Usage:
                                 transitions ride the principal (talking-head) track; it is sliced to fit
                       — his transitions + matching SFX on every cut, measured from
                         Hermes-agent / Higgsfield Refund / Content System / IKEA Refund
+  capcutctl layout auto         --project NAME_OR_PATH [--plan]   — split-screen where B-roll covers, full face where it does not
+  capcutctl layout audit        --project NAME_OR_PATH            — what each clip is vs what it should be
   capcutctl layout list
 
 Layouts are exact, measured geometry (presets/layouts.json) — not judgement:
@@ -314,7 +316,14 @@ export async function main(argv) {
   if (command === 'layout') {
     const name = args._[1];
     if (!name) throw new CapcutError('layout requires a name: split-screen | circle | background | list', { exitCode: 2 });
-    const { buildLayoutSpec } = await import('./layouts.mjs');
+    const layoutsMod = await import('./layouts.mjs');
+    const { buildLayoutSpec } = layoutsMod;
+    layoutsMod.setCoreLoader(await import('./core.mjs'));
+    if (name === 'audit' || (name === 'auto' && args.plan)) {
+      const { loadProject } = await import('./core.mjs');
+      const doc = loadProject(projectDir).groups.find(g => g.name === 'root').doc;
+      return print(layoutsMod.layoutAudit(doc, args.track == null ? null : Number(args.track)), true);
+    }
     const spec = buildLayoutSpec(projectDir, name, {
       segments: args.segments ? String(args.segments).split(',').map(s => s.trim()).filter(Boolean) : null,
       at: args.at ? String(args.at).split(',').map(Number) : null,

@@ -159,6 +159,41 @@ def contact_sheet(tiles, out, tile_w=240, pad=6, bar=22):
     return out
 
 
+OCR_BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vision", "ocr")
+
+
+def ocr(path, languages="en-US,ar"):
+    """Text in a rendered frame, via Apple's Vision framework.
+
+    doctor validates structure and cannot see the picture; qa draws the picture and needs a
+    human to read it. This closes the loop: the frame the viewer will actually see is read
+    back and checked against what the edit claims is on screen. It is the only check that
+    would have caught the sidebar-vs-file-list mistake, where the JSON was valid, the
+    geometry was right, and the frame simply showed the wrong thing.
+    """
+    if not os.path.exists(OCR_BIN):
+        raise SystemExit(
+            "the OCR helper is not built. Run:\n"
+            "  swiftc -O -o tools/vision/ocr tools/vision/ocr.swift")
+    out = subprocess.run([OCR_BIN, path, "--languages", languages],
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        raise SystemExit(f"ocr failed on {path}: {out.stderr.strip()}")
+    return json.loads(out.stdout or "[]")
+
+
+def normalise_text(s):
+    return " ".join((s or "").lower().split())
+
+
+def check_expectations(path, wanted, languages="en-US,ar"):
+    """Every phrase in `wanted` present in the frame? Returns (ok, found, runs)."""
+    runs = ocr(path, languages)
+    haystack = normalise_text(" ".join(r["text"] for r in runs))
+    found = {w: (normalise_text(w) in haystack) for w in wanted}
+    return all(found.values()), found, runs
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--project", required=True)
@@ -172,11 +207,23 @@ def main():
                     help="also write a labelled contact sheet of every rendered frame")
     ap.add_argument("--label", action="append", default=[],
                     help="caption for the Nth frame (repeatable); defaults to the timecode")
+    ap.add_argument("--expect", action="append", default=[],
+                    help="SECONDS=phrase[|phrase] — assert the rendered frame contains it "
+                         "(repeatable). Exit 1 if any expectation fails.")
+    ap.add_argument("--ocr", action="store_true", help="print the text found in each frame")
+    ap.add_argument("--languages", default="en-US,ar")
     ap.add_argument("--width", type=int, default=240, help="tile width in the contact sheet")
     a = ap.parse_args()
     proj, tl, path = load_project(a.project)
     print(f"timeline: {path}")
     os.makedirs(a.out, exist_ok=True)
+    expectations = {}
+    for spec in a.expect:
+        if "=" not in spec:
+            raise SystemExit(f"--expect wants SECONDS=phrase, got {spec!r}")
+        when, phrases = spec.split("=", 1)
+        expectations.setdefault(float(when), []).extend(p for p in phrases.split("|") if p)
+    failures = []
     tiles = []
     for t in [float(x) for x in a.times.split(",")]:
         img, rows, W, H = render(proj, tl, t, a.z)
@@ -196,11 +243,27 @@ def main():
         f = os.path.join(a.out, f"t{t:g}.png")
         img.convert("RGB").save(f)
         print(f"  -> {f}")
+        if a.ocr or expectations.get(t):
+            wanted = expectations.get(t, [])
+            ok, found, runs = check_expectations(f, wanted, a.languages)
+            if a.ocr:
+                for r in sorted(runs, key=lambda r: r["y"])[:20]:
+                    print(f"       y={r['y']:.3f} {r['text'][:64]}")
+            for phrase, hit in found.items():
+                print(f"       {'PASS' if hit else 'FAIL'}  expected {phrase!r}")
+                if not hit:
+                    failures.append((t, phrase))
         tiles.append((f, a.label[len(tiles)] if len(tiles) < len(a.label) else f"t={t:g}"))
 
     if a.sheet and tiles:
         out = a.sheet if os.path.isabs(a.sheet) else os.path.join(a.out, a.sheet)
         print(f"\n  -> {contact_sheet(tiles, out, a.width)}")
+
+    if failures:
+        print(f"\n{len(failures)} expectation(s) failed:")
+        for t, phrase in failures:
+            print(f"  t={t:g}  {phrase!r} is not on screen")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

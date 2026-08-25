@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { principalTrack } from './polish.mjs';
 import { CapcutError, clone, uuid, allSegments, selectSegments, loadProject } from './core.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -212,7 +213,11 @@ export function opLayoutApply(doc, op, context = {}) {
     subject.clip = clone(layout.subject.clip);
     subject.uniform_scale = { on: true, value: 1.0 };
     subject.desc = subject.desc && subject.desc.startsWith('layout:') ? LAYOUT_DESC(op.layout) : (subject.desc || LAYOUT_DESC(op.layout));
-    applyMask(doc, subject, layout.subject.maskTemplate, layout.subject.mask);
+    if (layout.subject.mask) applyMask(doc, subject, layout.subject.maskTemplate, layout.subject.mask);
+    else removeMask(doc, subject);
+    // A layout with no overlay must also take away the one a previous layout left behind,
+    // or a full-face shot keeps the seam bar from the split screen it used to be.
+    if (!layout.overlay) removeOverlaysOver(doc, entry.trackIndex, subject.target_timerange);
 
     if (layout.overlay && op.overlay !== false) {
       const slot = overlayTrackFor(doc, entry.trackIndex, subject.target_timerange, layout.overlay.role, layout.overlay.asset);
@@ -233,6 +238,56 @@ export function opLayoutApply(doc, op, context = {}) {
   }
   renumberTracks(doc);
   return { changed: targets.length, layout: op.layout, overlays };
+}
+
+/** Detach and delete the mask a previous layout bound to this segment. */
+function removeMask(doc, segment) {
+  const index = materialById(doc);
+  const bound = (segment.extra_material_refs || [])
+    .map(id => index.get(id))
+    .filter(item => item?.kind === 'common_mask' || item?.value?.type === 'mask');
+  if (!bound.length) return;
+  const ids = new Set(bound.map(b => b.value.id));
+  segment.extra_material_refs = (segment.extra_material_refs || []).filter(r => !ids.has(r));
+  doc.materials.common_mask = (doc.materials.common_mask || []).filter(m => !ids.has(m.id));
+}
+
+/** Drop layout plates on higher tracks that cover exactly this span. */
+function removeOverlaysOver(doc, trackIndex, span) {
+  for (const [i, track] of doc.tracks.entries()) {
+    if (i <= trackIndex || track.type !== 'video') continue;
+    track.segments = (track.segments || []).filter(s =>
+      !((s.desc || '').startsWith('layout:')
+        && s.target_timerange.start === span.start
+        && s.target_timerange.duration === span.duration));
+  }
+}
+
+/**
+ * Which layout each principal clip SHOULD have — a rule, not a judgement call. If moving
+ * picture covers the moment from a lower track, he is sharing the frame: split screen.
+ * If nothing does, he is alone in it: full face. Verified against grok-build-final, where
+ * this reproduces the eight split-screen beats and the two full-face ones exactly.
+ */
+export function layoutAudit(doc, trackIndex = null) {
+  const { index: pi, track } = principalTrack(doc, trackIndex);
+  const plates = new Set((doc.materials.videos || []).filter(m => m.type && m.type !== 'video').map(m => m.id));
+  const masks = new Set((doc.materials.common_mask || []).map(m => m.id));
+  const covers = (start, end) => doc.tracks.some((t, i) =>
+    i < pi && t.type === 'video' && (t.segments || []).some(s =>
+      !plates.has(s.material_id) && !(s.desc || '').startsWith('layout:')
+      && s.target_timerange.start < end - 20000
+      && s.target_timerange.start + s.target_timerange.duration > start + 20000));
+  return [...track.segments]
+    .sort((a, b) => a.target_timerange.start - b.target_timerange.start)
+    .map(s => {
+      const start = s.target_timerange.start, end = start + s.target_timerange.duration;
+      const masked = (s.extra_material_refs || []).some(r => masks.has(r));
+      const want = covers(start, end) ? 'split-screen' : 'full-face';
+      const is = masked ? 'split-screen' : 'full-face';
+      return { id: s.id, at: Math.round(start / 1000) / 1000, end: Math.round(end / 1000) / 1000,
+               brollUnder: covers(start, end), is, want, change: is !== want };
+    });
 }
 
 /** True when the segment carries this layout's exact subject mask config. */
@@ -518,6 +573,13 @@ export function opLayoutBroll(doc, op) {
   return { changed: out.length, framed: out };
 }
 
+let _core = null;
+function require_core() {
+  if (!_core) throw new CapcutError('layout auto needs the core loader; call setCoreLoader first.', { exitCode: 1 });
+  return _core;
+}
+export function setCoreLoader(mod) { _core = mod; }
+
 export function buildLayoutSpec(projectDir, name, opts = {}) {
   if (name === 'background') {
     const base = opts.includeTemplate ? { op: 'layout.background', includeTemplate: true } : { op: 'layout.background' };
@@ -532,6 +594,19 @@ export function buildLayoutSpec(projectDir, name, opts = {}) {
              operations: ids.map(id => ({ op: 'layout.broll', selector: { id },
                                           row: Number(opts.row), scale: opts.scale ? Number(opts.scale) : undefined,
                                           seam: opts.seam })) };
+  }
+  if (name === 'auto') {
+    const { loadProject } = require_core();
+    const doc = loadProject(projectDir).groups.find(g => g.name === 'root').doc;
+    const rows = layoutAudit(doc, opts.track == null ? null : Number(opts.track));
+    const changes = rows.filter(r => r.change);
+    if (!changes.length) {
+      throw new CapcutError('layout auto: every principal clip already has the layout its B-roll implies.',
+        { code: 'LAYOUT_ALREADY_CORRECT', exitCode: 0 });
+    }
+    return { version: 1, name: 'layout-auto',
+             operations: changes.map(r => ({ op: 'layout.apply', layout: r.want, selector: { id: r.id } })),
+             __audit: rows };
   }
   const config = presets();
   if (!config.layouts[name]) {
