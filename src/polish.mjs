@@ -221,18 +221,46 @@ export function planPolish(doc, opts = {}) {
   const last = cuts.length ? cuts.at(-1).t : null;
   const rotate = ['flash', 'glitch', 'whiteflash', 'glitch2', 'flash', 'sweepL'];
   const plan = [];
-  let rot = 0, prev = null;
+  let rot = 0, prev = null, sweepAlt = 0;
   for (const c of cuts) {
     if (opts.only && !opts.only.includes(Math.round(c.t * 100) / 100)) continue;
     let name;
     if (c.t === last && duration > 20) name = 'payoff';
-    else if (layoutChange(c.t)) name = 'sweep';
+    // A layout change gets a sweep, but ALTERNATE the two sweeps. `sweep` used to be exempt
+    // from the never-twice-running rule below, and a video whose every scene changes layout
+    // then got the identical Horizontal Triptych + Woosh on every cut — 18 of 24 seams in
+    // GrokBuild-20260825. Identical seams are the loudest tell that a machine made the edit.
+    else if (layoutChange(c.t)) name = ['sweep', 'sweepL'][sweepAlt++ % 2];
     else { name = rotate[rot++ % rotate.length]; }
-    if (name === prev && name !== 'sweep') name = rotate[rot++ % rotate.length];  // never twice running
+    if (name === prev) name = name === 'sweep' ? 'sweepL'
+                            : name === 'sweepL' ? 'sweep'
+                            : rotate[rot++ % rotate.length];               // never twice running
     prev = name;
     plan.push({ ...c, pair: name, ...p.pairs[name] });
   }
   return plan;
+}
+
+/**
+ * How lopsided is the seam vocabulary? His hand-cut projects keep any one transition under
+ * ~45% of cuts (Hermes-agent 4/9, Higgsfield 2/6); the unaided CLI hit 18/24 on one name.
+ * Reported, never enforced — a short video legitimately has few cuts to vary.
+ */
+export function seamVariety(plan) {
+  const byTransition = new Map();
+  for (const cue of plan) {
+    const name = cue.transition || cue.pair;
+    byTransition.set(name, (byTransition.get(name) || 0) + 1);
+  }
+  const total = plan.length;
+  const top = [...byTransition.entries()].sort((a, b) => b[1] - a[1])[0] || [null, 0];
+  return {
+    cuts: total,
+    distinct: byTransition.size,
+    top: top[0],
+    topShare: total ? Math.round((top[1] / total) * 100) / 100 : 0,
+    lopsided: total >= 6 && top[1] / total > 0.45
+  };
 }
 
 export function opPolish(doc, op, context = {}) {
@@ -305,6 +333,7 @@ export function opPolish(doc, op, context = {}) {
   doc.tracks.forEach((t, i) => (t.segments || []).forEach(s => { s.track_render_index = i; }));
   return { changed: plan.length, transitions, removedTransitions: removed, sfx: plan.length,
            principalTrack: principal ? principal.index : null,
+           variety: seamVariety(plan),
            sliced: slices.split, alreadyCut: slices.existing,
            ...(slices.refused.length ? { keyframedSoNotSliced: slices.refused } : {}),
            ...(skipped.length ? { noTransition: skipped } : {}),
