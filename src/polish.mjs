@@ -107,6 +107,103 @@ function ensureAudioTrack(doc, name) {
 }
 
 /**
+ * The principal track — the one a transition must ride.
+ *
+ * Measured from Hermes-agent, which is the reference for layering: all 9 of its
+ * transitions sit on track[4], the talking head, and none anywhere else. That track is
+ * the only video track that is gapless and spans the whole timeline, and it is sliced at
+ * every visible cut *even where the face content is continuous*, purely so the transition
+ * has a boundary to live on. Because it sits above the screen recording, everything under
+ * it inherits the wipe; a transition placed on the B-roll instead dissolves underneath a
+ * face that hard-cuts.
+ *
+ * So: gapless, spans the timeline, highest index among the candidates.
+ */
+export function principalTrack(doc, explicit = null) {
+  if (explicit != null) {
+    const t = doc.tracks[explicit];
+    if (!t || t.type !== 'video') throw new CapcutError(`track ${explicit} is not a video track`, { code: 'BAD_TRACK', exitCode: 2 });
+    return { index: explicit, track: t };
+  }
+  const total = (doc.duration || 0) / 1e6;
+  const candidates = [];
+  for (const [index, track] of doc.tracks.entries()) {
+    if (track.type !== 'video') continue;
+    const segs = [...(track.segments || [])].sort((a, b) => a.target_timerange.start - b.target_timerange.start);
+    if (segs.length < 2) continue;
+    let gap = false, cursor = segs[0].target_timerange.start;
+    for (const s of segs) {
+      if (s.target_timerange.start - cursor > 20000) { gap = true; break; }   // 20ms slack
+      cursor = s.target_timerange.start + s.target_timerange.duration;
+    }
+    if (gap) continue;
+    const span = (cursor - segs[0].target_timerange.start) / 1e6;
+    if (segs[0].target_timerange.start > 20000) continue;                     // must start at zero
+    if (total && span < total * 0.9) continue;
+    candidates.push({ index, track, span });
+  }
+  if (!candidates.length) {
+    throw new CapcutError(
+      'no principal track: no video track is gapless and spans the timeline. Transitions must ride '
+      + 'one continuous track (the talking head) or CapCut drops them on load. Pass --track N to override.',
+      { code: 'NO_PRINCIPAL_TRACK', exitCode: 2 });
+  }
+  return candidates.at(-1);                                                   // highest index wins
+}
+
+/** Clone a segment's extra materials so the two halves of a split do not share state. */
+function cloneRefs(doc, segment, key) {
+  const out = [];
+  for (const ref of segment.extra_material_refs || []) {
+    let found = null, bucket = null;
+    for (const [k, v] of Object.entries(doc.materials)) {
+      if (!Array.isArray(v)) continue;
+      const m = v.find(x => x && x.id === ref);
+      if (m) { found = m; bucket = k; break; }
+    }
+    if (!found) { out.push(ref); continue; }
+    const copy = clone(found);
+    copy.id = mint(`${bucket}:${key}`);
+    doc.materials[bucket].push(copy);
+    out.push(copy.id);
+  }
+  return out;
+}
+
+/**
+ * Split the segment straddling `t` (absolute seconds) in two. Returns true if a cut was
+ * made or already existed. Keyframed segments are refused — their values are anchored to
+ * the segment's own timeline and splitting silently rescales the animation.
+ */
+export function sliceAt(doc, track, t, key) {
+  const us = US(t);
+  const segs = track.segments || [];
+  if (segs.some(s => Math.abs(s.target_timerange.start - us) < 20000)) return 'existing';
+  const seg = segs.find(s => s.target_timerange.start + 20000 < us
+                          && s.target_timerange.start + s.target_timerange.duration - 20000 > us);
+  if (!seg) return false;
+  if ((seg.common_keyframes || []).some(k => (k.keyframe_list || []).length)) return 'keyframed';
+
+  const tt = seg.target_timerange, st = seg.source_timerange;
+  const offset = us - tt.start;
+  const ratio = st && tt.duration ? st.duration / tt.duration : 1;
+  const srcOffset = Math.round(offset * ratio);
+
+  const right = clone(seg);
+  right.id = mint(`slice:${key}`);
+  right.extra_material_refs = cloneRefs(doc, seg, `slice:${key}`);
+  right.target_timerange = { ...tt, start: us, duration: tt.duration - offset };
+  if (st) right.source_timerange = { ...st, start: st.start + srcOffset, duration: st.duration - srcOffset };
+
+  tt.duration = offset;
+  if (st) st.duration = srcOffset;
+
+  segs.push(right);
+  segs.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
+  return 'split';
+}
+
+/**
  * Choose a pair per cut. His grammar, measured: a sweep for a layout change, a flash
  * for a jump inside a scene, a glitch when the machine does something, a coin on the
  * payoff. Deterministic — the same timeline always gets the same treatment.
@@ -151,28 +248,53 @@ export function opPolish(doc, op, context = {}) {
       if (Array.isArray(s.extra_material_refs) && s.__polishTransition) delete s.__polishTransition;
     }
   }
-  const priorTransitions = new Set((doc.materials.transitions || []).filter(m => m.__polish).map(m => m.id));
-  for (const { segment } of allSegments(doc)) {
-    segment.extra_material_refs = (segment.extra_material_refs || []).filter(r => !priorTransitions.has(r));
+  // Polish owns the transitions. It cannot mark its own — CapCut strips unknown keys such as
+  // __polish on the next save, so a marker-based cleanup silently duplicates on the second
+  // run. So every transition is cleared and rebuilt from the plan, which is deterministic:
+  // the same timeline always yields the same set. Pass keepExisting to leave hand-made ones.
+  let removed = 0;
+  if (!op.keepExisting) {
+    const priorTransitions = new Set((doc.materials.transitions || []).map(m => m.id));
+    removed = priorTransitions.size;
+    for (const { segment } of allSegments(doc)) {
+      segment.extra_material_refs = (segment.extra_material_refs || []).filter(r => !priorTransitions.has(r));
+    }
+    doc.materials.transitions = [];
   }
-  doc.materials.transitions = (doc.materials.transitions || []).filter(m => !m.__polish);
 
   const plan = planPolish(doc, op);
   const lane = ensureAudioTrack(doc, 'polish-sfx');
-  const index = new Map(allSegments(doc).map(e => [e.segment.id, e]));
+
+  // Every transition rides the principal track, and the principal track gets sliced to
+  // make room. This is the Hermes-agent rule: the transition belongs to the layer above
+  // the B-roll so the whole frame wipes together, and it needs a clip on *both* sides —
+  // a transition on a segment with nothing after it is silently discarded by CapCut.
+  const principal = op.noTransitions ? null : principalTrack(doc, op.track ?? null);
+  const slices = { split: 0, existing: 0, refused: [] };
+  if (principal) {
+    for (const [i, cue] of plan.entries()) {
+      const r = sliceAt(doc, principal.track, cue.t, `${i}:${cue.t}`);
+      if (r === 'split') slices.split++;
+      else if (r === 'existing') slices.existing++;
+      else if (r === 'keyframed') slices.refused.push(cue.t);
+    }
+  }
 
   let transitions = 0;
+  const skipped = [];
   for (const [i, cue] of plan.entries()) {
-    // the transition rides the segment that ENDS at this cut, on the busiest visual track
-    const ending = allSegments(doc).filter(({ segment, track }) =>
-      track.type === 'video' && !(segment.desc || '').startsWith('layout:')
-      && Math.abs((segment.target_timerange.start + segment.target_timerange.duration) / 1e6 - cue.t) < 0.05);
-    if (ending.length && !op.noTransitions) {
-      const target = ending.sort((a, b) => b.segment.target_timerange.duration - a.segment.target_timerange.duration)[0];
-      const id = makeTransition(doc, cue.transition, cue.duration, `${i}:${cue.t}`);
-      doc.materials.transitions.at(-1).__polish = true;
-      target.segment.extra_material_refs = [...(target.segment.extra_material_refs || []), id];
-      transitions++;
+    if (principal) {
+      const segs = principal.track.segments;
+      const at = segs.findIndex(s =>
+        Math.abs((s.target_timerange.start + s.target_timerange.duration) / 1e6 - cue.t) < 0.05);
+      // no clip after the boundary => CapCut drops the transition on load, so do not write one
+      if (at >= 0 && at < segs.length - 1) {
+        const id = makeTransition(doc, cue.transition, cue.duration, `${i}:${cue.t}`);
+          segs[at].extra_material_refs = [...(segs[at].extra_material_refs || []), id];
+        transitions++;
+      } else {
+        skipped.push(cue.t);
+      }
     }
     const audioId = ensureAudio(doc, cue.sfx);
     const tpl = p.audioTemplates[cue.sfx];
@@ -181,6 +303,10 @@ export function opPolish(doc, op, context = {}) {
   }
   lane.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
   doc.tracks.forEach((t, i) => (t.segments || []).forEach(s => { s.track_render_index = i; }));
-  return { changed: plan.length, transitions, sfx: plan.length,
+  return { changed: plan.length, transitions, removedTransitions: removed, sfx: plan.length,
+           principalTrack: principal ? principal.index : null,
+           sliced: slices.split, alreadyCut: slices.existing,
+           ...(slices.refused.length ? { keyframedSoNotSliced: slices.refused } : {}),
+           ...(skipped.length ? { noTransition: skipped } : {}),
            cues: plan.map(c => ({ t: c.t, pair: c.pair, transition: c.transition, sfx: c.sfx })) };
 }

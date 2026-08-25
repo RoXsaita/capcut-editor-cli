@@ -47,7 +47,8 @@ Usage:
   capcutctl layout circle       --project NAME_OR_PATH --segments IDS|--at SECONDS [--track N] [--dry-run]
   capcutctl layout background   --project NAME_OR_PATH [--at SECONDS] [--include-template] [--dry-run]
   capcutctl layout broll        --project NAME_OR_PATH --at SECONDS --track N --row ROW [--scale S]
-  capcutctl polish              --project NAME_OR_PATH [--lead 0.14] [--dry-run]
+  capcutctl polish              --project NAME_OR_PATH [--lead 0.14] [--track N] [--dry-run]
+                                transitions ride the principal (talking-head) track; it is sliced to fit
                       — his transitions + matching SFX on every cut, measured from
                         Hermes-agent / Higgsfield Refund / Content System / IKEA Refund
   capcutctl layout list
@@ -192,6 +193,7 @@ export async function main(argv) {
   if (command === 'polish') {
     const spec = { version: 1, name: 'polish',
                    operations: [{ op: 'polish', ...(args.lead ? { lead: Number(args.lead) } : {}),
+                                  ...(args.track != null ? { track: Number(args.track) } : {}),
                                   ...(args.noTransitions ? { noTransitions: true } : {}) }] };
     return print(applySpec(projectDir, spec, options), true);
   }

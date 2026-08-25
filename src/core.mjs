@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { opLayoutApply, opLayoutBackground, opLayoutBroll } from './layouts.mjs';
-import { opPolish } from './polish.mjs';
+import { opPolish, principalTrack } from './polish.mjs';
 
 export const DEFAULT_ROOT = path.join(
   process.env.HOME || '',
@@ -279,6 +279,72 @@ export function doctor(projectDir, { checkFiles = true } = {}) {
       }
     }
   }
+  // A transition needs a clip on BOTH sides. CapCut silently discards one attached to a
+  // segment with nothing after it on its own track, so the edit looks applied on disk and
+  // is gone the moment the project is opened. And a transition below the talking head
+  // wipes the B-roll while the face hard-cuts — the layer, not just the timing, is wrong.
+  for (const group of state.groups) {
+    const doc = group.doc;
+    if (!doc || !Array.isArray(doc.tracks)) continue;
+    const transitionIds = new Set((doc.materials?.transitions || []).map(m => m.id));
+    if (!transitionIds.size) continue;
+    const videoTracks = doc.tracks
+      .map((t, i) => ({ t, i }))
+      .filter(({ t }) => t.type === 'video' && (t.segments || []).length);
+    const carriers = [];
+    for (const { t, i } of videoTracks) {
+      const segs = [...t.segments].sort((a, b) => a.target_timerange.start - b.target_timerange.start);
+      for (const [n, seg] of segs.entries()) {
+        if (!(seg.extra_material_refs || []).some(r => transitionIds.has(r))) continue;
+        const end = seg.target_timerange.start + seg.target_timerange.duration;
+        carriers.push({ i, at: end });
+        const next = segs[n + 1];
+        if (!next || next.target_timerange.start - end > 20000) {
+          issues.push(issue('error', 'TRANSITION_ORPHANED',
+            `${group.name}: a transition at ${(end / 1e6).toFixed(2)}s sits on track ${i} with no clip after it. CapCut will drop it on load.`,
+            { file: group.canonical, track: i, at: end / 1e6 }));
+        }
+      }
+    }
+    // Hermes-agent puts all nine of its transitions on one track — the talking head — and
+    // none anywhere else. Split across layers, each wipe only affects its own layer while
+    // the others cut straight through, which is the difference between a polished cut and
+    // a B-roll that dissolves under a face that jumps.
+    let principal = null;
+    try { principal = principalTrack(doc).index; } catch { /* no continuous track; skip */ }
+    if (principal != null) {
+      const strays = [...new Set(carriers.filter(c => c.i !== principal).map(c => c.i))];
+      if (strays.length) {
+        const n = carriers.filter(c => c.i !== principal).length;
+        issues.push(issue('warn', 'TRANSITION_OFF_PRINCIPAL',
+          `${group.name}: ${n} transition(s) sit on track(s) ${strays.join(', ')} instead of the principal track ${principal} (the gapless talking head). Re-run \`capcutctl polish\` to move them.`,
+          { file: group.canonical, strays, principal }));
+      }
+    }
+
+    // A frame plate above the cut is fine: a PNG or GIF swapping when the layout changes is
+    // the frame following the scene, and Hermes-agent — the reference — does exactly that at
+    // four of its nine cuts. The fault is a higher track of MOVING PICTURE that cuts at the
+    // same instant with no transition of its own: that layer hard-cuts through the wipe.
+    const plates = new Set((doc.materials?.videos || [])
+      .filter(m => m.type && m.type !== 'video').map(m => m.id));
+    for (const { i, at } of carriers) {
+      for (const { i: j, t } of videoTracks) {
+        if (j <= i) continue;
+        const bare = (t.segments || []).find(s =>
+          Math.abs(s.target_timerange.start + s.target_timerange.duration - at) < 20000
+          && !plates.has(s.material_id)
+          && !(s.desc || '').startsWith('layout:')
+          && !(s.extra_material_refs || []).some(r => transitionIds.has(r)));
+        if (!bare) continue;
+        issues.push(issue('warn', 'TRANSITION_BELOW_TOP',
+          `${group.name}: the transition at ${(at / 1e6).toFixed(2)}s is on track ${i}, but track ${j} cuts at the same instant with no transition and renders above it — the upper layer hard-cuts through the wipe. Put transitions on the principal (talking-head) track.`,
+          { file: group.canonical, track: i, cutAlsoOn: j, at: at / 1e6 }));
+        break;
+      }
+    }
+  }
+
   const running = capcutProcess();
   if (running.running) issues.push(issue('warning', 'CAPCUT_RUNNING', `CapCut is running (PID ${running.pids.join(', ')}). Writes are blocked by default.`, { pids: running.pids }));
   return {
