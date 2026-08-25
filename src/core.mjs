@@ -814,7 +814,11 @@ export function applySpec(projectDir, spec, options = {}) {
   const operations = clone(spec.operations || []);
   for (const op of operations) {
     if (['segment.clone', 'material.clone', 'track.clone'].includes(op.op) && !op.id) op.id = uuid();
-    if ((op.op.startsWith('layout.') || op.op === 'polish') && !op.__seed) op.__seed = uuid();
+    // Every op gets one, not a whitelist of ops. Each document in the group is edited
+    // independently, so an op that mints ids must mint the SAME ids in each pass or the
+    // mirrors drift apart. This was a per-op list and adding `signature` without adding it
+    // here produced exactly that drift — silently, until doctor caught it.
+    if (!op.__seed) op.__seed = uuid();
   }
   return executeTransaction(projectDir, groups => groups.map(group => ({
     group: group.name,

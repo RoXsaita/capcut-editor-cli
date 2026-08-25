@@ -183,3 +183,20 @@ test('a layout plate does not count as B-roll under the face', () => {
   ] });
   assert.ok(layoutAudit(d).every(r => r.brollUnder === false));
 });
+
+test('every op gets a deterministic seed, not a whitelisted few', async () => {
+  // A per-op whitelist in core meant `signature` minted different ids in the root draft and
+  // the timeline, and the two mirrors drifted apart on a real project. The invariant is that
+  // the SAME seed produces the SAME ids, so each document's independent pass agrees.
+  const { opSignature: run } = await import('../src/signature.mjs');
+  const ids = docObj => docObj.tracks.flatMap(t => (t.segments || []).map(s => s.id))
+    .concat(docObj.materials.texts.map(m => m.id));
+  const a = doc(); const b = doc();
+  run(a, { endcard: { text: 'Follow' }, noSfx: true, __seed: 'fixed-seed' });
+  run(b, { endcard: { text: 'Follow' }, noSfx: true, __seed: 'fixed-seed' });
+  assert.deepEqual(ids(a), ids(b));
+
+  const c = doc();
+  run(c, { endcard: { text: 'Follow' }, noSfx: true, __seed: 'other-seed' });
+  assert.notDeepEqual(ids(c), ids(a));
+});
