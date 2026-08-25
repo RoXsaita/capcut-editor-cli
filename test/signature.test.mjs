@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { sourceToTimeline, detectBrands, talkingHeadScenes, opSignature } from '../src/signature.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { sourceToTimeline, detectBrands, talkingHeadScenes, opSignature, imageSize, logoScaleFor } from '../src/signature.mjs';
 
 const US = s => Math.round(s * 1e6);
 
@@ -132,6 +135,67 @@ test('the endcard pops from 0.01 and carries the text it was given', () => {
   assert.equal(seg.clip.scale.x, 0.01);
   assert.equal(seg.common_keyframes[0].keyframe_list[0].values[0], 0.01);
   assert.equal(JSON.parse(d.materials.texts[0].content).text, 'اشترك');
+});
+
+test('endcard styles[].range is UTF-16 code units, not bytes', () => {
+  // 'Follow 🚀' is the only case that pins the SEMANTICS: every BMP string has the same
+  // UTF-16 and code-point length, so Array.from(text).length would pass on those alone.
+  for (const text of ['Follow', 'جروك', 'اشترك', 'Follow 🚀']) {
+    const d = doc();
+    opSignature(d, { endcard: { text }, noSfx: true });
+    const content = JSON.parse(d.materials.texts[0].content);
+    assert.deepEqual(content.styles[0].range, [0, text.length], text);
+  }
+  assert.equal('Follow 🚀'.length, 9);
+  assert.equal([...'Follow 🚀'].length, 8);          // the two must not be interchangeable
+});
+
+const PNG_1x1 = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64');
+
+test('imageSize reads PNG IHDR', () => {
+  const f = path.join(os.tmpdir(), 'capcutctl-1x1.png');
+  fs.writeFileSync(f, PNG_1x1);
+  assert.deepEqual(imageSize(f), { width: 1, height: 1 });
+});
+
+test('logoScaleFor keeps 0.36 on width-limited assets (the 1280×276 template and a square PNG)', () => {
+  assert.ok(Math.abs(logoScaleFor(1280, 276, 0.36) - 0.36) < 1e-9);
+  assert.ok(Math.abs(logoScaleFor(975, 936, 0.36) - 0.36) < 1e-9);
+});
+
+// The contract: whatever the asset's aspect, it must occupy the same ON-CANVAS WIDTH the
+// 1280×276 template did at the requested scale. CapCut fits a material inside the canvas
+// and then multiplies by clip.scale, so that width is scale * fit-width.
+const onCanvasWidth = (sw, sh, scale, canvas) => scale * sw * Math.min(canvas.width / sw, canvas.height / sh);
+
+test('logoScaleFor compensates when the ratio is genuinely not 1 (tall asset, non-9:16 canvas)', () => {
+  const cases = [
+    [500, 2000, { width: 1080, height: 1920 }],     // taller than the canvas: height-limited
+    [975, 936, { width: 1920, height: 1080 }],      // landscape canvas, square asset
+    [1280, 276, { width: 1920, height: 1080 }]
+  ];
+  for (const [sw, sh, canvas] of cases) {
+    const scale = logoScaleFor(sw, sh, 0.36, canvas);
+    const want = onCanvasWidth(1280, 276, 0.36, canvas);
+    assert.ok(Math.abs(onCanvasWidth(sw, sh, scale, canvas) - want) < 1e-6,
+      `${sw}x${sh} on ${canvas.width}x${canvas.height}: ${onCanvasWidth(sw, sh, scale, canvas)} != ${want}`);
+  }
+  // and the ratio must genuinely move, or `(sw, sh, requested) => requested` would pass
+  assert.ok(Math.abs(logoScaleFor(500, 2000, 0.36, { width: 1080, height: 1920 }) - 0.36) > 0.1);
+  assert.ok(Math.abs(logoScaleFor(975, 936, 0.36, { width: 1920, height: 1080 }) - 0.36) > 0.1);
+});
+
+test('logo material takes PNG pixel size, not the 1280×276 template', () => {
+  const f = path.join(os.tmpdir(), 'capcutctl-logo.png');
+  fs.writeFileSync(f, PNG_1x1);
+  const d = doc();
+  d.canvas_config = { width: 1080, height: 1920 };
+  opSignature(d, { logos: [{ brand: 'grok', at: 1, logo: f }], noSfx: true });
+  const mat = d.materials.videos.find(v => v.path === f);
+  assert.equal(mat.width, 1);
+  assert.equal(mat.height, 1);
 });
 
 test('signature refuses rather than silently doing nothing', () => {
