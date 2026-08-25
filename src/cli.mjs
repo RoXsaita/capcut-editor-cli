@@ -47,6 +47,9 @@ Usage:
   capcutctl layout circle       --project NAME_OR_PATH --segments IDS|--at SECONDS [--track N] [--dry-run]
   capcutctl layout background   --project NAME_OR_PATH [--at SECONDS] [--include-template] [--dry-run]
   capcutctl layout broll        --project NAME_OR_PATH --at SECONDS --track N --row ROW [--scale S]
+  capcutctl pace                --project NAME_OR_PATH [--track N] [--max 100]
+                                no flags = print the plan; --auto applies it
+                                --at T --speed X | --at T --cover IN-OUT for one clip
   capcutctl polish              --project NAME_OR_PATH [--lead 0.14] [--track N] [--dry-run]
                                 transitions ride the principal (talking-head) track; it is sliced to fit
                       — his transitions + matching SFX on every cut, measured from
@@ -76,7 +79,7 @@ function parseArgs(argv) {
     if (!token.startsWith('--')) { result._.push(token); continue; }
     const key = token.slice(2).replace(/-([a-z])/g, (_, char) => char.toUpperCase());
     if (['json', 'dryRun', 'forceRunning', 'noBackup', 'help', 'noOverlay', 'blank', 'includeTemplate', 'newTimelineId',
-         'transcript', 'noTransitions', 'noSeam'].includes(key)) result[key] = true;
+         'transcript', 'noTransitions', 'noSeam', 'auto'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
       result[key] = argv[++i];
@@ -189,6 +192,37 @@ export async function main(argv) {
     const { describeScenes } = await import('./layouts.mjs');
     return print(describeScenes(projectDir, args.track == null ? null : Number(args.track),
                                 Boolean(args.transcript)), true);
+  }
+  if (command === 'pace') {
+    const { pacePlan } = await import('./pace.mjs');
+    const hasAction = args.auto || args.at != null;
+    if (!hasAction) {                                     // read-only: the plan
+      const { loadProject } = await import('./core.mjs');
+      const state = loadProject(projectDir);
+      const doc = state.groups.find(g => g.name === 'root').doc;
+      const rows = pacePlan(doc, { track: args.track == null ? null : Number(args.track),
+                                   max: args.max ? Number(args.max) : 100,
+                                   minGap: args.minGap ? Number(args.minGap) : 5.0 });
+      return print({ plan: rows.map(({ __seg, ...r }) => r) }, true);
+    }
+    const set = [];
+    if (args.at != null) {
+      if (args.cover) {
+        const [a, b] = String(args.cover).split(/[-:,]/).map(Number);
+        if (!(b > a)) throw new CapcutError('--cover expects IN-OUT in source seconds, e.g. --cover 178.6-190.5', { exitCode: 2 });
+        set.push({ at: Number(args.at), cover: [a, b] });
+      } else if (args.speed != null) {
+        set.push({ at: Number(args.at), speed: Number(args.speed) });
+      } else {
+        throw new CapcutError('--at needs either --speed X or --cover IN-OUT', { exitCode: 2 });
+      }
+    }
+    const spec = { version: 1, name: 'pace', operations: [{ op: 'pace',
+      ...(set.length ? { set } : {}), ...(args.auto ? { auto: true } : {}),
+      ...(args.track != null ? { track: Number(args.track) } : {}),
+      ...(args.max ? { max: Number(args.max) } : {}),
+      ...(args.minGap ? { minGap: Number(args.minGap) } : {}) }] };
+    return print(applySpec(projectDir, spec, options), true);
   }
   if (command === 'polish') {
     const spec = { version: 1, name: 'polish',
