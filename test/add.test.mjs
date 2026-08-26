@@ -350,12 +350,29 @@ test('no verb will touch the flag=0 main track', async () => {
 
 test('an added clip records its speed on the speed material, so pace can read it', () => {
   const f = fixture();
+  // The template MUST carry a non-1x speed material, or this test cannot fail: writing the
+  // speed through to the template's own material (the bug) still leaves the clone reading 1x
+  // when the template already said 1x.
+  for (const dir of [f.project, f.timelineDir]) {
+    const d = readJson(path.join(dir, 'draft_info.json'));
+    d.materials.speeds = [{ id: 'SPEED', type: 'speed', speed: 0.44, mode: 0, curve_speed: null }];
+    d.tracks[1].segments[0].extra_material_refs = ['SPEED'];
+    d.tracks[1].segments[0].speed = 0.44;
+    for (const name of ['draft_info.json', 'draft_info.json.bak', 'template-2.tmp']) {
+      fs.writeFileSync(path.join(dir, name), stableJson(d));
+    }
+  }
   applySpec(f.project, { version: 1, operations: [addOp(f, { at: 1, duration: 2, srcDur: 8 })] }, { forceRunning: true });
   const doc = readJson(path.join(f.project, 'draft_info.json'));
   const seg = doc.tracks.find(t => t.name === 'broll').segments[0];
   assert.equal(seg.speed, 4);
   const speeds = (doc.materials.speeds || []).filter(m => seg.extra_material_refs.includes(m.id));
+  assert.ok(speeds.length, 'the added clip has no speed material at all');
   for (const m of speeds) assert.equal(m.speed, 4, 'speed material still reports the template value');
+  // and the template it was cloned from must be untouched
+  assert.equal(doc.materials.speeds.find(m => m.id === 'SPEED').speed, 0.44,
+    'writing the new clip\'s speed changed the template clip\'s speed');
+  assert.equal(doctor(f.project).errors, 0);
 });
 
 test('--src defaults to the start of the media, not to the timeline position', () => {

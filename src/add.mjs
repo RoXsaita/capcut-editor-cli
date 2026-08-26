@@ -289,9 +289,6 @@ export function opClipAdd(doc, op, context = {}) {
   segment.enable_video_mask = false;
   segment.volume = op.volume == null ? 1 : Number(op.volume);
   segment.speed = speed;
-  // `pace` reads the speed MATERIAL first and only falls back to the segment, so leaving the
-  // cloned material at the template's 1x made every added clip report as 1x forever.
-  setSpeedMaterial(doc, segment, speed);
   // Keep the template's stacking rather than pinning every add to 2, which gave several
   // adds colliding render indices.
   if (!Number.isFinite(segment.render_index)) segment.render_index = 2;
@@ -299,6 +296,12 @@ export function opClipAdd(doc, op, context = {}) {
   segment.keyframe_refs = [];
   segment.common_keyframes = [];
   segment.extra_material_refs = cloneExtras(doc, template, segment.id);
+  // AFTER cloneExtras, never before: until that line `segment.extra_material_refs` still holds
+  // the TEMPLATE's ids, so setting the speed there wrote through to the template's own material
+  // and left this clip on whatever the template happened to say.
+  // `pace` reads the material first and only falls back to the segment, so a clip whose
+  // material still says 1x reports as un-ramped forever.
+  setSpeedMaterial(doc, segment, speed);
   dest.track.segments = dest.track.segments || [];
   dest.track.segments.push(segment);
   dest.track.segments.sort((a, b) => (a.target_timerange?.start || 0) - (b.target_timerange?.start || 0));
