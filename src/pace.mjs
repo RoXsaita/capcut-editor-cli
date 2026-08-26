@@ -103,8 +103,9 @@ export function setSpeed(doc, seg, speed, { sourceStart = null } = {}) {
  * is exactly what IKEA Refund does 21 times.
  */
 export function pacePlan(doc, { track = null, max = 100, minGap = 5.0 } = {}) {
-  let principal = null;
-  try { principal = principalTrack(doc).index; } catch { /* fine */ }
+  // Do not catch NO_PRINCIPAL_TRACK. Swallowing it used to pace the talking head
+  // itself — dead air already cut looks like "skipped source" and --auto 30×'s it.
+  const principal = track == null ? principalTrack(doc).index : null;
   const rows = [];
   for (const [ti, t] of doc.tracks.entries()) {
     if (t.type !== 'video' || !(t.segments || []).length) continue;

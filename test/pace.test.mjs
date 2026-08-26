@@ -45,6 +45,13 @@ test('the plan skips the principal track — faces never ramp', () => {
   assert.equal(rows.length, 3);
 });
 
+test('pace refuses rather than ramping the face when there is no principal', () => {
+  const d = doc();
+  d.tracks.pop();                                 // drop the face
+  d.tracks[1].segments[1].target_timerange.start = US(10);  // open a hole
+  assert.throws(() => pacePlan(d), /NO_PRINCIPAL_TRACK|no principal track/);
+});
+
 test('the plan suggests only for a long skip, and matches by path not material id', () => {
   const rows = pacePlan(doc(), { minGap: 5 });
   assert.equal(rows[0].skippedAfter, 58);           // source 12 -> 70

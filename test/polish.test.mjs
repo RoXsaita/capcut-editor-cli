@@ -15,12 +15,15 @@ const track = (type, segments) => ({ type, segments, id: 't' });
 function doc() {
   return {
     duration: US(30),
-    materials: { videos: [{ id: 'M', type: 'video' }], common_mask: [{ id: 'K', config: { centerY: 0.5 } }] },
+    materials: {
+      videos: [{ id: 'M', type: 'video' }, { id: 'PLATE', type: 'photo' }],
+      common_mask: [{ id: 'K', config: { centerY: 0.5 } }]
+    },
     tracks: [
-      track('video', []),                                                   // 0: main, empty
+      { ...track('video', []), flag: 0 },                                   // 0: main, empty
       track('video', [seg(0, 5), seg(5, 5), seg(20, 10)]),                  // 1: B-roll, gap 10-20
       track('video', [seg(0, 12, 100), seg(12, 18, 200)]),                  // 2: the face, gapless
-      track('video', [seg(0, 8)]),                                          // 3: one plate
+      track('video', [seg(0, 8, 0, { material_id: 'PLATE', desc: 'layout:seam-bar' })]),
     ],
   };
 }
@@ -43,6 +46,29 @@ test('principalTrack refuses when nothing is continuous', () => {
 
 test('principalTrack honours an explicit override', () => {
   assert.equal(principalTrack(doc(), 1).index, 1);
+});
+
+test('a single continuous talking-head clip is still the principal', () => {
+  const d = doc();
+  d.tracks[2].segments = [seg(0, 30, 100)];
+  assert.equal(principalTrack(d).index, 2);
+});
+
+test('a seam-bar stacked above the face is not the principal', () => {
+  const d = doc();
+  d.tracks.push(track('video', [
+    seg(0, 15, 0, { material_id: 'PLATE', desc: 'layout:seam-bar' }),
+    seg(15, 15, 0, { material_id: 'PLATE', desc: 'layout:seam-bar' }),
+  ]));
+  assert.equal(principalTrack(d).index, 2);
+});
+
+test('an endcard after the face does not disqualify the talking head', () => {
+  const d = doc();
+  d.duration = US(48);
+  d.tracks[2].segments = [seg(0, 40, 100)];
+  d.tracks.push(track('video', [seg(40, 8, 0, { material_id: 'PLATE', desc: 'sig:endcard' })]));
+  assert.equal(principalTrack(d).index, 2);
 });
 
 test('sliceAt splits frame-continuously and keeps the timeline gapless', () => {

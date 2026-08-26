@@ -106,18 +106,27 @@ function ensureAudioTrack(doc, name) {
   return track;
 }
 
+function isLayoutOrPlate(doc, segment) {
+  if ((segment.desc || '').startsWith('layout:')) return true;
+  const mats = doc.materials?.videos || [];
+  const m = mats.find(x => x.id === segment.material_id);
+  return Boolean(m && m.type && m.type !== 'video');
+}
+
 /**
  * The principal track — the one a transition must ride.
  *
- * Measured from Hermes-agent, which is the reference for layering: all 9 of its
- * transitions sit on track[4], the talking head, and none anywhere else. That track is
- * the only video track that is gapless and spans the whole timeline, and it is sliced at
- * every visible cut *even where the face content is continuous*, purely so the transition
- * has a boundary to live on. Because it sits above the screen recording, everything under
- * it inherits the wipe; a transition placed on the B-roll instead dissolves underneath a
- * face that hard-cuts.
+ * Measured from Hermes-agent: all 9 of its transitions sit on the talking head, none
+ * anywhere else. That track is gapless, starts at zero, and sits above the B-roll so
+ * the whole frame wipes together.
  *
- * So: gapless, spans the timeline, highest index among the candidates.
+ * A cloned Preset 3 endcard after the face used to fail the old "90% of duration"
+ * check (40s of face in a 48s draft). A split-screen seam-bar stacked above the
+ * face used to WIN it (highest index, gapless, full span). Both are wrong.
+ *
+ * So: skip plates and layout:* overlays, skip the empty main track, allow a single
+ * continuous clip, pick the longest gapless-from-zero video track, and if several
+ * share that span, the highest index (the face sits above the B-roll).
  */
 export function principalTrack(doc, explicit = null) {
   if (explicit != null) {
@@ -125,30 +134,32 @@ export function principalTrack(doc, explicit = null) {
     if (!t || t.type !== 'video') throw new CapcutError(`track ${explicit} is not a video track`, { code: 'BAD_TRACK', exitCode: 2 });
     return { index: explicit, track: t };
   }
-  const total = (doc.duration || 0) / 1e6;
   const candidates = [];
   for (const [index, track] of doc.tracks.entries()) {
-    if (track.type !== 'video') continue;
-    const segs = [...(track.segments || [])].sort((a, b) => a.target_timerange.start - b.target_timerange.start);
-    if (segs.length < 2) continue;
+    if (track.type !== 'video' || track.flag === 0) continue;
+    const segs = [...(track.segments || [])]
+      .filter(s => s.target_timerange && !isLayoutOrPlate(doc, s))
+      .sort((a, b) => a.target_timerange.start - b.target_timerange.start);
+    if (!segs.length) continue;
     let gap = false, cursor = segs[0].target_timerange.start;
     for (const s of segs) {
-      if (s.target_timerange.start - cursor > 20000) { gap = true; break; }   // 20ms slack
+      if (s.target_timerange.start - cursor > 20000) { gap = true; break; }
       cursor = s.target_timerange.start + s.target_timerange.duration;
     }
     if (gap) continue;
+    if (segs[0].target_timerange.start > 20000) continue;
     const span = (cursor - segs[0].target_timerange.start) / 1e6;
-    if (segs[0].target_timerange.start > 20000) continue;                     // must start at zero
-    if (total && span < total * 0.9) continue;
     candidates.push({ index, track, span });
   }
   if (!candidates.length) {
     throw new CapcutError(
-      'no principal track: no video track is gapless and spans the timeline. Transitions must ride '
-      + 'one continuous track (the talking head) or CapCut drops them on load. Pass --track N to override.',
+      'no principal track: no video track is gapless from t=0 (the talking head). '
+      + 'Transitions must ride one continuous track or CapCut drops them on load. Pass --track N to override.',
       { code: 'NO_PRINCIPAL_TRACK', exitCode: 2 });
   }
-  return candidates.at(-1);                                                   // highest index wins
+  const longest = Math.max(...candidates.map(c => c.span));
+  const top = candidates.filter(c => longest - c.span < 0.05);
+  return top.at(-1);
 }
 
 /** Clone a segment's extra materials so the two halves of a split do not share state. */
