@@ -21,5 +21,5 @@ main(process.argv.slice(2)).catch(error => {
     }
   }
   if (process.env.CAPCUTCTL_STACK && error?.stack) process.stderr.write(`${error.stack}\n`);
-  process.exitCode = error?.exitCode || 1;
+  process.exitCode = error?.exitCode ?? 1;
 });

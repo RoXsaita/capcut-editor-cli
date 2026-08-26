@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -78,7 +79,7 @@ Usage:
 
 Layouts are exact, measured geometry (presets/layouts.json) — not judgement:
   split-screen  subject fills the BOTTOM half from y=960, indigo bar on the seam
-  circle        subject as the lower-left circular avatar, inside the white ring
+  circle        subject as the upper-left circular avatar, inside the white ring
   background    finds every circle scene and builds the blurred backdrop under it
 
 New projects clone "Preset 3" by default: the branded endcard is carried over and
@@ -153,11 +154,31 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
  * `layout broll --track broll` line that `add` prints as the next step resolved to NaN and
  * matched nothing — and `add`'s primary form is the named one.
  */
+async function loadWorking(projectDir) {
+  const { loadProject } = await import('./core.mjs');
+  const state = loadProject(projectDir);
+  const group = state.groups.find(g => g.name.startsWith('timeline:')) || state.groups[0];
+  return group.doc;
+}
+
+function findWhisperCache(doc) {
+  const videos = doc.materials?.videos || [];
+  const cache = path.join(os.homedir(), 'Downloads', '.video-index');
+  if (!fs.existsSync(cache)) return null;
+  const names = fs.readdirSync(cache);
+  for (const m of videos) {
+    if (!m.path || (m.type && m.type !== 'video')) continue;
+    const stem = path.basename(m.path).replace(/\.[^.]+$/, '');
+    const hit = names.filter(n => n.startsWith(stem) && n.includes('.whisper')).sort()[0];
+    if (hit) return path.join(cache, hit);
+  }
+  return null;
+}
+
 async function trackIndex(projectDir, spec) {
   if (spec == null || spec === '') return null;
   if (/^\d+$/.test(String(spec))) return Number(spec);
-  const { loadProject } = await import('./core.mjs');
-  const doc = loadProject(projectDir).groups.find(g => g.name === 'root').doc;
+  const doc = await loadWorking(projectDir);
   const index = (doc.tracks || []).findIndex(t => t.type === 'video' && t.name === String(spec));
   if (index < 0) {
     throw new CapcutError(`no video track named "${spec}". Run \`capcutctl inspect\` to list them.`,
@@ -231,6 +252,13 @@ export async function main(argv) {
     return process.stdout.write(data);
   }
 
+  const NEEDS_PROJECT = new Set([
+    'inspect', 'doctor', 'snapshot', 'history', 'restore', 'sync', 'scenes',
+    'pace', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
+    'replace-media', 'trim', 'shift', 'remove', 'volume', 'fade', 'keyframe',
+    'preview', 'diff', 'apply'
+  ]);
+  if (!NEEDS_PROJECT.has(command)) throw new CapcutError(`Unknown command: ${command}\n\n${HELP}`, { exitCode: 2 });
   const projectDir = resolveProject(args.project, root);
   if (command === 'inspect') return print(inspectProject(projectDir), true);
   if (command === 'doctor') return printDoctor(doctor(projectDir), args.json);
@@ -249,7 +277,7 @@ export async function main(argv) {
   }
   if (command === 'scenes') {
     const { describeScenes } = await import('./layouts.mjs');
-    let rows = describeScenes(projectDir, args.track == null ? null : Number(args.track),
+    let rows = describeScenes(projectDir, await trackIndex(projectDir, args.track),
                               Boolean(args.transcript));
     if (args.name) {
       const needle = String(args.name).toLowerCase();
@@ -263,10 +291,8 @@ export async function main(argv) {
     const { pacePlan } = await import('./pace.mjs');
     const hasAction = args.auto || args.at != null;
     if (!hasAction) {                                     // read-only: the plan
-      const { loadProject } = await import('./core.mjs');
-      const state = loadProject(projectDir);
-      const doc = state.groups.find(g => g.name === 'root').doc;
-      const rows = pacePlan(doc, { track: args.track == null ? null : Number(args.track),
+      const doc = await loadWorking(projectDir);
+      const rows = pacePlan(doc, { track: await trackIndex(projectDir, args.track),
                                    max: args.max ? Number(args.max) : 100,
                                    minGap: args.minGap ? Number(args.minGap) : 5.0 });
       return print({ plan: rows.map(({ __seg, ...r }) => r) }, true);
@@ -283,9 +309,10 @@ export async function main(argv) {
         throw new CapcutError('--at needs either --speed X or --cover IN-OUT', { exitCode: 2 });
       }
     }
+    const paceTrack = await trackIndex(projectDir, args.track);
     const spec = { version: 1, name: 'pace', operations: [{ op: 'pace',
       ...(set.length ? { set } : {}), ...(args.auto ? { auto: true } : {}),
-      ...(args.track != null ? { track: Number(args.track) } : {}),
+      ...(paceTrack != null ? { track: paceTrack } : {}),
       ...(args.max ? { max: Number(args.max) } : {}),
       ...(args.minGap ? { minGap: Number(args.minGap) } : {}) }] };
     return print(applySpec(projectDir, spec, options), true);
@@ -311,9 +338,8 @@ export async function main(argv) {
     }
     if (command === 'zoom') {
       if (args.auto) {
-        const { loadProject } = await import('./core.mjs');
-        const doc = loadProject(projectDir).groups.find(g => g.name === 'root').doc;
-        const scenes = sig.talkingHeadScenes(doc, args.track == null ? null : Number(args.track),
+        const doc = await loadWorking(projectDir);
+        const scenes = sig.talkingHeadScenes(doc, await trackIndex(projectDir, args.track),
                                              args.minLength ? Number(args.minLength) : 2.5);
         if (!scenes.length) throw new CapcutError('no full-face scenes found (every principal clip carries a mask).', { exitCode: 2 });
         // fire a little after the cut, so the push reads as a move and not as the cut itself
@@ -327,16 +353,21 @@ export async function main(argv) {
     }
 
     if (command === 'wrap') {
-      const { loadProject } = await import('./core.mjs');
-      const state = loadProject(projectDir);
-      const doc = state.groups.find(g => g.name === 'root').doc;
-      const mapper = sig.sourceToTimeline(doc, args.track == null ? null : Number(args.track));
+      const doc = await loadWorking(projectDir);
+      const mapper = sig.sourceToTimeline(doc, await trackIndex(projectDir, args.track));
       let hits = [];
       if (args.transcript === true) {
         throw new CapcutError('wrap takes --words FILE (a word-level transcript json), not a bare --transcript.', { exitCode: 2 });
       }
-      if (args.words) {
-        const tr = readJson(path.resolve(args.words));
+      const wordsFile = args.words ? path.resolve(args.words) : findWhisperCache(doc);
+      if (wordsFile) {
+        const tr = readJson(wordsFile);
+        if (!Array.isArray(tr.segments)) {
+          throw new CapcutError(
+            'wrap --words wants a Whisper transcript with segments[].words, not an .aroll.json. '
+            + 'The cache is ~/Downloads/.video-index/<stem>.whisper-*.json (written by `capcutctl cut`).',
+            { exitCode: 2 });
+        }
         hits = sig.detectBrands(tr, mapper, { only: args.only ? String(args.only).split(',') : null });
       }
       const missing = hits.filter(h => !h.logo || !fs.existsSync(h.logo));
@@ -353,21 +384,21 @@ export async function main(argv) {
     return print(applySpec(projectDir, { version: 1, name: command, operations: [op] }, options), true);
   }
   if (command === 'polish') {
+    const polishTrack = await trackIndex(projectDir, args.track);
     const spec = { version: 1, name: 'polish',
                    operations: [{ op: 'polish', ...(args.lead ? { lead: Number(args.lead) } : {}),
-                                  ...(args.track != null ? { track: Number(args.track) } : {}),
+                                  ...(polishTrack != null ? { track: polishTrack } : {}),
                                   ...(args.noTransitions ? { noTransitions: true } : {}) }] };
     return print(applySpec(projectDir, spec, options), true);
   }
   if (command === 'layout') {
     const name = args._[1];
-    if (!name) throw new CapcutError('layout requires a name: split-screen | circle | background | list', { exitCode: 2 });
+    if (!name) throw new CapcutError('layout requires a name: split-screen | circle | background | broll | auto | audit | list', { exitCode: 2 });
     const layoutsMod = await import('./layouts.mjs');
     const { buildLayoutSpec } = layoutsMod;
     layoutsMod.setCoreLoader(await import('./core.mjs'));
     if (name === 'audit' || (name === 'auto' && args.plan)) {
-      const { loadProject } = await import('./core.mjs');
-      const doc = loadProject(projectDir).groups.find(g => g.name === 'root').doc;
+      const doc = await loadWorking(projectDir);
       return print(layoutsMod.layoutAudit(doc, await trackIndex(projectDir, args.track)), true);
     }
     const spec = buildLayoutSpec(projectDir, name, {
@@ -378,6 +409,9 @@ export async function main(argv) {
       overlay: args.noOverlay ? false : undefined,
       includeTemplate: Boolean(args.includeTemplate)
     });
+    if (name === 'auto' && !(spec.operations || []).length) {
+      return print({ changed: 0, note: 'every principal clip already has the layout its B-roll implies.', audit: spec.__audit }, true);
+    }
     return print(applySpec(projectDir, spec, options), true);
   }
   if (command === 'add') {
@@ -438,6 +472,7 @@ export async function main(argv) {
       const hits = [];
       for (const [ti, track] of (doc.tracks || []).entries()) {
         if (track.type !== 'video') continue;
+        if (track.flag === 0) continue;
         if (/^\d+$/.test(String(args.track || '')) && ti !== Number(args.track)) continue;
         if (args.track && !/^\d+$/.test(String(args.track)) && track.name !== String(args.track)) continue;
         for (const s of track.segments || []) {
@@ -463,6 +498,7 @@ export async function main(argv) {
       selector,
       path: path.resolve(file),
       retime: Boolean(args.retime),
+      localize: Boolean(args.localize),
       width: probe.width,
       height: probe.height,
       mediaDuration: probe.duration

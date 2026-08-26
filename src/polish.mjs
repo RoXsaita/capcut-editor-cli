@@ -338,7 +338,11 @@ export function opPolish(doc, op, context = {}) {
     const audioId = ensureAudio(doc, cue.sfx);
     const tpl = p.audioTemplates[cue.sfx];
     const dur = Math.min((tpl.duration || US(0.5)) / 1e6, 1.2);
-    lane.segments.push(audioSegment(doc, audioId, cue.t - lead, dur, `${i}:${cue.t}`, volume));
+    const start = Math.max(0, cue.t - lead);
+    const maxEnd = (doc.duration || 0) / 1e6;
+    if (start >= maxEnd) continue;
+    const clipped = Math.max(0.05, Math.min(dur, maxEnd - start));
+    lane.segments.push(audioSegment(doc, audioId, start, clipped, `${i}:${cue.t}`, volume));
   }
   lane.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
   doc.tracks.forEach((t, i) => (t.segments || []).forEach(s => { s.track_render_index = i; }));

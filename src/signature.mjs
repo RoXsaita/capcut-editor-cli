@@ -136,7 +136,7 @@ function normalise(s) {
     .replace(/[ً-ْـ]/g, '')          // diacritics, tatweel
     .replace(/[إأآا]/g, 'ا').replace(/[ىي]/g, 'ي').replace(/[ةه]/g, 'ه')
     .replace(/[جقغ]/g, 'ج')                          // g/q/gh all render "g"
-    .replace(/[كق]/g, 'ك')
+    .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
     .replace(/\s+/g, ' ').trim();
 }
 
@@ -285,7 +285,12 @@ export function opSignature(doc, op, context = {}) {
     const requested = l.scale ?? rules.logoDefaultScale;
     const scale = logoScaleFor(px.width, px.height, requested,
       doc.canvas_config || { width: 1080, height: 1920 }, { width: tplW, height: tplH });
-    const hold = l.hold ?? rules.logoHoldSeconds;
+    const remaining = S(doc.duration || 0) - (l.at ?? 0);
+    if (!(remaining > 0.35)) {
+      result.logos.push({ brand: l.brand, at: l.at, skipped: 'past-end' });
+      continue;
+    }
+    const hold = Math.min(l.hold ?? rules.logoHoldSeconds, remaining);
     const seg = clone(p.logoSegmentTemplate);
     seg.id = mint(`seg:${key}`);
     seg.material_id = mat.id;
