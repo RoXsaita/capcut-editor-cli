@@ -9,7 +9,7 @@
   },
   "scripts": {
     "test": "node --test",
-    "check": "node --check bin/capcutctl.mjs && node --check src/core.mjs && node --check src/cli.mjs && node --check src/layouts.mjs && node --check src/add.mjs && node --check src/diff.mjs && node --check src/harvest.mjs"
+    "check": "node --check bin/capcutctl.mjs && node --check src/core.mjs && node --check src/cli.mjs && node --check src/layouts.mjs && node --check src/add.mjs && node --check src/create.mjs && node --check src/diff.mjs && node --check src/harvest.mjs && node --check src/pace.mjs && node --check src/polish.mjs && node --check src/signature.mjs"
   },
   "engines": {
     "node": ">=20"
