@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { principalTrack, sliceAt } from '../src/polish.mjs';
+import { principalTrack, sliceAt, planPolish, seamVariety } from '../src/polish.mjs';
 
 const US = s => Math.round(s * 1e6);
 const seg = (start, dur, srcStart = 0, extra = {}) => ({
@@ -96,4 +96,44 @@ test('sliceAt refuses a keyframed segment rather than rescaling its animation', 
   d.tracks[2].segments[0].common_keyframes = [{ keyframe_list: [{ time_offset: 0 }] }];
   assert.equal(sliceAt(d, d.tracks[2], 6, 'k'), 'keyframed');
   assert.equal(d.tracks[2].segments.length, 2);
+});
+
+/**
+ * GrokBuild-20260825 put the identical Horizontal Triptych + Woosh on 18 of its 24 seams,
+ * because every scene changed layout and `sweep` was exempt from the never-twice-running
+ * rule. Identical seams are the loudest tell that a machine made the edit.
+ */
+function everySceneChangesLayout(scenes = 10) {
+  const face = [], bars = [];
+  for (let i = 0; i < scenes; i++) {
+    face.push(seg(i * 2, 2, i * 2));
+    bars.push({ ...seg(i * 2, 2), id: `bar${i}`, desc: 'layout:seam-bar' });
+  }
+  return {
+    duration: US(scenes * 2),
+    materials: { videos: [{ id: 'M', type: 'video' }] },
+    tracks: [track('video', []), track('video', bars), track('video', face)],
+  };
+}
+
+test('a layout change on every cut still alternates its sweep', () => {
+  const plan = planPolish(everySceneChangesLayout());
+  assert.ok(plan.length >= 6, `expected several cuts, got ${plan.length}`);
+  for (let i = 1; i < plan.length; i++) {
+    assert.notEqual(plan[i].pair, plan[i - 1].pair,
+      `cut ${i} at ${plan[i].t}s repeats "${plan[i].pair}"`);
+  }
+  assert.ok(new Set(plan.map(c => c.pair)).size >= 2);
+});
+
+test('seamVariety reports a lopsided seam vocabulary without enforcing it', () => {
+  assert.equal(seamVariety([]).lopsided, false);
+  const same = Array.from({ length: 10 }, () => ({ transition: 'Horizontal Triptych' }));
+  const lop = seamVariety(same);
+  assert.equal(lop.lopsided, true);
+  assert.equal(lop.topShare, 1);
+  assert.equal(lop.distinct, 1);
+  const mixed = seamVariety([...same.slice(0, 4),
+    ...Array.from({ length: 6 }, (_, i) => ({ transition: `T${i}` }))]);
+  assert.equal(mixed.lopsided, false);
 });

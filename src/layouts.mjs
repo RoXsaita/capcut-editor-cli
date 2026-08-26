@@ -431,16 +431,19 @@ function transcriptFor(mediaPath) {
 export function describeScenes(projectDir, trackFilter = null, withTranscript = false) {
   const doc = activeDoc(projectDir);
   const config = presets();
+  const mats = new Map((doc.materials?.videos || []).map(m => [m.id, m]));
   const rows = [];
   for (const { segment, trackIndex, track } of allSegments(doc)) {
     if (track.type !== 'video') continue;
     if (trackFilter != null && trackIndex !== trackFilter) continue;
     const t = segment.target_timerange;
+    const sr = segment.source_timerange;
     let style = 'plain';
     for (const name of Object.keys(config.layouts)) if (hasLayoutMask(doc, segment, name)) style = name;
     // overlay plates (seam-bar / white-ring / background-blur) are named by their role
     const role = (segment.desc || '').startsWith('layout:') ? segment.desc.slice(7) : null;
     if (role && !config.layouts[role]) style = role;
+    const mat = mats.get(segment.material_id);
     rows.push({
       id: segment.id,
       track: trackIndex,
@@ -448,14 +451,17 @@ export function describeScenes(projectDir, trackFilter = null, withTranscript = 
       end: round3((t.start + t.duration) / 1e6),
       style,
       scale: segment.clip?.scale?.x,
-      transformY: segment.clip?.transform?.y
+      transformY: segment.clip?.transform?.y,
+      desc: segment.desc || null,
+      media: mat?.path ? path.basename(mat.path) : null,
+      source: sr ? [round3(sr.start / 1e6), round3((sr.start + sr.duration) / 1e6)] : null
     });
   }
   if (withTranscript) {
     const byMedia = new Map();
     for (const { segment, track } of allSegments(doc)) {
       if (track.type !== 'video') continue;
-      const mat = (doc.materials?.videos || []).find(m => m.id === segment.material_id);
+      const mat = mats.get(segment.material_id);
       if (!mat?.path || mat.type === 'photo') continue;
       if (!byMedia.has(mat.path)) byMedia.set(mat.path, transcriptFor(mat.path));
       const segs = byMedia.get(mat.path);
@@ -464,7 +470,6 @@ export function describeScenes(projectDir, trackFilter = null, withTranscript = 
       const sr = segment.source_timerange || { start: 0, duration: 0 };
       const a = sr.start / 1e6, b = (sr.start + sr.duration) / 1e6;
       row.says = segs.filter(x => x.start < b && x.end > a).map(x => x.text.trim()).join(' ').trim() || null;
-      row.source = [Math.round(a * 100) / 100, Math.round(b * 100) / 100];
     }
   }
   return rows.sort((a, b) => a.start - b.start || a.track - b.track);
