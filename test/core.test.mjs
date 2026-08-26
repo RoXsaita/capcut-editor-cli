@@ -8,6 +8,7 @@ import {
   CapcutError,
   applyOperations,
   applySpec,
+  createSnapshot,
   doctor,
   inspectProject,
   listSnapshots,
@@ -223,6 +224,17 @@ test('transaction rollback restores every live document after a partial write', 
   }
   assert.equal(fs.readFileSync(path.join(fx.project, 'draft_info.json'), 'utf8'), before);
   assert.equal(readJson(path.join(fx.timelineDir, 'draft_info.json')).tracks[0].segments[0].volume, 1);
+  // The inner reason used to vanish inside {snapshot}. Need it to debug the rollback.
+  try {
+    process.env.CAPCUTCTL_FAIL_AFTER_WRITES = '2';
+    applySpec(fx.project, { version: 1, operations: [{ op: 'segment.patch', selector: { id: 'SEGMENT-ONE' }, set: { volume: 0.1 } }] }, { forceRunning: true });
+    assert.fail('should have rolled back');
+  } catch (error) {
+    assert.equal(error.code, 'ROLLED_BACK');
+    assert.ok(error.details?.cause?.message);
+  } finally {
+    delete process.env.CAPCUTCTL_FAIL_AFTER_WRITES;
+  }
 });
 
 test('history lists snapshots and manual restore preserves a rescue point', () => {
@@ -263,6 +275,74 @@ test('inspect reports root and active timeline separately', () => {
   assert.equal(inspected.activeTimelineId, 'TIMELINE-ONE');
   assert.equal(inspected.groups.length, 2);
   assert.equal(inspected.groups[0].tracks[0].segments, 1);
+  assert.ok('name' in inspected.groups[0].tracks[0]);
+});
+
+test('snapshots include created.json so restore does not leave a stale endcard window', () => {
+  const fx = fixture({ drift: false });
+  const sidecar = path.join(fx.project, '.capcutctl', 'created.json');
+  fs.mkdirSync(path.dirname(sidecar), { recursive: true });
+  fs.writeFileSync(sidecar, stableJson({ preserved: { start: 1_000_000, end: 2_000_000 } }));
+  const snap = createSnapshot(fx.project, 'with-sidecar');
+  fs.writeFileSync(sidecar, stableJson({ preserved: { start: 9_000_000, end: 10_000_000 } }));
+  restoreProjectSnapshot(fx.project, snap, { forceRunning: true });
+  assert.deepEqual(readJson(sidecar).preserved, { start: 1_000_000, end: 2_000_000 });
+});
+
+test('restore still works after the project folder is renamed', () => {
+  const fx = fixture({ drift: false });
+  const first = applySpec(fx.project, {
+    version: 1,
+    operations: [{ op: 'segment.patch', selector: { id: 'SEGMENT-ONE' }, set: { volume: 0.25 } }]
+  }, { forceRunning: true });
+  const renamed = `${fx.project}-moved`;
+  fs.renameSync(fx.project, renamed);
+  const snapName = path.basename(first.snapshot);
+  restoreProjectSnapshot(renamed, snapName, { forceRunning: true });
+  assert.equal(readJson(path.join(renamed, 'draft_info.json')).tracks[0].segments[0].volume, 1);
+});
+
+test('a stale write.lock from a dead pid is stolen, not a hard lock', () => {
+  const fx = fixture({ drift: false });
+  const lock = path.join(fx.project, '.capcutctl', 'write.lock');
+  fs.mkdirSync(path.dirname(lock), { recursive: true });
+  fs.writeFileSync(lock, stableJson({ pid: 99999999, startedAt: new Date().toISOString() }));
+  const result = applySpec(fx.project, {
+    version: 1,
+    operations: [{ op: 'segment.patch', selector: { id: 'SEGMENT-ONE' }, set: { volume: 0.4 } }]
+  }, { forceRunning: true });
+  assert.equal(result.committed, true);
+  assert.equal(readJson(path.join(fx.project, 'draft_info.json')).tracks[0].segments[0].volume, 0.4);
+});
+
+test('doctor counts TRANSITION_OFF_PRINCIPAL as a warning', () => {
+  const fx = fixture({ drift: false });
+  const video = { id: 'VIDEO-ONE', type: 'video', path: fx.media, duration: 10_000_000, width: 1080, height: 1920 };
+  const seg = (id, start, refs = []) => ({
+    id, material_id: 'VIDEO-ONE', extra_material_refs: refs,
+    target_timerange: { start, duration: 5_000_000 },
+    source_timerange: { start, duration: 5_000_000 },
+    clip: { scale: { x: 1, y: 1 } }
+  });
+  for (const dir of [fx.project, fx.timelineDir]) {
+    const doc = readJson(path.join(dir, 'draft_info.json'));
+    doc.duration = 10_000_000;
+    doc.materials.videos = [video];
+    doc.materials.transitions = [{ id: 'TR1', type: 'transition', duration: 200_000 }];
+    doc.tracks = [
+      { id: 'MAIN', type: 'video', flag: 0, segments: [] },
+      { id: 'BROLL', type: 'video', flag: 2, segments: [seg('B1', 0, ['TR1']), seg('B2', 5_000_000)] },
+      { id: 'FACE', type: 'video', flag: 2, segments: [seg('F1', 0), seg('F2', 5_000_000)] }
+    ];
+    for (const name of ['draft_info.json', 'draft_info.json.bak', 'template-2.tmp']) {
+      fs.writeFileSync(path.join(dir, name), stableJson(doc));
+    }
+  }
+  const report = doctor(fx.project, { checkFiles: false });
+  const hit = report.issues.filter(item => item.code === 'TRANSITION_OFF_PRINCIPAL');
+  assert.ok(hit.length, JSON.stringify(report.issues.map(i => i.code)));
+  assert.equal(hit[0].level, 'warning');
+  assert.ok(report.warnings >= hit.length);
 });
 
 test('segment.clone mints the same extra-material ids in every mirror document', () => {
