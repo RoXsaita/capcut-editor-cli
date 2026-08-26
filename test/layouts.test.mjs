@@ -34,7 +34,8 @@ function fixture() {
         segments: [{
           id: 'SUBJECT', material_id: 'VIDEO', extra_material_refs: [],
           enable_video_mask: false, speed: 1, volume: 1, render_index: 2, track_render_index: 1,
-          source_timerange: { start: 0, duration: 5_000_000 },
+          desc: 'usage-10pct',
+          source_timerange: { start: 2_000_000, duration: 5_000_000 },
           target_timerange: { start: 0, duration: 5_000_000 },
           clip: { scale: { x: 1, y: 1 }, transform: { x: 0, y: 0 }, rotation: 0, alpha: 1 }
         }]
@@ -130,6 +131,14 @@ test('background is a no-op when no circle scene has a ring', () => {
   const op = result.result[0].operations[0];
   assert.equal(op.changed, 0);
   assert.match(op.note, /no circle scenes/);
+});
+
+test('scenes always lists desc, media basename and source window', () => {
+  const f = fixture();
+  const row = describeScenes(f.project).find(r => r.id === 'SUBJECT');
+  assert.equal(row.desc, 'usage-10pct');
+  assert.equal(row.media, 'face.mp4');
+  assert.deepEqual(row.source, [2, 7]);
 });
 
 test('scenes reports style and ignores disabled masks', () => {

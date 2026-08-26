@@ -269,15 +269,22 @@ def print_handout(data, path):
     if data["duplicate_groups"]:
         print("\nrepeated lines — LAST instance wins:")
         for g in data["duplicate_groups"]:
-            print(f"   beats {g['members']}  \"{g['key'][:56]}\"")
-    print(f"\n{'id':>3} {'take':>4} {'in':>8} {'out':>8} {'dur':>6}  {'keep':>4}  text")
-    print("-" * 78)
+            print(f"   beats {g['members']}  \"{g['key']}\"")
+    head = f"{'id':>3} {'take':>4} {'in':>8} {'out':>8} {'dur':>6}  {'keep':>4}  text"
+    rows = []
     for b in data["beats"]:
         mark = "KEEP" if b["id"] in data["default_keep"] else "  · "
         flag = (" ⚠ " + "; ".join(b["defects"])) if b["defects"] else ""
-        print(f"{b['id']:>3} {b['take']:>4} {b['src_in']:>8.3f} {b['src_out']:>8.3f} "
-              f"{b['dur']:>6.2f}  {mark}  {b['text'][:44]}{flag}")
-    print("-" * 78)
+        rows.append(f"{b['id']:>3} {b['take']:>4} {b['src_in']:>8.3f} {b['src_out']:>8.3f} "
+                    f"{b['dur']:>6.2f}  {mark}  {b['text']}{flag}")
+    # untruncated text runs past 78 columns, so size the rules to the table instead of
+    # leaving rows hanging off the end of a rule that no longer means anything
+    rule = "-" * max([78] + [len(r) for r in rows])
+    print(f"\n{head}")
+    print(rule)
+    for r in rows:
+        print(r)
+    print(rule)
     print(f"wrote {path}")
     print(f"\nreview the text above, then build with your selection:\n"
           f"  capcutctl cut {os.path.basename(data['media'])} "
@@ -374,7 +381,9 @@ def cmd_cut(args):
 
     print(f"kept {len(keep)} beats -> {cursor:.2f}s (source {data['source_duration']:.1f}s)")
     for t in timeline:
-        print(f"  {t['tl_in']:>7.3f}->{t['tl_out']:>7.3f}  src {t['src_in']:>8.3f}  {t['text'][:46]}")
+        # never slice the text: [:46] cut Arabic mid-word, and this is the table he actually
+        # reads back after choosing beats. Text is the last field, so the numbers still line up.
+        print(f"  {t['tl_in']:>7.3f}->{t['tl_out']:>7.3f}  src {t['src_in']:>8.3f}  {t['text']}")
     print(f"\nseam lint: {'CLEAN' if not findings else str(len(findings)) + ' findings'}")
     for f in findings:
         print("  ! " + f)
