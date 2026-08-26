@@ -267,8 +267,7 @@ track below it, and `track_render_index` is renumbered after any insert.
 `doctor` validates structure and cannot see the picture. To check the frame itself:
 
 ```bash
-python3 ~/.claude/skills/capcut-editing/scripts/frame_qa.py \
-  --project grok-build-gpt --times 1.5,6,41.5 --guide 960 --out qa/
+capcutctl qa --project grok-build-gpt --times 1.5,6,41.5 --guide 960 --out qa/
 ```
 
 It composites any timeline frame outside CapCut and prints each segment's on-canvas
