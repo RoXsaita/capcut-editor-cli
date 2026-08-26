@@ -148,13 +148,26 @@ function pickSegmentTemplate(doc) {
 }
 
 /** Add the new footage to the scenes, on a track in front of the preset's content. */
-function addScenes(doc, mediaPath, probe, scenes, ids) {
-  const matTemplate = (doc.materials?.videos || []).find(m => m.type === 'video')
+function parseCanvas(spec) {
+  const m = String(spec).match(/^(\d+)\s*[x×]\s*(\d+)$/i);
+  if (!m) throw new CapcutError('--canvas expects WIDTHxHEIGHT, e.g. 1080x1920.', { code: 'BAD_CANVAS', exitCode: 2 });
+  const width = Number(m[1]), height = Number(m[2]);
+  if (!(width > 0 && height > 0)) throw new CapcutError('--canvas dimensions must be positive.', { exitCode: 2 });
+  const gcd = (a, b) => (b ? gcd(b, a % b) : a);
+  const d = gcd(width, height);
+  return { width, height, ratio: `${width / d}:${height / d}` };
+}
+
+function addScenes(doc, mediaPath, probe, scenes, ids, templates = {}) {
+  const matTemplate = templates.matTemplate
+    || (doc.materials?.videos || []).find(m => m.type === 'video')
     || { type: 'video', crop_scale: 1 };
-  const segTemplate = pickSegmentTemplate(doc);
+  const segTemplate = templates.segTemplate || pickSegmentTemplate(doc);
   const kind = new Map();
-  for (const [k, v] of Object.entries(doc.materials || {})) {
-    if (Array.isArray(v)) for (const m of v) if (m?.id) kind.set(m.id, k);
+  for (const bucket of [templates.materials, doc.materials]) {
+    for (const [k, v] of Object.entries(bucket || {})) {
+      if (Array.isArray(v)) for (const m of v) if (m?.id) kind.set(m.id, k);
+    }
   }
 
   const material = clone(matTemplate);
@@ -183,10 +196,14 @@ function addScenes(doc, mediaPath, probe, scenes, ids) {
     segment.extra_material_refs = (segTemplate.extra_material_refs || []).flatMap(ref => {
       const k = kind.get(ref);
       if (!k || LOOK_KINDS.has(k)) return [];
-      const copied = clone((doc.materials[k] || []).find(m => m.id === ref));
+      const copied = clone(
+        (doc.materials[k] || []).find(m => m.id === ref)
+        || (templates.materials?.[k] || []).find(m => m.id === ref)
+      );
+      if (!copied) return [];
       copied.id = ids.next();
       if (copied.bind_segment_id) copied.bind_segment_id = segment.id;
-      doc.materials[k].push(copied);
+      (doc.materials[k] ||= []).push(copied);
       return [copied.id];
     });
     return segment;
@@ -260,40 +277,84 @@ export function createProject(name, options = {}) {
     options.media = media;
   }
 
+  if (options.newTimelineId) {
+    throw new CapcutError(
+      '--new-timeline-id is not supported: CapCut will not open a project whose draft id does not match the timeline folder.',
+      { code: 'UNSUPPORTED_FLAG', exitCode: 2 });
+  }
+  const canvas = options.canvas ? parseCanvas(options.canvas) : null;
+  const fps = options.fps != null ? Number(options.fps) : null;
+  if (fps != null && !(fps > 0)) throw new CapcutError('--fps must be positive.', { exitCode: 2 });
+
   if (options.dryRun) {
     return {
       project: projectDir, template: templateDir, media: options.media || null, created: false, dryRun: true,
+      blank: Boolean(options.blank), canvas, fps,
       scenes: scenes.map(s => ({ start: s.start / 1e6, end: (s.start + s.duration) / 1e6, source: s.source / 1e6 }))
     };
   }
 
   duplicate(templateDir, projectDir);
+  try {
+    return finishCreate(projectDir, { name, root, templateDir, options, probe, scenes, canvas, fps });
+  } catch (error) {
+    try { fs.rmSync(projectDir, { recursive: true, force: true }); } catch {}
+    throw error;
+  }
+}
 
-  // --- the only edits: the name, and (optionally) the new scenes ---
+function finishCreate(projectDir, { name, root, templateDir, options, probe, scenes, canvas, fps }) {
   const contentUs = scenes.length ? Math.max(...scenes.map(s => s.start + s.duration)) : 0;
   let contentTrack = null;
   let shifted = 0;
   let durationUs = 0;
   const ids = idPool();
+  const staged = [];
+  const transactionId = uuid();
   for (const group of docGroups(projectDir)) {
     const doc = readJson(group.files[0]);
     doc.name = name;
+    // Capture templates BEFORE --blank wipes them. --blank --media used to empty
+    // every video segment and then die in pickSegmentTemplate, leaving the folder.
+    const templates = {};
+    try {
+      templates.segTemplate = clone(pickSegmentTemplate(doc));
+      templates.matTemplate = clone((doc.materials?.videos || []).find(m => m.type === 'video') || { type: 'video', crop_scale: 1 });
+      templates.materials = clone(doc.materials || {});
+    } catch {
+      if (scenes.length) throw new CapcutError('Template project has no video segment to model on.', { code: 'NO_TEMPLATE', exitCode: 2 });
+    }
+    if (options.blank) {
+      const main = (doc.tracks || []).filter(t => t.flag === 0).map(t => ({ ...clone(t), segments: [] }));
+      const overlayShell = (doc.tracks || []).find(t => t.type === 'video' && t.flag === 2)
+        || (doc.tracks || []).find(t => t.type === 'video');
+      const overlay = overlayShell
+        ? [{ ...clone(overlayShell), segments: [], flag: 2, attribute: 0, name: overlayShell.name || 'content' }]
+        : [];
+      doc.tracks = [...main, ...overlay];
+      doc.materials = Object.fromEntries(Object.entries(doc.materials || {}).map(([k, v]) => [k, Array.isArray(v) ? [] : v]));
+      doc.duration = 0;
+    }
     if (scenes.length) {
-      if (options.blank) {
-        doc.tracks = (doc.tracks || []).filter(t => t.flag === 0).map(t => ({ ...t, segments: [] }));
-        doc.materials = Object.fromEntries(Object.entries(doc.materials || {}).map(([k, v]) => [k, Array.isArray(v) ? [] : v]));
-        doc.duration = 0;
-      } else {
-        shifted = shiftContent(doc, contentUs);
-      }
-      ids.reset();                       // same ids in every document
-      contentTrack = addScenes(doc, options.media, probe, scenes, ids);
+      if (!options.blank) shifted = shiftContent(doc, contentUs);
+      ids.reset();
+      contentTrack = addScenes(doc, options.media, probe, scenes, ids, templates);
       doc.duration = Math.max(doc.duration || 0, contentUs);
     }
+    if (canvas) {
+      doc.canvas_config = { ...(doc.canvas_config || {}), width: canvas.width, height: canvas.height, ratio: canvas.ratio };
+    }
+    if (fps != null) doc.fps = fps;
     durationUs = doc.duration || 0;
     const text = stableJson(doc);
-    for (const file of group.files) fs.writeFileSync(file, text);
+    for (const file of group.files) {
+      const temp = `${file}.capcutctl-${transactionId}.tmp`;
+      fs.writeFileSync(temp, text);
+      readJson(temp);
+      staged.push({ temp, file });
+    }
   }
+  for (const item of staged) fs.renameSync(item.temp, item.file);
 
   const metaFile = path.join(projectDir, 'draft_meta_info.json');
   const draftId = uuid();
@@ -323,7 +384,10 @@ export function createProject(name, options = {}) {
         });
       }
     }
-    fs.writeFileSync(metaFile, stableJson(meta));
+    const stagedMeta = `${metaFile}.capcutctl-staged`;
+    fs.writeFileSync(stagedMeta, stableJson(meta));
+    readJson(stagedMeta);
+    fs.renameSync(stagedMeta, metaFile);
   }
 
   fs.mkdirSync(path.join(projectDir, '.capcutctl'), { recursive: true });
@@ -342,6 +406,8 @@ export function createProject(name, options = {}) {
     scenes: scenes.map(s => ({ start: s.start / 1e6, end: (s.start + s.duration) / 1e6, source: s.source / 1e6 })),
     carriedOver: options.blank ? 'none (--blank)' : `preset content shifted by ${(shifted / 1e6).toFixed(3)}s`,
     duration: durationUs / 1e6,
+    canvas: canvas || null,
+    fps: fps || null,
     created: true,
     ...registration
   };
@@ -367,6 +433,10 @@ export function removeProject(name, options = {}) {
 
   const registry = path.join(root, 'root_meta_info.json');
   let removedEntries = 0;
+  if (!options.dryRun) {
+    fs.mkdirSync(bin, { recursive: true });
+    fs.renameSync(projectDir, dest);
+  }
   if (fs.existsSync(registry)) {
     const meta = readJson(registry);
     const before = (meta.all_draft_store || []).length;
@@ -380,10 +450,6 @@ export function removeProject(name, options = {}) {
       readJson(staged);
       fs.renameSync(staged, registry);
     }
-  }
-  if (!options.dryRun) {
-    fs.mkdirSync(bin, { recursive: true });
-    fs.renameSync(projectDir, dest);
   }
   return { removed: projectDir, recycled: dest, registryEntriesRemoved: removedEntries,
            dryRun: Boolean(options.dryRun), restore: `mv "${dest}" "${projectDir}"` };
