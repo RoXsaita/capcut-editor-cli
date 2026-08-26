@@ -105,6 +105,21 @@ test('circle attaches the ring and is idempotent when re-run', () => {
   assert.equal(rings(activeDoc(f)).length, 1, 're-running must replace the ring, not duplicate it');
 });
 
+test('switching split-screen to circle removes the seam bar', () => {
+  const f = fixture();
+  applySpec(f.project, buildLayoutSpec(f.project, 'split-screen', { segments: ['SUBJECT'] }), { forceRunning: true });
+  applySpec(f.project, buildLayoutSpec(f.project, 'circle', { segments: ['SUBJECT'] }), { forceRunning: true });
+  const segs = activeDoc(f).tracks.flatMap(t => t.segments || []);
+  assert.equal(segs.filter(s => s.desc === 'layout:seam-bar').length, 0);
+  assert.equal(segs.filter(s => s.desc === 'layout:white-ring').length, 1);
+});
+
+test('layout auto is a no-op (not an error) when every clip already matches', () => {
+  const f = fixture();
+  const spec = buildLayoutSpec(f.project, 'auto', {});
+  assert.equal(spec.operations.length, 0);
+});
+
 test('background finds circle scenes and lands the blur plate below the subject', () => {
   const f = fixture();
   applySpec(f.project, buildLayoutSpec(f.project, 'circle', { segments: ['SUBJECT'] }), { forceRunning: true });
