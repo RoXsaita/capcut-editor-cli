@@ -60,6 +60,13 @@ test('detectBrands folds Arabic transliteration variants', () => {
   assert.equal(hits[0].at, 1);
 });
 
+test('detectBrands strips trailing punctuation', () => {
+  const tr = { segments: [{ start: 0, words: [{ start: 101.0, word: 'Grok.' }] }] };
+  const hits = detectBrands(tr, sourceToTimeline(doc()),
+    { brands: { grok: { aliases: ['grok'], logo: '/x/grok.png' } } });
+  assert.equal(hits.length, 1);
+});
+
 test('detectBrands takes the first mention that SURVIVES the cut', () => {
   const tr = { segments: [{ start: 0, words: [
     { start: 7.0, word: 'جروك' },      // an earlier take, not on the timeline
