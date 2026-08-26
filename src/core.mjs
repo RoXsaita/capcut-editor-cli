@@ -213,6 +213,16 @@ export function validateDocument(doc, { file = '<memory>', checkFiles = true } =
     if (source && Number.isFinite(material?.duration) && source.start + source.duration > material.duration + 1) {
       issues.push(issue('error', 'SOURCE_AFTER_END', `Segment ${segment.id} exceeds source material duration.`, { file, id: segment.id, materialId: segment.material_id }));
     }
+    // source = target × speed. 1ms of slack: CapCut's own rounding drifts a microsecond
+    // or two, which is not a ramp bug. A 10% miss is.
+    if (source && target && Number.isFinite(segment.speed) && segment.speed > 0 && target.duration > 0) {
+      const expected = target.duration * segment.speed;
+      if (Math.abs(source.duration - expected) > 1000) {
+        issues.push(issue('warning', 'SPEED_INVARIANT',
+          `${segment.id}: source ${source.duration}us ≠ target ${target.duration}us × speed ${segment.speed}.`,
+          { file, id: segment.id }));
+      }
+    }
     const numericLeaves = [];
     walk(segment.clip, (value, keyPath) => { if (typeof value === 'number') numericLeaves.push([keyPath, value]); });
     for (const [keyPath, value] of numericLeaves) if (!Number.isFinite(value)) {
@@ -328,7 +338,7 @@ export function doctor(projectDir, { checkFiles = true } = {}) {
       const strays = [...new Set(carriers.filter(c => c.i !== principal).map(c => c.i))];
       if (strays.length) {
         const n = carriers.filter(c => c.i !== principal).length;
-        issues.push(issue('warn', 'TRANSITION_OFF_PRINCIPAL',
+        issues.push(issue('warning', 'TRANSITION_OFF_PRINCIPAL',
           `${group.name}: ${n} transition(s) sit on track(s) ${strays.join(', ')} instead of the principal track ${principal} (the gapless talking head). Re-run \`capcutctl polish\` to move them.`,
           { file: group.canonical, strays, principal }));
       }
@@ -349,7 +359,7 @@ export function doctor(projectDir, { checkFiles = true } = {}) {
           && !(s.desc || '').startsWith('layout:')
           && !(s.extra_material_refs || []).some(r => transitionIds.has(r)));
         if (!bare) continue;
-        issues.push(issue('warn', 'TRANSITION_BELOW_TOP',
+        issues.push(issue('warning', 'TRANSITION_BELOW_TOP',
           `${group.name}: the transition at ${(at / 1e6).toFixed(2)}s is on track ${i}, but track ${j} cuts at the same instant with no transition and renders above it — the upper layer hard-cuts through the wipe. Put transitions on the principal (talking-head) track.`,
           { file: group.canonical, track: i, cutAlsoOn: j, at: at / 1e6 }));
         break;
@@ -673,10 +683,12 @@ export function applyOperations(doc, operations, context) {
   return results;
 }
 
+const SIDECAR_RELATIVE = path.join('.capcutctl', 'created.json');
+
 function snapshotFiles(projectDir) {
   const files = new Set();
   for (const group of documentGroups(projectDir)) for (const file of group.mirrors) if (fs.existsSync(file)) files.add(file);
-  for (const relative of ['draft_meta_info.json', 'draft_virtual_store.json', 'Timelines/project.json']) {
+  for (const relative of ['draft_meta_info.json', 'draft_virtual_store.json', 'Timelines/project.json', SIDECAR_RELATIVE]) {
     const file = path.join(projectDir, relative);
     if (fs.existsSync(file)) files.add(file);
   }
@@ -687,12 +699,16 @@ export function createSnapshot(projectDir, label = 'snapshot') {
   const root = path.join(projectDir, '.capcutctl', 'history', `${nowStamp()}-${label.replace(/[^a-zA-Z0-9._-]/g, '_')}`);
   fs.mkdirSync(root, { recursive: true });
   const managed = documentGroups(projectDir).flatMap(group => group.mirrors);
+  const sidecar = path.join(projectDir, SIDECAR_RELATIVE);
   const manifest = {
     version: 1,
     createdAt: new Date().toISOString(),
     projectDir,
     files: [],
-    absent: managed.filter(file => !fs.existsSync(file)).map(file => path.relative(projectDir, file))
+    absent: [
+      ...managed.filter(file => !fs.existsSync(file)).map(file => path.relative(projectDir, file)),
+      ...(!fs.existsSync(sidecar) ? [SIDECAR_RELATIVE] : [])
+    ]
   };
   for (const file of snapshotFiles(projectDir)) {
     const relative = path.relative(projectDir, file);
@@ -705,15 +721,16 @@ export function createSnapshot(projectDir, label = 'snapshot') {
   return root;
 }
 
-function restoreSnapshot(snapshotDir) {
+function restoreSnapshot(snapshotDir, destRoot = null) {
   const manifest = readJson(path.join(snapshotDir, 'manifest.json'));
+  const root = destRoot || manifest.projectDir;
   for (const relative of manifest.absent || []) {
-    const destination = path.join(manifest.projectDir, relative);
+    const destination = path.join(root, relative);
     try { if (fs.existsSync(destination)) fs.unlinkSync(destination); } catch {}
   }
   for (const item of manifest.files) {
     const source = path.join(snapshotDir, item.relative);
-    const destination = path.join(manifest.projectDir, item.relative);
+    const destination = path.join(root, item.relative);
     fs.mkdirSync(path.dirname(destination), { recursive: true });
     fs.copyFileSync(source, destination);
   }
@@ -732,7 +749,13 @@ export function listSnapshots(projectDir) {
     .sort((a, b) => b.name.localeCompare(a.name));
 }
 
-function acquireLock(projectDir) {
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return error.code !== 'ESRCH'; }
+}
+
+function acquireLock(projectDir, retried = false) {
   const dir = path.join(projectDir, '.capcutctl');
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, 'write.lock');
@@ -741,8 +764,14 @@ function acquireLock(projectDir) {
     fs.writeFileSync(fd, stableJson({ pid: process.pid, startedAt: new Date().toISOString() }));
     return { file, fd };
   } catch (error) {
-    if (error.code === 'EEXIST') throw new CapcutError(`Another capcutctl write is active: ${file}`, { code: 'LOCKED', exitCode: 4 });
-    throw error;
+    if (error.code !== 'EEXIST') throw error;
+    let stale = false;
+    try { stale = !pidAlive(readJson(file).pid); } catch { stale = true; }
+    if (stale && !retried) {
+      try { fs.unlinkSync(file); } catch {}
+      return acquireLock(projectDir, true);
+    }
+    throw new CapcutError(`Another capcutctl write is active: ${file}`, { code: 'LOCKED', exitCode: 4 });
   }
 }
 
@@ -826,8 +855,11 @@ export function executeTransaction(projectDir, mutator, {
     if (post.errors) throw new CapcutError(`Post-write validation found ${post.errors} errors.`, { code: 'POST_WRITE_VALIDATION', details: post.issues });
     return { ...preview, committed: true, snapshot, postDoctor: post };
   } catch (error) {
-    if (snapshot) restoreSnapshot(snapshot);
-    throw new CapcutError(`Transaction rolled back: ${error.message}`, { code: 'ROLLED_BACK', details: { snapshot } });
+    if (snapshot) restoreSnapshot(snapshot, projectDir);
+    const cause = error instanceof CapcutError
+      ? { code: error.code, message: error.message, details: error.details }
+      : { message: error?.message || String(error) };
+    throw new CapcutError(`Transaction rolled back: ${error.message}`, { code: 'ROLLED_BACK', details: { snapshot, cause } });
   } finally {
     cleanStaged(staged);
     releaseLock(lock);
@@ -867,19 +899,24 @@ export function restoreProjectSnapshot(projectDir, snapshotNameOrPath, options =
   }
   const manifestFile = path.join(snapshotDir, 'manifest.json');
   if (!fs.existsSync(manifestFile)) throw new CapcutError(`Snapshot not found: ${snapshotNameOrPath}`, { code: 'SNAPSHOT_NOT_FOUND', exitCode: 2 });
-  const manifest = readJson(manifestFile);
-  if (path.resolve(manifest.projectDir) !== path.resolve(projectDir)) throw new CapcutError('Snapshot belongs to a different project path.', { code: 'SNAPSHOT_PROJECT' });
   const lock = acquireLock(projectDir);
   let rescue = null;
   try {
     if (options.backup !== false) rescue = createSnapshot(projectDir, options.label || 'before-restore');
-    restoreSnapshot(snapshotDir);
+    // Restore into THIS projectDir, not the absolute path baked into the manifest.
+    // CapCut (and `mv`) rename draft folders; the snapshot already lives inside
+    // `.capcutctl/history`, so pinning to the original path made every snapshot
+    // unrestorable after a rename.
+    restoreSnapshot(snapshotDir, projectDir);
     const post = doctor(projectDir, { checkFiles: true });
     if (post.errors) throw new CapcutError(`Restored snapshot has ${post.errors} validation error(s).`, { code: 'RESTORE_VALIDATION', details: post.issues });
     return { restored: snapshotDir, rescue, postDoctor: post };
   } catch (error) {
-    if (rescue) restoreSnapshot(rescue);
-    throw new CapcutError(`Restore rolled back: ${error.message}`, { code: 'RESTORE_ROLLED_BACK', details: { rescue } });
+    if (rescue) restoreSnapshot(rescue, projectDir);
+    const cause = error instanceof CapcutError
+      ? { code: error.code, message: error.message, details: error.details }
+      : { message: error?.message || String(error) };
+    throw new CapcutError(`Restore rolled back: ${error.message}`, { code: 'RESTORE_ROLLED_BACK', details: { rescue, cause } });
   } finally {
     releaseLock(lock);
   }
@@ -936,7 +973,10 @@ export function inspectProject(projectDir) {
       duration: group.doc.duration,
       fps: group.doc.fps,
       canvas: group.doc.canvas_config,
-      tracks: (group.doc.tracks || []).map((track, index) => ({ index, id: track.id, type: track.type, segments: track.segments?.length || 0 })),
+      tracks: (group.doc.tracks || []).map((track, index) => ({
+        index, id: track.id, name: track.name || null, type: track.type,
+        flag: track.flag ?? null, segments: track.segments?.length || 0
+      })),
       materials: Object.fromEntries(Object.entries(group.doc.materials || {}).filter(([, value]) => Array.isArray(value)).map(([key, value]) => [key, value.length]))
     }))
   };
