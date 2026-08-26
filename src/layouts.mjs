@@ -215,9 +215,9 @@ export function opLayoutApply(doc, op, context = {}) {
     subject.desc = subject.desc && subject.desc.startsWith('layout:') ? LAYOUT_DESC(op.layout) : (subject.desc || LAYOUT_DESC(op.layout));
     if (layout.subject.mask) applyMask(doc, subject, layout.subject.maskTemplate, layout.subject.mask);
     else removeMask(doc, subject);
-    // A layout with no overlay must also take away the one a previous layout left behind,
-    // or a full-face shot keeps the seam bar from the split screen it used to be.
-    if (!layout.overlay) removeOverlaysOver(doc, entry.trackIndex, subject.target_timerange);
+    // Always strip other-role plates on this span (seam-bar, white-ring, blur).
+    // Switching split ↔ circle used to stack both because overlays are keyed by role.
+    removeOverlaysOver(doc, entry.trackIndex, subject.target_timerange);
 
     if (layout.overlay && op.overlay !== false) {
       const slot = overlayTrackFor(doc, entry.trackIndex, subject.target_timerange, layout.overlay.role, layout.overlay.asset);
@@ -252,10 +252,10 @@ function removeMask(doc, segment) {
   doc.materials.common_mask = (doc.materials.common_mask || []).filter(m => !ids.has(m.id));
 }
 
-/** Drop layout plates on higher tracks that cover exactly this span. */
-function removeOverlaysOver(doc, trackIndex, span) {
-  for (const [i, track] of doc.tracks.entries()) {
-    if (i <= trackIndex || track.type !== 'video') continue;
+/** Drop layout plates on ANY track covering this span (blur sits BELOW the subject). */
+function removeOverlaysOver(doc, _trackIndex, span) {
+  for (const track of doc.tracks) {
+    if (track.type !== 'video') continue;
     track.segments = (track.segments || []).filter(s =>
       !((s.desc || '').startsWith('layout:')
         && s.target_timerange.start === span.start
@@ -282,12 +282,23 @@ export function layoutAudit(doc, trackIndex = null) {
     .sort((a, b) => a.target_timerange.start - b.target_timerange.start)
     .map(s => {
       const start = s.target_timerange.start, end = start + s.target_timerange.duration;
-      const masked = (s.extra_material_refs || []).some(r => masks.has(r));
       const want = covers(start, end) ? 'split-screen' : 'full-face';
-      const is = masked ? 'split-screen' : 'full-face';
+      const is = currentLook(doc, s, masks);
+      // Circle with B-roll under it should become split-screen. Circle with nothing
+      // under it is a look, not a miss — auto must not strip it to full-face.
+      const change = is === 'circle' ? want === 'split-screen' : is !== want;
       return { id: s.id, at: Math.round(start / 1000) / 1000, end: Math.round(end / 1000) / 1000,
-               brollUnder: covers(start, end), is, want, change: is !== want };
+               brollUnder: covers(start, end), is, want, change };
     });
+}
+
+function currentLook(doc, segment, masks) {
+  if (hasLayoutMask(doc, segment, 'split-screen')) return 'split-screen';
+  if (hasLayoutMask(doc, segment, 'circle')) return 'circle';
+  if ((segment.extra_material_refs || []).some(r => masks.has(r)) && segment.enable_video_mask !== false) {
+    return 'split-screen';
+  }
+  return 'full-face';
 }
 
 /** True when the segment carries this layout's exact subject mask config. */
@@ -357,15 +368,12 @@ export function opLayoutBackground(doc, op, context = {}) {
   }
 
   const byId = new Map(allSegments(doc).map(e => [e.segment.id, e]));
-  const lowest = Math.min(...scenes.map(s => s.trackIndex));
-  // The blur plate must render BEHIND the subject: insert directly below it.
+  // Behind everything except the empty main track. Inserting at the circle's own
+  // index dropped the blur ON TOP of the B-roll that the circle is sharing the
+  // frame with.
   let bgTrack = doc.tracks.find(t => t.type === 'video' && t.name === 'layout-background');
-  let bgIndex;
-  if (bgTrack) {
-    bgIndex = doc.tracks.indexOf(bgTrack);
-  } else {
-    bgIndex = Math.max(1, lowest);
-    bgTrack = insertOverlayTrack(doc, bgIndex, mint('track:layout-background'));
+  if (!bgTrack) {
+    bgTrack = insertOverlayTrack(doc, 1, mint('track:layout-background'));
     bgTrack.name = 'layout-background';
   }
 
@@ -389,6 +397,7 @@ export function opLayoutBackground(doc, op, context = {}) {
     plate.enable_video_mask = false;
     const effect = clone(bg.effect);
     effect.id = mint(`${subject.id}:blur`);
+    if ('bind_segment_id' in effect) effect.bind_segment_id = plate.id;
     ensureMaterialArray(doc, 'video_effects').push(effect);
     plate.extra_material_refs = [effect.id];
     bgTrack.segments.push(plate);
@@ -601,21 +610,16 @@ export function buildLayoutSpec(projectDir, name, opts = {}) {
                                           seam: opts.seam })) };
   }
   if (name === 'auto') {
-    const { loadProject } = require_core();
-    const doc = loadProject(projectDir).groups.find(g => g.name === 'root').doc;
+    const doc = activeDoc(projectDir);
     const rows = layoutAudit(doc, opts.track == null ? null : Number(opts.track));
     const changes = rows.filter(r => r.change);
-    if (!changes.length) {
-      throw new CapcutError('layout auto: every principal clip already has the layout its B-roll implies.',
-        { code: 'LAYOUT_ALREADY_CORRECT', exitCode: 0 });
-    }
     return { version: 1, name: 'layout-auto',
              operations: changes.map(r => ({ op: 'layout.apply', layout: r.want, selector: { id: r.id } })),
              __audit: rows };
   }
   const config = presets();
   if (!config.layouts[name]) {
-    throw new CapcutError(`Unknown layout "${name}". Known: ${Object.keys(config.layouts).join(', ')}, broll, background`, { code: 'UNKNOWN_LAYOUT', exitCode: 2 });
+    throw new CapcutError(`Unknown layout "${name}". Known: ${Object.keys(config.layouts).join(', ')}, auto, audit, broll, background`, { code: 'UNKNOWN_LAYOUT', exitCode: 2 });
   }
   const ids = resolveIds(projectDir, opts, true);
   return {
