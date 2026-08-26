@@ -74,13 +74,18 @@ def main():
         tr = load_transcript(a.media)
         rows = []
         for seg in tr.get("segments", []):
-            for w in seg.get("words", []) or []:
-                if all(t in w["word"].lower() for t in terms) or a.query.lower() in w["word"].lower():
-                    rows.append((round(w["start"], 2), w["word"].strip(), seg["text"].strip()))
-        if not rows:
-            for seg in tr.get("segments", []):
-                if all(t in seg["text"].lower() for t in terms):
-                    rows.append((round(seg["start"], 2), "(segment)", seg["text"].strip()))
+            words = seg.get("words") or []
+            texts = [(w.get("word") or w.get("text") or "").strip() for w in words]
+            lowers = [t.lower() for t in texts]
+            n = len(terms)
+            for i in range(len(lowers)):
+                window = " ".join(lowers[i:i + n])
+                if window == " ".join(terms) or (n == 1 and terms[0] in lowers[i]):
+                    rows.append((round(words[i]["start"], 2), " ".join(texts[i:i + n]), seg["text"].strip()))
+                    break
+            else:
+                if not words and all(t in (seg.get("text") or "").lower() for t in terms):
+                    rows.append((round(seg.get("start") or 0, 2), "(segment)", (seg.get("text") or "").strip()))
         print(f"{len(rows)} spoken match(es) in {os.path.basename(a.media)}")
         for t, word, line in rows[:40]:
             print(f"  {t:8.2f}s  {word}" + (f"   — {line[:70]}" if a.context else ""))
@@ -95,7 +100,9 @@ def main():
     for lo, hi in runs[:25]:
         stable = next((t for t in range(lo, hi + 1)
                        if all(all(x in idx.get(t + k, "") for x in terms)
-                              for k in range(int(a.settle)))), lo)
+                              for k in range(int(a.settle)))), None)
+        if stable is None:
+            continue
         held = hi - lo + 1
         mark = "" if stable == lo else f"  (flickers from {lo}s)"
         print(f"  {stable:6d}s -> {hi:6d}s   held {held:4d}s{mark}")

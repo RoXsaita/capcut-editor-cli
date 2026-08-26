@@ -41,19 +41,27 @@ class AudioIndex:
         return AudioIndex(out, bin_ms/1000, wav)
 
     @staticmethod
-    def build_or_load(media, bin_ms=10, cache_dir="~/Downloads/.video-index"):
+    def _token(media):
+        st = os.stat(media)
+        return {"ino": st.st_ino, "size": st.st_size, "mtime": int(st.st_mtime)}
+
+    @staticmethod
+    def build_or_load(media, bin_ms=10, cache_dir="~/Downloads/.video-index", force=False):
         cd = os.path.expanduser(cache_dir); os.makedirs(cd, exist_ok=True)
         key = os.path.join(cd, os.path.basename(media).rsplit(".",1)[0] + f".energy{bin_ms}.json")
-        if os.path.exists(key):
-            d = json.loads(Path(key).read_text()); return AudioIndex(d["db"], d["bin"], media)
+        token = AudioIndex._token(media)
+        if not force and os.path.exists(key):
+            d = json.loads(Path(key).read_text())
+            if d.get("token") == token:
+                return AudioIndex(d["db"], d["bin"], media)
         wav = media
         if not media.lower().endswith(".wav"):
             wav = os.path.join(cd, os.path.basename(media).rsplit(".",1)[0] + ".16k.wav")
-            if not os.path.exists(wav):
+            if force or not os.path.exists(wav):
                 subprocess.run(["ffmpeg","-v","error","-y","-i",media,"-vn","-ac","1",
                                 "-ar","16000","-c:a","pcm_s16le",wav], check=True)
         idx = AudioIndex.from_wav(wav, bin_ms)
-        Path(key).write_text(json.dumps({"bin": idx.bin, "db": idx.db}))
+        Path(key).write_text(json.dumps({"bin": idx.bin, "db": idx.db, "token": token}))
         return idx
 
     # ---------- queries ----------
@@ -141,8 +149,12 @@ def lint(idx, spans, fps=30.0):
             tail, head = idx.tail_silence(b), idx.head_silence(na)
             if head > 0.30:
                 on = idx.onset_after(na)
-                f.append(f"{lbl}->{nl} SEAM  {head:.2f}s dead air on the incoming side "
-                         f"(tail {tail:.2f}s) -> move {nl} IN to {on-2*frame:.3f}")
+                if on is None:
+                    f.append(f"{lbl}->{nl} SEAM  {head:.2f}s dead air on the incoming side "
+                             f"(tail {tail:.2f}s) -> no onset in 3s")
+                else:
+                    f.append(f"{lbl}->{nl} SEAM  {head:.2f}s dead air on the incoming side "
+                             f"(tail {tail:.2f}s) -> move {nl} IN to {on-2*frame:.3f}")
             elif tail + head > 0.45:
                 f.append(f"{lbl}->{nl} SEAM  {tail+head:.2f}s total stitched pause "
                          f"(tail {tail:.2f} + head {head:.2f})")

@@ -2,16 +2,16 @@
 """
 aroll — deterministic A-roll (talking head) cleanup.
 
-Two commands. Code does the mechanical work; the agent only makes judgement calls.
+One command, run twice. Code does the mechanical work; the agent only makes judgement calls.
 
-    aroll index  MEDIA [--lang ar] [--model small]
+    capcutctl cut VIDEO.mp4 [--lang ar]
         Transcribe with word timestamps, build the acoustic energy index, snap every
         boundary acoustically, delete dead air, detect takes and repeated beats, and
         write a handout for the agent to read.
 
-    aroll cut    MEDIA.aroll.json --project NAME [--drop 3,7,12] [--keep 1-9]
+    capcutctl cut VIDEO.mp4 --keep 0,2-9 --project NAME
         Apply the agent's selection, lint every seam, pack the timeline with no gaps,
-        and build the CapCut project through capcutctl.
+        and build the CapCut project.
 
 The division of labour that matters:
     Whisper decides WHICH WORDS.  The energy index decides EXACTLY WHERE.
@@ -63,7 +63,15 @@ def quantise(t):
 DEFAULT_MODEL = "mlx-community/whisper-large-v3-turbo"
 
 
-def transcribe(media, lang, model, cache_dir):
+CREDIT = re.compile(r"ترجمة|نانسي")
+
+
+def media_token(media):
+    st = os.stat(media)
+    return {"ino": st.st_ino, "size": st.st_size, "mtime": int(st.st_mtime)}
+
+
+def transcribe(media, lang, model, cache_dir, force=False):
     """
     mlx_whisper on Apple silicon, running large-v3-turbo by default — accuracy matters
     most here because Whisper's Arabic is what duplicate detection reads. Falls back to
@@ -71,9 +79,12 @@ def transcribe(media, lang, model, cache_dir):
     """
     slug = re.sub(r"[^a-zA-Z0-9._-]", "-", model)
     cache = os.path.join(cache_dir, os.path.basename(media).rsplit(".", 1)[0] + f".whisper-{slug}.json")
-    if os.path.exists(cache):
-        print(f"  transcript: cached ({model})", file=sys.stderr)
-        return json.loads(Path(cache).read_text())
+    token = media_token(media)
+    if not force and os.path.exists(cache):
+        d = json.loads(Path(cache).read_text())
+        if d.get("_token") == token:
+            print(f"  transcript: cached ({model})", file=sys.stderr)
+            return d
 
     mlx = shutil.which("mlx_whisper")
     if mlx and "/" in model:
@@ -95,13 +106,22 @@ def transcribe(media, lang, model, cache_dir):
             media, language=lang, word_timestamps=True, verbose=False,
             condition_on_previous_text=False,      # stops one hallucination poisoning the rest
         )
+    result["_token"] = token
     Path(cache).write_text(json.dumps(result, ensure_ascii=False))
     return result
 
 
 # ---------------------------------------------------------------- indexing
 def split_on_dead_air(idx, start, end):
-    """Break a beat wherever it goes quiet for longer than a hesitation."""
+    """Break a beat wherever it goes quiet for longer than a hesitation.
+
+    Leading silence is dropped, not kept as a 0.25s 'beat' that then snaps
+    onto the first syllable (Whisper starts can sit 0.7s early; HESITATION is 0.60).
+    """
+    on = idx.onset_after(start)
+    if on is None or on >= end:
+        return []
+    start = max(start, on)
     spans, run_start, silence_from = [], start, None
     t = start
     while t < end:
@@ -115,20 +135,51 @@ def split_on_dead_air(idx, start, end):
             silence_from = None
         t += idx.bin
     spans.append((run_start, end))
-    return [(a, b) for a, b in spans if b - a >= MIN_BEAT]
+    out = []
+    for a, b in spans:
+        if b - a < MIN_BEAT:
+            continue
+        u = a
+        spoke = False
+        while u < b:
+            if idx.at(u) >= SOFT:
+                spoke = True
+                break
+            u += idx.bin
+        if spoke:
+            out.append((a, b))
+    return out
+
+
+def words_in(seg, a, b):
+    """Text whose word timestamps fall in [a, b), not the parent Whisper segment."""
+    picked = []
+    for w in seg.get("words") or []:
+        t = w.get("start")
+        if t is None:
+            continue
+        if a - 0.05 <= t < b:
+            picked.append((w.get("word") or w.get("text") or "").strip())
+    text = " ".join(p for p in picked if p).strip()
+    if text:
+        return text
+    parent = (seg.get("text") or "").strip()
+    dur = max(1e-6, seg.get("end", b) - seg.get("start", a))
+    return parent if (b - a) >= 0.8 * dur else ""
 
 
 def snap(idx, a, b, floor=0.0):
     """
-    IN on the next real onset (minus a lead), OUT in the nearest trough.
-
-    `floor` is the previous beat's OUT. Reaching back past it makes consecutive beats
-    overlap, and a kept pair then repeats ~0.3s of audio across the seam — the exact
-    defect this tool exists to prevent.
+    IN on the next real onset (minus a lead). OUT by walking back from the
+    next onset (or `b`) to a trough — not a ±0.20s window around Whisper's end.
     """
-    on = idx.onset_after(max(floor, a - 0.30)) or a
+    on = idx.onset_after(max(floor, a - 0.30))
+    if on is None:
+        return None
     src_in = max(floor, 0.0, on - LEAD_FRAMES * FRAME)
-    src_out = idx.trough(b)
+    nxt = idx.onset_after(b)
+    anchor = (nxt - 0.04) if nxt is not None and nxt > src_in + MIN_BEAT else b
+    src_out = idx.trough(anchor, win=0.45)
     if src_out <= src_in:
         src_out = max(b, src_in + MIN_BEAT)
     return quantise(src_in), quantise(src_out)
@@ -192,21 +243,25 @@ def cmd_index(args):
     os.makedirs(cache_dir, exist_ok=True)
 
     print(f"aroll index {os.path.basename(media)}", file=sys.stderr)
-    idx = AudioIndex.build_or_load(media)
+    idx = AudioIndex.build_or_load(media, force=getattr(args, "reindex", False))
     print(f"  energy index: {len(idx.db)} bins @ {int(idx.bin*1000)}ms = {len(idx.db)*idx.bin:.1f}s", file=sys.stderr)
-    result = transcribe(media, args.lang, args.model, cache_dir)
+    result = transcribe(media, args.lang, args.model, cache_dir, force=getattr(args, "reindex", False))
 
     beats = []
     for seg in result.get("segments", []):
         text = seg.get("text", "").strip()
-        if not text:
+        if not text or CREDIT.search(text):
             continue
         for a, b in split_on_dead_air(idx, seg["start"], seg["end"]):
-            src_in, src_out = snap(idx, a, b, floor=beats[-1]["src_out"] if beats else 0.0)
+            snapped = snap(idx, a, b, floor=beats[-1]["src_out"] if beats else 0.0)
+            if snapped is None:
+                continue
+            src_in, src_out = snapped
             if src_out - src_in < MIN_BEAT:
                 continue
+            slice_text = words_in(seg, src_in, src_out) or text
             beats.append({
-                "id": len(beats), "text": text, "src_in": src_in, "src_out": src_out,
+                "id": len(beats), "text": slice_text, "src_in": src_in, "src_out": src_out,
                 "dur": round(src_out - src_in, 3), "take": 0,
                 "dupe_group": None, "is_last_of_group": True, "defects": [],
             })
@@ -299,8 +354,13 @@ def parse_ids(spec):
         if not part:
             continue
         if "-" in part:
-            a, b = part.split("-")
-            out.update(range(int(a), int(b) + 1))
+            bits = part.split("-")
+            if len(bits) != 2:
+                raise ValueError(f"bad id range {part!r}")
+            a, b = int(bits[0]), int(bits[1])
+            if b < a:
+                raise ValueError(f"reversed id range {part!r}")
+            out.update(range(a, b + 1))
         else:
             out.add(int(part))
     return out
@@ -413,9 +473,15 @@ def cmd_selftest(args):
         print(f"  {'PASS' if cond else 'FAIL'}  {name}")
 
     check("parse_ids ranges", parse_ids("1,3-5,9") == {1, 3, 4, 5, 9})
+    try:
+        parse_ids("9-2")
+        check("parse_ids rejects reversed ranges", False)
+    except ValueError:
+        check("parse_ids rejects reversed ranges", True)
     check("quantise snaps to frames", abs(quantise(1.0 / 30 * 2.4) - 2 / 30) < 1e-9)
     check("norm folds arabic orthography", norm("أَحْلَى") == norm("احلى"))
     check("norm strips punctuation", norm("hello, world!") == "hello world")
+    check("credit line is dropped", bool(CREDIT.search("ترجمة نانسي قنقر")))
 
     class Fake:
         """silence, speech 1.0-2.0, silence, speech 3.0-4.0, silence"""
@@ -425,6 +491,10 @@ def cmd_selftest(args):
         def head_silence(self, t, thresh=SOFT, cap=2.0):
             n = 0
             while n * self.bin < cap and self.at(t + n * self.bin) < thresh: n += 1
+            return n * self.bin
+        def tail_silence(self, t, thresh=SOFT, cap=2.0):
+            n = 0
+            while n * self.bin < cap and self.at(t - (n + 1) * self.bin) < thresh: n += 1
             return n * self.bin
         def onset_after(self, t, thresh=SOFT, cap=3.0):
             n = 0
@@ -437,11 +507,21 @@ def cmd_selftest(args):
     fake = Fake()
     spans = split_on_dead_air(fake, 0.5, 4.5)
     check("dead air splits one beat into two", len(spans) == 2)
+    check("leading silence is not its own beat", abs(spans[0][0] - 1.0) < 0.02)
 
     a1, b1 = snap(fake, 0.9, 2.1)
     a2, _ = snap(fake, 2.9, 4.1, floor=b1)
     check("snap finds the onset", abs(a1 - (1.0 - LEAD_FRAMES * FRAME)) < 0.05)
     check("consecutive beats never overlap", a2 >= b1)
+
+    seg = {"start": 0.5, "end": 4.5, "text": "hello world and more",
+           "words": [{"start": 1.1, "word": "hello"}, {"start": 3.2, "word": "world"}]}
+    check("words_in uses the window not the parent", words_in(seg, 1.0, 2.2) == "hello")
+
+    from audio_index import lint as lint_seams
+    findings = lint_seams(fake, [("a", 3.5, 4.5), ("b", 8.0, 8.5)])
+    check("lint reports no-onset rather than crashing",
+          any("no onset" in f for f in findings))
 
     print("selftest:", "all passed" if all(ok) else "FAILURES")
     return 0 if all(ok) else 1

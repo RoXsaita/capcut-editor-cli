@@ -73,7 +73,7 @@ def load_project(name):
     tl_id = None
     if os.path.exists(meta):
         j = json.loads(Path(meta).read_text())
-        tl_id = j.get("active_timeline_id") or j.get("activeTimelineId")
+        tl_id = j.get("main_timeline_id") or j.get("active_timeline_id") or j.get("activeTimelineId")
     if not tl_id:
         tls = [d for d in os.listdir(os.path.join(proj, "Timelines"))
                if os.path.isdir(os.path.join(proj, "Timelines", d))] if os.path.isdir(os.path.join(proj, "Timelines")) else []
