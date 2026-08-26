@@ -178,3 +178,36 @@ test('a missing template names the alternatives instead of guessing', () => {
   fs.renameSync(path.join(root, 'Preset 3'), path.join(root, 'Something Else'));
   assert.throws(() => createProject('demo', opts({ root, media })), /Template "Preset 3" not found/);
 });
+
+test('--blank without media actually empties the timeline', () => {
+  const { root } = templateLibrary();
+  const r = createProject('demo', opts({ root, blank: true }));
+  const doc = activeDoc(r.project);
+  assert.equal(doc.tracks.flatMap(t => t.segments || []).length, 0);
+  assert.equal(r.carriedOver, 'none (--blank)');
+  assert.equal(readJson(path.join(r.project, '.capcutctl', 'created.json')).preserved, null);
+});
+
+test('--blank --media keeps the new scenes and drops the template endcard', () => {
+  const { root, media } = templateLibrary();
+  const r = createProject('demo', opts({ root, media, scenes: '0:6,6:12', blank: true }));
+  const doc = activeDoc(r.project);
+  assert.equal(doc.tracks[r.contentTrack].segments.length, 2);
+  assert.ok(!doc.tracks.flatMap(t => t.segments).some(s => s.material_id === 'TPL-VIDEO'));
+  assert.equal(r.duration, 12);
+});
+
+test('--canvas and --fps are applied, not discarded', () => {
+  const { root, media } = templateLibrary();
+  const r = createProject('demo', opts({ root, media, scenes: '0:6', canvas: '1920x1080', fps: 24 }));
+  const doc = activeDoc(r.project);
+  assert.equal(doc.canvas_config.width, 1920);
+  assert.equal(doc.canvas_config.height, 1080);
+  assert.equal(doc.fps, 24);
+  assert.equal(r.canvas.width, 1920);
+});
+
+test('--new-timeline-id is refused rather than silently ignored', () => {
+  const { root } = templateLibrary();
+  assert.throws(() => createProject('demo', opts({ root, newTimelineId: true })), /not supported/);
+});
