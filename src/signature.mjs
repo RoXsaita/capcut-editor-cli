@@ -2,11 +2,9 @@ import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { CapcutError, clone, uuid, allSegments } from './core.mjs';
+import { CapcutError, clone, uuid, allSegments, loadPreset } from './core.mjs';
 import { principalTrack, sfxPresets } from './polish.mjs';
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
 const US = s => Math.round(s * 1e6);
 const S = us => us / 1e6;
 const r3 = n => Math.round(n * 1000) / 1000;
@@ -81,14 +79,11 @@ export function logoScaleFor(sw, sh, requested, canvas = { width: 1080, height: 
   return requested * (ref / fit);
 }
 
-let SIG = null, BRANDS = null;
 export function sigPresets() {
-  if (!SIG) SIG = JSON.parse(fs.readFileSync(path.join(HERE, '..', 'presets', 'signature.json'), 'utf8'));
-  return SIG;
+  return loadPreset('signature');
 }
 export function brandPresets() {
-  if (!BRANDS) BRANDS = JSON.parse(fs.readFileSync(path.join(HERE, '..', 'presets', 'brands.json'), 'utf8'));
-  return BRANDS;
+  return loadPreset('brands');
 }
 
 let SEED = null;
@@ -422,7 +417,7 @@ function sigAudio() {
       return t;
     },
     audioSegmentFor(doc, cue, mintFn) {
-      const p = JSON.parse(fs.readFileSync(path.join(HERE, '..', 'presets', 'sfx.json'), 'utf8'));
+      const p = loadPreset('sfx');
       const seg = clone(p.audioSegmentTemplate);
       const refs = [];
       for (const [kind, tpl] of Object.entries(p.audioExtraTemplates)) {

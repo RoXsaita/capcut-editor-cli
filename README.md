@@ -20,6 +20,10 @@ Every write command:
 
 ## Install locally
 
+Setting this up on a machine that has never run it? Read **[SETUP.md](SETUP.md)** —
+it covers all three repos (`capcutctl`, `rl2`, the skills) and what will not resolve
+on a new Mac.
+
 ```bash
 cd /path/to/capcut-editor-cli
 npm link
@@ -33,6 +37,25 @@ node bin/capcutctl.mjs help
 ```
 
 Node.js 20 or newer is required. There are no runtime dependencies.
+
+### Presets are portable; what they point at is not
+
+Every path in `presets/*.json` is written as `~/…` and expanded to your own home
+directory when the preset loads (`loadPreset` in `src/core.mjs`), so nothing in this
+repo is tied to one machine. What those paths *point at* is still local:
+
+| Preset | Points at | On a new machine |
+|---|---|---|
+| `layouts.json`, `sfx.json`, `signature.json` | `~/Library/Containers/com.lemon.lvoverseas/…/Cache/effect` and `…/Cache/music` | **Will not resolve.** CapCut writes these ids when *you* download an effect or a track. Download the same ones in CapCut, then re-capture the ids with `capcutctl harvest`. |
+| `brands.json` | `~/Downloads/Logos`, `~/Downloads/Media/Images/2026` | Your own logo folder. Point `svgFallbackDir` / `rasterCacheDir` and each brand's `logo` at it. |
+| `sfx.json` | `~/Downloads/fahhh.mp3` | One personal sound file; substitute your own. |
+
+`presets/harvest.json` is **not** in the repo — it is a capture of the local CapCut
+drafts root and names every project on the machine that produced it. Run
+`capcutctl harvest` to write your own; nothing in the shipped code reads it.
+
+`capcutctl doctor` reports a missing media path rather than writing a broken project,
+so a preset that has not been re-harvested fails loudly, not silently.
 
 ## Core commands
 
