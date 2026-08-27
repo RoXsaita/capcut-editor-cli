@@ -1,7 +1,9 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { opLayoutApply, opLayoutBackground, opLayoutBroll } from './layouts.mjs';
 import { opPolish, principalTrack } from './polish.mjs';
 import { opPace } from './pace.mjs';
@@ -17,6 +19,44 @@ export const DEFAULT_ROOT = path.join(
 );
 
 export const LIVE_FILE_NAMES = ['draft_info.json', 'draft_info.json.bak', 'template-2.tmp'];
+
+const PRESET_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'presets');
+
+/**
+ * Presets ship with `~/…` paths, never `/Users/<someone>/…`, so the repo works on
+ * any Mac. CapCut itself needs a real absolute path inside draft_info.json, so the
+ * tilde is expanded here — at load — and nothing downstream has to remember to.
+ */
+export const expandHome = p =>
+  typeof p === 'string' && (p === '~' || p.startsWith('~/'))
+    ? path.join(os.homedir(), p.slice(1))
+    : p;
+
+/**
+ * CapCut also stores JSON *inside* a string (a text segment's `content` carries a
+ * nested `{"font":{"path":"…"}}`), so a tilde can appear mid-string, quoted.
+ */
+const expandNested = s => s.replaceAll('"~/', `"${os.homedir()}/`);
+
+const expandTree = value => {
+  if (typeof value === 'string') return expandNested(expandHome(value));
+  if (Array.isArray(value)) return value.map(expandTree);
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[k] = expandTree(v);
+    return out;
+  }
+  return value;
+};
+
+const PRESET_CACHE = new Map();
+/** Read `presets/<name>.json` with every `~/…` string expanded for this machine. */
+export function loadPreset(name) {
+  if (!PRESET_CACHE.has(name)) {
+    PRESET_CACHE.set(name, expandTree(readJson(path.join(PRESET_DIR, `${name}.json`))));
+  }
+  return PRESET_CACHE.get(name);
+}
 
 export class CapcutError extends Error {
   constructor(message, { code = 'CAPCUTCTL_ERROR', exitCode = 1, details } = {}) {

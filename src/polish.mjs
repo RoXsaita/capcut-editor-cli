@@ -1,14 +1,8 @@
 import crypto from 'node:crypto';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { CapcutError, clone, uuid, allSegments } from './core.mjs';
+import { CapcutError, clone, uuid, allSegments, loadPreset } from './core.mjs';
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-let SFX = null;
 export function sfxPresets() {
-  if (!SFX) SFX = JSON.parse(fs.readFileSync(path.join(HERE, '..', 'presets', 'sfx.json'), 'utf8'));
-  return SFX;
+  return loadPreset('sfx');
 }
 
 let SEED = null;

@@ -55,7 +55,7 @@
      "constant_material_id": "653DAE0A-19B7-4B0B-9E91-1C22F2CDF902",
      "name": "Split",
      "resource_type": "line",
-     "path": "/Users/roxsa/Library/Containers/com.lemon.lvoverseas/Data/Movies/CapCut/User Data/Cache/effect/1068046523/4c6a0ef5de6a844342d40330e00c59eb",
+     "path": "~/Library/Containers/com.lemon.lvoverseas/Data/Movies/CapCut/User Data/Cache/effect/1068046523/4c6a0ef5de6a844342d40330e00c59eb",
      "position_info": "",
      "config": {
       "width": 0.28,
@@ -215,7 +215,7 @@
      "constant_material_id": "28340A85-6C8B-4E6F-A950-0E76678C0DA6",
      "name": "Circle",
      "resource_type": "circle",
-     "path": "/Users/roxsa/Library/Containers/com.lemon.lvoverseas/Data/Movies/CapCut/User Data/Cache/effect/1068046525/3ab1c47350d987c8ad415497e020a38b",
+     "path": "~/Library/Containers/com.lemon.lvoverseas/Data/Movies/CapCut/User Data/Cache/effect/1068046525/3ab1c47350d987c8ad415497e020a38b",
      "position_info": "",
      "config": {
       "width": 1.0032193406262426,
@@ -292,7 +292,7 @@
      "constant_material_id": "28340A85-6C8B-4E6F-A950-0E76678C0DA6",
      "name": "Circle",
      "resource_type": "circle",
-     "path": "/Users/roxsa/Library/Containers/com.lemon.lvoverseas/Data/Movies/CapCut/User Data/Cache/effect/1068046525/3ab1c47350d987c8ad415497e020a38b",
+     "path": "~/Library/Containers/com.lemon.lvoverseas/Data/Movies/CapCut/User Data/Cache/effect/1068046525/3ab1c47350d987c8ad415497e020a38b",
      "position_info": "",
      "config": {
       "width": 0.8681592039800995,
@@ -440,7 +440,7 @@
    "sub_type": 0,
    "bind_segment_id": "3A713CA9-04E9-44C1-985A-E5735D4D7CE8",
    "transparent_params": "",
-   "path": "/Users/roxsa/Library/Containers/com.lemon.lvoverseas/Data/Movies/CapCut/User Data/Cache/effect/7399464929830423813/2db7bf49d9349e308ef0f46c39b14abf",
+   "path": "~/Library/Containers/com.lemon.lvoverseas/Data/Movies/CapCut/User Data/Cache/effect/7399464929830423813/2db7bf49d9349e308ef0f46c39b14abf",
    "value": 1.0,
    "category_id": "1111",
    "category_name": "Video effects",

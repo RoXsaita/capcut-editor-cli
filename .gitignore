@@ -3,3 +3,7 @@ node_modules/
 .DS_Store
 __pycache__/
 *.pyc
+
+# Captured from the local CapCut drafts root and never read by the shipped code:
+# it names every project on this machine. Regenerate with `capcutctl harvest`.
+presets/harvest.json

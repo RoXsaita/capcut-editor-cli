@@ -2,12 +2,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { principalTrack } from './polish.mjs';
-import { CapcutError, clone, uuid, allSegments, selectSegments, loadProject } from './core.mjs';
-
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-const PRESET_FILE = path.join(HERE, '..', 'presets', 'layouts.json');
+import { CapcutError, clone, uuid, allSegments, selectSegments, loadProject, loadPreset, expandHome } from './core.mjs';
 
 /**
  * Root and active timeline are edited as separate documents, so every generated
@@ -22,15 +18,13 @@ function mint(key) {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
 }
 
-let CACHED = null;
 export function presets() {
-  if (!CACHED) CACHED = JSON.parse(fs.readFileSync(PRESET_FILE, 'utf8'));
-  return CACHED;
+  return loadPreset('layouts');
 }
 
-function expand(p) {
-  return p.startsWith('~') ? path.join(os.homedir(), p.slice(1)) : p;
-}
+// Wrapped, not aliased: core.mjs imports this module, so the binding is still
+// in its TDZ while this module body runs.
+const expand = p => expandHome(p);
 
 function ensureMaterialArray(doc, kind) {
   if (!Array.isArray(doc.materials[kind])) doc.materials[kind] = [];

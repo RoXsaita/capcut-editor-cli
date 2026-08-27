@@ -1,7 +1,7 @@
 {
  "_note": "brand -> spoken aliases (Latin + Arabic transliterations, as Whisper actually writes them) and a TRANSPARENT raster logo. SVG is not usable: CapCut needs a raster and qlmanage renders SVG on white.",
- "svgFallbackDir": "/Users/roxsa/Downloads/Logos",
- "rasterCacheDir": "/Users/roxsa/Downloads/Logos/.raster",
+ "svgFallbackDir": "~/Downloads/Logos",
+ "rasterCacheDir": "~/Downloads/Logos/.raster",
  "brands": {
   "claude": {
    "aliases": [
@@ -9,7 +9,7 @@
     "كلود",
     "كلاود"
    ],
-   "logo": "/Users/roxsa/Downloads/Media/Images/2026/Claude_AI_logo.svg.png"
+   "logo": "~/Downloads/Media/Images/2026/Claude_AI_logo.svg.png"
   },
   "chatgpt": {
    "aliases": [
@@ -19,7 +19,7 @@
     "شات جيبيتي",
     "تشات جي بي تي"
    ],
-   "logo": "/Users/roxsa/Downloads/Media/Images/2026/ChatGPT-Logo.png"
+   "logo": "~/Downloads/Media/Images/2026/ChatGPT-Logo.png"
   },
   "openai": {
    "aliases": [
@@ -28,7 +28,7 @@
     "اوبن ايه اي",
     "أوبن ايه اي"
    ],
-   "logo": "/Users/roxsa/Downloads/Media/Images/2026/ChatGPT-Logo.png"
+   "logo": "~/Downloads/Media/Images/2026/ChatGPT-Logo.png"
   },
   "gemini": {
    "aliases": [
@@ -38,7 +38,7 @@
     "جمناي",
     "جيميني"
    ],
-   "logo": "/Users/roxsa/Downloads/Logos/Google-gemini-icon.svg.png"
+   "logo": "~/Downloads/Logos/Google-gemini-icon.svg.png"
   },
   "google": {
    "aliases": [
@@ -47,7 +47,7 @@
     "قوقل",
     "غوغل"
    ],
-   "logo": "/Users/roxsa/Downloads/Logos/Google__G__logo.svg.webp"
+   "logo": "~/Downloads/Logos/Google__G__logo.svg.webp"
   },
   "grok": {
    "aliases": [
@@ -56,7 +56,7 @@
     "قروك",
     "غروك"
    ],
-   "logo": "/Users/roxsa/Downloads/Logos/.raster/grok.png"
+   "logo": "~/Downloads/Logos/.raster/grok.png"
   },
   "xai": {
    "aliases": [
@@ -64,7 +64,7 @@
     "x ai",
     "اكس ايه اي"
    ],
-   "logo": "/Users/roxsa/Downloads/Logos/.raster/xai.png"
+   "logo": "~/Downloads/Logos/.raster/xai.png"
   },
   "ikea": {
    "aliases": [
@@ -72,7 +72,7 @@
     "ايكيا",
     "آيكيا"
    ],
-   "logo": "/Users/roxsa/Downloads/Media/Images/2026/Ikea-logo.png"
+   "logo": "~/Downloads/Media/Images/2026/Ikea-logo.png"
   },
   "higgsfield": {
    "aliases": [
@@ -80,14 +80,14 @@
     "هيغزفيلد",
     "هيجزفيلد"
    ],
-   "logo": "/Users/roxsa/Downloads/Media/Images/2026/higgsfield_ai-logo-brandlogos.net-c221a.png"
+   "logo": "~/Downloads/Media/Images/2026/higgsfield_ai-logo-brandlogos.net-c221a.png"
   },
   "codex": {
    "aliases": [
     "codex",
     "كودكس"
    ],
-   "logo": "/Users/roxsa/Downloads/Logos/codex-logo-transparent.png"
+   "logo": "~/Downloads/Logos/codex-logo-transparent.png"
   },
   "opencode": {
    "aliases": [
@@ -95,14 +95,14 @@
     "open code",
     "اوبن كود"
    ],
-   "logo": "/Users/roxsa/Downloads/Media/Images/2026/opencode-logo-dark.png"
+   "logo": "~/Downloads/Media/Images/2026/opencode-logo-dark.png"
   },
   "chrome": {
    "aliases": [
     "chrome",
     "كروم"
    ],
-   "logo": "/Users/roxsa/chrome-logo.png"
+   "logo": "~/chrome-logo.png"
   },
   "ollama": {
    "aliases": [
@@ -110,14 +110,14 @@
     "اولاما",
     "أولاما"
    ],
-   "logo": "/Users/roxsa/Downloads/Logos/Ollama Logo.png"
+   "logo": "~/Downloads/Logos/Ollama Logo.png"
   },
   "midjourney": {
    "aliases": [
     "midjourney",
     "ميدجورني"
    ],
-   "logo": "/Users/roxsa/Downloads/Logos/midjourney.png"
+   "logo": "~/Downloads/Logos/midjourney.png"
   },
   "elevenlabs": {
    "aliases": [
@@ -125,7 +125,7 @@
     "eleven labs",
     "ايليفن لابز"
    ],
-   "logo": "/Users/roxsa/Downloads/Logos/.raster/elevenlabs.png"
+   "logo": "~/Downloads/Logos/.raster/elevenlabs.png"
   },
   "cursor": {
    "aliases": [
@@ -133,35 +133,35 @@
     "كيرسر",
     "كورسر"
    ],
-   "logo": "/Users/roxsa/Downloads/Logos/.raster/cursor.png"
+   "logo": "~/Downloads/Logos/.raster/cursor.png"
   },
   "notion": {
    "aliases": [
     "notion",
     "نوشن"
    ],
-   "logo": "/Users/roxsa/Downloads/Logos/.raster/notion.png"
+   "logo": "~/Downloads/Logos/.raster/notion.png"
   },
   "vercel": {
    "aliases": [
     "vercel",
     "فيرسيل"
    ],
-   "logo": "/Users/roxsa/Downloads/Logos/.raster/vercel.png"
+   "logo": "~/Downloads/Logos/.raster/vercel.png"
   },
   "antigravity": {
    "aliases": [
     "antigravity",
     "انتيجرافيتي"
    ],
-   "logo": "/Users/roxsa/Downloads/Logos/ag-logo.png"
+   "logo": "~/Downloads/Logos/ag-logo.png"
   },
   "remotion": {
    "aliases": [
     "remotion",
     "ريموشن"
    ],
-   "logo": "/Users/roxsa/Downloads/Logos/Remotion-logo.png"
+   "logo": "~/Downloads/Logos/Remotion-logo.png"
   }
  }
 }
