@@ -292,6 +292,24 @@ npm run check
 
 The tests use synthetic projects and never touch the user's CapCut library.
 
+## Working together
+
+Private repo, two people. Collaborator with Write is the whole access model.
+
+- Pull `main` before you start.
+- Short-lived branches. Open a PR even if you merge it yourself — that is the paper trail, not a gate. Self-merge is fine.
+- Direct commits to `main` are ok for a typo or a one-liner you would not mind landing on you with no warning.
+- Never force-push `main`.
+- One job per PR. Say so in chat if you are about to touch the same files.
+
+This repo is one of three:
+
+- [`capcut-editor-cli`](https://github.com/RoXsaita/capcut-editor-cli) — this CLI (`capcutctl`)
+- [`capcut-skills`](https://github.com/RoXsaita/capcut-skills) — the agent skills
+- [`recording-layout-v2`](https://github.com/RoXsaita/recording-layout-v2) — `rl2`, the recorder
+
+A CLI change and the skill that documents it should land as a pair.
+
 ## Scope of v0.1
 
 This release provides the stable foundation: discovery, active-timeline resolution, doctoring, snapshots/manual restore, mirror synchronization, atomic rollback, safe relinking and native material cloning, track cloning, segment patch/clone/remove, bound-mask editing, and timeline metadata updates.
