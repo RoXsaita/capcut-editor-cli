@@ -11,24 +11,18 @@ commit does not remove it from GitHub.
 - [ ] Confirm no live key string in any commit:
       `git grep -a 'GEMINI_API_KEY=' $(git rev-list --all)`
 
-## History rewrite (blocking)
+## History rewrite
 
-`presets/harvest.json` was committed, then gitignored. The blob is still on
-`origin/main` and names every local draft (unpublished video titles). Older
-commits also contain `/Users/roxsa/…` absolute paths.
-
-Either:
+`presets/harvest.json` was stripped from all commits with `git filter-repo`
+(`--path presets/harvest.json --invert-paths`) and force-pushed. Confirm:
 
 ```bash
-# from a clean clone, after installing git-filter-repo
-git filter-repo --path presets/harvest.json --invert-paths
-# inspect, then force-push ALL branches and tags, then rotate nothing else
-# that was only in that file (titles, not credentials)
+git log --all -- presets/harvest.json   # must be empty
 ```
 
-or publish a **new empty repository** with a squashed current tree.
-
-Until one of those is done, **do not** make `RoXsaita/capcut-editor-cli` public.
+The repository stays **private**. Do not flip visibility until you decide to
+open-source. Older commits may still contain `/Users/roxsa/…` in files that
+were later rewritten to `~/…`; that is machine-local, not a credential.
 
 ## Working tree (not in git, still do not zip)
 
