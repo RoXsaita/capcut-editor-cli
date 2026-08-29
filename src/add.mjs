@@ -1,8 +1,9 @@
+import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { CapcutError, clone, uuid, allSegments, selectSegments, stableJson, localizeMedia } from './core.mjs';
+import { CapcutError, clone, uuid, allSegments, selectSegments, stableJson, localizeMedia, isLocalMedia, PRESET_PARK_GAP_US } from './core.mjs';
 import { insertOverlayTrack, renumberTracks } from './layouts.mjs';
 import { principalTrack } from './polish.mjs';
 
@@ -188,11 +189,78 @@ function slidePreserved(doc, context, clipEndUs, op = {}, { wasAtUs = null } = {
 /** Persist the slid endcard window once, after both documents committed. */
 export function commitPreservedSlides(shared) {
   const state = shared?.preserved;
-  if (!state?.next || !state.file || !state.created) return;
+  if (!state?.file || !state.created) return;
+  if (!state.next && state.contentEnd == null) return;
   const created = clone(state.created);
-  created.preserved = state.next;
+  if (state.next) created.preserved = state.next;
+  if (state.contentEnd != null) created.contentEnd = state.contentEnd;
   fs.mkdirSync(path.dirname(state.file), { recursive: true });
   fs.writeFileSync(state.file, stableJson(created));
+}
+
+/**
+ * End of the real edit: last clip on the talking-head track that is not inside the
+ * parked Preset 3 leftover. Wrap/Follow/music use this, never draft duration —
+ * duration includes the leftover parts-bin.
+ */
+export function contentEndUs(doc, projectDir = null) {
+  let parked = null;
+  if (projectDir) {
+    try {
+      const created = JSON.parse(fs.readFileSync(path.join(projectDir, '.capcutctl', 'created.json'), 'utf8'));
+      if (created?.preserved?.start > 0) parked = created.preserved.start;
+    } catch { /* no sidecar */ }
+  }
+  let end = 0;
+  try {
+    const { track } = principalTrack(doc);
+    for (const s of track.segments || []) {
+      const start = s.target_timerange?.start || 0;
+      if (parked != null && start >= parked - 1) continue;
+      const e = start + (s.target_timerange?.duration || 0);
+      if (e > end) end = e;
+    }
+  } catch { /* no principal track */ }
+  if (end > 0) return parked != null ? Math.min(end, parked) : end;
+  if (parked != null) return parked;
+  return doc.duration || 0;
+}
+
+/**
+ * Push the cloned Preset 3 leftover past a gap after the talking head.
+ * Do not delete it — it is a parts bin (copy attributes). It is not the video's ending.
+ * Idempotent: no-op if already parked far enough.
+ */
+export function parkPresetLeftover(doc, context = {}, op = {}) {
+  const projectDir = context.projectDir;
+  if (!projectDir) return { slid: 0 };
+  const state = slideState(projectDir, context.shared || (context.shared = {}));
+  if (!state.window?.start) return { slid: 0 };
+  if (op.__park === undefined) {
+    const contentEnd = contentEndUs(doc, projectDir);
+    const desired = contentEnd + PRESET_PARK_GAP_US;
+    const from = state.window.start + (state.total || 0);
+    op.__park = from >= desired - 1000 ? 0 : desired - from;
+    op.__parkFrom = from;
+    if (op.__park) {
+      state.total = (state.total || 0) + op.__park;
+      state.next = { start: state.window.start + state.total, end: (state.window.end || state.window.start) + state.total };
+      state.contentEnd = contentEnd;
+    }
+  }
+  const delta = op.__park;
+  if (!delta) return { slid: 0, preserved: state.window };
+  const from = op.__parkFrom;
+  for (const t of doc.tracks || []) {
+    for (const s of t.segments || []) {
+      if ((s.target_timerange?.start || 0) >= from) {
+        s.target_timerange.start += delta;
+        if (s.render_timerange?.duration) s.render_timerange.start = (s.render_timerange.start || 0) + delta;
+      }
+    }
+  }
+  doc.duration = Math.max(doc.duration || 0, state.next.end);
+  return { slid: delta, preserved: state.next };
 }
 
 function rescaleKeyframes(seg, oldStart, oldDur, newStart, newDur) {
@@ -266,7 +334,7 @@ export function opClipAdd(doc, op, context = {}) {
   assertNoOverlap(dest.track, atUs, durUs);
 
   if (op.localize && context.projectDir) {
-    op.media = localizeMedia(context.projectDir, path.resolve(op.media), path.basename(op.media), { dryRun: context.dryRun });
+    op.media = localizeMedia(context.projectDir, path.resolve(op.media), undefined, { dryRun: context.dryRun });
   }
 
   const slid = slidePreserved(doc, context, atUs + durUs, op);
@@ -350,7 +418,7 @@ export function opReplaceMedia(doc, op, context = {}) {
   }
   let dest = path.resolve(op.path);
   if (op.localize && context.projectDir) {
-    dest = localizeMedia(context.projectDir, dest, path.basename(dest), { dryRun: context.dryRun });
+    dest = localizeMedia(context.projectDir, dest, undefined, { dryRun: context.dryRun });
   }
   // Refuse here rather than letting validateDocument roll the whole transaction back with a
   // MISSING_MEDIA dump — the same check opMaterialRelink does.
@@ -383,6 +451,72 @@ export function opReplaceMedia(doc, op, context = {}) {
     }
   }
   return { changed: 1, id: seg.id, materialId: material.id, path: dest, shared: shared && true };
+}
+
+const isCapCutCache = p => /\/CapCut\/User Data\/Cache\//.test(p);
+
+function probeDurationUs(file) {
+  try {
+    const out = execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', file], { encoding: 'utf8' }).trim();
+    const s = Number(out);
+    return s > 0 ? Math.round(s * 1e6) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Copy every outside video into Resources/CapcutctlMedia and relink.
+ * Same-basename takes (every rl2 file is screen.mp4) get unique names from their parent folder.
+ * CapCut cache SFX/stock stay put — those are already inside the sandbox.
+ * Duplicate material records (CapCut repeats ids) are made identical so doctor
+ * does not report CONFLICTING_MATERIAL_ID after the path change.
+ */
+export function opLocalizeAll(doc, op, context = {}) {
+  const projectDir = context.projectDir;
+  if (!projectDir) throw new CapcutError('media.localize needs a project directory.', { code: 'NO_PROJECT' });
+  const kinds = op.kinds || ['videos'];
+  const copied = [];
+  const seen = new Map();
+  for (const kind of kinds) {
+    for (const mat of doc.materials?.[kind] || []) {
+      const src = mat.path;
+      if (typeof src !== 'string' || !src.startsWith('/')) continue;
+      if (isLocalMedia(projectDir, src) || isCapCutCache(src)) continue;
+      if (!fs.existsSync(src)) continue;
+      let dest = seen.get(src);
+      if (!dest) {
+        dest = localizeMedia(projectDir, src, undefined, { dryRun: context.dryRun });
+        seen.set(src, dest);
+        copied.push({ from: src, to: dest });
+      }
+      mat.path = dest;
+      if ('media_path' in mat) mat.media_path = '';
+      mat.material_name = path.basename(dest);
+      if (!(mat.duration > 0)) mat.duration = probeDurationUs(dest);
+    }
+  }
+  for (const kind of kinds) {
+    const byId = new Map();
+    for (const mat of doc.materials?.[kind] || []) {
+      if (!mat?.id) continue;
+      if (!byId.has(mat.id)) byId.set(mat.id, []);
+      byId.get(mat.id).push(mat);
+    }
+    for (const clones of byId.values()) {
+      if (clones.length < 2) continue;
+      const best = clones.find(m => m.duration > 0) || clones[0];
+      for (const m of clones) {
+        m.path = best.path;
+        m.duration = best.duration;
+        m.material_name = best.material_name;
+        if (best.width) m.width = best.width;
+        if (best.height) m.height = best.height;
+        if ('media_path' in m) m.media_path = '';
+      }
+    }
+  }
+  return { changed: copied.length, copied };
 }
 
 const MAIN_TRACK = 'the main/cover track, which stays empty — move the clip to an overlay first';

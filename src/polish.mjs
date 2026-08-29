@@ -32,7 +32,14 @@ function coveringBroll(doc, t, principalIndex) {
       const a = s.target_timerange.start, b = a + s.target_timerange.duration;
       if (a - 20000 < us && us < b - 20000) {
         const m = videos.get(s.material_id);
-        return { desc: s.desc || '', path: m?.path || '', id: s.id };
+        const sr = s.source_timerange || {};
+        const cl = s.clip || {};
+        return {
+          desc: s.desc || '', path: m?.path || '', id: s.id,
+          scale: cl.scale?.x ?? 1, tx: cl.transform?.x ?? 0, ty: cl.transform?.y ?? 0,
+          srcStart: (sr.start || 0) / 1e6,
+          srcEnd: ((sr.start || 0) + (sr.duration || 0)) / 1e6,
+        };
       }
     }
   }
@@ -72,6 +79,26 @@ function collapse(marks, minGap) {
 }
 
 /**
+ * Is this a different SHOT, not merely a different segment?
+ *
+ * Keying on `path|desc` alone made three consecutive clips of one screen recording —
+ * same file, same desc, but reframed 3.33x -> 5.0x -> 5.0x-panned — read as ONE
+ * continuous shot, so `--motivated` dropped the seams at both cuts. Reframing the same
+ * file is a new shot: the viewer sees the picture jump.
+ *
+ * Deliberately NOT keyed on the source window. A same-file, same-framing cut that jumps
+ * in the source is also a visible cut, but every packer leaves frame-boundary slivers
+ * and some fixtures carry no source at all, so that rule costs more false positives than
+ * it buys. Reframing is the signal that is always real.
+ */
+function shotChanged(a, b) {
+  if (!a || !b) return a !== b;
+  if (a.path !== b.path || a.desc !== b.desc) return true;
+  const fr = x => `${r2(x.scale)}|${r2(x.tx)}|${r2(x.ty)}`;
+  return fr(a) !== fr(b);
+}
+
+/**
  * Cuts the VIEWER can see: B-roll shot change or layout class change.
  * An A-roll splice over an unchanged files list is not a picture change —
  * decorating those is what made grok-build-final feel machine-made.
@@ -92,8 +119,7 @@ export function pictureChanges(doc, { minGap = 0.9, track = null } = {}) {
     const afterB = coveringBroll(doc, t + 0.05, principal.index);
     const beforeL = coveringLayout(doc, t - 0.05, principal);
     const afterL = coveringLayout(doc, t + 0.05, principal);
-    const bKey = x => (x ? `${x.path}|${x.desc}` : '');
-    const brollChanged = bKey(beforeB) !== bKey(afterB);
+    const brollChanged = shotChanged(beforeB, afterB);
     const layoutChanged = beforeL !== afterL;
     if (!brollChanged && !layoutChanged) continue;
     marks.push({
@@ -319,11 +345,22 @@ export function planPolish(doc, opts = {}) {
     }
     cuts.sort((x, y) => x.t - y.t);
   }
-  const layoutChange = t => allSegments(doc).some(({ segment }) =>
-    (segment.desc || '') === 'layout:seam-bar'
-    && Math.abs(segment.target_timerange.start / 1e6 - t) < 0.05);
+  // A sweep means the LAYOUT changed (split-screen <-> full face), which is what
+  // `Horizontal Triptych` reads as. Testing for a `layout:seam-bar` segment START was
+  // wrong: the seam bar is re-cut at every split-screen B-roll boundary, so every such
+  // cut claimed to be a layout change and took a sweep — 8 of 13 seams here, a 62%
+  // Horizontal Triptych share against the ~45% ceiling in his hand-cut projects.
+  // Compare the actual layout class either side instead.
+  const principalT = principalTrack(doc, opts.track ?? null);
+  const layoutChange = t =>
+    coveringLayout(doc, t - 0.05, principalT) !== coveringLayout(doc, t + 0.05, principalT);
 
-  const rotate = ['flash', 'glitch', 'whiteflash', 'glitch2', 'flash', 'sweepL'];
+  // A sweep is reserved for a layout change (above), so it does not belong in the
+  // generic rotation — drawing sweepL here put Horizontal Triptych on cuts that changed
+  // no layout and pushed its share back over the ceiling. `fade` (Black Fade + the click)
+  // was defined in sfx.json and never reachable; it is in his top-7 palette, 27 uses
+  // across 12 projects.
+  const rotate = ['flash', 'glitch', 'whiteflash', 'glitch2', 'flash', 'fade'];
   const plan = [];
   let rot = 0, prev = null, sweepAlt = 0;
   for (const c of cuts) {

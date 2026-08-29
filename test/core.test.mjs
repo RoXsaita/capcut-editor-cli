@@ -172,7 +172,7 @@ test('apply patches native segment/mask, localizes raw media, and clones refs', 
     assert.notEqual(copied.id, original.id);
     assert.notEqual(copied.extra_material_refs[0], original.extra_material_refs[0]);
     assert.equal(fs.existsSync(doc.materials.videos[0].path), true);
-    assert.match(doc.materials.videos[0].path, /Resources\/CapcutctlMedia\/replacement\.mov$/);
+    assert.match(doc.materials.videos[0].path, /Resources\/CapcutctlMedia\/.*replacement\.mov$/);
   }
   assert.equal(new Set(clonedIds).size, 1, 'generated segment id must stay stable across root and timeline');
 });
@@ -203,7 +203,7 @@ test('material and track cloning reuse verified native structures', () => {
     const material = doc.materials.videos.find(item => item.id === 'VIDEO-TWO');
     const track = doc.tracks.find(item => item.id === 'TRACK-TWO');
     assert.equal(material.material_name, 'Second raw source');
-    assert.match(material.path, /Resources\/CapcutctlMedia\/second-raw\.mp4$/);
+    assert.match(material.path, /Resources\/CapcutctlMedia\/.*second-raw\.mp4$/);
     assert.equal(track.segments.length, 1);
     assert.equal(track.segments[0].material_id, 'VIDEO-TWO');
     assert.equal(track.segments[0].desc, 'editable raw insert');

@@ -3,8 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import {
-  CapcutError, DEFAULT_ROOT, LIVE_FILE_NAMES, assertCapcutClosed,
-  clone, listProjects, readJson, resolveProject, stableJson, uuid
+  CapcutError, DEFAULT_ROOT, LIVE_FILE_NAMES, PRESET_PARK_GAP_US, assertCapcutClosed,
+  clone, listProjects, readJson, resolveProject, stableJson, uuid, localizeMedia
 } from './core.mjs';
 
 /**
@@ -65,7 +65,7 @@ function pickTemplate(root, from) {
   if (fs.existsSync(path.join(dir, 'draft_info.json'))) return dir;
   const names = listProjects(root).map(p => p.name || p).slice(0, 8);
   throw new CapcutError(
-    `Template "${DEFAULT_TEMPLATE}" not found in ${root}. Pass --from NAME. Available: ${names.join(', ')}`,
+    `Template "${DEFAULT_TEMPLATE}" not found in ${root}. Pass --from NAME of a draft you already have, or --blank for an empty timeline. Available: ${names.join(', ') || '(none)'}`,
     { code: 'NO_TEMPLATE', exitCode: 2 }
   );
 }
@@ -116,7 +116,7 @@ function idPool() {
 
 const segmentsOf = doc => (doc.tracks || []).flatMap(t => t.segments || []);
 
-/** Slide the preset's own content so it starts at `startUs` (endcard to the end). */
+/** Slide the preset's own content so it starts at `startUs` (parked leftover, not the video's ending). */
 function shiftContent(doc, startUs) {
   const segs = segmentsOf(doc);
   if (!segs.length) return 0;
@@ -296,6 +296,9 @@ export function createProject(name, options = {}) {
 
   duplicate(templateDir, projectDir);
   try {
+    if (options.media && options.localize !== false) {
+      options.media = localizeMedia(projectDir, options.media);
+    }
     return finishCreate(projectDir, { name, root, templateDir, options, probe, scenes, canvas, fps });
   } catch (error) {
     try { fs.rmSync(projectDir, { recursive: true, force: true }); } catch {}
@@ -336,7 +339,7 @@ function finishCreate(projectDir, { name, root, templateDir, options, probe, sce
       doc.duration = 0;
     }
     if (scenes.length) {
-      if (!options.blank) shifted = shiftContent(doc, contentUs);
+      if (!options.blank) shifted = shiftContent(doc, contentUs + PRESET_PARK_GAP_US);
       ids.reset();
       contentTrack = addScenes(doc, options.media, probe, scenes, ids, templates);
       doc.duration = Math.max(doc.duration || 0, contentUs);
@@ -394,7 +397,10 @@ function finishCreate(projectDir, { name, root, templateDir, options, probe, sce
   fs.writeFileSync(path.join(projectDir, '.capcutctl', 'created.json'), stableJson({
     template: path.basename(templateDir),
     contentTrack,
-    preserved: scenes.length && !options.blank ? { start: contentUs, end: durationUs } : null
+    preserved: scenes.length && !options.blank
+      ? { start: contentUs + PRESET_PARK_GAP_US, end: durationUs }
+      : null,
+    contentEnd: scenes.length ? contentUs : null
   }));
 
   const registration = registerDraft(root, projectDir, name, draftId, durationUs);

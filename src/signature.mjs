@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { CapcutError, clone, uuid, allSegments, loadPreset } from './core.mjs';
 import { principalTrack, sfxPresets } from './polish.mjs';
+import { contentEndUs, parkPresetLeftover } from './add.mjs';
 
 const US = s => Math.round(s * 1e6);
 const S = us => us / 1e6;
@@ -241,12 +242,29 @@ export function opSignature(doc, op, context = {}) {
   const rules = p.rules;
   const result = { logos: [], endcard: null, zooms: [], sfx: 0 };
 
-  // start clean: everything this op writes is tagged, so re-running replaces
-  const TAGS = ['sig:logo', 'sig:endcard', 'sig:sfx'];
-  for (const t of doc.tracks) t.segments = (t.segments || []).filter(s => !TAGS.includes(s.desc || ''));
-  doc.tracks = doc.tracks.filter(t => !(t.name || '').startsWith('sig-') || (t.segments || []).length);
+  // Start clean — but ONLY for the kinds this op actually writes. Wiping all three
+  // unconditionally meant `capcutctl zoom` (which writes neither a logo nor an endcard)
+  // deleted the endcard and its Culin cue and never put them back: 11 tracks in, 9 out,
+  // silently, with `doctor` clean. SFX are attributed to their owner so clearing logos
+  // cannot take the endcard's cue with it.
+  const writesLogos = Array.isArray(op.logos) && op.logos.length > 0;
+  const writesEndcard = !!op.endcard;
+  const TAGS = [];
+  if (writesLogos) TAGS.push('sig:logo', 'sig:sfx:logo');
+  if (writesEndcard) TAGS.push('sig:endcard', 'sig:sfx:endcard');
+  // untagged legacy cues predate the attribution; only a pass that rewrites BOTH owners
+  // (i.e. `wrap`) can safely claim them.
+  if (writesLogos && writesEndcard) TAGS.push('sig:sfx');
+  if (TAGS.length) {
+    for (const t of doc.tracks) t.segments = (t.segments || []).filter(s => !TAGS.includes(s.desc || ''));
+    doc.tracks = doc.tracks.filter(t => !(t.name || '').startsWith('sig-') || (t.segments || []).length);
+  }
+
+  // Preset 3 leftover is a parts bin. Park it after a gap, then place Follow on the talking head.
+  if (context.projectDir) parkPresetLeftover(doc, context, op);
 
   const pending = [];
+  const editUs = contentEndUs(doc, context.projectDir);
 
   /* ---- logos ---- */
   for (const [i, l] of (op.logos || []).entries()) {
@@ -280,7 +298,7 @@ export function opSignature(doc, op, context = {}) {
     const requested = l.scale ?? rules.logoDefaultScale;
     const scale = logoScaleFor(px.width, px.height, requested,
       doc.canvas_config || { width: 1080, height: 1920 }, { width: tplW, height: tplH });
-    const remaining = S(doc.duration || 0) - (l.at ?? 0);
+    const remaining = S(editUs) - (l.at ?? 0);
     if (!(remaining > 0.35)) {
       result.logos.push({ brand: l.brand, at: l.at, skipped: 'past-end' });
       continue;
@@ -302,7 +320,7 @@ export function opSignature(doc, op, context = {}) {
     track.segments.push(seg);
     if (!op.noSfx) {
       const cue = ensureSfx(doc, rules.logoSfx, l.at - rules.logoSfxLeadSeconds, key);
-      if (cue) { cue.duration = Math.min(cue.duration, S(doc.duration || 0) - cue.at); pending.push(cue); }
+      if (cue) { cue.owner = 'logo'; cue.duration = Math.min(cue.duration, S(editUs) - cue.at); pending.push(cue); }
     }
     result.logos.push({ brand: l.brand, at: l.at, scale, hold, logo: l.logo });
   }
@@ -310,9 +328,9 @@ export function opSignature(doc, op, context = {}) {
   /* ---- endcard ---- */
   if (op.endcard) {
     const e = op.endcard;
-    // Work in microseconds: 96% of 52.366666s rounded to 3dp lands 334us past the end, and
-    // a segment one microsecond beyond draft duration fails validation.
-    const durUs = doc.duration || 0;
+    // Follow sits on the talking head, never on the parked Preset 3 leftover.
+    // 96% of 52.366666s rounded to 3dp used to land 334us past the end; stay in microseconds.
+    const durUs = editUs || doc.duration || 0;
     const atUs = e.at != null ? US(e.at) : Math.round(durUs * rules.endcard.atFractionOfDuration);
     const holdUs = e.hold != null ? US(e.hold) : Math.max(US(0.8), durUs - atUs);
     const at = S(atUs);
@@ -340,7 +358,7 @@ export function opSignature(doc, op, context = {}) {
     track.segments.push(seg);
     if (!op.noSfx) {
       const cue = ensureSfx(doc, rules.endcardSfx, at - rules.endcardSfxLeadSeconds, key);
-      if (cue) { cue.duration = Math.min(cue.duration, S(durUs) - cue.at); pending.push(cue); }
+      if (cue) { cue.owner = 'endcard'; cue.duration = Math.min(cue.duration, S(durUs) - cue.at); pending.push(cue); }
     }
     result.endcard = { text: style.text, at, hold };
   }
@@ -434,7 +452,7 @@ function sigAudio() {
       seg.source_timerange = { start: 0, duration: US(cue.duration) };
       seg.volume = 1;
       seg.last_nonzero_volume = 1;
-      seg.desc = 'sig:sfx';
+      seg.desc = cue.owner ? `sig:sfx:${cue.owner}` : 'sig:sfx';
       return seg;
     },
   };

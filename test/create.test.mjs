@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { readJson, stableJson } from '../src/core.mjs';
+import { readJson, stableJson, PRESET_PARK_GAP_US } from '../src/core.mjs';
 import { createProject, parseScenes } from '../src/create.mjs';
 
 /**
@@ -74,15 +74,16 @@ test('parseScenes reads ranges and source offsets, and rejects nonsense', () => 
   assert.throws(() => parseScenes('0:10,5:12'), /overlap/);
 });
 
-test('new clones the preset and slides its endcard in behind the scenes', () => {
+test('new clones the preset and parks its leftover after a gap, not as the ending', () => {
   const { root, media } = templateLibrary();
   const r = createProject('demo', opts({ root, media, scenes: '0:6,6:12,12:18' }));
   assert.equal(r.created, true);
-  assert.equal(r.duration, 26);                       // 18s of content + the 8s endcard
+  assert.equal(r.duration, (18_000_000 + PRESET_PARK_GAP_US + 8_000_000) / 1e6);
 
   const doc = activeDoc(r.project);
-  const endcard = doc.tracks.flatMap(t => t.segments).find(s => s.material_id === 'TPL-VIDEO');
-  assert.equal(endcard.target_timerange.start, 18_000_000, 'endcard starts right after the content');
+  const leftover = doc.tracks.flatMap(t => t.segments).find(s => s.material_id === 'TPL-VIDEO');
+  assert.equal(leftover.target_timerange.start, 18_000_000 + PRESET_PARK_GAP_US,
+    'preset leftover sits after a gap, not glued to the talking head');
   assert.equal(doc.tracks[r.contentTrack].segments.length, 3);
 });
 
@@ -105,7 +106,8 @@ test('new records a sidecar so later commands can skip the cloned preset', () =>
   const r = createProject('demo', opts({ root, media, scenes: '0:6' }));
   const side = readJson(path.join(r.project, '.capcutctl', 'created.json'));
   assert.equal(side.template, 'Preset 3');
-  assert.equal(side.preserved.start, 6_000_000);
+  assert.equal(side.preserved.start, 6_000_000 + PRESET_PARK_GAP_US);
+  assert.equal(side.contentEnd, 6_000_000);
 });
 
 test('a new project is a byte-for-byte duplicate apart from the name', () => {

@@ -125,6 +125,23 @@ test('a push-in never overwrites an existing zoom', () => {
   assert.equal(r.zooms[0].skipped, 'already keyframed');
 });
 
+test('Follow sits on the talking head, not on leftover preset clips after it', () => {
+  const d = doc();
+  d.duration = US(27);
+  d.tracks.push({
+    type: 'video', id: 'leftover', segments: [{
+      id: 'preset', material_id: 'CAM', extra_material_refs: [],
+      target_timerange: { start: US(20), duration: US(7) },
+      source_timerange: { start: 0, duration: US(7) },
+      desc: 'layout:endcard',
+      clip: { scale: { x: 1, y: 1 }, transform: { x: 0, y: 0 } },
+    }],
+  });
+  const r = opSignature(d, { endcard: { text: 'Follow' }, noSfx: true });
+  assert.ok(r.endcard.at < 20, `Follow at ${r.endcard.at}s landed on the leftover, not the talking head`);
+  assert.ok(r.endcard.at + r.endcard.hold <= 20.001, 'Follow must not spill onto the leftover');
+});
+
 test('the endcard lands inside the draft, never one microsecond past it', () => {
   const d = doc();
   d.duration = 52366666;                                    // the real rounding trap
@@ -270,4 +287,18 @@ test('every op gets a deterministic seed, not a whitelisted few', async () => {
   const c = doc();
   run(c, { endcard: { text: 'Follow' }, noSfx: true, __seed: 'other-seed' });
   assert.notDeepEqual(ids(c), ids(a));
+});
+
+test('zoom does not delete the endcard it never wrote', () => {
+  // 11 tracks in, 9 out: opSignature wiped every sig:* segment before writing anything,
+  // so `capcutctl zoom --auto` silently took the endcard and its Culin cue with it —
+  // and `doctor` stayed clean, because the file was still structurally valid.
+  const d = doc();
+  opSignature(d, { endcard: { text: 'Follow' } });
+  const endcards = () => d.tracks.flatMap(t => t.segments || [])
+    .filter(x => (x.desc || '').startsWith('sig:endcard')).length;
+  assert.equal(endcards(), 1, 'endcard was written');
+
+  opSignature(d, { zooms: [{ at: 10.4 }] });                 // zoom writes no endcard
+  assert.equal(endcards(), 1, 'endcard survives a zoom-only pass');
 });

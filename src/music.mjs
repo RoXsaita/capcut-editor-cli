@@ -5,6 +5,7 @@ import path from 'node:path';
 import { CapcutError, clone, uuid } from './core.mjs';
 import { geminiApiKey, loadEnv } from './env.mjs';
 import { pictureChanges, sfxPresets } from './polish.mjs';
+import { contentEndUs } from './add.mjs';
 
 const US = s => Math.round(s * 1e6);
 const S = us => us / 1e6;
@@ -244,18 +245,18 @@ function audioSegment(doc, materialId, startS, durationS, key, volume, desc) {
   return seg;
 }
 
-/** Earliest endcard / CTA start, or the draft end if none is present. */
-export function ctaBoundary(doc) {
-  const dur = S(doc.duration || 0);
+/** Earliest Follow/CTA start on the talking head, not the parked leftover. */
+export function ctaBoundary(doc, projectDir = null) {
   const starts = [];
   for (const t of doc.tracks || []) {
     for (const s of t.segments || []) {
-      if ((s.desc || '').includes('endcard') || t.name === 'sig-endcard') {
+      if ((s.desc || '') === 'sig:endcard' || t.name === 'sig-endcard') {
         starts.push(S(s.target_timerange.start));
       }
     }
   }
-  return starts.length ? Math.min(...starts) : dur;
+  if (starts.length) return Math.min(...starts);
+  return S(contentEndUs(doc, projectDir));
 }
 
 /**
@@ -274,7 +275,7 @@ export function opMusic(doc, op, context = {}) {
   const fadeOut = op.fadeOut ?? 1.2;
   const srcOffset = Math.max(0, op.srcOffset ?? 0);
   const at = Math.max(0, op.at ?? 0);
-  const until = op.until != null ? Number(op.until) : ctaBoundary(doc);
+  const until = op.until != null ? Number(op.until) : ctaBoundary(doc, context.projectDir);
   const durFile = op.duration ?? probeAudioDuration(file);
   const play = Math.min(Math.max(0.2, until - at), Math.max(0.2, durFile - srcOffset));
 

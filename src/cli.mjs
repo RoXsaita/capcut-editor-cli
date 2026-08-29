@@ -43,8 +43,9 @@ Usage:
   capcutctl sync --project NAME_OR_PATH [--dry-run] [--force-running] [--no-backup]
   capcutctl apply --project NAME_OR_PATH --spec FILE [--dry-run] [--force-running] [--no-backup]
   capcutctl add --project NAME --media FILE --at S --dur S --track NAME|N
-                [--src S] [--cover IN-OUT] [--volume 0] [--desc TEXT] [--localize]
-  capcutctl replace-media --project NAME --file FILE --at S --track NAME|N [--retime] [--localize]
+                [--src S] [--cover IN-OUT] [--volume 0] [--desc TEXT] [--no-localize]
+  capcutctl replace-media --project NAME --file FILE --at S --track NAME|N [--retime] [--no-localize]
+  capcutctl localize --project NAME   — copy outside videos into the project (fixes Link media)
   capcutctl trim --project NAME --at S --track NAME|N --src IN-OUT | --start S --dur S
   capcutctl shift --project NAME --at S --track NAME|N --by SECONDS
   capcutctl remove --project NAME --at S --track NAME|N
@@ -91,8 +92,9 @@ Layouts are exact, measured geometry (presets/layouts.json) — not judgement:
   circle        subject as the upper-left circular avatar, inside the white ring
   background    finds every circle scene and builds the blurred backdrop under it
 
-New projects clone "Preset 3" by default: the branded endcard is carried over and
-slid to sit immediately after your scenes. Use --blank for an empty timeline.
+New projects clone "Preset 3" by default: leftover preset clips are parked 30s after
+the talking head (a parts bin — do not delete them). Follow/CTA is written on the
+talking head, never on that leftover. Use --blank for an empty timeline.
 
 Safety defaults:
   • refuses writes while CapCut is running
@@ -112,7 +114,7 @@ export function parseArgs(argv) {
     const key = token.slice(2).replace(/-([a-z])/g, (_, char) => char.toUpperCase());
     if (['json', 'dryRun', 'forceRunning', 'noBackup', 'help', 'noOverlay', 'blank', 'includeTemplate', 'newTimelineId',
          'transcript', 'noTransitions', 'noSeam', 'auto', 'plan', 'noSfx', 'noZoom', 'retime', 'localize',
-         'motivated', 'regen', 'music', 'noMusic', 'polish'].includes(key)) result[key] = true;
+         'noLocalize', 'motivated', 'regen', 'music', 'noMusic', 'polish'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
       result[key] = argv[++i];
@@ -253,6 +255,7 @@ export async function main(argv) {
       canvas: args.canvas, fps: args.fps, blank: Boolean(args.blank),
       width: args.width, height: args.height, duration: args.duration,
       newTimelineId: Boolean(args.newTimelineId),
+      localize: !args.noLocalize,
       dryRun: Boolean(args.dryRun), forceRunning: Boolean(args.forceRunning)
     }), true);
   }
@@ -266,7 +269,7 @@ export async function main(argv) {
   const NEEDS_PROJECT = new Set([
     'inspect', 'doctor', 'snapshot', 'history', 'restore', 'sync', 'scenes',
     'pace', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
-    'replace-media', 'trim', 'shift', 'remove', 'volume', 'fade', 'keyframe',
+    'replace-media', 'localize', 'trim', 'shift', 'remove', 'volume', 'fade', 'keyframe',
     'preview', 'diff', 'apply', 'timeline', 'finish', 'music'
   ]);
   if (!NEEDS_PROJECT.has(command)) throw new CapcutError(`Unknown command: ${command}\n\n${HELP}`, { exitCode: 2 });
@@ -511,7 +514,7 @@ export async function main(argv) {
       width: probe.width,
       height: probe.height,
       mediaDuration: probe.duration,
-      localize: Boolean(args.localize)
+      localize: !args.noLocalize
     };
     const result = applySpec(projectDir, { version: 1, name: 'add', operations: [op] }, options);
     const added = (result.result || []).find(g => g.group === 'root')?.operations?.[0];
@@ -560,12 +563,15 @@ export async function main(argv) {
       selector,
       path: path.resolve(file),
       retime: Boolean(args.retime),
-      localize: Boolean(args.localize),
+      localize: !args.noLocalize,
       width: probe.width,
       height: probe.height,
       mediaDuration: probe.duration
     };
     return print(applySpec(projectDir, { version: 1, name: 'replace-media', operations: [op] }, options), true);
+  }
+  if (command === 'localize') {
+    return print(applySpec(projectDir, { version: 1, name: 'localize', operations: [{ op: 'media.localize' }] }, options), true);
   }
   if (command === 'trim' || command === 'shift' || command === 'remove' || command === 'volume' || command === 'keyframe' || command === 'fade') {
     const { loadProject } = await import('./core.mjs');

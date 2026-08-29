@@ -75,6 +75,40 @@ test('pictureChanges ignores A-roll splices over the same B-roll desc', () => {
   assert.equal(times.includes(17), false, 'same files list at 17 must not be a picture change');
 });
 
+test('a reframed clip of the SAME file and desc is a new shot', () => {
+  // grok-build regression: three consecutive slices of one screen recording shared a
+  // desc, so `path|desc` read them as one continuous shot and --motivated dropped the
+  // seams. Reframing is what the viewer actually sees change.
+  const d = grokLike();
+  const punched = { scale: { x: 5, y: 5 }, transform: { x: -1.02, y: 0.28 } };
+  d.tracks[1].segments[3].clip = punched;   // 13-17 reframed ...
+  d.tracks[1].segments[4].clip = punched;   // ... and 17-20 holds that same framing
+  const times = pictureChanges(d, { minGap: 0.5 }).map(h => h.t);
+  assert.ok(times.includes(13), `reframe at 13 is a picture change: ${times}`);
+  assert.equal(times.includes(17), false, 'un-reframed slice at 17 still is not');
+});
+
+test('a sweep means the layout class changed, not that the seam bar was re-cut', () => {
+  // The seam bar is re-cut at every split-screen B-roll boundary. Testing for a
+  // `layout:seam-bar` segment START made every such cut claim to be a layout change and
+  // take a Horizontal Triptych — 8 of 13 seams (62%) against a ~45% ceiling.
+  const d = grokLike();
+  d.tracks[3].segments = [
+    seg(0, 6, { material_id: 'PLATE', desc: 'layout:seam-bar' }),
+    seg(6, 4, { material_id: 'PLATE', desc: 'layout:seam-bar' }),
+    seg(10, 10, { material_id: 'PLATE', desc: 'layout:seam-bar' }),
+    seg(24, 6, { material_id: 'PLATE', desc: 'layout:seam-bar' }),
+  ];
+  const plan = planPolish(d, { motivated: true, minGap: 0.5 });
+  const sweeps = plan.filter(p => p.pair === 'sweep' || p.pair === 'sweepL');
+  assert.ok(sweeps.length < plan.length,
+    `not every seam is a sweep: ${plan.map(p => `${p.t}:${p.pair}`)}`);
+  for (const s of sweeps) {
+    assert.ok(s.t === 20 || s.t === 24,
+      `sweep at ${s.t} is a real layout change (full-face hole is 20-24)`);
+  }
+});
+
 test('pictureChanges treats Split → Circle as a layout-class change', () => {
   const d = grokLike();
   d.materials.common_mask = [

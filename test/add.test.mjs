@@ -78,6 +78,42 @@ const addOp = (f, extra = {}) => ({
   ...extra
 });
 
+test('localize copies two screen.mp4 takes under unique parent-prefixed names', () => {
+  const f = fixture();
+  const dirA = path.join(f.temp, 'Hermes-20260829-123224');
+  const dirB = path.join(f.temp, 'Google-Chrome-20260829-124818');
+  fs.mkdirSync(dirA);
+  fs.mkdirSync(dirB);
+  const a = path.join(dirA, 'screen.mp4');
+  const b = path.join(dirB, 'screen.mp4');
+  fs.writeFileSync(a, 'hermes-bytes-xxxxxxxxxxxxxxx');
+  fs.writeFileSync(b, 'chrome-bytes');
+  applySpec(f.project, { version: 1, operations: [
+    { ...addOp(f, { media: a, at: 1, duration: 1, src: 0, desc: 'hermes' }), localize: true, mediaDuration: 10_000_000 },
+    { ...addOp(f, { media: b, at: 3, duration: 1, src: 0, desc: 'chrome' }), localize: true, mediaDuration: 10_000_000 }
+  ] }, { forceRunning: true });
+  const doc = readJson(path.join(f.project, 'draft_info.json'));
+  const broll = doc.tracks.find(t => t.name === 'broll').segments;
+  const paths = broll.map(s => doc.materials.videos.find(m => m.id === s.material_id).path);
+  assert.equal(paths.length, 2);
+  assert.notEqual(paths[0], paths[1]);
+  assert.match(paths[0], /Resources\/CapcutctlMedia\/Hermes-20260829-123224__screen\.mp4$/);
+  assert.match(paths[1], /Resources\/CapcutctlMedia\/Google-Chrome-20260829-124818__screen\.mp4$/);
+  assert.equal(fs.readFileSync(paths[0], 'utf8'), 'hermes-bytes-xxxxxxxxxxxxxxx');
+  assert.equal(fs.readFileSync(paths[1], 'utf8'), 'chrome-bytes');
+});
+
+test('media.localize relinks every outside video into the project', () => {
+  const f = fixture();
+  applySpec(f.project, { version: 1, operations: [addOp(f)] }, { forceRunning: true });
+  applySpec(f.project, { version: 1, operations: [{ op: 'media.localize' }] }, { forceRunning: true });
+  const doc = readJson(path.join(f.project, 'draft_info.json'));
+  const broll = doc.tracks.find(t => t.name === 'broll').segments[0];
+  const mat = doc.materials.videos.find(m => m.id === broll.material_id);
+  assert.match(mat.path, /Resources\/CapcutctlMedia\//);
+  assert.equal(fs.existsSync(mat.path), true);
+});
+
 test('add places a muted clip on a new named overlay below the face, ids match across documents', () => {
   const f = fixture();
   const result = applySpec(f.project, { version: 1, name: 'add', operations: [addOp(f)] }, { forceRunning: true });

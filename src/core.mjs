@@ -10,7 +10,7 @@ import { opPace } from './pace.mjs';
 import { opSignature } from './signature.mjs';
 import {
   opClipAdd, opReplaceMedia, opScaleKeyframe,
-  opClipShift, opClipTrim, opClipFade, commitPreservedSlides
+  opClipShift, opClipTrim, opClipFade, opLocalizeAll, commitPreservedSlides
 } from './add.mjs';
 import { opMusic } from './music.mjs';
 
@@ -20,6 +20,9 @@ export const DEFAULT_ROOT = path.join(
 );
 
 export const LIVE_FILE_NAMES = ['draft_info.json', 'draft_info.json.bak', 'template-2.tmp'];
+
+/** Empty timeline between the real edit and the cloned Preset 3 leftover. The leftover is a parts bin, not the ending. */
+export const PRESET_PARK_GAP_US = 30_000_000;
 
 const PRESET_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'presets');
 
@@ -205,6 +208,7 @@ export function validateDocument(doc, { file = '<memory>', checkFiles = true } =
   const seenSegmentIds = new Set();
   const seenMaterialIds = new Map();
   const seenTrackIds = new Set();
+  const videoBasenames = new Map();
   for (const [kind, values] of Object.entries(doc.materials || {})) {
     if (!Array.isArray(values)) continue;
     for (const value of values) {
@@ -222,7 +226,18 @@ export function validateDocument(doc, { file = '<memory>', checkFiles = true } =
       if (checkFiles && typeof mediaPath === 'string' && mediaPath.startsWith('/') && !fs.existsSync(mediaPath)) {
         issues.push(issue('error', 'MISSING_MEDIA', `Missing media file: ${mediaPath}`, { file, id: value.id, path: mediaPath }));
       }
+      if (kind === 'videos' && typeof mediaPath === 'string' && mediaPath.startsWith('/')) {
+        const name = path.basename(mediaPath);
+        if (!videoBasenames.has(name)) videoBasenames.set(name, new Set());
+        videoBasenames.get(name).add(mediaPath);
+      }
     }
+  }
+  for (const [name, paths] of videoBasenames) {
+    if (paths.size < 2) continue;
+    issues.push(issue('warning', 'MEDIA_BASENAME_COLLISION',
+      `CapCut cannot tell ${paths.size} files all named ${name} apart. Run capcutctl localize --project NAME.`,
+      { file, name, paths: [...paths] }));
   }
 
   for (const entry of allSegments(doc)) {
@@ -611,11 +626,39 @@ function opMaskPatch(doc, op) {
   return { changed };
 }
 
+export const LOCAL_MEDIA_DIR = path.join('Resources', 'CapcutctlMedia');
+
+const sanitizeName = s => String(s || '').replace(/[^a-zA-Z0-9._-]/g, '_') || 'media';
+
+export function isLocalMedia(projectDir, mediaPath) {
+  if (!projectDir || typeof mediaPath !== 'string') return false;
+  const root = path.resolve(projectDir);
+  const resolved = path.resolve(mediaPath);
+  return resolved === root || resolved.startsWith(root + path.sep);
+}
+
 export function localizeMedia(projectDir, source, fileName, { dryRun = false } = {}) {
+  source = path.resolve(source);
   if (!fs.existsSync(source)) throw new CapcutError(`Source media does not exist: ${source}`, { code: 'MISSING_SOURCE' });
-  const mediaDir = path.join(projectDir, 'Resources', 'CapcutctlMedia');
-  const safe = (fileName || path.basename(source)).replace(/[^a-zA-Z0-9._-]/g, '_');
-  const destination = path.join(mediaDir, safe);
+  const mediaDir = path.join(projectDir, LOCAL_MEDIA_DIR);
+  if (isLocalMedia(projectDir, source)) return source;
+
+  const base = sanitizeName(fileName || path.basename(source));
+  const parent = sanitizeName(path.basename(path.dirname(source)));
+  // rl2 writes every take as screen.mp4 — basename alone would collide and CapCut
+  // then cannot tell three files named screen.mp4 apart in its "Link media" dialog.
+  let safe = parent && parent !== '_' ? `${parent}__${base}` : base;
+  let destination = path.join(mediaDir, safe);
+  if (fs.existsSync(destination) && path.resolve(destination) !== source) {
+    const a = fs.statSync(source);
+    const b = fs.statSync(destination);
+    if (a.size !== b.size) {
+      const tag = crypto.createHash('sha1').update(source).digest('hex').slice(0, 8);
+      const ext = path.extname(base);
+      safe = `${parent}__${path.basename(base, ext)}__${tag}${ext}`;
+      destination = path.join(mediaDir, safe);
+    }
+  }
   if (!dryRun) {
     fs.mkdirSync(mediaDir, { recursive: true });
     if (path.resolve(source) !== path.resolve(destination)) fs.copyFileSync(source, destination);
@@ -715,6 +758,7 @@ export function applyOperations(doc, operations, context) {
     else if (op.op === 'signature') result = opSignature(doc, op, context);
     else if (op.op === 'clip.add') result = opClipAdd(doc, op, context);
     else if (op.op === 'replace.media') result = opReplaceMedia(doc, op, context);
+    else if (op.op === 'media.localize') result = opLocalizeAll(doc, op, context);
     else if (op.op === 'keyframe.scale') result = opScaleKeyframe(doc, op, context);
     else if (op.op === 'clip.shift') result = opClipShift(doc, op, context);
     else if (op.op === 'clip.trim') result = opClipTrim(doc, op, context);

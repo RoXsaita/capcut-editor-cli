@@ -82,7 +82,10 @@ export function finishScorecard(doc, { projectDir = null, width = 64 } = {}) {
     .filter(s => (s.desc || '').startsWith('sig:logo'))
     .map(s => ({ at: r2(S(s.target_timerange.start)), desc: s.desc })));
   const endcard = (doc.tracks || []).flatMap(t => (t.segments || [])
-    .filter(s => (s.desc || '').includes('endcard') || t.name === 'sig-endcard')
+    // the endcard CARD, not its paired cue: `sig:sfx:endcard` also contains "endcard",
+    // and a substring match counted one endcard as two.
+    .filter(s => (s.desc || '') === 'sig:endcard'
+              || (t.name === 'sig-endcard' && !(s.desc || '').startsWith('sig:sfx')))
     .map(s => ({ at: r2(S(s.target_timerange.start)), desc: s.desc || t.name })));
   const timeline = renderTimeline(doc, { width });
   return {
