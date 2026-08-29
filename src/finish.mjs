@@ -106,7 +106,7 @@ export function finishScorecard(doc, { projectDir = null, width = 64 } = {}) {
     laws: [
       'Transition only on a picture change (B-roll shot or layout class), never on an A-roll splice over the same screen.',
       'Do not recut speech to a beat. Generate and offset the bed so beats land on picture changes.',
-      'Music is background: ~0.16, fade in, out before the CTA. Captions happen outside CapCut.',
+      'Music is background: ~0.08, fade in, out before the CTA. Captions happen outside CapCut.',
     ],
   };
 }

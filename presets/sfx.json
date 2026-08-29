@@ -5,6 +5,10 @@
   "sfxLeadSeconds": 0.14,
   "note": "the sound starts BEFORE the visual: median lead measured at 0.14s across 20 paired cuts",
   "volume": 1.0,
+  "calloutSfx": [
+   "Enter / click / select sound (picon)(890901)",
+   "Enter / Click / Select sound"
+  ],
   "transitionDurationSeconds": [
    0.2,
    0.33
@@ -59,6 +63,7 @@
   "impact": "Sundon: Impact sound",
   "typing": "Typing sound (keyboard x 3p) 1 minute(1006556)",
   "enter": "Enter / click / select sound (picon)(890901)",
+  "select": "Enter / Click / Select sound",
   "idea": "Culin. It looks like a light bulb mark is on the head."
  },
  "transitionTemplates": {

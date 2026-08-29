@@ -5,7 +5,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { opLayoutApply, opLayoutBackground, opLayoutBroll } from './layouts.mjs';
-import { opPolish, principalTrack } from './polish.mjs';
+import { opPolish, opCalloutSfx, principalTrack } from './polish.mjs';
 import { opPace } from './pace.mjs';
 import { opSignature } from './signature.mjs';
 import {
@@ -710,6 +710,7 @@ export function applyOperations(doc, operations, context) {
     else if (op.op === 'layout.background') result = opLayoutBackground(doc, op, context);
     else if (op.op === 'layout.broll') result = opLayoutBroll(doc, op, context);
     else if (op.op === 'polish') result = opPolish(doc, op, context);
+    else if (op.op === 'polish.callouts') result = opCalloutSfx(doc, op);
     else if (op.op === 'pace') result = opPace(doc, op, context);
     else if (op.op === 'signature') result = opSignature(doc, op, context);
     else if (op.op === 'clip.add') result = opClipAdd(doc, op, context);

@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import path from 'node:path';
 import { CapcutError, clone, uuid, allSegments, loadPreset } from './core.mjs';
 
 export function sfxPresets() {
@@ -156,7 +157,7 @@ function makeTransition(doc, name, durationS, key) {
  * vocal_separations — there is no audio_fades key, and guessing one produces a segment
  * CapCut will not play.
  */
-function audioSegment(doc, materialId, startS, durationS, key, volume) {
+function audioSegment(doc, materialId, startS, durationS, key, volume, desc = 'polish:sfx') {
   const p = sfxPresets();
   const seg = clone(p.audioSegmentTemplate);
   const refs = [];
@@ -174,7 +175,7 @@ function audioSegment(doc, materialId, startS, durationS, key, volume) {
   seg.source_timerange = { start: 0, duration: US(durationS) };
   seg.volume = volume;
   seg.last_nonzero_volume = volume;
-  seg.desc = 'polish:sfx';
+  seg.desc = desc;
   return seg;
 }
 
@@ -300,8 +301,11 @@ export function sliceAt(doc, track, t, key) {
 
 /**
  * Choose a pair per cut. His grammar, measured: a sweep for a layout change, a flash
- * for a jump inside a scene, a glitch when the machine does something, a coin on the
- * payoff. Deterministic — the same timeline always gets the same treatment.
+ * for a jump inside a scene, a glitch when the machine does something. Deterministic —
+ * the same timeline always gets the same treatment.
+ *
+ * Coin/cashier is a success *accent*, not a scene-transition. Wiring it to the last
+ * cut made the CTA splice ding like a slot machine.
  */
 export function planPolish(doc, opts = {}) {
   const p = sfxPresets();
@@ -315,26 +319,21 @@ export function planPolish(doc, opts = {}) {
     }
     cuts.sort((x, y) => x.t - y.t);
   }
-  const duration = (doc.duration || 0) / 1e6;
   const layoutChange = t => allSegments(doc).some(({ segment }) =>
     (segment.desc || '') === 'layout:seam-bar'
     && Math.abs(segment.target_timerange.start / 1e6 - t) < 0.05);
 
-  // The coin is the payoff and there is exactly one payoff: the last cut into the CTA.
-  // Firing it on everything in the closing stretch gave four coins in a row.
-  const last = cuts.length ? cuts.at(-1).t : null;
   const rotate = ['flash', 'glitch', 'whiteflash', 'glitch2', 'flash', 'sweepL'];
   const plan = [];
   let rot = 0, prev = null, sweepAlt = 0;
   for (const c of cuts) {
     if (opts.only && !opts.only.includes(Math.round(c.t * 100) / 100)) continue;
     let name;
-    if (c.t === last && duration > 20) name = 'payoff';
     // A layout change gets a sweep, but ALTERNATE the two sweeps. `sweep` used to be exempt
     // from the never-twice-running rule below, and a video whose every scene changes layout
     // then got the identical Horizontal Triptych + Woosh on every cut — 18 of 24 seams in
     // GrokBuild-20260825. Identical seams are the loudest tell that a machine made the edit.
-    else if (layoutChange(c.t)) name = ['sweep', 'sweepL'][sweepAlt++ % 2];
+    if (layoutChange(c.t)) name = ['sweep', 'sweepL'][sweepAlt++ % 2];
     else { name = rotate[rot++ % rotate.length]; }
     if (name === prev) name = name === 'sweep' ? 'sweepL'
                             : name === 'sweepL' ? 'sweep'
@@ -343,6 +342,76 @@ export function planPolish(doc, opts = {}) {
     plan.push({ ...c, pair: name, ...p.pairs[name] });
   }
   return plan;
+}
+
+/**
+ * Highlight GIFs/PNGs he drops on a UI element: rectangles, arrows, circles.
+ * Not the split-screen indigo bar, not the circle-layout white ring, not the logo.
+ */
+export function isCalloutPlate(material, segment) {
+  const desc = segment?.desc || '';
+  if (desc.startsWith('layout:') || desc.startsWith('sig:')) return false;
+  const file = path.basename(material?.path || '').toLowerCase();
+  if (!file) return false;
+  if (file.includes('indigo')) return false;
+  if (file.includes('suheilai-circle-white')) return false;
+  return /arrow|rectangle|^rect-|\bcircle\b/.test(file);
+}
+
+export function calloutPlates(doc, { minGap = 0.15 } = {}) {
+  const videos = new Map((doc.materials?.videos || []).map(m => [m.id, m]));
+  const hits = [];
+  for (const { segment, track } of allSegments(doc)) {
+    if (track.type !== 'video') continue;
+    const m = videos.get(segment.material_id);
+    if (!isCalloutPlate(m, segment)) continue;
+    const tr = segment.target_timerange;
+    if (!tr) continue;
+    hits.push({ t: r2(tr.start / 1e6), file: path.basename(m.path || ''), id: segment.id });
+  }
+  hits.sort((a, b) => a.t - b.t);
+  const out = [];
+  for (const h of hits) {
+    if (out.length && h.t - out.at(-1).t < minGap) continue;
+    out.push(h);
+  }
+  return out;
+}
+
+/**
+ * Enter/click/select on each callout appearance, alternating the two variants.
+ * Coincident with the picture — these are clicks, not seam wooshes.
+ */
+export function opCalloutSfx(doc, op = {}) {
+  SEED = op.__seed || SEED || null;
+  const p = sfxPresets();
+  const names = p.rules?.calloutSfx || [
+    p.accents?.enter, p.accents?.select,
+  ].filter(Boolean);
+  if (!names.length) {
+    throw new CapcutError('no callout SFX configured in presets/sfx.json', { code: 'UNKNOWN_SFX', exitCode: 2 });
+  }
+  const volume = op.volume ?? p.rules.volume ?? 1;
+  for (const track of doc.tracks) {
+    track.segments = (track.segments || []).filter(s => (s.desc || '') !== 'polish:callout');
+  }
+  const lane = ensureAudioTrack(doc, 'polish-sfx');
+  const plates = calloutPlates(doc);
+  const cues = [];
+  const maxEnd = (doc.duration || 0) / 1e6;
+  for (const [i, plate] of plates.entries()) {
+    const name = names[i % names.length];
+    const audioId = ensureAudio(doc, name);
+    const tpl = p.audioTemplates[name];
+    const dur = Math.min((tpl.duration || US(0.5)) / 1e6, 1.2);
+    if (plate.t >= maxEnd) continue;
+    const clipped = Math.max(0.05, Math.min(dur, maxEnd - plate.t));
+    lane.segments.push(audioSegment(doc, audioId, plate.t, clipped, `callout:${i}:${plate.t}`, volume, 'polish:callout'));
+    cues.push({ t: plate.t, sfx: name, file: plate.file });
+  }
+  lane.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
+  doc.tracks.forEach((t, i) => (t.segments || []).forEach(s => { s.track_render_index = i; }));
+  return { changed: cues.length, sfx: cues.length, cues };
 }
 
 /**
@@ -438,11 +507,12 @@ export function opPolish(doc, op, context = {}) {
     lane.segments.push(audioSegment(doc, audioId, start, clipped, `${i}:${cue.t}`, volume));
   }
   lane.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
-  doc.tracks.forEach((t, i) => (t.segments || []).forEach(s => { s.track_render_index = i; }));
+  const callouts = opCalloutSfx(doc, { volume, __seed: op.__seed });
   return { changed: plan.length, transitions, removedTransitions: removed, sfx: plan.length,
            principalTrack: principal ? principal.index : null,
            variety: seamVariety(plan),
            sliced: slices.split, alreadyCut: slices.existing,
+           callouts: callouts.cues,
            ...(slices.refused.length ? { keyframedSoNotSliced: slices.refused } : {}),
            ...(skipped.length ? { noTransition: skipped } : {}),
            cues: plan.map(c => ({ t: c.t, pair: c.pair, transition: c.transition, sfx: c.sfx })) };

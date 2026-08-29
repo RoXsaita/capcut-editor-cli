@@ -73,13 +73,14 @@ Usage:
   capcutctl polish              --project NAME_OR_PATH [--lead 0.14] [--track N] [--motivated] [--dry-run]
                                 transitions ride the principal (talking-head) track; it is sliced to fit
                       — his transitions + matching SFX. --motivated: only on picture
-                        changes (B-roll shot or layout class), not every A-roll splice
+                        changes (B-roll shot or layout class), not every A-roll splice.
+                        Also clicks every rectangle/arrow/circle callout (Enter / click / select).
   capcutctl timeline            --project NAME [--width 64]   — ASCII dump of the stacked timeline
   capcutctl finish              --project NAME [--plan] [--music] [--polish] [--regen]
                                 scorecard + ASCII. --plan is read-only. --music generates
                                 a Lyria bed timed to picture changes and beat-aligned.
                                 --polish runs motivated polish. Voice is never recut.
-  capcutctl music               --project NAME [--plan] [--regen] [--volume 0.16]
+  capcutctl music               --project NAME [--plan] [--regen] [--volume 0.08]
                                 generate / place the instrumental bed (used by finish --music)
   capcutctl layout auto         --project NAME_OR_PATH [--plan]   — split-screen where B-roll covers, full face where it does not
   capcutctl layout audit        --project NAME_OR_PATH            — what each clip is vs what it should be
@@ -421,10 +422,10 @@ export async function main(argv) {
     }
     const ops = [];
     if (wantMusic) {
-      const { prepareMusic } = await import('./music.mjs');
+      const { prepareMusic, DEFAULT_MUSIC_VOLUME } = await import('./music.mjs');
       const prepared = await prepareMusic(projectDir, doc, {
         regen: Boolean(args.regen),
-        volume: args.volume != null ? Number(args.volume) : 0.16,
+        volume: args.volume != null ? Number(args.volume) : DEFAULT_MUSIC_VOLUME,
         prompt: args.prompt || undefined,
       });
       const off = prepared.align?.offset || 0;

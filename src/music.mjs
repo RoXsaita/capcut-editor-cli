@@ -9,6 +9,7 @@ import { pictureChanges, sfxPresets } from './polish.mjs';
 const US = s => Math.round(s * 1e6);
 const S = us => us / 1e6;
 const r3 = n => Math.round(n * 1000) / 1000;
+export const DEFAULT_MUSIC_VOLUME = 0.08;
 
 let SEED = null;
 function mint(key) {
@@ -268,7 +269,7 @@ export function opMusic(doc, op, context = {}) {
   if (!file || !fs.existsSync(file)) {
     throw new CapcutError(`music file missing: ${file || '(none)'}`, { code: 'MUSIC_MISSING', exitCode: 2 });
   }
-  const volume = op.volume ?? 0.16;
+  const volume = op.volume ?? DEFAULT_MUSIC_VOLUME;
   const fadeIn = op.fadeIn ?? 0.4;
   const fadeOut = op.fadeOut ?? 1.2;
   const srcOffset = Math.max(0, op.srcOffset ?? 0);
@@ -330,7 +331,7 @@ export function opMusic(doc, op, context = {}) {
   };
 }
 
-export async function prepareMusic(projectDir, doc, { regen = false, volume = 0.16, prompt: override } = {}) {
+export async function prepareMusic(projectDir, doc, { regen = false, volume = DEFAULT_MUSIC_VOLUME, prompt: override } = {}) {
   const hits = pictureChanges(doc);
   const prompt = override || musicPrompt(doc, { hits });
   const hash = promptHash(prompt);

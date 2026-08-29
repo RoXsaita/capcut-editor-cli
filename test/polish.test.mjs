@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { principalTrack, sliceAt, planPolish, seamVariety } from '../src/polish.mjs';
+import { principalTrack, sliceAt, planPolish, seamVariety, isCalloutPlate, calloutPlates, opCalloutSfx } from '../src/polish.mjs';
 
 const US = s => Math.round(s * 1e6);
 const seg = (start, dur, srcStart = 0, extra = {}) => ({
@@ -150,6 +150,60 @@ test('a layout change on every cut still alternates its sweep', () => {
       `cut ${i} at ${plan[i].t}s repeats "${plan[i].pair}"`);
   }
   assert.ok(new Set(plan.map(c => c.pair)).size >= 2);
+});
+
+test('the last cut is a normal seam, not a cashier ding', () => {
+  const d = everySceneChangesLayout(12); // 24s, would have tripped the old duration>20 payoff
+  const plan = planPolish(d);
+  assert.ok(plan.length >= 2);
+  assert.notEqual(plan.at(-1).pair, 'payoff');
+  assert.equal(/cashier/i.test(plan.at(-1).sfx || ''), false);
+});
+
+test('isCalloutPlate matches arrows/rects/circles and skips layout plates', () => {
+  const seg = {};
+  assert.equal(isCalloutPlate({ path: '/x/rect-16-9-1080x608.gif' }, seg), true);
+  assert.equal(isCalloutPlate({ path: '/x/rectangle (1).gif' }, seg), true);
+  assert.equal(isCalloutPlate({ path: '/x/arrow (1).gif' }, seg), true);
+  assert.equal(isCalloutPlate({ path: '/x/circle-1080x1080.gif' }, seg), true);
+  assert.equal(isCalloutPlate({ path: '/x/suheilai-rect-indigo-1080x1920 (2).png' }, seg), false);
+  assert.equal(isCalloutPlate({ path: '/x/suheilai-circle-white-1080x1920.png' }, seg), false);
+  assert.equal(isCalloutPlate({ path: '/x/grok.png' }, { desc: 'sig:logo' }), false);
+  assert.equal(isCalloutPlate({ path: '/x/rect-16-9-1080x608.gif' }, { desc: 'layout:seam-bar' }), false);
+});
+
+test('opCalloutSfx places alternating enter/select clicks on callout appearances', () => {
+  const d = {
+    duration: US(30),
+    materials: {
+      videos: [
+        { id: 'M', type: 'video', path: '/cam.mp4' },
+        { id: 'R', type: 'gif', path: '/Users/roxsa/Downloads/rect-16-9-1080x608.gif' },
+        { id: 'A', type: 'gif', path: '/Users/roxsa/Downloads/arrow (1).gif' },
+        { id: 'BAR', type: 'photo', path: '/Users/roxsa/Downloads/suheilai-rect-indigo-1080x1920 (2).png' },
+      ],
+      audios: [],
+    },
+    tracks: [
+      track('video', [seg(0, 30, 0)]),
+      track('video', [
+        { ...seg(4, 2), id: 'rect', material_id: 'R' },
+        { ...seg(10, 2), id: 'arrow', material_id: 'A' },
+        { ...seg(0, 8), id: 'bar', material_id: 'BAR', desc: 'layout:seam-bar' },
+      ]),
+    ],
+  };
+  assert.deepEqual(calloutPlates(d).map(c => c.t), [4, 10]);
+  const r = opCalloutSfx(d, { __seed: 'CALLOUT' });
+  assert.equal(r.changed, 2);
+  assert.equal(r.cues[0].sfx, 'Enter / click / select sound (picon)(890901)');
+  assert.equal(r.cues[1].sfx, 'Enter / Click / Select sound');
+  const lane = d.tracks.find(t => t.name === 'polish-sfx');
+  assert.equal(lane.segments.length, 2);
+  assert.equal(lane.segments[0].desc, 'polish:callout');
+  assert.equal(lane.segments[0].target_timerange.start, US(4));
+  opCalloutSfx(d, { __seed: 'CALLOUT' });
+  assert.equal(lane.segments.length, 2, 're-run replaces rather than stacks');
 });
 
 test('seamVariety reports a lopsided seam vocabulary without enforcing it', () => {
