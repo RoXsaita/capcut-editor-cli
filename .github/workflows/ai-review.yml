@@ -1,0 +1,101 @@
+name: Codex PR review
+
+on:
+  # The workflow never checks out or executes PR code. It reviews API-fetched data in a read-only,
+  # networkless sandbox, then publishes through a separate least-privilege job.
+  pull_request_target: # zizmor: ignore[dangerous-triggers] controlled review-data boundary
+    types: [opened, reopened, synchronize, ready_for_review, labeled]
+
+permissions: {}
+
+concurrency:
+  group: codex-review-${{ github.repository }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: Review pull request
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.actor != 'dependabot[bot]' &&
+      (
+        contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) ||
+        contains(github.event.pull_request.labels.*.name, 'ai-review-approved')
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      final-message: ${{ steps.codex.outputs.final-message }}
+    steps:
+      # pull_request_target keeps this workflow and checkout on the trusted base revision.
+      # PR code is fetched through the GitHub API as inert review data and is never executed.
+      - name: Check out trusted base revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build read-only review bundle
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const prepare = require("./.github/scripts/prepare-review.cjs");
+            await prepare({ github, context, core });
+
+      - name: Verify OpenAI API key is configured
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "Repository secret OPENAI_API_KEY is not configured." >&2
+            exit 1
+          fi
+
+      - name: Run defect-first Codex review
+        id: codex
+        uses: openai/codex-action@86365089eb2b84e0a8fb0717b304f8bdcb13b20e # v1.12
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: .github/codex/prompts/review.md
+          output-schema-file: .github/codex/review-output.schema.json
+          output-file: codex-review.json
+          model: gpt-5.6-luna
+          effort: max
+          codex-version: 0.150.1
+          codex-args: '["--ephemeral", "--ignore-user-config"]'
+          permission-profile: ":read-only"
+          safety-strategy: drop-sudo
+          allow-users: "*"
+
+  publish:
+    name: Publish review feedback
+    needs: review
+    if: always() && needs.review.result != 'cancelled' && needs.review.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Check out trusted publishing code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - name: Update summary and inline comments
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          REVIEW_JOB_RESULT: ${{ needs.review.result }}
+          CODEX_RESULT: ${{ needs.review.outputs.final-message }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const publish = require("./.github/scripts/publish-review.cjs");
+            await publish({ github, context, core });

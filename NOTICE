@@ -1,0 +1,22 @@
+capcutctl (capcut-editor-cli)
+Copyright (c) 2026 Suheil Abu Aittah
+
+This project is an independent, unofficial tool. It is not affiliated with,
+endorsed by, or sponsored by ByteDance, CapCut, or Lemon Inc.
+
+It reads and writes CapCut's local project files (`draft_info.json` and related
+mirrors) on the machine where CapCut is installed. CapCut, its effects, fonts,
+sounds, and project format are the property of their respective owners.
+
+Shipped presets contain *lookup keys* (effect names, resource IDs, cache path
+patterns) captured from real CapCut projects so the tool can clone verified
+native structures instead of inventing them. They are not CapCut binaries, not
+a redistribution of CapCut's effect packages, and they will not resolve until
+you download the corresponding effects inside CapCut on your own Mac.
+
+Third-party brand names and logo *paths* in `presets/brands.json` are examples
+for the signature pass. Do not commit logo raster files you do not own.
+
+Use of this software with CapCut is subject to CapCut's own terms of service.
+The authors provide no warranty that writing project JSON is permitted on your
+account or in your jurisdiction.

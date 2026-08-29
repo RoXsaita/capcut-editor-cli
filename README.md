@@ -1,5 +1,7 @@
 # capcutctl
 
+**Unofficial.** Not affiliated with ByteDance or CapCut. MIT licensed — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
 `capcutctl` is a transactional control layer for local CapCut projects. It edits CapCut's native draft model directly while keeping the project editable in CapCut. It does not render layouts with FFmpeg, replace raw footage with flattened montages, or treat a single `draft_info.json` as the whole project.
 
 The first release is deliberately conservative: it focuses on the operations that repeatedly broke real projects—root/active-timeline drift, temporary media paths, stale IDs, missing bound mask materials, partial writes, unsafe edits while CapCut is auto-saving, and silent corruption across `.bak`/`.tmp` mirrors.
@@ -21,8 +23,7 @@ Every write command:
 ## Install locally
 
 Setting this up on a machine that has never run it? Read **[SETUP.md](SETUP.md)** —
-it covers all three repos (`capcutctl`, `rl2`, the skills) and what will not resolve
-on a new Mac.
+it covers this CLI, the skills repo, and what will not resolve on a new Mac.
 
 ```bash
 cd /path/to/capcut-editor-cli
@@ -37,6 +38,42 @@ node bin/capcutctl.mjs help
 ```
 
 Node.js 20 or newer is required. There are no runtime dependencies.
+
+## Development checks
+
+```bash
+npm run check
+npm test
+python3 tools/aroll.py --selftest
+```
+
+Pull requests run the Node, Python, and shell quality suite. A separate read-only
+reviewer comments on PRs. See [`.github/AUTOMATION.md`](.github/AUTOMATION.md).
+
+macOS only, not in CI: `swiftc -O -o tools/vision/ocr tools/vision/ocr.swift`
+
+## Style — ask once
+
+This repo ships a default house style (Suheil / suheilai): 9:16, overlays-only,
+measured split-screen / circle / full-face layouts, `polish` / `pace` / `wrap`
+grammar, and `presets/brands.json` spoken aliases.
+
+**Agents: on a new user or a new machine, ask which they want before writing a
+project. Do not silently apply the bundled look.**
+
+1. **Keep the bundled house style.** Use `presets/layouts.json`, `sfx.json`,
+   `signature.json`, and `suheil-vertical.json` as-is. Point `brands.json` at
+   their logo rasters (or keep the names and drop files under `~/Downloads/Logos`).
+2. **Harvest their own CapCut edits.** They already have a look.
+   `capcutctl harvest` catalogues transitions, SFX, and keyframes from *their*
+   drafts. Treat that as the style source; do not run `polish` / `wrap` as if
+   the bundled pairings were theirs.
+3. **Build their own style.** `capcutctl new --blank` (or `--from` a draft they
+   name). Skip `polish`, `wrap`, and branded endcards until they say what they
+   want.
+
+`capcutctl new` still defaults to cloning a local draft named `Preset 3` when
+it exists; pass `--from NAME` or `--blank` otherwise.
 
 ### Presets are portable; what they point at is not
 
@@ -204,7 +241,8 @@ capcutctl new --project grok-demo \
 media — all in seconds. Dimensions and duration come from `ffprobe`; pass `--width`,
 `--height` and `--duration` if it is unavailable.
 
-Every new project **clones `Preset 3`** by default: the branded endcard is carried over
+Every new project **clones `Preset 3`** by default: the leftover clips are parked 30s after
+the talking head (a parts bin — not the ending). Follow/CTA is written on the talking head.
 and slid to sit immediately after your scenes, which is the duplicate-and-build-in-front
 workflow. `--from NAME` uses a different template; `--blank` drops the template content
 and leaves an empty timeline.
@@ -315,22 +353,12 @@ npm run check
 
 The tests use synthetic projects and never touch the user's CapCut library.
 
-## Working together
+## Contributing
 
-Private repo, two people. Collaborator with Write is the whole access model.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Pull requests welcome. Never force-push `main`.
+One job per PR. Do not commit `.env`, `presets/harvest.json`, compiled OCR, or media.
 
-- Pull `main` before you start.
-- Short-lived branches. Open a PR even if you merge it yourself — that is the paper trail, not a gate. Self-merge is fine.
-- Direct commits to `main` are ok for a typo or a one-liner you would not mind landing on you with no warning.
-- Never force-push `main`.
-- One job per PR. Say so in chat if you are about to touch the same files.
-
-This repo is one of three:
-
-- [`capcut-editor-cli`](https://github.com/RoXsaita/capcut-editor-cli) — this CLI (`capcutctl`)
-- [`capcut-skills`](https://github.com/RoXsaita/capcut-skills) — the agent skills
-- [`recording-layout-v2`](https://github.com/RoXsaita/recording-layout-v2) — `rl2`, the recorder
-
+Companion repo: [`capcut-skills`](https://github.com/RoXsaita/capcut-skills).
 A CLI change and the skill that documents it should land as a pair.
 
 ## Scope of v0.1

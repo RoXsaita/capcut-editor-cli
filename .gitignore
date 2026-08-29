@@ -3,6 +3,8 @@ node_modules/
 .DS_Store
 __pycache__/
 *.pyc
+.ruff_cache/
+.codex-review/
 
 # Captured from the local CapCut drafts root and never read by the shipped code:
 # it names every project on this machine. Regenerate with `capcutctl harvest`.
@@ -13,3 +15,11 @@ presets/harvest.json
 .env.local
 .env.*
 !.env.example
+
+# Mach-O build of tools/vision/ocr.swift — rebuild locally on macOS
+tools/vision/ocr
+
+# Local compositor output, never fixtures
+qa/
+*.mp4
+.capcutctl/

@@ -1,0 +1,44 @@
+name: Bug report
+description: CapCut would not open the project, or a command did the wrong thing
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        `capcutctl` writes real CapCut drafts. Please do **not** paste `draft_info.json`,
+        transcripts, or frames that show your face or a private screen.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Command, expected, actual. Quote the error `code` if there is one.
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: Command
+      placeholder: capcutctl doctor --project demo
+    validations:
+      required: true
+  - type: dropdown
+    id: capcut
+    attributes:
+      label: Did CapCut still open the project?
+      options:
+        - "Yes"
+        - "No — would not open"
+        - "Opened, but the picture was wrong"
+        - "n/a (read-only / tests)"
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: capcutctl / Node / macOS
+      placeholder: capcutctl 0.1.0, Node 20, macOS 15
+  - type: textarea
+    id: doctor
+    attributes:
+      label: `capcutctl doctor` output
+      description: Redact project names if you want. Do not paste the whole draft.

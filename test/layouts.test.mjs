@@ -20,6 +20,23 @@ function fixture() {
   for (const name of ['suheilai-rect-indigo-1080x1920 (2).png', 'suheilai-circle-white-1080x1920.png']) {
     fs.writeFileSync(path.join(assets, name), 'png');
   }
+  // Preset mask/effect paths point at the current user's CapCut cache. Tests must
+  // validate the material wiring without those machine-local downloads present.
+  let resourceIndex = 0;
+  const localizeMissingResources = value => {
+    if (Array.isArray(value)) return value.forEach(localizeMissingResources);
+    if (!value || typeof value !== 'object') return;
+    for (const [key, child] of Object.entries(value)) {
+      if (key === 'path' && typeof child === 'string' && child && !fs.existsSync(child)) {
+        const fixturePath = path.join(assets, `preset-resource-${resourceIndex++}`);
+        fs.writeFileSync(fixturePath, 'fixture');
+        value[key] = fixturePath;
+      } else {
+        localizeMissingResources(child);
+      }
+    }
+  };
+  localizeMissingResources(presets());
   const doc = {
     id: timelineId, name: 'Layout Project', duration: 10_000_000, fps: 30,
     canvas_config: { ratio: '9:16', width: 1080, height: 1920, background: null },

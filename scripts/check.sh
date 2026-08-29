@@ -58,9 +58,15 @@ else
 fi
 
 stage "vision ocr helper"
-if [ -x tools/vision/ocr ]; then ok "built"; else
+if [ "$(uname -s)" != "Darwin" ]; then
+    echo "SKIP — macOS only"
+elif [ -x tools/vision/ocr ]; then
+    ok "built"
+elif [ "${CI_REQUIRE_OCR:-}" = 1 ]; then
     echo "not built — swiftc -O -o tools/vision/ocr tools/vision/ocr.swift"
     fail "ocr helper"
+else
+    echo "SKIP — swiftc -O -o tools/vision/ocr tools/vision/ocr.swift"
 fi
 
 printf '\n'

@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security report
+    url: https://github.com/RoXsaita/capcut-editor-cli/security/advisories/new
+    about: Private disclosure for secrets, injection, or writes outside a project
+  - name: Agent skills
+    url: https://github.com/RoXsaita/capcut-skills
+    about: The companion skills live in a separate repository
