@@ -12,6 +12,7 @@ import {
   opClipAdd, opReplaceMedia, opScaleKeyframe,
   opClipShift, opClipTrim, opClipFade, commitPreservedSlides
 } from './add.mjs';
+import { opMusic } from './music.mjs';
 
 export const DEFAULT_ROOT = path.join(
   process.env.HOME || '',
@@ -717,6 +718,7 @@ export function applyOperations(doc, operations, context) {
     else if (op.op === 'clip.shift') result = opClipShift(doc, op, context);
     else if (op.op === 'clip.trim') result = opClipTrim(doc, op, context);
     else if (op.op === 'clip.fade') result = opClipFade(doc, op, context);
+    else if (op.op === 'music') result = opMusic(doc, op, context);
     else throw new CapcutError(`Unsupported operation: ${op.op}`, { code: 'UNSUPPORTED_OPERATION' });
     results.push({ index, op: op.op, ...result });
   }

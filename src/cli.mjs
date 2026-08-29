@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadEnv } from './env.mjs';
 import {
   CapcutError,
   DEFAULT_ROOT,
@@ -69,10 +70,17 @@ Usage:
   capcutctl pace                --project NAME_OR_PATH [--track N] [--max 100]
                                 no flags = print the plan; --auto applies it
                                 --at T --speed X | --at T --cover IN-OUT for one clip
-  capcutctl polish              --project NAME_OR_PATH [--lead 0.14] [--track N] [--dry-run]
+  capcutctl polish              --project NAME_OR_PATH [--lead 0.14] [--track N] [--motivated] [--dry-run]
                                 transitions ride the principal (talking-head) track; it is sliced to fit
-                      — his transitions + matching SFX on every cut, measured from
-                        Hermes-agent / Higgsfield Refund / Content System / IKEA Refund
+                      — his transitions + matching SFX. --motivated: only on picture
+                        changes (B-roll shot or layout class), not every A-roll splice
+  capcutctl timeline            --project NAME [--width 64]   — ASCII dump of the stacked timeline
+  capcutctl finish              --project NAME [--plan] [--music] [--polish] [--regen]
+                                scorecard + ASCII. --plan is read-only. --music generates
+                                a Lyria bed timed to picture changes and beat-aligned.
+                                --polish runs motivated polish. Voice is never recut.
+  capcutctl music               --project NAME [--plan] [--regen] [--volume 0.16]
+                                generate / place the instrumental bed (used by finish --music)
   capcutctl layout auto         --project NAME_OR_PATH [--plan]   — split-screen where B-roll covers, full face where it does not
   capcutctl layout audit        --project NAME_OR_PATH            — what each clip is vs what it should be
   capcutctl layout list
@@ -102,7 +110,8 @@ function parseArgs(argv) {
     if (!token.startsWith('--')) { result._.push(token); continue; }
     const key = token.slice(2).replace(/-([a-z])/g, (_, char) => char.toUpperCase());
     if (['json', 'dryRun', 'forceRunning', 'noBackup', 'help', 'noOverlay', 'blank', 'includeTemplate', 'newTimelineId',
-         'transcript', 'noTransitions', 'noSeam', 'auto', 'plan', 'noSfx', 'noZoom', 'retime', 'localize'].includes(key)) result[key] = true;
+         'transcript', 'noTransitions', 'noSeam', 'auto', 'plan', 'noSfx', 'noZoom', 'retime', 'localize',
+         'motivated', 'regen', 'music', 'noMusic'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
       result[key] = argv[++i];
@@ -188,6 +197,7 @@ async function trackIndex(projectDir, spec) {
 }
 
 export async function main(argv) {
+  loadEnv();
   const command = argv[0];
   if (command === 'cut' || command === 'qa' || command === 'find') {
     const tool = { cut: 'aroll.py', qa: 'frame_qa.py', find: 'find.py' }[command];
@@ -256,7 +266,7 @@ export async function main(argv) {
     'inspect', 'doctor', 'snapshot', 'history', 'restore', 'sync', 'scenes',
     'pace', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
     'replace-media', 'trim', 'shift', 'remove', 'volume', 'fade', 'keyframe',
-    'preview', 'diff', 'apply'
+    'preview', 'diff', 'apply', 'timeline', 'finish', 'music'
   ]);
   if (!NEEDS_PROJECT.has(command)) throw new CapcutError(`Unknown command: ${command}\n\n${HELP}`, { exitCode: 2 });
   const projectDir = resolveProject(args.project, root);
@@ -388,8 +398,59 @@ export async function main(argv) {
     const spec = { version: 1, name: 'polish',
                    operations: [{ op: 'polish', ...(args.lead ? { lead: Number(args.lead) } : {}),
                                   ...(polishTrack != null ? { track: polishTrack } : {}),
-                                  ...(args.noTransitions ? { noTransitions: true } : {}) }] };
+                                  ...(args.noTransitions ? { noTransitions: true } : {}),
+                                  ...(args.motivated ? { motivated: true } : {}) }] };
     return print(applySpec(projectDir, spec, options), true);
+  }
+  if (command === 'timeline') {
+    const { renderTimeline } = await import('./timeline.mjs');
+    const doc = await loadWorking(projectDir);
+    const view = renderTimeline(doc, { width: args.width ? Number(args.width) : 64 });
+    if (args.json) return print(view, true);
+    return print(view.text);
+  }
+  if (command === 'finish' || command === 'music') {
+    const { finishScorecard, finishText } = await import('./finish.mjs');
+    const doc = await loadWorking(projectDir);
+    const score = finishScorecard(doc, { projectDir, width: args.width ? Number(args.width) : 64 });
+    const wantMusic = command === 'music' || (command === 'finish' && args.music && !args.noMusic);
+    const wantPolish = command === 'finish' && args.polish;
+    if (args.plan || (!wantMusic && !wantPolish && command === 'finish')) {
+      if (args.json) return print(score, true);
+      return print(finishText(score));
+    }
+    const ops = [];
+    if (wantMusic) {
+      const { prepareMusic } = await import('./music.mjs');
+      const prepared = await prepareMusic(projectDir, doc, {
+        regen: Boolean(args.regen),
+        volume: args.volume != null ? Number(args.volume) : 0.16,
+        prompt: args.prompt || undefined,
+      });
+      const off = prepared.align?.offset || 0;
+      ops.push({
+        op: 'music',
+        file: prepared.file,
+        duration: prepared.duration,
+        volume: prepared.volume,
+        srcOffset: off < 0 ? -off : 0,
+        at: off > 0 ? off : 0,
+        fadeIn: 0.4,
+        fadeOut: 1.2,
+      });
+      score.musicPrepared = { generated: prepared.generated, beats: prepared.beats.length, align: prepared.align };
+    }
+    if (wantPolish) {
+      const polishTrack = await trackIndex(projectDir, args.track);
+      ops.push({ op: 'polish', motivated: true, ...(polishTrack != null ? { track: polishTrack } : {}) });
+    }
+    if (!ops.length) {
+      if (args.json) return print(score, true);
+      return print(finishText(score));
+    }
+    const result = applySpec(projectDir, { version: 1, name: command, operations: ops }, options);
+    if (args.json) return print({ score, result }, true);
+    return print(JSON.stringify({ ...result, music: score.musicPrepared || score.music }, null, 2));
   }
   if (command === 'layout') {
     const name = args._[1];
