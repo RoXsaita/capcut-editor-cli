@@ -72,9 +72,10 @@ export function finishScorecard(doc, { projectDir = null, width = 64 } = {}) {
   const allCuts = cutPoints(doc);
   const picture = pictureChanges(doc);
   const trans = transitionTimes(doc);
-  const sameScreen = trans.filter(t => !picture.some(p => Math.abs(p.t - t.t) < 0.12 && p.kind));
+  const nearPicture = t => picture.some(p => Math.abs(p.t - t) < 0.12);
   // transition is stored on the clip BEFORE the cut, so t is the cut time ≈ clip end
-  const sameScreenCuts = allCuts.filter(c => !picture.some(p => Math.abs(p.t - c.t) < 0.12));
+  const sameScreenTransitions = trans.filter(t => !nearPicture(t.t));
+  const sameScreenCuts = allCuts.filter(c => !nearPicture(c.t));
   const motivated = planPolish(doc, { motivated: true });
   const unmotivated = planPolish(doc, { motivated: false });
   const logos = (doc.tracks || []).flatMap(t => (t.segments || [])
@@ -91,6 +92,7 @@ export function finishScorecard(doc, { projectDir = null, width = 64 } = {}) {
     pictureChanges: picture,
     transitions: trans.length,
     sameScreenCuts: sameScreenCuts.map(c => r2(c.t)),
+    sameScreenTransitions: sameScreenTransitions.map(t => r2(t.t)),
     motivatedSeams: motivated.length,
     unmotivatedSeams: unmotivated.length,
     variety: seamVariety(motivated),
@@ -117,6 +119,9 @@ export function finishText(score) {
     `motivated polish would write ${score.motivatedSeams} seams (all-cuts would write ${score.unmotivatedSeams})`,
     `logos ${score.logos.length}  endcard ${score.endcard.length}  face-zooms ${score.faceZooms}  music ${score.music.present ? 'yes' : 'no'}`,
   ];
+  if (score.sameScreenTransitions.length) {
+    lines.push(`same-screen transitions (remove these): ${score.sameScreenTransitions.join(', ')}`);
+  }
   if (score.sameScreenCuts.length) {
     lines.push(`same-screen cuts (do not decorate): ${score.sameScreenCuts.join(', ')}`);
   }

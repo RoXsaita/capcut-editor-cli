@@ -243,9 +243,24 @@ function audioSegment(doc, materialId, startS, durationS, key, volume, desc) {
   return seg;
 }
 
+/** Earliest endcard / CTA start, or the draft end if none is present. */
+export function ctaBoundary(doc) {
+  const dur = S(doc.duration || 0);
+  const starts = [];
+  for (const t of doc.tracks || []) {
+    for (const s of t.segments || []) {
+      if ((s.desc || '').includes('endcard') || t.name === 'sig-endcard') {
+        starts.push(S(s.target_timerange.start));
+      }
+    }
+  }
+  return starts.length ? Math.min(...starts) : dur;
+}
+
 /**
  * Place (or replace) the generated bed. Picture stays locked. Optional source
  * offset slides the music so detected beats land on picture changes.
+ * The bed stops at the CTA (endcard) so the fade lands before he asks for the comment.
  */
 export function opMusic(doc, op, context = {}) {
   SEED = op.__seed || null;
@@ -258,9 +273,9 @@ export function opMusic(doc, op, context = {}) {
   const fadeOut = op.fadeOut ?? 1.2;
   const srcOffset = Math.max(0, op.srcOffset ?? 0);
   const at = Math.max(0, op.at ?? 0);
-  const durDoc = S(doc.duration || 0);
+  const until = op.until != null ? Number(op.until) : ctaBoundary(doc);
   const durFile = op.duration ?? probeAudioDuration(file);
-  const play = Math.min(Math.max(0.2, durDoc - at), Math.max(0.2, durFile - srcOffset));
+  const play = Math.min(Math.max(0.2, until - at), Math.max(0.2, durFile - srcOffset));
 
   for (const track of doc.tracks) {
     if (track.type !== 'audio') continue;
@@ -310,6 +325,7 @@ export function opMusic(doc, op, context = {}) {
     duration: r3(play),
     srcOffset: r3(srcOffset),
     at: r3(at),
+    until: r3(until),
     fade: { in: fadeIn, out: fadeOut, id: fade.id },
   };
 }

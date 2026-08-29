@@ -103,7 +103,7 @@ Safety defaults:
 
 const r2 = n => Math.round(n * 100) / 100;
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const result = { _: [] };
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i];
@@ -111,7 +111,7 @@ function parseArgs(argv) {
     const key = token.slice(2).replace(/-([a-z])/g, (_, char) => char.toUpperCase());
     if (['json', 'dryRun', 'forceRunning', 'noBackup', 'help', 'noOverlay', 'blank', 'includeTemplate', 'newTimelineId',
          'transcript', 'noTransitions', 'noSeam', 'auto', 'plan', 'noSfx', 'noZoom', 'retime', 'localize',
-         'motivated', 'regen', 'music', 'noMusic'].includes(key)) result[key] = true;
+         'motivated', 'regen', 'music', 'noMusic', 'polish'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
       result[key] = argv[++i];

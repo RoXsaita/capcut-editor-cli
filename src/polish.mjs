@@ -40,7 +40,7 @@ function coveringBroll(doc, t, principalIndex) {
 
 function coveringLayout(doc, t, principal) {
   const us = US(t);
-  const masks = new Set((doc.materials?.common_mask || []).map(m => m.id));
+  const masks = new Map((doc.materials?.common_mask || []).map(m => [m.id, m]));
   const seg = (principal.track.segments || []).find(s => {
     const a = s.target_timerange.start, b = a + s.target_timerange.duration;
     return a - 20000 <= us && us < b + 20000;
@@ -48,8 +48,13 @@ function coveringLayout(doc, t, principal) {
   if (!seg) return 'none';
   const refs = seg.extra_material_refs || [];
   if (seg.enable_video_mask === false) return 'full-face';
-  if (refs.some(id => masks.has(id))) return 'split-screen';
-  return 'full-face';
+  const hit = refs.map(id => masks.get(id)).find(Boolean);
+  if (!hit) return 'full-face';
+  const name = String(hit.name || '').toLowerCase();
+  const rtype = String(hit.resource_type || '').toLowerCase();
+  if (name === 'circle' || rtype === 'circle') return 'circle';
+  if (name === 'split' || rtype === 'line') return 'split-screen';
+  return 'split-screen';
 }
 
 function collapse(marks, minGap) {

@@ -8,7 +8,8 @@ import { execFileSync } from 'node:child_process';
 import { pictureChanges, planPolish, cutPoints } from '../src/polish.mjs';
 import { renderTimeline } from '../src/timeline.mjs';
 import { beatOffset, musicPrompt, detectBeats, opMusic } from '../src/music.mjs';
-import { finishScorecard } from '../src/finish.mjs';
+import { finishScorecard, finishText } from '../src/finish.mjs';
+import { parseArgs } from '../src/cli.mjs';
 
 const US = s => Math.round(s * 1e6);
 const seg = (start, dur, extra = {}) => ({
@@ -74,6 +75,36 @@ test('pictureChanges ignores A-roll splices over the same B-roll desc', () => {
   assert.equal(times.includes(17), false, 'same files list at 17 must not be a picture change');
 });
 
+test('pictureChanges treats Split → Circle as a layout-class change', () => {
+  const d = grokLike();
+  d.materials.common_mask = [
+    { id: 'MASK', name: 'Split', resource_type: 'line', type: 'mask' },
+    { id: 'CIR', name: 'Circle', resource_type: 'circle', type: 'mask' },
+  ];
+  d.tracks[2].segments = [
+    seg(0, 6, { refs: ['MASK'], id: 'f0' }),
+    seg(6, 4, { refs: ['MASK'], id: 'f1' }),
+    seg(10, 3, { refs: ['MASK'], id: 'f2' }),
+    seg(13, 7, { refs: ['CIR'], id: 'f3' }),
+    seg(20, 4, { id: 'f4' }),
+    seg(24, 6, { refs: ['MASK'], id: 'f5' }),
+  ];
+  const hits = pictureChanges(d, { minGap: 0.5 });
+  const at13 = hits.find(h => h.t === 13);
+  assert.ok(at13, `expected layout change at 13, got ${hits.map(h => `${h.t}:${h.kind}`)}`);
+  assert.equal(at13.kind, 'layout');
+});
+
+test('finish --polish is a boolean flag, not a value option', () => {
+  const a = parseArgs(['finish', '--project', 'X', '--polish']);
+  assert.equal(a.polish, true);
+  assert.equal(a.project, 'X');
+  const b = parseArgs(['finish', '--project', 'X', '--music', '--polish', '--regen']);
+  assert.equal(b.music, true);
+  assert.equal(b.polish, true);
+  assert.equal(b.regen, true);
+});
+
 test('motivated polish plans fewer seams than every-cut polish', () => {
   const d = grokLike();
   const all = planPolish(d, { motivated: false });
@@ -95,6 +126,22 @@ test('finish scorecard flags same-screen cuts', () => {
   assert.ok(score.sameScreenCuts.length >= 1, score.sameScreenCuts);
   assert.ok(score.musicPrompt.includes('Instrumental'));
   assert.ok(score.timeline.includes('▓'));
+});
+
+test('finish scorecard reports existing same-screen transitions separately', () => {
+  const d = grokLike();
+  d.tracks[2].segments = [
+    seg(0, 6, { refs: ['MASK'], id: 'f0' }),
+    seg(6, 4, { refs: ['MASK'], id: 'f1' }),
+    seg(10, 3, { refs: ['MASK', 'TR1'], id: 'f2' }),
+    seg(13, 7, { refs: ['MASK'], id: 'f2b' }),
+    seg(20, 4, { id: 'f3' }),
+    seg(24, 6, { refs: ['MASK'], id: 'f4' }),
+  ];
+  const score = finishScorecard(d);
+  assert.ok(score.sameScreenTransitions.includes(13), score.sameScreenTransitions);
+  assert.ok(score.sameScreenCuts.includes(13), score.sameScreenCuts);
+  assert.match(finishText(score), /same-screen transitions \(remove these\): 13/);
 });
 
 test('beatOffset picks a clamped median shift and never recuts hits', () => {
@@ -139,6 +186,21 @@ test('opMusic places a local file on finish-music and is idempotent', () => {
   assert.equal(lane.segments[0].volume, 0.16);
   opMusic(d, { file: mp3, duration: 8, volume: 0.16, __seed: 'SEED' });
   assert.equal(lane.segments.length, 1, 're-run replaces rather than stacks');
+});
+
+test('opMusic ends the bed at the endcard, not the draft tail', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'music-'));
+  const mp3 = path.join(dir, 'bed.mp3');
+  fs.writeFileSync(mp3, Buffer.alloc(64));
+  const d = grokLike();
+  d.tracks.push(track('video', [
+    seg(20, 10, { desc: 'sig:endcard', id: 'cta' }),
+  ], { name: 'sig-endcard' }));
+  const r = opMusic(d, { file: mp3, duration: 40, volume: 0.16, fadeIn: 0.4, fadeOut: 1.2, __seed: 'SEED' });
+  assert.equal(r.duration, 20);
+  assert.equal(r.until, 20);
+  const lane = d.tracks.find(t => t.name === 'finish-music');
+  assert.equal(lane.segments[0].target_timerange.duration, US(20));
 });
 
 test('cutPoints still sees every splice so the all-cuts plan remains available', () => {
