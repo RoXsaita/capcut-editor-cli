@@ -178,9 +178,9 @@ test('opCalloutSfx places alternating enter/select clicks on callout appearances
     materials: {
       videos: [
         { id: 'M', type: 'video', path: '/cam.mp4' },
-        { id: 'R', type: 'gif', path: '/Users/roxsa/Downloads/rect-16-9-1080x608.gif' },
-        { id: 'A', type: 'gif', path: '/Users/roxsa/Downloads/arrow (1).gif' },
-        { id: 'BAR', type: 'photo', path: '/Users/roxsa/Downloads/suheilai-rect-indigo-1080x1920 (2).png' },
+        { id: 'R', type: 'gif', path: '/x/rect-16-9-1080x608.gif' },
+        { id: 'A', type: 'gif', path: '/x/arrow (1).gif' },
+        { id: 'BAR', type: 'photo', path: '/x/suheilai-rect-indigo-1080x1920 (2).png' },
       ],
       audios: [],
     },
