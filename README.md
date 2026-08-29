@@ -38,6 +38,19 @@ node bin/capcutctl.mjs help
 
 Node.js 20 or newer is required. There are no runtime dependencies.
 
+## Development checks
+
+```bash
+npm run check
+npm test
+python3 tools/aroll.py --selftest
+```
+
+Pull requests run the full Node, Python, and shell quality suite. A separate read-only Codex review
+checks every new PR revision for concrete regressions and leaves inline findings plus one current
+summary. See [`.github/AUTOMATION.md`](.github/AUTOMATION.md) for the review contract, security
+model, and one-time repository setup.
+
 ### Presets are portable; what they point at is not
 
 Every path in `presets/*.json` is written as `~/…` and expanded to your own home

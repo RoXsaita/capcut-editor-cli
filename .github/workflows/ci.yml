@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node:
+    name: Node ${{ matrix.node-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 24]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Check JavaScript syntax
+        run: npm run check
+
+      - name: Run Node.js tests
+        run: npm test
+
+  quality:
+    name: Python and shell quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Use Python 3.11
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: .github/requirements/ci.txt
+
+      - name: Install pinned quality tools
+        run: python -m pip install --require-hashes -r .github/requirements/ci.txt
+
+      - name: Compile Python helpers
+        run: python -m compileall -q tools
+
+      - name: Run A-roll self-tests
+        run: python tools/aroll.py --selftest
+
+      - name: Run Ruff
+        run: ruff check tools/
+
+      - name: Find dead Python code
+        run: vulture tools/ --min-confidence 80
+
+      - name: Check shell scripts
+        run: shellcheck --version && shellcheck scripts/check.sh

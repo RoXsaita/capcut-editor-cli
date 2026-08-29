@@ -10,6 +10,7 @@ presets/harvest.json
 
 # API keys — never commit
 .env
+.codex-review/
 .env.local
 .env.*
 !.env.example
