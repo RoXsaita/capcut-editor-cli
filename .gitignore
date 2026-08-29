@@ -7,3 +7,9 @@ __pycache__/
 # Captured from the local CapCut drafts root and never read by the shipped code:
 # it names every project on this machine. Regenerate with `capcutctl harvest`.
 presets/harvest.json
+
+# API keys — never commit
+.env
+.env.local
+.env.*
+!.env.example

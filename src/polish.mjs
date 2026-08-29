@@ -15,6 +15,96 @@ function mint(key) {
 const US = s => Math.round(s * 1e6);
 const arr = (doc, kind) => (doc.materials[kind] ||= []);
 
+function r2(n) { return Math.round(n * 100) / 100; }
+
+function coveringBroll(doc, t, principalIndex) {
+  const us = US(t);
+  const plates = new Set((doc.materials?.videos || []).filter(m => m.type && m.type !== 'video').map(m => m.id));
+  const videos = new Map((doc.materials?.videos || []).map(m => [m.id, m]));
+  for (let i = 0; i < principalIndex; i++) {
+    const track = doc.tracks[i];
+    if (!track || track.type !== 'video' || track.flag === 0) continue;
+    for (const s of track.segments || []) {
+      if (!s.target_timerange) continue;
+      if ((s.desc || '').startsWith('layout:')) continue;
+      if (plates.has(s.material_id)) continue;
+      const a = s.target_timerange.start, b = a + s.target_timerange.duration;
+      if (a - 20000 < us && us < b - 20000) {
+        const m = videos.get(s.material_id);
+        return { desc: s.desc || '', path: m?.path || '', id: s.id };
+      }
+    }
+  }
+  return null;
+}
+
+function coveringLayout(doc, t, principal) {
+  const us = US(t);
+  const masks = new Map((doc.materials?.common_mask || []).map(m => [m.id, m]));
+  const seg = (principal.track.segments || []).find(s => {
+    const a = s.target_timerange.start, b = a + s.target_timerange.duration;
+    return a - 20000 <= us && us < b + 20000;
+  });
+  if (!seg) return 'none';
+  const refs = seg.extra_material_refs || [];
+  if (seg.enable_video_mask === false) return 'full-face';
+  const hit = refs.map(id => masks.get(id)).find(Boolean);
+  if (!hit) return 'full-face';
+  const name = String(hit.name || '').toLowerCase();
+  const rtype = String(hit.resource_type || '').toLowerCase();
+  if (name === 'circle' || rtype === 'circle') return 'circle';
+  if (name === 'split' || rtype === 'line') return 'split-screen';
+  return 'split-screen';
+}
+
+function collapse(marks, minGap) {
+  const sorted = [...marks].sort((a, b) => a.t - b.t);
+  const out = [];
+  for (const m of sorted) {
+    if (out.length && m.t - out.at(-1).t < minGap) {
+      out.at(-1).kind = out.at(-1).kind === 'layout' && m.kind === 'broll' ? 'broll' : out.at(-1).kind;
+      continue;
+    }
+    out.push(m);
+  }
+  return out;
+}
+
+/**
+ * Cuts the VIEWER can see: B-roll shot change or layout class change.
+ * An A-roll splice over an unchanged files list is not a picture change —
+ * decorating those is what made grok-build-final feel machine-made.
+ */
+export function pictureChanges(doc, { minGap = 0.9, track = null } = {}) {
+  const principal = principalTrack(doc, track);
+  const marks = [];
+  const seen = new Set();
+  for (const { segment, track: tr } of allSegments(doc)) {
+    if (tr.type !== 'video' || !(tr.segments || []).length) continue;
+    if ((segment.desc || '').startsWith('layout:')) continue;
+    const t = segment.target_timerange.start / 1e6;
+    if (t <= 0.001) continue;
+    const key = Math.round(t * 30) / 30;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const beforeB = coveringBroll(doc, t - 0.05, principal.index);
+    const afterB = coveringBroll(doc, t + 0.05, principal.index);
+    const beforeL = coveringLayout(doc, t - 0.05, principal);
+    const afterL = coveringLayout(doc, t + 0.05, principal);
+    const bKey = x => (x ? `${x.path}|${x.desc}` : '');
+    const brollChanged = bKey(beforeB) !== bKey(afterB);
+    const layoutChanged = beforeL !== afterL;
+    if (!brollChanged && !layoutChanged) continue;
+    marks.push({
+      t: r2(t),
+      kind: brollChanged ? 'broll' : 'layout',
+      from: brollChanged ? (beforeB?.desc || beforeL) : beforeL,
+      to: brollChanged ? (afterB?.desc || afterL) : afterL,
+    });
+  }
+  return collapse(marks, minGap);
+}
+
 /** Cut points that a viewer actually sees: a scene change on any visual track. */
 export function cutPoints(doc, { minGap = 0.9 } = {}) {
   const marks = new Map();
@@ -215,7 +305,16 @@ export function sliceAt(doc, track, t, key) {
  */
 export function planPolish(doc, opts = {}) {
   const p = sfxPresets();
-  const cuts = cutPoints(doc, { minGap: opts.minGap ?? 0.9 });
+  let cuts = cutPoints(doc, { minGap: opts.minGap ?? 0.9 });
+  if (opts.motivated) {
+    const allowed = pictureChanges(doc, { minGap: opts.minGap ?? 0.9, track: opts.track ?? null });
+    cuts = cuts.filter(c => allowed.some(a => Math.abs(a.t - c.t) < 0.08));
+    // a picture change with no clip-boundary still needs a seam if the principal can be sliced
+    for (const a of allowed) {
+      if (!cuts.some(c => Math.abs(c.t - a.t) < 0.08)) cuts.push({ t: a.t, weight: 1 });
+    }
+    cuts.sort((x, y) => x.t - y.t);
+  }
   const duration = (doc.duration || 0) / 1e6;
   const layoutChange = t => allSegments(doc).some(({ segment }) =>
     (segment.desc || '') === 'layout:seam-bar'
@@ -295,7 +394,7 @@ export function opPolish(doc, op, context = {}) {
     doc.materials.transitions = [];
   }
 
-  const plan = planPolish(doc, op);
+  const plan = planPolish(doc, { ...op, motivated: Boolean(op.motivated) });
   const lane = ensureAudioTrack(doc, 'polish-sfx');
 
   // Every transition rides the principal track, and the principal track gets sliced to
