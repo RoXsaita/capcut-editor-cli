@@ -26,3 +26,7 @@ qa/
 
 # npm pack output — a build artifact, and it embeds whatever is in presets/ at the time.
 *.tgz
+
+# Third-party brand logos (trademarked artwork, not ours to redistribute).
+# brands.json points at these by absolute path; keep them local.
+Logos/
