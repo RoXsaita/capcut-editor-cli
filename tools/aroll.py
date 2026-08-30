@@ -41,7 +41,7 @@ from audio_index import SIL, SOFT, AudioIndex, lint, loud_out_finding, source_to
 
 FPS = 30.0
 FRAME = 1.0 / FPS
-AROLL_INDEX_VERSION = 3
+AROLL_INDEX_VERSION = 4
 LEAD_FRAMES = 2          # start this many frames before the onset, so the attack survives
 AUDIO_RAMP_FRAMES = 2     # native audio fade on both sides of every generated splice
 HESITATION = 0.60        # silence longer than this inside a beat is dead air
@@ -251,8 +251,8 @@ def first_word_in(seg, a, b):
     return result
 
 
-def words_in(seg, a, b):
-    """Text whose word timestamps overlap [a, b), not the parent Whisper segment."""
+def word_entries_in(seg, a, b):
+    """Words whose timestamps overlap [a, b), retaining any caller metadata."""
     picked = []
     for word in seg.get("words") or []:
         start = _word_start(word)
@@ -261,8 +261,14 @@ def words_in(seg, a, b):
         end = _word_end(word)
         overlaps = end > a if end is not None else start >= a - WORD_START_LOOKBACK
         if overlaps:
-            picked.append((word.get("word") or word.get("text") or "").strip())
-    text = " ".join(p for p in picked if p).strip()
+            picked.append(word)
+    return picked
+
+
+def words_in(seg, a, b):
+    """Text whose word timestamps overlap [a, b), not the parent Whisper segment."""
+    text = " ".join((word.get("word") or word.get("text") or "").strip()
+                    for word in word_entries_in(seg, a, b)).strip()
     if text:
         return text
     parent = (seg.get("text") or "").strip()
@@ -634,8 +640,14 @@ def cmd_index(args):
     print(f"  energy index: {len(idx.db)} bins @ {int(idx.bin*1000)}ms = {len(idx.db)*idx.bin:.1f}s", file=sys.stderr)
     result = transcribe(media, args.lang, args.model, cache_dir, force=getattr(args, "reindex", False))
 
+    segments = result.get("segments", [])
+    all_words = [
+        {**word, "_aroll_segment": segment_id}
+        for segment_id, segment in enumerate(segments)
+        for word in segment.get("words") or []
+    ]
     beats = []
-    for seg in result.get("segments", []):
+    for segment_id, seg in enumerate(segments):
         text = seg.get("text", "").strip()
         if not text or CREDIT.search(text):
             continue
@@ -656,14 +668,26 @@ def cmd_index(args):
             if src_out - src_in < MIN_BEAT:
                 continue
             slice_text = words_in(seg, src_in, src_out) or text
-            beats.append({
+            source_words = word_entries_in({"words": all_words}, src_in, src_out)
+            foreign = [entry for entry in source_words
+                       if entry.get("_aroll_segment", segment_id) < segment_id]
+            beat = {
                 "id": len(beats), "text": slice_text, "src_in": src_in, "src_out": src_out,
                 "dur": round(src_out - src_in, 3), "take": 0,
                 "dupe_group": None, "is_last_of_group": True, "defects": [],
                 "first_word": word["text"] if word else "",
                 "first_word_start": word["start"] if word else None,
                 "first_word_trustworthy": trusted,
-            })
+            }
+            if foreign:
+                beat["foreign_lead"] = " ".join(
+                    (entry.get("word") or entry.get("text") or "").strip()
+                    for entry in foreign
+                ).strip()
+                if beats:
+                    beat["continuation_of"] = beats[-1]["id"]
+                    beats[-1]["continued_by"] = beat["id"]
+            beats.append(beat)
     detect_takes(beats)
     groups = group_duplicates(beats)
     for beat in beats:
@@ -737,6 +761,10 @@ def print_handout(data, path):
     for b in data["beats"]:
         mark = "KEEP" if b["id"] in data["default_keep"] else "  · "
         flag = (" ⚠ " + "; ".join(b["defects"])) if b["defects"] else ""
+        if b.get("foreign_lead"):
+            source = (f"b{b['continuation_of']}" if b.get("continuation_of") is not None
+                      else "an unrepresented prior segment")
+            flag += f" ⚠ continuous from {source}: {b['foreign_lead']}"
         rows.append(f"{b['id']:>3} {b['take']:>4} {b['src_in']:>8.3f} {b['src_out']:>8.3f} "
                     f"{b['dur']:>6.2f}  {mark}  {b['text']}{flag}")
     # untruncated text runs past 78 columns, so size the rules to the table instead of
@@ -1043,6 +1071,78 @@ def source_overlap_findings(picked, fps=FPS):
     return findings
 
 
+def _merge_text(parts):
+    """Join overlapping transcript windows without repeating their shared word."""
+    merged = []
+    for text in parts:
+        words = [word for word in (text or "").split() if word]
+        overlap = 0
+        for size in range(min(len(merged), len(words)), 0, -1):
+            if [norm(word) for word in merged[-size:]] == [norm(word) for word in words[:size]]:
+                overlap = size
+                break
+        merged.extend(words[overlap:])
+    return " ".join(merged)
+
+
+def _continuous_source(idx, start, end):
+    """True only when no indexed sample between two ranges is hard silence."""
+    step = _number(getattr(idx, "bin", None))
+    if step is None or step <= 0 or end < start:
+        return False
+    samples = int(math.ceil((end - start) / step))
+    return all(idx.at(min(end, start + sample * step)) >= SIL for sample in range(samples + 1))
+
+
+def coalesce_continuous(idx, picked, boundaries=None):
+    """Turn an evidenced cross-segment utterance into one native source clip."""
+    for index, beat in enumerate(picked):
+        previous = picked[index - 1]["id"] if index else None
+        following = picked[index + 1]["id"] if index + 1 < len(picked) else None
+        if beat.get("continuation_of") is not None and beat["continuation_of"] != previous:
+            raise ValueError(f"beat {beat['id']} starts with b{beat['continuation_of']}'s speech; "
+                             f"keep b{beat['continuation_of']} immediately before it")
+        if beat.get("continued_by") is not None and beat["continued_by"] != following:
+            raise ValueError(f"beat {beat['id']} ends inside b{beat['continued_by']}'s continuous speech; "
+                             f"keep b{beat['continued_by']} immediately after it")
+    clips = []
+    for beat in picked:
+        previous = beat.get("continuation_of")
+        if previous is None and beat.get("foreign_lead"):
+            raise ValueError(f"beat {beat['id']} starts with unrepresented prior speech "
+                             f"({beat['foreign_lead']!r})")
+        if previous is not None:
+            if not beat.get("foreign_lead"):
+                raise ValueError(f"beat {beat['id']} names b{previous} without transcript evidence")
+            if not clips or clips[-1]["beats"][-1] != previous:
+                detail = beat.get("foreign_lead") or "prior speech"
+                raise ValueError(f"beat {beat['id']} starts with b{previous}'s speech ({detail!r}); "
+                                 f"keep b{previous} immediately before it")
+            if "outOffset" in (boundaries or {}).get(previous, {}) \
+                    or "inOffset" in (boundaries or {}).get(beat["id"], {}):
+                raise ValueError(f"b{previous}->b{beat['id']} is one continuous source span; "
+                                 "trim only its outer IN or OUT")
+            clip = clips[-1]
+            if not _continuous_source(idx, clip["src_out"], beat["src_in"]):
+                raise ValueError(f"b{previous}->b{beat['id']} has no continuous acoustic source span")
+            clip["beats"].append(beat["id"])
+            clip["src_out"] = beat["src_out"]
+            clip["text"] = _merge_text((clip["text"], beat.get("foreign_lead", ""), beat["text"]))
+            for key in ("_manual_max_src_out", "_manual_out"):
+                if key in beat:
+                    clip[key] = beat[key]
+                else:
+                    clip.pop(key, None)
+            clip["continuity"].append({
+                "from": previous,
+                "into": beat["id"],
+                "foreign_lead": beat.get("foreign_lead", ""),
+            })
+            continue
+        clips.append({**beat, "beats": [beat["id"]], "continuity": []})
+    return clips
+
+
 def _shell_command(parts):
     return " ".join(shlex.quote(str(part)) for part in parts)
 
@@ -1246,41 +1346,47 @@ def cmd_cut(args):
         print(f"A-roll boundary decision rejected: {error}", file=sys.stderr)
         return 2
 
-    if not getattr(args, "no_repair", False):
-        repairs = repair(idx, picked, fps=fps)
-    else:
-        repairs = []
     for p in picked:
         if p["src_out"] - p["src_in"] < MIN_BEAT:
             print(f"A-roll boundary decision rejected: beat {p['id']} is shorter than {MIN_BEAT:.2f}s",
                   file=sys.stderr)
             return 2
-        beats[p["id"]]["src_in"], beats[p["id"]]["src_out"] = p["src_in"], p["src_out"]
 
-    spans = [(f"b{p['id']}", p["src_in"], p["src_out"]) for p in picked]
+    try:
+        clips = coalesce_continuous(idx, picked, decisions["boundaries"])
+    except ValueError as error:
+        print(f"A-roll boundary decision rejected: {error}", file=sys.stderr)
+        return 2
+    if not getattr(args, "no_repair", False):
+        repairs = repair(idx, clips, fps=fps)
+    else:
+        repairs = []
+
+    spans = [(f"b{clip['id']}", clip["src_in"], clip["src_out"]) for clip in clips]
     first_words = [
         {
-            "start": p.get("first_word_start"),
-            "word": p.get("first_word", ""),
-            "trustworthy": bool(p.get("first_word_trustworthy")),
+            "start": clip.get("first_word_start"),
+            "word": clip.get("first_word", ""),
+            "trustworthy": bool(clip.get("first_word_trustworthy")),
         }
-        for p in picked
+        for clip in clips
     ]
     findings = lint(idx, spans, fps=fps, first_word_starts=first_words)
-    overlap_findings = source_overlap_findings(picked, fps=fps)
+    overlap_findings = source_overlap_findings(clips, fps=fps)
     findings.extend(overlap_findings)
 
     # pack the timeline with no gaps — this is the dead-space removal
     timeline, cursor = [], 0.0
-    for p in picked:
-        i = p["id"]
-        b = p
-        dur = quantise(b["src_out"] - b["src_in"], fps=fps)
+    for clip in clips:
+        dur = quantise(clip["src_out"] - clip["src_in"], fps=fps)
         tl_in = quantise(cursor, fps=fps)
         tl_out = quantise(tl_in + dur, fps=fps)
-        timeline.append({"beat": i, "tl_in": round(tl_in, 6), "tl_out": round(tl_out, 6),
-                         "src_in": round(b["src_in"], 6), "src_out": round(b["src_out"], 6),
-                         "src_dur": round(dur, 6), "dur": round(dur, 6), "text": b["text"]})
+        timeline.append({"beat": clip["id"], "beats": clip["beats"],
+                         "tl_in": round(tl_in, 6), "tl_out": round(tl_out, 6),
+                         "src_in": round(clip["src_in"], 6), "src_out": round(clip["src_out"], 6),
+                         "src_dur": round(dur, 6), "dur": round(dur, 6),
+                         "text": clip["text"],
+                         **({"continuity": clip["continuity"]} if clip["continuity"] else {})})
         cursor = tl_out
 
     timeline = add_audio_ramps(timeline, fps=fps)
@@ -1333,9 +1439,15 @@ def cmd_cut(args):
     for t in timeline:
         # never slice the text: [:46] cut Arabic mid-word, and this is the table he actually
         # reads back after choosing beats. Text is the last field, so the numbers still line up.
-        print(f"  b{t['beat']:<3} {t['tl_in']:>9.6f}->{t['tl_out']:>9.6f}  "
+        label = "+".join(f"b{beat}" for beat in t["beats"])
+        print(f"  {label:<7} {t['tl_in']:>9.6f}->{t['tl_out']:>9.6f}  "
               f"src {t['src_in']:>9.6f}->{t['src_out']:>9.6f}  "
               f"dur {t['dur']:>8.6f}  {t['text']}")
+        if t.get("continuity"):
+            evidence = ", ".join(
+                f"b{item['from']}→b{item['into']}: {item['foreign_lead']}" for item in t["continuity"]
+            )
+            print(f"          coalesced continuous source ({evidence})")
     print(f"\nseam lint: {'CLEAN' if not findings else str(len(findings)) + ' findings'}")
     for f in findings:
         print("  ! " + f)

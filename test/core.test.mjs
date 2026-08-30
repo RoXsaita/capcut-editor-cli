@@ -793,6 +793,24 @@ test('cut.recut source-maps anchors, keeps principal at 1x, mirrors ids, and is 
   assert.equal(stableJson(readJson(path.join(f.timelineDir, 'draft_info.json'))), timelineBefore);
 });
 
+test('cut.recut accepts an evidenced coalesced beat pair as one 1x clip', NEEDS_FFMPEG, () => {
+  const f = recutFixture();
+  const spec = recutSpec(f, [
+    { beat: 0, beats: [0, 1], tl_in: 0, tl_out: 4, src_in: 0, dur: 4, text: 'continuous' },
+  ]);
+  spec.operations[0].plan.order = [0, 1];
+  spec.operations[0].audioRamps = [{ op: 'clip.fade', at: 0, in: 2 / 30, out: 2 / 30 }];
+  assert.equal(applySpec(f.project, spec, { forceRunning: true }).committed, true);
+  for (const dir of [f.project, f.timelineDir]) {
+    const principal = readJson(path.join(dir, 'draft_info.json')).tracks
+      .find(track => track.name === 'content').segments.filter(segment => !segment.desc?.startsWith('layout:'));
+    assert.equal(principal.length, 1);
+    assert.deepEqual(principal[0].target_timerange, { start: 0, duration: 4_000_000 });
+    assert.deepEqual(principal[0].source_timerange, { start: 0, duration: 4_000_000 });
+    assert.equal(principal[0].speed, 1);
+  }
+});
+
 test('cut.recut preserves an explicit reverse editorial order and rejects a non-permutation', NEEDS_FFMPEG, () => {
   const f = recutFixture();
   const reversed = recutSpec(f, [

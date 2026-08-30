@@ -2076,8 +2076,13 @@ function recutNormalizePlan(op, documentFps = null) {
   for (const [index, item] of op.plan.timeline.entries()) {
     if (!item || typeof item !== 'object') recutFail('timeline entry ' + index + ' is not an object.');
     const beat = item.beat == null ? index : Number(item.beat);
-    if (!Number.isInteger(beat) || beats.has(beat)) recutFail('timeline beat ' + index + ' is missing or duplicated.', 'CUT_PLAN_AMBIGUOUS');
-    beats.add(beat);
+    const itemBeats = item.beats == null ? [beat] : (Array.isArray(item.beats) ? item.beats.map(Number) : []);
+    if (!Number.isInteger(beat) || !itemBeats.length || itemBeats[0] !== beat
+        || itemBeats.some(value => !Number.isInteger(value) || value < 0 || beats.has(value))
+        || new Set(itemBeats).size !== itemBeats.length) {
+      recutFail('timeline beat ' + index + ' is missing or duplicated.', 'CUT_PLAN_AMBIGUOUS');
+    }
+    for (const value of itemBeats) beats.add(value);
     const targetStart = recutFrameTime(item.tl_in, 'timeline[' + index + '].tl_in', fps);
     const targetEnd = recutFrameTime(item.tl_out, 'timeline[' + index + '].tl_out', fps);
     const targetDuration = targetEnd - targetStart;
@@ -2095,7 +2100,7 @@ function recutNormalizePlan(op, documentFps = null) {
     }
     const sourceEnd = sourceStart + sourceDuration;
     timeline.push({
-      index, beat, targetStart, targetEnd, targetDuration,
+      index, beat, beats: itemBeats, targetStart, targetEnd, targetDuration,
       sourceStart, sourceEnd, sourceDuration, text: item.text || ''
     });
   }
@@ -2114,7 +2119,7 @@ function recutNormalizePlan(op, documentFps = null) {
   const declaredOrder = op.plan.order == null ? null : validateDeclaredBeatList(op.plan.order, 'plan.order');
   const sameBeatSet = (left, right) => left.length === right.length
     && left.every(beat => right.includes(beat));
-  const timelineBeats = timeline.map(item => item.beat);
+  const timelineBeats = timeline.flatMap(item => item.beats);
   if (declaredKept && !sameBeatSet(declaredKept, timelineBeats)) {
     recutFail('plan.kept must match the beats present in plan.timeline.', 'CUT_PLAN_AMBIGUOUS', {
       kept: declaredKept, timeline: timelineBeats
@@ -2356,7 +2361,7 @@ function recutValidateRefs(doc, oldMap, anchors) {
 function recutStableSeed(op, plan) {
   if (op.__seed) return op.__seed;
   return 'cut.recut.v1|' + path.resolve(op.media || '') + '|'
-    + plan.timeline.map(item => [item.beat, item.tl_in, item.tl_out, item.src_in, item.dur].join(':')).join('|');
+    + plan.timeline.map(item => [(item.beats || [item.beat]).join(','), item.tl_in, item.tl_out, item.src_in, item.dur].join(':')).join('|');
 }
 
 function recutPushMaterial(doc, kind, value) {
