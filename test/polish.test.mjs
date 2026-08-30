@@ -1,3 +1,4 @@
+import './helpers/sfx-fixture.mjs';   // repoint the SFX palette off this machine — must come first
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';

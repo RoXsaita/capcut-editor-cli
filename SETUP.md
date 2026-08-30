@@ -7,8 +7,12 @@ Two repositories make the toolkit. Start here; each repo's own README goes deepe
 | `capcut-editor-cli` (this one) | `capcutctl` — reads and writes CapCut's `draft_info.json` transactionally |
 | `capcut-skills` | the four agent skills that teach an agent how to use `capcutctl` |
 
-Requirements: **macOS**, **Node.js 20+**, **Xcode command line tools** (for Swift),
-and **CapCut** installed and launched at least once.
+Requirements: **macOS**, **Node.js 20+**, **ffmpeg** (`brew install ffmpeg`),
+**Xcode command line tools** (for Swift), and **CapCut** installed and launched at
+least once.
+
+After installing, `capcutctl preflight` checks every one of those and tells you what
+is missing — run it before anything else.
 
 ---
 
@@ -30,13 +34,20 @@ like, as long as you use the same paths consistently. The rest of this file uses
 
 ## 2. `capcutctl`
 
-No runtime dependencies; Node 20+ is the only requirement.
+No npm runtime dependencies. Node 20+ and ffmpeg are the requirements.
 
 ```bash
+brew install ffmpeg           # cut, qa, find, preview, music and review need it
 cd ~/src/capcut-editor-cli
 npm link                      # puts capcutctl on your PATH
-capcutctl help
+capcutctl preflight           # deps, bundled artwork, SFX palette, drafts folder
 ```
+
+`preflight` exits 1 if the install cannot work, and names the fix for each problem.
+The overlay artwork the built-in layouts need is bundled in `assets/`, so
+`layout split-screen` / `circle` / `screen` work immediately. The SFX palette is the
+one thing that cannot be shipped — see the README section *What ships with the tool,
+and what is yours*.
 
 If you would rather not use `npm link` (it writes to your global npm prefix):
 
@@ -97,10 +108,27 @@ are local *by nature*.
   the machine that produced it. Nothing in the shipped code reads it; it is a
   reference capture for you.
 
+  `polish` does not need this to succeed: a sound that is not on your machine is
+  **skipped and named** in the command's output, so you get the edit without the
+  palette rather than a failed transaction. `capcutctl preflight` reports the ratio.
+
+  To use your own sounds instead of downloading his, put an `sfx.json` in a directory
+  and point at it — each preset falls back to the bundled one when absent:
+
+  ```bash
+  export CAPCUTCTL_PRESET_DIR=~/my-presets
+  ```
+
 * **Logo and media folders.** `presets/brands.json` points at `~/Downloads/Logos` and
-  `~/Downloads/Media/Images/2026`; `presets/sfx.json` points at one personal
-  `~/Downloads/fahhh.mp3`. Repoint `svgFallbackDir`, `rasterCacheDir` and each brand's
-  `logo` at your own files.
+  `~/Downloads/Media/Images/2026`. Those are third-party marks and are not
+  redistributable. `capcutctl brands` lists which have a usable PNG and which do not;
+  only `logo` / `wrap` need them. Repoint `svgFallbackDir`, `rasterCacheDir` and each
+  brand's `logo` at your own files, or override the whole preset with
+  `CAPCUTCTL_PRESET_DIR`.
+
+* **Overlay artwork is bundled, not local.** The indigo bar and white ring the
+  layouts need ship in `assets/`, so `layout split-screen` / `circle` / `screen`
+  work on a fresh clone. `CAPCUTCTL_ASSET_DIR` overrides them with your own.
 
 * **The legacy scripts.** `skills/capcut-editing/scripts/{build,full,match,render}.py`
   predate `capcutctl` and are kept as reference. Their media constants are now read
@@ -110,6 +138,7 @@ are local *by nature*.
   CAPCUT_CAM=/path/to/face.mp4 CAPCUT_BROLL=/path/to/screen.mp4 python3 render.py
   ```
 
-Every one of these fails loudly rather than quietly: `capcutctl doctor` reports a
-missing media path as an **error**, and a transaction that would write one is aborted
-before anything reaches disk.
+Every one of these is visible before you hit it: `capcutctl preflight` reports the
+whole environment up front, `capcutctl doctor` reports a missing media path as an
+**error**, and a transaction that would write one is aborted before anything reaches
+disk. Nothing here fails as a stack trace.

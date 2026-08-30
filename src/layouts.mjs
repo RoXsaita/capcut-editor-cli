@@ -6,7 +6,7 @@ import { principalTrack } from './polish.mjs';
 import { assertOrigin } from './origin.mjs';
 import {
   CapcutError, clone, uuid, allSegments, selectSegments, loadProject, loadPreset,
-  expandHome, localizeMedia, stableJson
+  expandHome, localizeMedia, stableJson, assetSearchRoots
 } from './core.mjs';
 
 /**
@@ -274,13 +274,19 @@ function resolveAsset(doc, basename, projectDir) {
   for (const material of doc.materials?.videos || []) {
     if (material.path && path.basename(material.path) === basename) return material.path;
   }
-  const roots = [path.join(projectDir, 'Resources'), ...(presets().assetSearchPaths || []).map(expand)];
+  const roots = [
+    path.join(projectDir, 'Resources'),
+    ...assetSearchRoots(presets().assetSearchPaths || []),
+  ];
   for (const root of roots) {
     const direct = path.join(root, basename);
     if (fs.existsSync(direct)) return direct;
   }
   throw new CapcutError(
-    `layout: asset "${basename}" not found. Searched the project's materials and: ${roots.join(', ')}`,
+    `layout: asset "${basename}" not found. Searched the project's materials and: ${roots.join(', ')}\n`
+    + 'The overlays the built-in layouts need ship in the package\'s assets/ directory, so this '
+    + 'normally cannot happen — check that install did not drop it. To use your own artwork, put a '
+    + 'file of this name in a directory named by $CAPCUTCTL_ASSET_DIR.',
     { code: 'ASSET_NOT_FOUND' }
   );
 }

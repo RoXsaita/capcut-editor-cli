@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import {
   CapcutError, clone, uuid, allSegments, selectSegments, stableJson, localizeMedia,
-  isLocalMedia, PRESET_PARK_GAP_US, contentEndUs as sharedContentEndUs,
+  isLocalMedia, isCapCutCachePath, PRESET_PARK_GAP_US, contentEndUs as sharedContentEndUs,
   maxSegmentEndUs as sharedMaxSegmentEndUs,
 } from './core.mjs';
 import {
@@ -510,7 +510,6 @@ export function opReplaceMedia(doc, op, context = {}) {
   return { changed: 1, id: seg.id, materialId: material.id, path: dest, origin: origin.kind, shared: shared && true };
 }
 
-const isCapCutCache = p => /\/CapCut\/User Data\/Cache\//.test(p);
 
 function probeDurationUs(file) {
   try {
@@ -539,7 +538,7 @@ export function opLocalizeAll(doc, op, context = {}) {
     for (const mat of doc.materials?.[kind] || []) {
       const src = mat.path;
       if (typeof src !== 'string' || !src.startsWith('/')) continue;
-      if (isLocalMedia(projectDir, src) || isCapCutCache(src)) continue;
+      if (isLocalMedia(projectDir, src) || isCapCutCachePath(src)) continue;
       if (!fs.existsSync(src)) continue;
       let dest = seen.get(src);
       if (!dest) {

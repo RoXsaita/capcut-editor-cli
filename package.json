@@ -18,9 +18,11 @@
   },
   "homepage": "https://github.com/RoXsaita/capcut-editor-cli#readme",
   "files": [
+    "assets/",
     "bin/",
     "src/",
     "presets/",
+    "!presets/harvest.json",
     "tools/*.py",
     "tools/vision/ocr.swift",
     "LICENSE",

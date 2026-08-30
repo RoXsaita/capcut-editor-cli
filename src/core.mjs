@@ -65,7 +65,31 @@ export const PRESET3_DUPLICATE_BASELINE = Object.freeze([
 export const KNOWN_PRESET3_DUPLICATES = PRESET3_DUPLICATE_BASELINE;
 export const PRESET3_DUPLICATE_MATERIALS = PRESET3_DUPLICATE_BASELINE;
 
-const PRESET_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'presets');
+const PACKAGE_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+const PRESET_DIR = path.join(PACKAGE_ROOT, 'presets');
+
+/**
+ * Overlay artwork that ships WITH the tool, so a fresh clone can run the three headline
+ * layouts without the user first recreating one person's ~/Downloads. The measured geometry in
+ * `presets/layouts.json` was calibrated against these exact pixels — replace a file here and the
+ * numbers stop meaning what they say, which is why they are versioned rather than regenerated.
+ */
+export const BUNDLED_ASSET_DIR = path.join(PACKAGE_ROOT, 'assets');
+
+/**
+ * Where to look for a named overlay asset, nearest-wins:
+ *   1. $CAPCUTCTL_ASSET_DIR  — colon-separated; your own artwork overrides the bundle
+ *   2. the bundled assets/   — always present, so nothing is required of a new machine
+ *   3. presets.assetSearchPaths — the original ~/Downloads locations, kept last so an
+ *      existing machine keeps resolving the files it already has.
+ * Callers prepend the project's own materials and its Resources/ dir.
+ */
+export function assetSearchRoots(extra = []) {
+  const fromEnv = String(process.env.CAPCUTCTL_ASSET_DIR || '')
+    .split(path.delimiter).map(v => v.trim()).filter(Boolean).map(expandHome);
+  const roots = [...fromEnv, BUNDLED_ASSET_DIR, ...extra.map(expandHome)];
+  return [...new Set(roots.map(v => path.resolve(v)))];
+}
 
 /**
  * Presets ship with `~/…` paths, never `/Users/<someone>/…`, so the repo works on
@@ -95,13 +119,70 @@ const expandTree = value => {
 };
 
 const PRESET_CACHE = new Map();
+
+/**
+ * Where `<name>.json` is read from. `$CAPCUTCTL_PRESET_DIR` wins when it holds that file.
+ *
+ * This is the supported way to bring your own palette. The bundled `sfx.json` and
+ * `layouts.json` point into CapCut's effect/music cache, and those paths are minted on the
+ * machine where the sound was downloaded — they are not portable and cannot be shipped. Rather
+ * than telling a new user to download the same twenty-five effects, let them drop their own
+ * `sfx.json` in a directory and name it here. Falls back to the bundled preset per file, so an
+ * override directory only has to contain the presets it actually changes.
+ */
+export function presetFile(name) {
+  const override = expandHome(String(process.env.CAPCUTCTL_PRESET_DIR || '').trim());
+  if (override) {
+    const candidate = path.join(path.resolve(override), `${name}.json`);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return path.join(PRESET_DIR, `${name}.json`);
+}
+
 /** Read `presets/<name>.json` with every `~/…` string expanded for this machine. */
 export function loadPreset(name) {
-  if (!PRESET_CACHE.has(name)) {
-    PRESET_CACHE.set(name, expandTree(readJson(path.join(PRESET_DIR, `${name}.json`))));
-  }
-  return PRESET_CACHE.get(name);
+  const file = presetFile(name);
+  const key = `${name}\u0000${file}`;
+  if (!PRESET_CACHE.has(key)) PRESET_CACHE.set(key, expandTree(readJson(file)));
+  return PRESET_CACHE.get(key);
 }
+
+/**
+ * ffmpeg / ffprobe are a real dependency, not an optional extra: `cut`, `qa`, `find`,
+ * `preview`, `music` and `review` all shell out. Node reports a missing binary as
+ * `spawnSync ffmpeg ENOENT`, which tells a new user nothing. Ask first, and say what to do.
+ */
+const BINARY_CACHE = new Map();
+export function hasBinary(name) {
+  if (!BINARY_CACHE.has(name)) {
+    const probe = spawnSync(process.platform === 'win32' ? 'where' : 'which', [name], { stdio: 'ignore' });
+    BINARY_CACHE.set(name, probe.status === 0);
+  }
+  return BINARY_CACHE.get(name);
+}
+
+const INSTALL_HINT = {
+  darwin: 'brew install ffmpeg',
+  linux: 'sudo apt-get install ffmpeg   (or your distro\'s package manager)',
+};
+
+export function requireBinary(name, what) {
+  if (hasBinary(name)) return true;
+  const hint = INSTALL_HINT[process.platform] || `install ${name} and put it on PATH`;
+  throw new CapcutError(
+    `${name} is not on PATH, and ${what} needs it.\n  ${hint}`,
+    { code: 'MISSING_DEPENDENCY', exitCode: 2 });
+}
+
+/**
+ * A path inside CapCut's own effect/music cache. These are CapCut's resources, not the user's
+ * media: the id is minted per machine when the app downloads the asset, and CapCut re-fetches
+ * one that is missing. Treating an absent cache file as a hard error meant a mask — which every
+ * split-screen and circle layout needs — could not be applied on any machine but the one the
+ * preset was harvested from. It is reported, not fatal.
+ */
+export const isCapCutCachePath = p =>
+  typeof p === 'string' && /\/CapCut\/User Data\/Cache\//.test(p);
 
 export class CapcutError extends Error {
   constructor(message, { code = 'CAPCUTCTL_ERROR', exitCode = 1, details } = {}) {
@@ -819,7 +900,13 @@ export function validateDocument(doc, {
       } else seenMaterialIds.set(value.id, { kind, value, reported: false });
       const mediaPath = value.path;
       if (checkFiles && typeof mediaPath === 'string' && mediaPath.startsWith('/') && !fs.existsSync(mediaPath)) {
-        issues.push(issue('error', 'MISSING_MEDIA', `Missing media file: ${mediaPath}`, { file, id: value.id, path: mediaPath }));
+        issues.push(isCapCutCachePath(mediaPath)
+          ? issue('warning', 'MISSING_CAPCUT_RESOURCE',
+            `CapCut resource not cached on this machine: ${mediaPath}. CapCut re-downloads its own `
+            + 'effects, masks and stock audio on demand, so this is not a broken project — but the '
+            + 'look will not render until it does. `capcutctl harvest` re-captures your machine\'s ids.',
+            { file, id: value.id, path: mediaPath })
+          : issue('error', 'MISSING_MEDIA', `Missing media file: ${mediaPath}`, { file, id: value.id, path: mediaPath }));
       }
       if (kind === 'videos' && typeof mediaPath === 'string' && mediaPath.startsWith('/')) {
         const name = path.basename(mediaPath);
@@ -978,6 +1065,62 @@ function auditMediaOrigins(projectDir, state) {
     }
   }
   return issues;
+}
+
+/**
+ * "Will this work on my machine?" — answered without needing a project.
+ *
+ * Three things are environment, not code, and all three used to fail as something unhelpful:
+ * a missing ffmpeg surfaced as `spawnSync ENOENT`; a missing overlay PNG as ASSET_NOT_FOUND
+ * halfway through a layout; and a missing CapCut effect cache as `Transaction failed
+ * validation with 12 error(s)` at the end of a polish. Report all of it up front, with the
+ * command that fixes each one.
+ */
+export function preflight() {
+  const checks = [];
+  const add = (name, ok, detail, fix = null) => checks.push({ name, ok, detail, ...(fix ? { fix } : {}) });
+
+  for (const binary of ['ffmpeg', 'ffprobe']) {
+    add(binary, hasBinary(binary),
+      hasBinary(binary) ? 'on PATH' : 'not on PATH',
+      hasBinary(binary) ? null : (INSTALL_HINT[process.platform] || `install ${binary}`));
+  }
+
+  const assets = ['suheilai-rect-indigo-1080x1920 (2).png', 'suheilai-circle-white-1080x1920.png'];
+  for (const basename of assets) {
+    const roots = assetSearchRoots(loadPreset('layouts').assetSearchPaths || []);
+    const found = roots.map(root => path.join(root, basename)).find(file => fs.existsSync(file));
+    add(`asset: ${basename}`, Boolean(found), found || `not found in ${roots.join(', ')}`,
+      found ? null : 'reinstall, or set CAPCUTCTL_ASSET_DIR to a directory holding your own overlay');
+  }
+
+  // The SFX palette is CapCut's own effect/music cache. Those paths are minted on the machine
+  // where the sound was downloaded, so a fresh install has none of them: polish still runs, it
+  // just places nothing. Report the ratio rather than pretending it is pass/fail.
+  const sfx = loadPreset('sfx');
+  const entries = [
+    ...Object.entries(sfx.audioTemplates || {}),
+    ...Object.entries(sfx.transitionTemplates || {}),
+  ].filter(([, tpl]) => tpl?.path);
+  const present = entries.filter(([, tpl]) => fs.existsSync(tpl.path));
+  add('sfx palette', present.length > 0,
+    `${present.length}/${entries.length} sounds and transitions available` +
+    (present.length ? '' : ' — polish will place none'),
+    present.length === entries.length ? null
+      : 'download the sounds you want in CapCut, then run `capcutctl harvest`, or point '
+        + '$CAPCUTCTL_PRESET_DIR at a directory with your own sfx.json');
+
+  const root = DEFAULT_ROOT;
+  add('CapCut drafts folder', fs.existsSync(root), fs.existsSync(root) ? root : `${root} does not exist`,
+    fs.existsSync(root) ? null : 'install CapCut and open it once, or pass --root PATH');
+
+  const blocking = checks.filter(c => !c.ok && !String(c.name).startsWith('sfx'));
+  return {
+    ok: blocking.length === 0,
+    presetDir: presetFile('sfx'),
+    assetDirs: assetSearchRoots(loadPreset('layouts').assetSearchPaths || []),
+    checks,
+  };
 }
 
 export function doctor(projectDir, { checkFiles = true, duplicateBaseline = null } = {}) {

@@ -1,10 +1,12 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import {
   CapcutError, DEFAULT_ROOT, LIVE_FILE_NAMES, PRESET_PARK_GAP_US, assertCapcutClosed,
-  clone, listProjects, readJson, resolveProject, stableJson, uuid, localizeMedia
+  clone, listProjects, loadPreset, readJson, resolveProject, stableJson, uuid, localizeMedia,
+  requireBinary
 } from './core.mjs';
 import { assertOrigin } from './origin.mjs';
 
@@ -42,6 +44,7 @@ export function parseScenes(spec) {
 }
 
 export function probeMedia(file) {
+  requireBinary('ffprobe', 'reading a media file\'s dimensions and duration');
   try {
     const out = execFileSync('ffprobe', [
       '-v', 'error', '-select_streams', 'v:0',
@@ -60,10 +63,40 @@ export function probeMedia(file) {
   }
 }
 
-function pickTemplate(root, from) {
+/**
+ * Materialise the bundled skeleton as a throwaway template directory.
+ *
+ * `--blank` is the documented route for someone building their own style, but it still cloned
+ * `Preset 3` for the document SHAPE — so on a machine with no drafts it could not run at all,
+ * which is every fresh install. `presets/blank-draft.json` is that shape: a real CapCut draft
+ * with its identity, media, materials and segments removed and only the track shells and
+ * CapCut-owned defaults left. Nothing is invented here either — it was harvested, then
+ * stripped.
+ */
+function materialiseBlankTemplate() {
+  const skeleton = loadPreset('blank-draft');
+  const doc = clone(skeleton);
+  delete doc.segmentTemplate;
+  delete doc.videoMaterialTemplate;
+  const timelineId = uuid();
+  doc.id = timelineId;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-blank-'));
+  const write = (target, value) => {
+    fs.mkdirSync(target, { recursive: true });
+    for (const file of LIVE_FILE_NAMES) fs.writeFileSync(path.join(target, file), stableJson(value));
+  };
+  write(dir, doc);
+  write(path.join(dir, 'Timelines', timelineId), clone(doc));
+  fs.writeFileSync(path.join(dir, 'Timelines', 'project.json'),
+    stableJson({ main_timeline_id: timelineId, timelines: [{ id: timelineId }] }));
+  return dir;
+}
+
+function pickTemplate(root, from, { blank = false } = {}) {
   if (from) return resolveProject(from, root);
   const dir = path.join(root, DEFAULT_TEMPLATE);
   if (fs.existsSync(path.join(dir, 'draft_info.json'))) return dir;
+  if (blank) return materialiseBlankTemplate();
   const names = listProjects(root).map(p => p.name || p).slice(0, 8);
   throw new CapcutError(
     `Template "${DEFAULT_TEMPLATE}" not found in ${root}. Pass --from NAME of a draft you already have, or --blank for an empty timeline. Available: ${names.join(', ') || '(none)'}`,
@@ -256,7 +289,7 @@ export function createProject(name, options = {}) {
   if (fs.existsSync(projectDir)) {
     throw new CapcutError(`${projectDir} already exists. Pick another name or delete it first.`, { code: 'PROJECT_EXISTS', exitCode: 2 });
   }
-  const templateDir = pickTemplate(root, options.from);
+  const templateDir = pickTemplate(root, options.from, { blank: Boolean(options.blank) });
 
   let probe = null;
   let scenes = [];
@@ -336,13 +369,26 @@ function finishCreate(projectDir, { name, root, templateDir, options, probe, sce
       templates.matTemplate = clone((doc.materials?.videos || []).find(m => m.type === 'video') || { type: 'video', crop_scale: 1 });
       templates.materials = clone(doc.materials || {});
     } catch {
-      if (scenes.length) throw new CapcutError('Template project has no video segment to model on.', { code: 'NO_TEMPLATE', exitCode: 2 });
+      // The bundled skeleton has no segments to model on — it carries the two templates
+      // explicitly instead, harvested from a real draft the same way. Without this,
+      // `new --blank --media … --scenes …` on a machine with no drafts died here.
+      const skeleton = loadPreset('blank-draft');
+      if (skeleton?.segmentTemplate && skeleton?.videoMaterialTemplate) {
+        templates.segTemplate = clone(skeleton.segmentTemplate);
+        templates.matTemplate = clone(skeleton.videoMaterialTemplate);
+        templates.materials = clone(doc.materials || {});
+      } else if (scenes.length) {
+        throw new CapcutError('Template project has no video segment to model on.', { code: 'NO_TEMPLATE', exitCode: 2 });
+      }
     }
     if (options.blank) {
       const main = (doc.tracks || []).filter(t => t.flag === 0).map(t => ({ ...clone(t), segments: [] }));
       const overlayShell = (doc.tracks || []).find(t => t.type === 'video' && t.flag === 2)
         || (doc.tracks || []).find(t => t.type === 'video');
-      const overlay = overlayShell
+      // Only keep an empty overlay lane when nothing else will make one. `addScenes` always
+      // pushes its own track called 'content', so keeping this shell too left every --blank
+      // project with a stray empty 'content' lane sitting above the real one in CapCut.
+      const overlay = overlayShell && !scenes.length
         ? [{ ...clone(overlayShell), segments: [], flag: 2, attribute: 0, name: overlayShell.name || 'content' }]
         : [];
       doc.tracks = [...main, ...overlay];

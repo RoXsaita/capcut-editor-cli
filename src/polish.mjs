@@ -194,23 +194,52 @@ export function cutPoints(doc, { minGap = 0.9, projectDir = null } = {}) {
   return out;
 }
 
-/** Ensure a named SFX / transition material exists; return its id. */
+/**
+ * Is the file this preset points at actually on THIS machine?
+ *
+ * The SFX and transition palettes are CapCut's own effect/music cache. CapCut mints those
+ * paths when *you* download a sound in its UI, so they exist only on the machine that was
+ * harvested. On any other machine `polish` used to write the reference anyway, and the whole
+ * transaction died with `Transaction failed validation with 12 error(s)` — a working project
+ * refusing to be polished because of one person's ~/Library. Missing assets are skipped and
+ * reported instead: the polish that CAN be applied still is.
+ *
+ * A template with no path at all (a pure structural transition) is always usable.
+ */
+function templateIsAvailable(tpl) {
+  const file = tpl?.path;
+  if (typeof file !== 'string' || !file) return true;
+  return fs.existsSync(file);
+}
+
+/** Names skipped this run, so the command can say what it could not place and why. */
+let UNAVAILABLE = new Set();
+export function resetUnavailableSfx() { UNAVAILABLE = new Set(); }
+export function unavailableSfx() { return [...UNAVAILABLE].sort(); }
+
+/**
+ * Ensure a named SFX material exists; return its id, or `null` when the sound is not on this
+ * machine. Every caller must treat null as "place no sound here".
+ */
 function ensureAudio(doc, name) {
   const p = sfxPresets();
   const tpl = p.audioTemplates[name];
   if (!tpl) throw new CapcutError(`unknown sfx "${name}". Known: ${Object.keys(p.audioTemplates).join(', ')}`, { code: 'UNKNOWN_SFX', exitCode: 2 });
   const found = (doc.materials.audios || []).find(m => m.name === name);
   if (found) return found.id;
+  if (!templateIsAvailable(tpl)) { UNAVAILABLE.add(name); return null; }
   const m = clone(tpl);
   m.id = mint(`audio:${name}`);
   arr(doc, 'audios').push(m);
   return m.id;
 }
 
+/** Returns null when the transition's effect file is not cached on this machine. */
 function makeTransition(doc, name, durationS, key) {
   const p = sfxPresets();
   const tpl = p.transitionTemplates[name];
   if (!tpl) throw new CapcutError(`unknown transition "${name}"`, { code: 'UNKNOWN_TRANSITION', exitCode: 2 });
+  if (!templateIsAvailable(tpl)) { UNAVAILABLE.add(name); return null; }
   const m = clone(tpl);
   m.id = mint(`transition:${key}`);
   m.duration = US(durationS);
@@ -532,6 +561,7 @@ export function opCalloutSfx(doc, op = {}, context = {}) {
   for (const [i, plate] of plates.entries()) {
     const name = names[i % names.length];
     const audioId = ensureAudio(doc, name);
+    if (!audioId) continue;                       // sound not cached on this machine
     const tpl = p.audioTemplates[name];
     const dur = Math.min((tpl.duration || US(0.5)) / 1e6, 1.2);
     if (plate.t >= maxEnd) continue;
@@ -798,6 +828,7 @@ export function opInteractions(doc, op = {}, context = {}) {
     const name = hit.kind === 'type' ? typeName : clickName;
     if (!name) continue;
     const audioId = ensureAudio(doc, name);
+    if (!audioId) continue;                       // sound not cached on this machine
     const tpl = p.audioTemplates[name];
     const fileDur = (tpl.duration || US(0.5)) / 1e6;
     const dur = Math.min(hit.dur || 0.3, fileDur, 1.5);
@@ -902,7 +933,9 @@ export function opPolish(doc, op, context = {}) {
   }
 
   let transitions = 0;
+  let sfxPlaced = 0;
   const skipped = [];
+  resetUnavailableSfx();
   for (const [i, cue] of plan.entries()) {
     if (principal) {
       const segs = principal.track.segments;
@@ -911,13 +944,16 @@ export function opPolish(doc, op, context = {}) {
       // no clip after the boundary => CapCut drops the transition on load, so do not write one
       if (at >= 0 && at < segs.length - 1) {
         const id = makeTransition(doc, cue.transition, cue.duration, `${i}:${cue.t}`);
+        if (id) {
           segs[at].extra_material_refs = [...(segs[at].extra_material_refs || []), id];
-        transitions++;
+          transitions++;
+        }
       } else {
         skipped.push(cue.t);
       }
     }
     const audioId = ensureAudio(doc, cue.sfx);
+    if (!audioId) continue;                       // sound not cached on this machine
     const tpl = p.audioTemplates[cue.sfx];
     const dur = Math.min((tpl.duration || US(0.5)) / 1e6, 1.2);
     const start = Math.max(0, cue.t - lead);
@@ -925,11 +961,17 @@ export function opPolish(doc, op, context = {}) {
     if (start >= maxEnd) continue;
     const clipped = Math.max(0.05, Math.min(dur, maxEnd - start));
     lane.segments.push(audioSegment(doc, audioId, start, clipped, `${i}:${cue.t}`, volume));
+    sfxPlaced++;
   }
   lane.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
   const callouts = opCalloutSfx(doc, { volume, __seed: op.__seed, projectDir: context.projectDir });
   const interactions = opInteractions(doc, { volume, __seed: op.__seed, skip: op.noInteractions }, context);
-  return { changed: plan.length, transitions, removedTransitions: removed, sfx: plan.length,
+  const unavailable = unavailableSfx();
+  return { changed: plan.length, transitions, removedTransitions: removed, sfx: sfxPlaced,
+           // Named, not silent: a palette entry whose CapCut cache file is not on this machine
+           // is skipped rather than written as a broken reference. `capcutctl harvest` after
+           // downloading the same sounds in CapCut re-points them.
+           ...(unavailable.length ? { unavailableSfx: unavailable } : {}),
            principalTrack: principal ? principal.index : null,
            variety: seamVariety(plan),
            sliced: slices.split, alreadyCut: slices.existing,

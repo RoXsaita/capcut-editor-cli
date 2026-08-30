@@ -12,6 +12,7 @@ import {
   doctor,
   inspectProject,
   listSnapshots,
+  preflight,
   listProjects,
   capcutStatus,
   closeCapcut,
@@ -35,6 +36,7 @@ Usage:
   capcutctl find "agent running" --media FILE [--shows|--says] [--context]
                       — when is it on screen / when was it said.
 
+  capcutctl preflight [--json]                 — will this work on this machine? deps, assets, SFX palette
   capcutctl projects [--root PATH] [--json]
   capcutctl rm --project NAME [--dry-run]      — to .recycle_bin, registry entry dropped
   capcutctl close                              — quit CapCut and wait for it to exit
@@ -107,7 +109,8 @@ Layouts are exact, measured geometry (presets/layouts.json) — not judgement:
 
 New projects clone "Preset 3" by default: leftover preset clips are parked 30s after
 the talking head (a parts bin — do not delete them). Follow/CTA is written on the
-talking head, never on that leftover. Use --blank for an empty timeline.
+talking head, never on that leftover. Use --blank for an empty timeline — it needs no
+local draft, so it works on a machine that has never made one.
 
 The origin contract — every frame stays editable in CapCut:
   Enforced by add, replace-media, layout screen, and new --media.
@@ -119,6 +122,18 @@ The origin contract — every frame stays editable in CapCut:
     --generated              a rendered asset with no editable original (Remotion, AE)
     --derived-from ORIGINAL  you pre-processed anyway; record where the real source is
   "doctor" reports MEDIA_PREFRAMED / MEDIA_ORIGIN_LOST for projects built before this.
+
+Portability — what is bundled and what is yours:
+  The overlay artwork the built-in layouts need ships in assets/, so a fresh clone can run
+  split-screen / circle / screen with no setup. The SFX and transition palette cannot: those
+  are CapCut's own effect/music cache, minted on the machine where you downloaded the sound.
+  polish SKIPS any sound that is not on this machine and names it, instead of writing a
+  reference that fails validation. Bring your own with either:
+    CAPCUTCTL_ASSET_DIR=DIR    overlay artwork, searched before the bundled assets/
+    CAPCUTCTL_PRESET_DIR=DIR   your own sfx.json / brands.json / layouts.json; each file
+                               falls back to the bundled preset when absent
+  ffmpeg and ffprobe are required (cut, qa, find, preview, music, review).
+  Run "capcutctl preflight" to see all of it at once.
 
 Safety defaults:
   • refuses writes while CapCut is running
@@ -542,6 +557,18 @@ export async function main(argv, dependencies = {}) {
       allowEphemeral: Boolean(args.allowEphemeral),
       dryRun: Boolean(args.dryRun), forceRunning: Boolean(args.forceRunning)
     }), true);
+  }
+  if (command === 'preflight') {
+    const report = preflight();
+    if (args.json) return print(report, true);
+    const lines = [`capcutctl preflight — ${report.ok ? 'ready' : 'NOT ready'}`, ''];
+    for (const c of report.checks) {
+      lines.push(`${c.ok ? '  ok  ' : '  --  '} ${c.name}: ${c.detail}`);
+      if (c.fix) lines.push(`         fix: ${c.fix}`);
+    }
+    process.stdout.write(`${lines.join('\n')}\n`);
+    if (!report.ok) process.exitCode = 1;
+    return;
   }
   if (command === 'projects') return print(listProjects(root), args.json);
   if (command === 'init-spec') {

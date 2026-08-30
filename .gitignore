@@ -23,3 +23,6 @@ tools/vision/ocr
 qa/
 *.mp4
 .capcutctl/
+
+# npm pack output — a build artifact, and it embeds whatever is in presets/ at the time.
+*.tgz

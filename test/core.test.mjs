@@ -12,6 +12,7 @@ import {
   assertCapcutClosed,
   capcutProcess,
   capcutStatus,
+  hasBinary,
   closeCapcut,
   contentEndUs,
   createSnapshot,
@@ -667,6 +668,13 @@ function writeRecutDocs(f, mutate) {
   }
 }
 
+// These tests need REAL media, because recut validates the source duration with ffprobe —
+// a text placeholder cannot exercise it. ffmpeg is a genuine dependency of capcutctl, so CI
+// installs it; a contributor without it gets a named skip rather than `spawnSync ENOENT`.
+const NEEDS_FFMPEG = hasBinary('ffmpeg') && hasBinary('ffprobe')
+  ? {}
+  : { skip: 'ffmpeg/ffprobe not on PATH — install ffmpeg to run the cut.recut suite' };
+
 function recutFixture() {
   const f = fixture({ drift: false });
   // recut validates the actual source duration with ffprobe. Keep the general fixture's
@@ -730,7 +738,7 @@ function recutSpec(f, timeline = [
   };
 }
 
-test('cut.recut source-maps anchors, keeps principal at 1x, mirrors ids, and is idempotent', () => {
+test('cut.recut source-maps anchors, keeps principal at 1x, mirrors ids, and is idempotent', NEEDS_FFMPEG, () => {
   const f = recutFixture();
   const spec = recutSpec(f);
   const first = applySpec(f.project, spec, { forceRunning: true });
@@ -785,7 +793,7 @@ test('cut.recut source-maps anchors, keeps principal at 1x, mirrors ids, and is 
   assert.equal(stableJson(readJson(path.join(f.timelineDir, 'draft_info.json'))), timelineBefore);
 });
 
-test('cut.recut rejects malformed or ambiguous plans before changing either mirror', () => {
+test('cut.recut rejects malformed or ambiguous plans before changing either mirror', NEEDS_FFMPEG, () => {
   const f = recutFixture();
   const before = [f.project, f.timelineDir].map(dir => stableJson(readJson(path.join(dir, 'draft_info.json'))));
   const bad = recutSpec(f, [
@@ -798,7 +806,7 @@ test('cut.recut rejects malformed or ambiguous plans before changing either mirr
   assert.equal(stableJson(readJson(path.join(f.timelineDir, 'draft_info.json'))), before[1]);
 });
 
-test('cut.recut rolls back all mirrors after an injected commit failure', () => {
+test('cut.recut rolls back all mirrors after an injected commit failure', NEEDS_FFMPEG, () => {
   const f = recutFixture();
   process.env.CAPCUTCTL_FAIL_AFTER_WRITES = '2';
   try {
@@ -817,7 +825,7 @@ test('cut.recut rolls back all mirrors after an injected commit failure', () => 
   }
 });
 
-test('cut.recut commits the parked timeline and created metadata as one transaction', () => {
+test('cut.recut commits the parked timeline and created metadata as one transaction', NEEDS_FFMPEG, () => {
   const f = recutFixture();
   const sidecar = path.join(f.project, '.capcutctl', 'created.json');
   fs.mkdirSync(path.dirname(sidecar), { recursive: true });
@@ -848,7 +856,7 @@ test('cut.recut commits the parked timeline and created metadata as one transact
   }
 });
 
-test('cut.recut no-backup rollback restores every mirror and created metadata byte-for-byte', () => {
+test('cut.recut no-backup rollback restores every mirror and created metadata byte-for-byte', NEEDS_FFMPEG, () => {
   const f = recutFixture();
   const sidecar = path.join(f.project, '.capcutctl', 'created.json');
   fs.mkdirSync(path.dirname(sidecar), { recursive: true });
@@ -876,7 +884,7 @@ test('cut.recut no-backup rollback restores every mirror and created metadata by
   assert.equal(fs.existsSync(path.join(f.project, '.capcutctl', 'write.lock')), false);
 });
 
-test('cut.recut resolves canonical original media paths and rejects source past real EOF', () => {
+test('cut.recut resolves canonical original media paths and rejects source past real EOF', NEEDS_FFMPEG, () => {
   const canonical = recutFixture();
   const localized = path.join(canonical.temp, 'localized-source.mp4');
   fs.copyFileSync(canonical.media, localized);
@@ -908,7 +916,7 @@ test('cut.recut resolves canonical original media paths and rejects source past 
   assert.deepEqual(fs.readFileSync(path.join(eof.timelineDir, 'draft_info.json')), before[1]);
 });
 
-test('cut.recut clones shared speed refs and filters/rebases animated split keyframes', () => {
+test('cut.recut clones shared speed refs and filters/rebases animated split keyframes', NEEDS_FFMPEG, () => {
   const f = recutFixture();
   writeRecutDocs(f, doc => {
     doc.materials.speeds = [{ id: 'SHARED-SPEED', type: 'speed', speed: 2, mode: 0, curve_speed: null }];
@@ -945,7 +953,7 @@ test('cut.recut clones shared speed refs and filters/rebases animated split keyf
   }
 });
 
-test('cut.recut treats project FPS as authoritative and quantizes non-30fps plans', () => {
+test('cut.recut treats project FPS as authoritative and quantizes non-30fps plans', NEEDS_FFMPEG, () => {
   const f = recutFixture();
   writeRecutDocs(f, doc => { doc.fps = 24; });
   const mismatch = recutSpec(f);
@@ -981,7 +989,7 @@ test('cut.recut treats project FPS as authoritative and quantizes non-30fps plan
   }
 });
 
-test('cut.recut leaves unrelated audio anchored but maps explicitly tied audio', () => {
+test('cut.recut leaves unrelated audio anchored but maps explicitly tied audio', NEEDS_FFMPEG, () => {
   const f = recutFixture();
   writeRecutDocs(f, doc => {
     doc.tracks.find(track => track.name === 'sfx').segments[0].source_tied_to_principal = true;

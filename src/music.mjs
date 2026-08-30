@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { CapcutError, clone, uuid } from './core.mjs';
+import { CapcutError, clone, uuid, requireBinary } from './core.mjs';
 import { geminiApiKey, loadEnv } from './env.mjs';
 import { pictureChanges, sfxPresets } from './polish.mjs';
 import { contentEndUs } from './add.mjs';
@@ -141,6 +141,7 @@ export function probeAudioDuration(file) {
  * musical beats, not every hi-hat. No extra deps.
  */
 export function detectBeats(file, { minGap = 0.32 } = {}) {
+  requireBinary('ffmpeg', 'detecting beats in the generated bed');
   const r = spawnSync('ffmpeg', [
     '-v', 'error', '-i', file, '-ac', '1', '-ar', '22050', '-f', 'f32le', '-',
   ], { encoding: 'buffer', maxBuffer: 80 * 1024 * 1024 });

@@ -32,6 +32,12 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
 
+      # ffmpeg/ffprobe are a real dependency — cut, qa, find, preview, music and review all
+      # shell out, and the cut.recut suite builds genuine media to validate against. Without
+      # this the suite skips itself rather than failing, so install it and actually run it.
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
       - name: Check JavaScript syntax
         run: npm run check
 

@@ -39,7 +39,12 @@ Or run without installation:
 node bin/capcutctl.mjs help
 ```
 
-Node.js 20 or newer is required. There are no runtime dependencies.
+Node.js 20 or newer is required, plus **ffmpeg / ffprobe** on PATH
+(`brew install ffmpeg`). There are no npm runtime dependencies.
+
+```bash
+capcutctl preflight     # checks deps, bundled artwork, SFX palette, drafts folder
+```
 
 ## Development checks
 
@@ -74,27 +79,46 @@ project. Do not silently apply the bundled look.**
    name). Skip `polish`, `wrap`, and branded endcards until they say what they
    want.
 
-`capcutctl new` still defaults to cloning a local draft named `Preset 3` when
-it exists; pass `--from NAME` or `--blank` otherwise.
+`capcutctl new` defaults to cloning a local draft named `Preset 3` when it exists;
+pass `--from NAME` to clone a different one. `--blank` needs no local draft at all —
+it builds from `presets/blank-draft.json`, a real CapCut draft stripped down to its
+track shells and CapCut-owned defaults, so a fresh install can create a project on a
+machine that has never had one.
 
-### Presets are portable; what they point at is not
+### What ships with the tool, and what is yours
 
-Every path in `presets/*.json` is written as `~/…` and expanded to your own home
-directory when the preset loads (`loadPreset` in `src/core.mjs`), so nothing in this
-repo is tied to one machine. What those paths *point at* is still local:
+Run this first on any new machine:
 
-| Preset | Points at | On a new machine |
+```bash
+capcutctl preflight
+```
+
+It reports the dependencies, the overlay artwork, the SFX palette and your CapCut drafts
+folder, and names the fix for anything missing. Exit code 1 if the install cannot work.
+
+**Required:** Node.js 20+, and **ffmpeg / ffprobe** on PATH (`brew install ffmpeg`) — `cut`,
+`qa`, `find`, `preview`, `music` and `review` all shell out to them.
+
+| What | Where it comes from | On a new machine |
 |---|---|---|
-| `layouts.json`, `sfx.json`, `signature.json` | `~/Library/Containers/com.lemon.lvoverseas/…/Cache/effect` and `…/Cache/music` | **Will not resolve.** CapCut writes these ids when *you* download an effect or a track. Download the same ones in CapCut, then re-capture the ids with `capcutctl harvest`. |
-| `brands.json` | `~/Downloads/Logos`, `~/Downloads/Media/Images/2026` | Your own logo folder. Point `svgFallbackDir` / `rasterCacheDir` and each brand's `logo` at it. |
-| `sfx.json` | `~/Downloads/fahhh.mp3` | One personal sound file; substitute your own. |
+| Overlay artwork (the indigo bar, the white ring) | **bundled** in `assets/` | Works with no setup. The geometry in `layouts.json` is measured against these exact pixels. |
+| SFX + transition palette | CapCut's own `…/Cache/effect` and `…/Cache/music` | **Cannot be shipped** — CapCut mints those ids when *you* download a sound. `polish` skips any sound that is not present and names it in its output, rather than writing a reference that fails validation. |
+| Brand logos | `~/Downloads/Logos`, `~/Downloads/Media/Images/2026` | Third-party marks, not redistributable. `capcutctl brands` lists which have a usable PNG and which do not. |
 
-`presets/harvest.json` is **not** in the repo — it is a capture of the local CapCut
-drafts root and names every project on the machine that produced it. Run
-`capcutctl harvest` to write your own; nothing in the shipped code reads it.
+Two environment variables let you bring your own instead:
 
-`capcutctl doctor` reports a missing media path rather than writing a broken project,
-so a preset that has not been re-harvested fails loudly, not silently.
+```bash
+export CAPCUTCTL_ASSET_DIR=~/my-overlays     # searched BEFORE the bundled assets/
+export CAPCUTCTL_PRESET_DIR=~/my-presets     # your own sfx.json / brands.json / layouts.json
+```
+
+`CAPCUTCTL_PRESET_DIR` falls back per file, so a directory containing only `sfx.json`
+overrides the palette and leaves the layouts alone. To adopt the bundled palette instead,
+download the same sounds in CapCut and run `capcutctl harvest` to capture your machine's ids.
+
+`presets/harvest.json` is **not** in the repo — it is a capture of the local CapCut drafts
+root and names every project on the machine that produced it. Run `capcutctl harvest` to write
+your own; nothing in the shipped code reads it.
 
 ## The origin contract
 
