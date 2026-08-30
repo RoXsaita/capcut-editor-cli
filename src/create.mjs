@@ -6,6 +6,7 @@ import {
   CapcutError, DEFAULT_ROOT, LIVE_FILE_NAMES, PRESET_PARK_GAP_US, assertCapcutClosed,
   clone, listProjects, readJson, resolveProject, stableJson, uuid, localizeMedia
 } from './core.mjs';
+import { assertOrigin } from './origin.mjs';
 
 /**
  * A new project is a literal duplicate of the branded preset with the name changed —
@@ -274,6 +275,16 @@ export function createProject(name, options = {}) {
         );
       }
     }
+    // The talking head is the timeline's clock; a pre-framed or scratchpad A-roll poisons every
+    // scene hung off it. Same contract as clip.add, checked before the draft is registered.
+    // The canvas is not built yet, so use the requested one (or the 1080x1920 default).
+    const [cw, ch] = String(options.canvas || '1080x1920').split('x').map(Number);
+    assertOrigin({
+      file: media, width: probe.width, height: probe.height,
+      canvas: [cw || 1080, ch || 1920], label: 'new --media', projectDir,
+      generated: options.generated === true, derivedFrom: options.derivedFrom || null,
+      derivedOffset: options.derivedOffset, allowEphemeral: options.allowEphemeral === true,
+    });
     options.media = media;
   }
 

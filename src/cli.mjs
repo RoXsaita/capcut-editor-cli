@@ -51,6 +51,7 @@ Usage:
   capcutctl apply --project NAME_OR_PATH --spec FILE [--dry-run] [--force-running] [--no-backup]
   capcutctl add --project NAME --media FILE --at S --dur S --track NAME|N
                 [--src S] [--cover IN-OUT] [--volume 0] [--desc TEXT] [--no-localize]
+                [--generated] [--derived-from ORIGINAL [--derived-offset S]] [--allow-ephemeral]
   capcutctl replace-media --project NAME --file FILE --at S --track NAME|N [--retime] [--no-localize]
   capcutctl localize --project NAME   — copy outside videos into the project (fixes Link media)
   capcutctl trim --project NAME --at S --track NAME|N --src IN-OUT | --start S --dur S
@@ -108,6 +109,17 @@ New projects clone "Preset 3" by default: leftover preset clips are parked 30s a
 the talking head (a parts bin — do not delete them). Follow/CTA is written on the
 talking head, never on that leftover. Use --blank for an empty timeline.
 
+The origin contract — every frame stays editable in CapCut:
+  Enforced by add, replace-media, layout screen, and new --media.
+  Media is refused when its framing was baked in before import (a file exactly half the
+  canvas is a crop, not a capture) or when it comes from a temp/scratchpad directory (the
+  origin recorded in media-map.json would be a dead link). Crop, pan and zoom with
+  "layout broll --row" / "layout screen" on the FULL-frame source instead — those write
+  clip.scale + clip.transform, which the human can still drag.
+    --generated              a rendered asset with no editable original (Remotion, AE)
+    --derived-from ORIGINAL  you pre-processed anyway; record where the real source is
+  "doctor" reports MEDIA_PREFRAMED / MEDIA_ORIGIN_LOST for projects built before this.
+
 Safety defaults:
   • refuses writes while CapCut is running
   • snapshots before every committed transaction
@@ -127,7 +139,8 @@ export function parseArgs(argv) {
     if (['json', 'dryRun', 'forceRunning', 'noBackup', 'help', 'noOverlay', 'blank', 'includeTemplate', 'newTimelineId',
          'transcript', 'noTransitions', 'noSeam', 'auto', 'plan', 'noSfx', 'noZoom', 'retime', 'localize',
          'noLocalize', 'motivated', 'regen', 'music', 'noMusic', 'polish', 'noInteractions',
-         'waitForClose', 'force', 'reindex', 'noRepair', 'inPlace'].includes(key)) result[key] = true;
+         'waitForClose', 'force', 'reindex', 'noRepair', 'inPlace',
+         'generated', 'allowEphemeral'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
       result[key] = argv[++i];
@@ -523,6 +536,10 @@ export async function main(argv, dependencies = {}) {
       width: args.width, height: args.height, duration: args.duration,
       newTimelineId: Boolean(args.newTimelineId),
       localize: !args.noLocalize,
+      generated: Boolean(args.generated),
+      derivedFrom: args.derivedFrom ? path.resolve(args.derivedFrom) : null,
+      derivedOffset: args.derivedOffset != null ? Number(args.derivedOffset) : null,
+      allowEphemeral: Boolean(args.allowEphemeral),
       dryRun: Boolean(args.dryRun), forceRunning: Boolean(args.forceRunning)
     }), true);
   }
@@ -826,7 +843,11 @@ export async function main(argv, dependencies = {}) {
       width: probe.width,
       height: probe.height,
       mediaDuration: probe.duration,
-      localize: !args.noLocalize
+      localize: !args.noLocalize,
+      generated: Boolean(args.generated),
+      derivedFrom: args.derivedFrom ? path.resolve(args.derivedFrom) : null,
+      derivedOffset: args.derivedOffset != null ? Number(args.derivedOffset) : null,
+      allowEphemeral: Boolean(args.allowEphemeral)
     };
     const result = applySpec(projectDir, { version: 1, name: 'add', operations: [op] }, options);
     const added = (result.result || []).find(g => g.group === 'root')?.operations?.[0];
@@ -878,7 +899,11 @@ export async function main(argv, dependencies = {}) {
       localize: !args.noLocalize,
       width: probe.width,
       height: probe.height,
-      mediaDuration: probe.duration
+      mediaDuration: probe.duration,
+      generated: Boolean(args.generated),
+      derivedFrom: args.derivedFrom ? path.resolve(args.derivedFrom) : null,
+      derivedOffset: args.derivedOffset != null ? Number(args.derivedOffset) : null,
+      allowEphemeral: Boolean(args.allowEphemeral)
     };
     return print(applySpec(projectDir, { version: 1, name: 'replace-media', operations: [op] }, options), true);
   }

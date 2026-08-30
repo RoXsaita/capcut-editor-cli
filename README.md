@@ -4,6 +4,8 @@
 
 `capcutctl` is a transactional control layer for local CapCut projects. It edits CapCut's native draft model directly while keeping the project editable in CapCut. It does not render layouts with FFmpeg, replace raw footage with flattened montages, or treat a single `draft_info.json` as the whole project.
 
+Since 0.1.1 it also refuses to let *you* do those things on the way in — see [The origin contract](#the-origin-contract).
+
 The first release is deliberately conservative: it focuses on the operations that repeatedly broke real projects—root/active-timeline drift, temporary media paths, stale IDs, missing bound mask materials, partial writes, unsafe edits while CapCut is auto-saving, and silent corruption across `.bak`/`.tmp` mirrors.
 
 ## Safety model
@@ -93,6 +95,48 @@ drafts root and names every project on the machine that produced it. Run
 
 `capcutctl doctor` reports a missing media path rather than writing a broken project,
 so a preset that has not been re-harvested fails loudly, not silently.
+
+## The origin contract
+
+The deliverable is a project a human finishes by hand. That only holds while every framing
+decision is still a CapCut property they can drag. Two ways of importing media quietly end that,
+and both happened on a real edit:
+
+- **Pre-framed media.** B-roll cropped and scaled from 1920x1080 to 1080x960 with FFmpeg, then
+  imported and placed with an identity transform. The picture is correct and `doctor` passes —
+  which is exactly the problem. The rows outside the crop are gone, so the shot can never be
+  reframed, zoomed elsewhere, or moved to another layout.
+- **Ephemeral origins.** Media imported from an agent session's scratchpad. The bytes are copied
+  into `Resources/`, so the project plays, but the original recorded in `media-map.json` points
+  at a directory that no longer exists. The trail back to the footage is gone permanently.
+
+`add`, `replace-media`, `layout screen`, `new --media` — and any `apply --spec` carrying
+`clip.add` / `replace.media` / `layout.screen` — refuse both before anything is written:
+
+| Code | Trigger |
+|---|---|
+| `PREFRAMED_MEDIA` | The file is exactly half the canvas. Capture devices do not produce that size; a crop does. |
+| `EPHEMERAL_MEDIA` | The source is under `/tmp`, `$TMPDIR`, `/var/folders`, or a `scratchpad/` directory. |
+
+Express the framing in CapCut instead — `layout broll --row SOURCE_PIXEL_ROW` and
+`layout screen` write `clip.scale` + `clip.transform` + the seam mask onto the full-frame source,
+producing the same picture from geometry the human can still change.
+
+Two honest escapes, both recorded on the material and in `media-map.json`:
+
+```bash
+capcutctl add --project P --media gfx.mp4 --at 9 --dur 2.8 --track broll --generated
+capcutctl add --project P --media cut.mp4 --at 9 --dur 2.8 --track broll \
+  --derived-from ~/Desktop/Screen\ Recordings/screen-1/screen.mp4 --derived-offset 220
+```
+
+`--generated` is for a render with no editable original (Remotion, After Effects). `--derived-from`
+is for deliberate pre-processing, and is accepted only when it names a real, durable file.
+
+A project whose own directory is temporary is exempt from the ephemeral check — it cannot outlive
+its own media. For projects built before the contract, `capcutctl doctor` reports
+`MEDIA_PREFRAMED` and `MEDIA_ORIGIN_LOST` as **warnings**: the repair is a judgement call, not
+something to fail a load over.
 
 ## Core commands
 

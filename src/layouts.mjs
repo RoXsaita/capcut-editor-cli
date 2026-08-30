@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { principalTrack } from './polish.mjs';
+import { assertOrigin } from './origin.mjs';
 import {
   CapcutError, clone, uuid, allSegments, selectSegments, loadProject, loadPreset,
   expandHome, localizeMedia, stableJson
@@ -109,7 +110,8 @@ function readMediaMap(projectDir) {
  * the original direct `{localizedPath: originalPath}` map shape.
  */
 export function persistMaterialSourceMapping(projectDir, {
-  materialId, localizedPath, originalPath, sourceTakeId: takeId = null
+  materialId, localizedPath, originalPath, sourceTakeId: takeId = null,
+  origin = null, derivedFromPath = null, derivedFromOffset = null,
 } = {}) {
   if (!projectDir || !materialId || !localizedPath || !originalPath) return null;
   const localized = canonicalMediaPath(localizedPath);
@@ -132,6 +134,12 @@ export function persistMaterialSourceMapping(projectDir, {
     original_path: original,
     sourceTakeId: stableTakeId,
     source_take_id: stableTakeId,
+    // What the origin contract decided at import: 'capture' (an original recording),
+    // 'generated' (a render with no editable source), or 'derived' (pre-processed, with the
+    // real original named). `doctor` needs this to know which lost origins are repairable.
+    origin: origin || null,
+    derived_from_path: derivedFromPath || null,
+    derived_from_offset: derivedFromOffset ?? null,
   };
   map.paths[localized] = original;
   atomicWrite(file, stableJson(map));
@@ -150,6 +158,9 @@ export function recordMediaProvenance(context, record = {}) {
     originalPath: canonicalMediaPath(source),
     localizedPath: canonicalMediaPath(localized),
     sourceTakeId: record.sourceTakeId || sourceTakeId(source),
+    origin: record.origin || null,
+    derivedFromPath: record.derivedFromPath || null,
+    derivedFromOffset: record.derivedFromOffset ?? null,
   };
   if (context.shared) {
     const queued = context.shared.mediaProvenance || (context.shared.mediaProvenance = new Map());
@@ -1375,6 +1386,19 @@ function ensureScreenMaterial(doc, op, context, screen, sourceStartUs, sourceDur
   // diagnostics. Canonicalization is still used by sourceTakeId and the map writer, so symlink
   // aliases cannot create two identities for one take.
   const source = path.resolve(expand(op.media));
+  // The third door into a project, and the one this skill actively recommends — so it obeys the
+  // same origin contract as clip.add. A recording that was already cropped to the half-frame
+  // defeats the whole point of layout.screen, which exists to compute that framing natively.
+  const canvasConfig = doc.canvas_config || {};
+  const declaredWidth = op.width == null ? Number(screen.source.width) : Number(op.width);
+  const declaredHeight = op.height == null ? Number(screen.source.height) : Number(op.height);
+  assertOrigin({
+    file: source, width: declaredWidth, height: declaredHeight,
+    canvas: [canvasConfig.width || 1080, canvasConfig.height || 1920],
+    label: 'layout.screen', projectDir: context.projectDir || null,
+    generated: op.generated === true, derivedFrom: op.derivedFrom || null,
+    derivedOffset: op.derivedOffset, allowEphemeral: op.allowEphemeral === true,
+  });
   let destination = source;
   if (op.localize !== false && context.projectDir) {
     destination = localizeMedia(context.projectDir, source, undefined, { dryRun: context.dryRun });

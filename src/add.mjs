@@ -12,6 +12,7 @@ import {
   insertOverlayTrack, renumberTracks, recordMediaProvenance, commitMediaProvenance,
   sourceTakeId
 } from './layouts.mjs';
+import { assertOrigin, stampOrigin } from './origin.mjs';
 import { principalTrack } from './polish.mjs';
 
 const US = s => Math.round(s * 1e6);
@@ -297,7 +298,7 @@ function ensureMaterial(doc, op, context) {
   return material;
 }
 
-function annotateMediaSource(material, segment, originalPath, localizedPath, context) {
+function annotateMediaSource(material, segment, originalPath, localizedPath, context, origin = null) {
   if (!material || !originalPath) return null;
   const original = path.resolve(originalPath);
   const localized = localizedPath ? path.resolve(localizedPath) : path.resolve(material.path || original);
@@ -314,6 +315,11 @@ function annotateMediaSource(material, segment, originalPath, localizedPath, con
       originalPath: original,
       localizedPath: localized,
       sourceTakeId: takeId,
+      // The origin contract's verdict travels with the provenance: `doctor` reads it to tell a
+      // generated graphic (no original exists, nothing to relink) apart from a baked crop.
+      origin: origin?.kind || null,
+      derivedFromPath: origin?.derivedFrom || null,
+      derivedFromOffset: origin?.derivedOffset ?? null,
     });
   }
   return takeId;
@@ -335,6 +341,16 @@ export function opClipAdd(doc, op, context = {}) {
   const atUs = US(op.at);
   const durUs = US(op.duration);
   if (!(durUs > 0)) throw new CapcutError('clip.add: --dur must be positive.', { code: 'BAD_TIME', exitCode: 2 });
+  // Before anything is copied: is this media the human can still reframe, from a source they
+  // can still find? Runs on the caller's source, not the localized destination.
+  const cc = doc.canvas_config || {};
+  const origin = assertOrigin({
+    file: originalMedia, width: op.width, height: op.height,
+    canvas: [cc.width || 1080, cc.height || 1920], label: 'clip.add',
+    projectDir: context.projectDir || null,
+    generated: op.generated === true, derivedFrom: op.derivedFrom || null,
+    derivedOffset: op.derivedOffset, allowEphemeral: op.allowEphemeral === true,
+  });
 
   // Default the source window to the START of the media. It used to default to `at`, so
   // `add --at 30` silently began 30s into a file the user had just picked — and refused
@@ -363,7 +379,7 @@ export function opClipAdd(doc, op, context = {}) {
   const slid = slidePreserved(doc, context, atUs + durUs, op);
   if (atUs + durUs > (doc.duration || 0) + 1) doc.duration = atUs + durUs;
 
-  const material = ensureMaterial(doc, op, context);
+  const material = stampOrigin(ensureMaterial(doc, op, context), origin);
   if (Number.isFinite(material.duration) && srcStart + srcDur > material.duration + 1) {
     throw new CapcutError(
       `clip.add: source ${r3(S(srcStart))}-${r3(S(srcStart + srcDur))}s exceeds media duration ${r3(S(material.duration))}s.`,
@@ -393,7 +409,7 @@ export function opClipAdd(doc, op, context = {}) {
   // `pace` reads the material first and only falls back to the segment, so a clip whose
   // material still says 1x reports as un-ramped forever.
   setSpeedMaterial(doc, segment, speed);
-  annotateMediaSource(material, segment, originalMedia, material.path, context);
+  annotateMediaSource(material, segment, originalMedia, material.path, context, origin);
   dest.track.segments = dest.track.segments || [];
   dest.track.segments.push(segment);
   dest.track.segments.sort((a, b) => (a.target_timerange?.start || 0) - (b.target_timerange?.start || 0));
@@ -409,6 +425,7 @@ export function opClipAdd(doc, op, context = {}) {
     duration: r3(S(durUs)),
     source: [r3(S(srcStart)), r3(S(srcStart + srcDur))],
     speed: r3(speed),
+    origin: origin.kind,
     extended: slid.extended,
     preserved: slid.preserved ? { start: r3(S(slid.preserved.start)), end: r3(S(slid.preserved.end)) } : null
   };
@@ -435,6 +452,16 @@ export function opReplaceMedia(doc, op, context = {}) {
   const seg = entry.segment;
   const old = (doc.materials?.videos || []).find(m => m.id === seg.material_id);
   if (!old) throw new CapcutError(`replace.media: segment ${seg.id} has no video material.`, { code: 'MISSING_MATERIAL_REF' });
+  // Swapping media is the other door into the project, and it was the wider one: it takes an
+  // arbitrary file and needs no track or timing. Same contract as clip.add.
+  const canvas = doc.canvas_config || {};
+  const origin = assertOrigin({
+    file: originalPath, width: op.width ?? old.width, height: op.height ?? old.height,
+    canvas: [canvas.width || 1080, canvas.height || 1920], label: 'replace.media',
+    projectDir: context.projectDir || null,
+    generated: op.generated === true, derivedFrom: op.derivedFrom || null,
+    derivedOffset: op.derivedOffset, allowEphemeral: op.allowEphemeral === true,
+  });
 
   const shared = (doc.tracks || []).flatMap(t => t.segments || []).filter(s => s.material_id === old.id).length > 1;
   let material = old;
@@ -478,8 +505,9 @@ export function opReplaceMedia(doc, op, context = {}) {
         { code: 'SOURCE_AFTER_END', exitCode: 2 });
     }
   }
-  annotateMediaSource(material, seg, originalPath, dest, context);
-  return { changed: 1, id: seg.id, materialId: material.id, path: dest, shared: shared && true };
+  stampOrigin(material, origin);
+  annotateMediaSource(material, seg, originalPath, dest, context, origin);
+  return { changed: 1, id: seg.id, materialId: material.id, path: dest, origin: origin.kind, shared: shared && true };
 }
 
 const isCapCutCache = p => /\/CapCut\/User Data\/Cache\//.test(p);

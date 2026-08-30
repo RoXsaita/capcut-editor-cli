@@ -15,6 +15,7 @@ import {
   opClipShift, opClipTrim, opClipFade, opLocalizeAll
 } from './add.mjs';
 import { opMusic } from './music.mjs';
+import { isPreframed } from './origin.mjs';
 
 export const DEFAULT_ROOT = path.join(
   process.env.HOME || '',
@@ -928,6 +929,57 @@ export function documentFingerprint(doc) {
   }));
 }
 
+/**
+ * Report media the human can no longer change. Both faults are invisible to every other check:
+ * the picture is correct, the JSON is valid, and the project opens — the loss is that a
+ * decision which should still be a CapCut property was flattened into the pixels, or the path
+ * back to the footage it came from is gone.
+ *
+ * Warnings, never errors. These are the projects built before `add` enforced the contract;
+ * refusing to load them would help nobody, and the repair (relink the original, re-express the
+ * framing with `layout broll --row`) is a judgement call the human has to make.
+ */
+function auditMediaOrigins(projectDir, state) {
+  const issues = [];
+  const group = state.groups.find(item => item.name === 'root') || state.groups[0];
+  if (!group?.doc) return issues;
+  let map = {};
+  try { map = JSON.parse(fs.readFileSync(path.join(projectDir, '.capcutctl', 'media-map.json'), 'utf8')) || {}; } catch { /* no map: fall back to the material's own fields */ }
+  const records = (map.materials && typeof map.materials === 'object') ? map.materials : {};
+  const cc = group.doc.canvas_config || {};
+  const canvas = [cc.width || 1080, cc.height || 1920];
+  const seen = new Set();
+  for (const material of group.doc.materials?.videos || []) {
+    if (!material?.id || material.type !== 'video' || seen.has(material.id)) continue;
+    seen.add(material.id);
+    const record = records[material.id] || null;
+    const declared = material.capcutctl_origin || record?.origin || null;
+    if (declared === 'generated') continue;              // a render has no original to lose
+    const name = material.material_name || path.basename(material.path || '<unknown>');
+
+    const region = isPreframed({ width: material.width, height: material.height, canvas });
+    if (region) {
+      issues.push(issue('warning', 'MEDIA_PREFRAMED',
+        `${name} is ${material.width}x${material.height} — exactly the ${region.region} of the `
+        + `${canvas[0]}x${canvas[1]} canvas, so its framing was cropped in before import and cannot be `
+        + 'changed in CapCut. Relink the full-frame original and re-frame with `capcutctl layout broll '
+        + '--row` (or `layout screen`). If it is a rendered graphic, re-add it with --generated.',
+        { id: material.id, name, width: material.width, height: material.height }));
+    }
+
+    const origin = material.derived_from_path || record?.derived_from_path
+      || material.original_path || record?.originalPath || material.source_path || null;
+    if (origin && !fs.existsSync(origin)) {
+      issues.push(issue('warning', 'MEDIA_ORIGIN_LOST',
+        `${name} was imported from ${origin}, which no longer exists. The copy in Resources still `
+        + 'plays, but there is no way back to the footage it was cut from. Re-add it from a durable '
+        + 'path, or record the real source with --derived-from.',
+        { id: material.id, name, origin }));
+    }
+  }
+  return issues;
+}
+
 export function doctor(projectDir, { checkFiles = true, duplicateBaseline = null } = {}) {
   const state = loadProject(projectDir);
   const issues = [];
@@ -1041,6 +1093,8 @@ export function doctor(projectDir, { checkFiles = true, duplicateBaseline = null
       }
     }
   }
+
+  issues.push(...auditMediaOrigins(projectDir, state));
 
   const capcut = capcutStatus({ root: path.dirname(projectDir) });
   if (capcut.running) issues.push(issue('warning', 'CAPCUT_RUNNING', `CapCut is running (PID ${capcut.pids.join(', ')}). Writes are blocked by default.`, { pids: capcut.pids }));
