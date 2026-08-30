@@ -164,16 +164,30 @@ export function parseArgs(argv) {
   return result;
 }
 
+/**
+ * Where command output goes. A test that wants to read it must set this rather than
+ * monkeypatching `process.stdout.write`: under Node 20's test runner that hook also carries the
+ * runner's OWN binary reporting protocol, so a test capturing it got the protocol bytes mixed
+ * into the JSON it was trying to parse — green on Node 24, `Unexpected token '\x0f'` on Node 20.
+ */
+let SINK = null;
+export function setOutput(write) {
+  const previous = SINK;
+  SINK = write;
+  return () => { SINK = previous; };
+}
+const emit = text => (SINK ? SINK(text) : process.stdout.write(text));
+
 function print(value, asJson = false) {
-  if (asJson || typeof value !== 'string') process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
-  else process.stdout.write(`${value}\n`);
+  if (asJson || typeof value !== 'string') emit(`${JSON.stringify(value, null, 2)}\n`);
+  else emit(`${value}\n`);
 }
 
 function printDoctor(report, asJson) {
   if (asJson) return print(report, true);
-  process.stdout.write(`Project: ${report.project}\nActive timeline: ${report.activeTimelineId || 'root only'}\nErrors: ${report.errors}  Warnings: ${report.warnings}\n`);
-  for (const item of report.issues) process.stdout.write(`${item.level === 'error' ? 'ERROR' : 'WARN '} ${item.code}: ${item.message}\n`);
-  if (!report.issues.length) process.stdout.write('OK: no issues found.\n');
+  emit(`Project: ${report.project}\nActive timeline: ${report.activeTimelineId || 'root only'}\nErrors: ${report.errors}  Warnings: ${report.warnings}\n`);
+  for (const item of report.issues) emit(`${item.level === 'error' ? 'ERROR' : 'WARN '} ${item.code}: ${item.message}\n`);
+  if (!report.issues.length) emit('OK: no issues found.\n');
 }
 
 const EXAMPLE_SPEC = {
@@ -566,7 +580,7 @@ export async function main(argv, dependencies = {}) {
       lines.push(`${c.ok ? '  ok  ' : '  --  '} ${c.name}: ${c.detail}`);
       if (c.fix) lines.push(`         fix: ${c.fix}`);
     }
-    process.stdout.write(`${lines.join('\n')}\n`);
+    emit(`${lines.join('\n')}\n`);
     if (!report.ok) process.exitCode = 1;
     return;
   }
@@ -574,7 +588,7 @@ export async function main(argv, dependencies = {}) {
   if (command === 'init-spec') {
     const data = `${JSON.stringify(EXAMPLE_SPEC, null, 2)}\n`;
     if (args.output) { fs.writeFileSync(path.resolve(args.output), data); return print(`Wrote ${path.resolve(args.output)}`); }
-    return process.stdout.write(data);
+    return emit(data);
   }
 
   const NEEDS_PROJECT = new Set([

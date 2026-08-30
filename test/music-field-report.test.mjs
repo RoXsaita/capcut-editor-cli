@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { main } from '../src/cli.mjs';
+import { main, setOutput } from '../src/cli.mjs';
 
 const US = seconds => Math.round(seconds * 1e6);
 
@@ -53,14 +53,16 @@ test('music --dry-run propagates through finish preparation without Lyria or cac
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-music-dry-run-'));
   const project = dryRunProject(temp);
   const previousFetch = globalThis.fetch;
-  const previousWrite = process.stdout.write;
   let fetchCalls = 0;
   let stdout = '';
   globalThis.fetch = async () => {
     fetchCalls++;
     throw new Error('Lyria must not be called during --dry-run');
   };
-  process.stdout.write = chunk => { stdout += String(chunk); return true; };
+  // Capture through the CLI's own sink, never by hooking process.stdout.write: on Node 20 the
+  // test runner reports through that same hook, so the JSON came back with the runner's binary
+  // protocol spliced into it.
+  const restoreOutput = setOutput(chunk => { stdout += String(chunk); return true; });
   const results = [];
   const cacheStates = [];
   try {
@@ -73,7 +75,7 @@ test('music --dry-run propagates through finish preparation without Lyria or cac
       cacheStates.push(fs.existsSync(path.join(project, '.capcutctl')));
     }
   } finally {
-    process.stdout.write = previousWrite;
+    restoreOutput();
     if (previousFetch === undefined) delete globalThis.fetch;
     else globalThis.fetch = previousFetch;
     fs.rmSync(temp, { recursive: true, force: true });

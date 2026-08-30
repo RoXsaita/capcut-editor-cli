@@ -13,6 +13,7 @@ import {
   parseArgs,
   serializeCloseFailure,
   statusPayload,
+  setOutput,
 } from '../src/cli.mjs';
 
 const stableJson = value => `${JSON.stringify(value, null, 2)}\n`;
@@ -160,14 +161,13 @@ test('main cut --into builds the recut spec and allowlists Python arroll flags',
   const previousPath = process.env.PATH;
   const previousLog = process.env.CAPCUT_TEST_ARG_LOG;
   const previousCwd = process.cwd();
-  const previousWrite = process.stdout.write;
   let stdout = '';
   const results = [];
   const pythonArgs = [];
   const applied = [];
   process.env.PATH = `${temp}${path.delimiter}${previousPath || ''}`;
   process.env.CAPCUT_TEST_ARG_LOG = log;
-  process.stdout.write = chunk => { stdout += String(chunk); return true; };
+  const restoreOutput = setOutput(chunk => { stdout += String(chunk); return true; });
   try {
     await main([
       'cut', media, '--into', project, '--keep', '0', '--force',
@@ -196,7 +196,7 @@ test('main cut --into builds the recut spec and allowlists Python arroll flags',
     pythonArgs.push(JSON.parse(fs.readFileSync(log, 'utf8')));
   } finally {
     process.chdir(previousCwd);
-    process.stdout.write = previousWrite;
+    restoreOutput();
     if (previousPath == null) delete process.env.PATH;
     else process.env.PATH = previousPath;
     if (previousLog == null) delete process.env.CAPCUT_TEST_ARG_LOG;
@@ -238,9 +238,8 @@ test('preview rejects zero and non-finite FPS instead of silently using 6', asyn
 });
 
 test('help and layout list expose the supported screen and automatic QA surface', async () => {
-  const originalWrite = process.stdout.write;
   let output = '';
-  process.stdout.write = chunk => { output += String(chunk); return true; };
+  const restoreOutput = setOutput(chunk => { output += String(chunk); return true; });
   try {
     await main(['help']);
     assert.match(output, /--at-cuts/);
@@ -254,7 +253,7 @@ test('help and layout list expose the supported screen and automatic QA surface'
     const rows = JSON.parse(output);
     assert.ok(rows.some(row => row.name === 'screenRecording'));
   } finally {
-    process.stdout.write = originalWrite;
+    restoreOutput();
   }
 });
 
