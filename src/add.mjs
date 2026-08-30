@@ -598,16 +598,24 @@ export function opLocalizeAll(doc, op, context = {}) {
 const MAIN_TRACK = 'the main/cover track, which stays empty — move the clip to an overlay first';
 
 /**
- * Resolve --at/--track to a single video segment.
+ * Resolve --at/--track to a single segment.
  *
  * Refuses the flag=0 main track. `resolveAddTrack` already guarded it, but every OTHER verb
  * (remove / volume / trim / shift / fade / keyframe) came through here, which filtered on
  * `type === 'video'` alone — so all six could edit the cover track that is supposed to stay
  * empty. That is rule zero of this project's style, and nothing downstream re-checks.
+ *
+ * Rule zero is about the *video* cover track only. CapCut writes `flag=0` on every audio and
+ * text track by convention (verified across the hand-cut drafts: Hermes-agent, IKEA Refund,
+ * Content System, Higgsfield Refund) — so guarding on `flag === 0` alone made every SFX, music
+ * and text cue unreachable, and polish's own sound lane could not be nudged or removed except
+ * by hand in the CapCut UI. Scope the refusal to video.
  */
+const isCoverTrack = t => t?.type === 'video' && t?.flag === 0;
+
 export function resolveClip(doc, { at, track, id } = {}) {
   const refuseMain = entry => {
-    if (entry.track?.flag === 0) {
+    if (isCoverTrack(entry.track)) {
       throw new CapcutError(`segment ${entry.segment.id} is on ${MAIN_TRACK}.`, { code: 'MAIN_TRACK', exitCode: 2 });
     }
     return entry;
@@ -625,8 +633,7 @@ export function resolveClip(doc, { at, track, id } = {}) {
   const numeric = spec != null && /^\d+$/.test(spec);
   const hits = [];
   for (const [ti, t] of (doc.tracks || []).entries()) {
-    if (t.type !== 'video') continue;
-    if (t.flag === 0) continue;                       // never selectable, even by explicit index
+    if (isCoverTrack(t)) continue;                    // never selectable, even by explicit index
     if (numeric && ti !== Number(spec)) continue;
     if (spec != null && !numeric && t.name !== spec) continue;
     for (const s of t.segments || []) {
@@ -635,7 +642,7 @@ export function resolveClip(doc, { at, track, id } = {}) {
     }
   }
   if (hits.length !== 1) {
-    const onMain = numeric && doc.tracks?.[Number(spec)]?.flag === 0;
+    const onMain = numeric && isCoverTrack(doc.tracks?.[Number(spec)]);
     if (onMain) throw new CapcutError(`track ${spec} is ${MAIN_TRACK}.`, { code: 'MAIN_TRACK', exitCode: 2 });
     throw new CapcutError(`${hits.length} clips cover ${at}s. Pass --track NAME|N.`, { code: 'SELECTOR_AMBIGUOUS', exitCode: 2 });
   }

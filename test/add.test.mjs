@@ -386,6 +386,39 @@ test('no verb will touch the flag=0 main track', async () => {
   assert.equal(still.tracks[0].segments[0].target_timerange.start, 0);
 });
 
+test('rule zero guards the VIDEO cover track, not the flag=0 audio and text lanes', async () => {
+  const { resolveClip } = await import('../src/add.mjs');
+  const { loadProject } = await import('../src/core.mjs');
+  const f = fixture();
+  // CapCut writes flag=0 on every audio and text track by convention — verified across the
+  // hand-cut drafts (Hermes-agent, IKEA Refund, Content System, Higgsfield Refund). Guarding
+  // on flag===0 alone therefore made polish's own SFX lane, the music bed and the endcard
+  // text unreachable: shift / volume / remove / fade all refused them as "the cover", so the
+  // only way to nudge a sound was by hand in the CapCut UI.
+  for (const dir of [f.project, f.timelineDir]) {
+    const d = readJson(path.join(dir, 'draft_info.json'));
+    const cue = structuredClone(d.tracks[1].segments[0]);
+    cue.id = 'SFX-CUE';
+    cue.target_timerange = { start: 2_000_000, duration: 400_000 };
+    d.tracks.push({ id: 'SFX-LANE', type: 'audio', flag: 0, name: 'polish-sfx', segments: [cue] });
+    const label = structuredClone(cue);
+    label.id = 'ENDCARD-TEXT';
+    d.tracks.push({ id: 'TEXT-LANE', type: 'text', flag: 0, name: 'sig-endcard', segments: [label] });
+    for (const name of ['draft_info.json', 'draft_info.json.bak', 'template-2.tmp']) {
+      fs.writeFileSync(path.join(dir, name), stableJson(d));
+    }
+  }
+  const doc = loadProject(f.project).groups.find(g => g.name === 'root').doc;
+
+  assert.equal(resolveClip(doc, { id: 'SFX-CUE' }).segment.id, 'SFX-CUE');
+  assert.equal(resolveClip(doc, { at: 2.1, track: 'polish-sfx' }).segment.id, 'SFX-CUE');
+  assert.equal(resolveClip(doc, { at: 2.1, track: 'sig-endcard' }).segment.id, 'ENDCARD-TEXT');
+  // reachable by explicit index too, the way --track N addresses a lane
+  assert.equal(resolveClip(doc, { at: 2.1, track: 2 }).segment.id, 'SFX-CUE');
+  // and rule zero still holds for the one track it is actually about
+  assert.throws(() => resolveClip(doc, { at: 2, track: 0 }), /MAIN_TRACK|main\/cover track/);
+});
+
 test('an added clip records its speed on the speed material, so pace can read it', () => {
   const f = fixture();
   // The template MUST carry a non-1x speed material, or this test cannot fail: writing the
