@@ -25,10 +25,12 @@ import {
 export const HELP = `capcutctl — transactional CapCut timeline control
 
 Usage:
-  capcutctl cut VIDEO [--keep 0,2-9] [--project NAME] [--into PROJECT] [--lang ar]
-                      — talking-head cleanup: transcribe, energy-sync, strip dead
-                        air, review table. Re-run with --keep to build; --into recuts
-                        an existing project through the anchored cut.recut contract.
+  capcutctl cut VIDEO [--keep 0,2-9] [--order 0,2,3] [--trim-beat ID:out=-1.16]
+                      [--review decisions.json] [--project NAME] [--into PROJECT] [--lang ar]
+                      — talking-head cleanup and reviewed A-roll assembly. Use --order
+                        for an exact kept-beat permutation, --trim-beat for safe inward
+                        acoustic trims, or --review for a source-tokened decision file.
+                        --into recuts an existing project transactionally.
   capcutctl qa --project NAME [--times 3,9,15|--at-cuts|--at-scenes|--at-broll]
                [--guide 960] [--sheet] [--label L]
                       — composite real frames (+ a labelled contact sheet); automatic
@@ -36,7 +38,7 @@ Usage:
   capcutctl find "agent running" --media FILE [--shows|--says] [--context]
                       — when is it on screen / when was it said.
 
-  capcutctl preflight [--json]                 — will this work on this machine? deps, assets, SFX palette
+  capcutctl preflight [--root PATH] [--json]   — will this work on this machine? deps, assets, tools, disk
   capcutctl projects [--root PATH] [--json]
   capcutctl rm --project NAME [--dry-run]      — to .recycle_bin, registry entry dropped
   capcutctl close                              — quit CapCut and wait for it to exit
@@ -147,6 +149,7 @@ const r2 = n => Math.round(n * 100) / 100;
 
 export function parseArgs(argv) {
   const result = { _: [] };
+  const repeatValueKeys = new Set(['trimBeat']);
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i];
     if (!token.startsWith('--')) { result._.push(token); continue; }
@@ -158,7 +161,13 @@ export function parseArgs(argv) {
          'generated', 'allowEphemeral'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
-      result[key] = argv[++i];
+      const value = argv[++i];
+      if (repeatValueKeys.has(key)) {
+        if (!Array.isArray(result[key])) result[key] = [];
+        result[key].push(value);
+      } else {
+        result[key] = value;
+      }
     }
   }
   return result;
@@ -342,9 +351,15 @@ export function buildCutRecutSpec({ projectDir, plan, planFile = null, media = n
     plan: {
       media: sourceMedia,
       kept: plan.kept || [],
+      ...(Array.isArray(plan.order) ? { order: plan.order } : {}),
       timeline: plan.timeline,
       duration: plan.duration,
       lint: plan.lint || [],
+      ...(plan.source_token != null ? { source_token: plan.source_token } : {}),
+      ...(plan.sourceToken != null ? { sourceToken: plan.sourceToken } : {}),
+      ...(plan.editorial ? { editorial: plan.editorial } : {}),
+      ...(plan.adjustments ? { adjustments: plan.adjustments } : {}),
+      ...(plan.repairs ? { repairs: plan.repairs } : {}),
       ...(plan.fps != null ? { fps: plan.fps } : {}),
       ...(plan.blocking_lint ? { blocking_lint: plan.blocking_lint } : {}),
     },
@@ -401,8 +416,12 @@ function statusText(payload) {
 const ARROLL_VALUE_OPTIONS = Object.freeze([
   ['keep', '--keep'],
   ['drop', '--drop'],
+  ['order', '--order'],
+  ['review', '--review'],
+  ['trimBeat', '--trim-beat'],
   ['lang', '--lang'],
   ['model', '--model'],
+  ['fps', '--fps'],
 ]);
 const ARROLL_BOOLEAN_OPTIONS = Object.freeze([
   ['reindex', '--reindex'],
@@ -414,7 +433,11 @@ const ARROLL_BOOLEAN_OPTIONS = Object.freeze([
 export function buildArrollArgs(args, media) {
   const forwarded = [String(media)];
   for (const [key, flag] of ARROLL_VALUE_OPTIONS) {
-    if (args?.[key] != null) forwarded.push(flag, String(args[key]));
+    if (Array.isArray(args?.[key])) {
+      for (const value of args[key]) forwarded.push(flag, String(value));
+    } else if (args?.[key] != null) {
+      forwarded.push(flag, String(args[key]));
+    }
   }
   for (const [key, flag] of ARROLL_BOOLEAN_OPTIONS) {
     if (args?.[key]) forwarded.push(flag);
@@ -440,7 +463,9 @@ async function runInPlaceCut(args, root, apply = applySpec) {
 
   // The first invocation without --keep/--drop is intentionally still the review handout.
   // This preserves the two-stage talking-head decision before any in-place mutation.
-  if (!args.keep && !args.drop) return null;
+  const hasEditorialDecision = Boolean(args.keep || args.drop || args.order || args.review
+    || (Array.isArray(args.trimBeat) && args.trimBeat.length));
+  if (!hasEditorialDecision) return null;
   const mediaPath = path.resolve(media);
   const planPath = path.join(path.dirname(mediaPath), `${path.basename(mediaPath).replace(/\.[^.]+$/, '')}.plan.json`);
   if (!fs.existsSync(planPath)) {
@@ -573,11 +598,12 @@ export async function main(argv, dependencies = {}) {
     }), true);
   }
   if (command === 'preflight') {
-    const report = preflight();
+    const report = preflight({ root });
     if (args.json) return print(report, true);
     const lines = [`capcutctl preflight — ${report.ok ? 'ready' : 'NOT ready'}`, ''];
     for (const c of report.checks) {
-      lines.push(`${c.ok ? '  ok  ' : '  --  '} ${c.name}: ${c.detail}`);
+      const optional = c.blocking === false ? ' (optional)' : '';
+      lines.push(`${c.ok ? '  ok  ' : '  --  '} ${c.name}${optional}: ${c.detail}`);
       if (c.fix) lines.push(`         fix: ${c.fix}`);
     }
     emit(`${lines.join('\n')}\n`);

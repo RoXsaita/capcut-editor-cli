@@ -9,9 +9,10 @@ One command, run twice. Code does the mechanical work; the agent only makes judg
         boundary acoustically, delete dead air, detect takes and repeated beats, and
         write a handout for the agent to read.
 
-    capcutctl cut VIDEO.mp4 --keep 0,2-9 --project NAME
-        Apply the agent's selection, lint every seam, pack the timeline with no gaps,
-        and build the CapCut project.
+    capcutctl cut VIDEO.mp4 --keep 0,2-9 --order 0,2,3 --trim-beat 3:out=-1.16 --project NAME
+        Apply the agent's selection/order/boundary hints, lint every seam, pack the timeline
+        with no gaps, and build the CapCut project. `--review decisions.json` accepts the same
+        decisions as a source-tokened v1 JSON file, and `--into` uses the transactional recut.
 
 The division of labour that matters:
     Whisper decides WHICH WORDS.  The energy index decides EXACTLY WHERE.
@@ -25,6 +26,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -747,28 +749,302 @@ def print_handout(data, path):
     print(rule)
     print(f"wrote {path}")
     print(f"\nreview the text above, then build with your selection:\n"
-          f"  capcutctl cut {os.path.basename(data['media'])} "
+          f"  capcutctl cut {shlex.quote(data['media'])} "
           f"--keep {compact(data['default_keep'])} --project NAME")
 
 
 # ---------------------------------------------------------------- cutting
+def _parse_id_part(part, field):
+    """Parse one non-negative id or ascending id range."""
+    part = str(part).strip()
+    if not part:
+        raise ValueError(f"{field} contains an empty beat id")
+    if "-" in part:
+        bits = part.split("-")
+        if len(bits) != 2 or not all(re.fullmatch(r"\d+", bit.strip()) for bit in bits):
+            raise ValueError(f"bad id range {part!r} in {field}")
+        a, b = (int(bit.strip()) for bit in bits)
+        if b < a:
+            raise ValueError(f"reversed id range {part!r} in {field}")
+        return list(range(a, b + 1))
+    if not re.fullmatch(r"\d+", part):
+        raise ValueError(f"invalid beat id {part!r} in {field}")
+    return [int(part)]
+
+
+def parse_order_spec(spec, field="order"):
+    """Parse an ordered id list while preserving order and rejecting duplicates."""
+    if isinstance(spec, (list, tuple)):
+        values = []
+        for value in spec:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{field} must contain non-negative integer beat ids")
+            values.append(value)
+    elif isinstance(spec, str):
+        values = []
+        for part in spec.split(","):
+            values.extend(_parse_id_part(part, field))
+    else:
+        raise ValueError(f"{field} must be a comma-separated id list or an array")
+    duplicates = sorted({value for value in values if values.count(value) > 1})
+    if duplicates:
+        raise ValueError(f"{field} contains duplicate beat ids: {duplicates}")
+    return values
+
+
 def parse_ids(spec):
-    out = set()
-    for part in str(spec).split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if "-" in part:
-            bits = part.split("-")
-            if len(bits) != 2:
-                raise ValueError(f"bad id range {part!r}")
-            a, b = int(bits[0]), int(bits[1])
-            if b < a:
-                raise ValueError(f"reversed id range {part!r}")
-            out.update(range(a, b + 1))
-        else:
-            out.add(int(part))
+    return set(parse_order_spec(str(spec), field="beat selection"))
+
+
+def _finite_offset(value, field):
+    number = _number(value)
+    if number is None:
+        raise ValueError(f"{field} must be a finite number of seconds")
+    return number
+
+
+def parse_boundaries(boundaries):
+    """Validate the review-file boundary map and return canonical camelCase fields."""
+    if boundaries is None:
+        return {}
+    if not isinstance(boundaries, dict):
+        raise ValueError("boundaries must be an object keyed by beat id")
+    out = {}
+    for raw_id, rule in boundaries.items():
+        if not re.fullmatch(r"\d+", str(raw_id)):
+            raise ValueError(f"boundaries contains an invalid beat id: {raw_id!r}")
+        beat_id = int(raw_id)
+        if not isinstance(rule, dict):
+            raise ValueError(f"boundaries[{raw_id!r}] must be an object")
+        unknown = set(rule) - {"inOffset", "outOffset"}
+        if unknown:
+            raise ValueError(f"boundaries[{raw_id!r}] has unsupported fields: {sorted(unknown)}")
+        if not rule:
+            raise ValueError(f"boundaries[{raw_id!r}] must contain inOffset or outOffset")
+        parsed = {}
+        if "inOffset" in rule:
+            value = _finite_offset(rule["inOffset"], f"boundaries[{raw_id!r}].inOffset")
+            if value < 0:
+                raise ValueError(f"boundaries[{raw_id!r}].inOffset must be non-negative (inward only)")
+            parsed["inOffset"] = value
+        if "outOffset" in rule:
+            value = _finite_offset(rule["outOffset"], f"boundaries[{raw_id!r}].outOffset")
+            if value > 0:
+                raise ValueError(f"boundaries[{raw_id!r}].outOffset must be non-positive (inward only)")
+            parsed["outOffset"] = value
+        out[beat_id] = parsed
     return out
+
+
+def parse_trim_specs(specs):
+    """Parse repeated --trim-beat ID:in=SECONDS / ID:out=SECONDS flags."""
+    if specs is None:
+        return {}
+    if isinstance(specs, str):
+        specs = [specs]
+    if not isinstance(specs, (list, tuple)):
+        raise ValueError("--trim-beat expects one or more ID:in=SECONDS or ID:out=SECONDS values")
+    out = {}
+    pattern = re.compile(r"^\s*(\d+)\s*:\s*(in|out)\s*=\s*"
+                         r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*$")
+    for raw in specs:
+        match = pattern.fullmatch(str(raw))
+        if not match:
+            raise ValueError(f"bad --trim-beat {raw!r}; use ID:in=SECONDS or ID:out=SECONDS")
+        beat_id, side, raw_value = int(match.group(1)), match.group(2), match.group(3)
+        value = _finite_offset(raw_value, f"--trim-beat {raw!r}")
+        if side == "in" and value < 0:
+            raise ValueError(f"--trim-beat {raw!r} expands the beat at IN; inward trims use a positive offset")
+        if side == "out" and value > 0:
+            raise ValueError(f"--trim-beat {raw!r} expands the beat at OUT; inward trims use a negative offset")
+        key = f"{side}Offset"
+        if key in out.setdefault(beat_id, {}):
+            raise ValueError(f"duplicate {key} adjustment for beat {beat_id}")
+        out[beat_id][key] = value
+    return out
+
+
+def _ids_known(values, beats, field):
+    unknown = sorted(set(values) - set(beats))
+    if unknown:
+        raise ValueError(f"{field} contains unknown beat ids: {unknown}")
+
+
+def load_review(path, data):
+    """Load a v1 review decision file and reject stale or ambiguous source decisions."""
+    review_path = os.path.abspath(os.fspath(path))
+    try:
+        review = json.loads(Path(review_path).read_text(encoding="utf-8"))
+    except OSError as error:
+        raise ValueError(f"could not read review file {review_path}: {error}") from error
+    except json.JSONDecodeError as error:
+        raise ValueError(f"review file is not valid JSON: {error}") from error
+    if not isinstance(review, dict):
+        raise ValueError("review file must contain a JSON object")
+    if review.get("version") != 1:
+        raise ValueError("review file version must be 1")
+    if "sourceToken" not in review:
+        raise ValueError("review file requires sourceToken copied from the current A-roll index")
+    expected = data.get("source_token", data.get("media_token"))
+    if expected is None or review["sourceToken"] != expected:
+        raise ValueError("review file sourceToken is stale; re-read the current .aroll.json index")
+    for field in ("keep", "order"):
+        if field in review and not isinstance(review[field], list):
+            raise ValueError(f"review field {field} must be an array of beat ids")
+    keep = parse_order_spec(review["keep"], "review.keep") if "keep" in review else None
+    order = parse_order_spec(review["order"], "review.order") if "order" in review else None
+    return {
+        "path": review_path,
+        "keep": keep,
+        "order": order,
+        "boundaries": parse_boundaries(review.get("boundaries")),
+        "sourceToken": review["sourceToken"],
+    }
+
+
+def resolve_editorial_decisions(data, args):
+    """Resolve flags or a review file into a strict keep/order/boundary decision."""
+    review_path = getattr(args, "review", None)
+    direct = [name for name in ("keep", "drop", "order", "trim_beat")
+              if getattr(args, name, None) not in (None, "", [])]
+    if review_path and direct:
+        raise ValueError("--review cannot be combined with --keep, --drop, --order, or --trim-beat")
+
+    beats = {beat["id"]: beat for beat in data.get("beats", [])}
+    review = load_review(review_path, data) if review_path else None
+    if review:
+        if review["keep"] is None:
+            kept = list(data.get("default_keep", []))
+        else:
+            kept = review["keep"]
+        _ids_known(kept, beats, "review.keep")
+        if review["order"] is not None:
+            ordered = review["order"]
+        else:
+            ordered = sorted(set(kept))
+        boundaries = review["boundaries"]
+    else:
+        if getattr(args, "keep", None):
+            kept = sorted(parse_ids(args.keep))
+        else:
+            kept = list(data.get("default_keep", []))
+        _ids_known(kept, beats, "keep")
+        if getattr(args, "drop", None):
+            dropped = parse_ids(args.drop)
+            _ids_known(dropped, beats, "drop")
+            kept = [beat_id for beat_id in kept if beat_id not in dropped]
+        ordered = parse_order_spec(args.order, "order") if getattr(args, "order", None) else sorted(set(kept))
+        boundaries = parse_trim_specs(getattr(args, "trim_beat", None))
+
+    if not kept:
+        raise ValueError("nothing kept")
+    _ids_known(ordered, beats, "order")
+    if len(ordered) != len(set(kept)) or set(ordered) != set(kept):
+        raise ValueError("order must be an exact permutation of the kept beat ids")
+    unknown_boundaries = sorted(set(boundaries) - set(beats))
+    if unknown_boundaries:
+        raise ValueError(f"boundary adjustments contain unknown beat ids: {unknown_boundaries}")
+    not_kept = sorted(set(boundaries) - set(kept))
+    if not_kept:
+        raise ValueError(f"boundary adjustments target beats that are not kept: {not_kept}")
+    return {
+        "kept": sorted(set(kept)),
+        "order": ordered,
+        "boundaries": boundaries,
+        "review": review,
+    }
+
+
+def _trough_before(idx, t, lower, upper, win=0.45):
+    """Find the quietest indexed bin at or before t within a bounded trim window."""
+    lo = max(float(lower), float(t) - float(win))
+    hi = min(float(upper), float(t))
+    if hi < lo:
+        return None
+    step = _number(getattr(idx, "bin", None))
+    if step is None or step <= 0:
+        return None
+    count = max(1, int(math.floor((hi - lo) / step)) + 1)
+    candidates = [min(hi, lo + index * step) for index in range(count)]
+    candidates.append(hi)
+    return min(candidates, key=lambda value: idx.at(value))
+
+
+def apply_boundary_adjustments(idx, picked, boundaries, fps=FPS):
+    """Resolve safe inward boundary hints against the acoustic index.
+
+    `inOffset` is measured from the indexed IN and must move into a quiet lead-in;
+    `outOffset` is measured from the indexed OUT and must land on a trough before the
+    indexed OUT. Neither form can expand a source range or use a raw Whisper timestamp.
+    """
+    adjustments = []
+    frame = 1.0 / float(fps)
+    for beat in picked:
+        rule = boundaries.get(beat["id"])
+        if not rule:
+            continue
+        base_in = quantise(beat["src_in"], fps=fps)
+        base_out = quantise(beat["src_out"], fps=fps)
+        new_in, new_out = base_in, base_out
+        resolved = {"src_in": base_in, "src_out": base_out}
+        if "inOffset" in rule and abs(rule["inOffset"]) > 0.5 * frame:
+            requested = quantise(base_in + rule["inOffset"], fps=fps)
+            if requested >= base_out - MIN_BEAT:
+                raise ValueError(f"beat {beat['id']} IN trim leaves less than {MIN_BEAT:.2f}s")
+            if idx.at(requested) >= SOFT:
+                raise ValueError(f"beat {beat['id']} IN trim is inside sound, not a safe lead-in")
+            onset = idx.onset_after(requested)
+            if onset is None:
+                raise ValueError(f"beat {beat['id']} IN trim has no acoustic onset")
+            new_in = quantise(onset - LEAD_FRAMES / float(fps), fps=fps)
+            if new_in <= base_in + 0.5 * frame:
+                raise ValueError(f"beat {beat['id']} IN trim does not move to a later acoustic boundary")
+            if new_in >= base_out - MIN_BEAT:
+                raise ValueError(f"beat {beat['id']} IN trim leaves less than {MIN_BEAT:.2f}s")
+            resolved["src_in"] = new_in
+            beat["_manual_min_src_in"] = new_in
+            beat["_manual_in"] = True
+        if "outOffset" in rule and abs(rule["outOffset"]) > 0.5 * frame:
+            requested = quantise(base_out + rule["outOffset"], fps=fps)
+            if requested <= base_in + MIN_BEAT:
+                raise ValueError(f"beat {beat['id']} OUT trim leaves less than {MIN_BEAT:.2f}s")
+            trough = _trough_before(idx, requested, base_in + MIN_BEAT, base_out)
+            if trough is None:
+                raise ValueError(f"beat {beat['id']} OUT trim has no acoustic trough")
+            new_out = quantise(trough, fps=fps)
+            if new_out >= base_out - 0.5 * frame:
+                raise ValueError(f"beat {beat['id']} OUT trim does not move to an earlier acoustic trough")
+            if idx.at(new_out) >= SOFT:
+                raise ValueError(f"beat {beat['id']} OUT trim does not land in acoustic silence")
+            if new_out <= new_in + MIN_BEAT:
+                raise ValueError(f"beat {beat['id']} OUT trim leaves less than {MIN_BEAT:.2f}s")
+            resolved["src_out"] = new_out
+            beat["_manual_max_src_out"] = new_out
+            beat["_manual_out"] = True
+        beat["src_in"], beat["src_out"] = new_in, new_out
+        adjustments.append({
+            "beat": beat["id"],
+            "offsets": dict(rule),
+            "indexed": {"src_in": base_in, "src_out": base_out},
+            "resolved": resolved,
+        })
+    return adjustments
+
+
+def source_overlap_findings(picked, fps=FPS):
+    """Check every source-neighbour pair, independent of requested timeline order."""
+    tolerance = 0.5 / float(fps)
+    ordered = sorted(picked, key=lambda beat: (beat["src_in"], beat["src_out"], beat["id"]))
+    findings = []
+    for left, right in pairwise(ordered):
+        overlap = left["src_out"] - right["src_in"]
+        if overlap > tolerance:
+            findings.append(f"b{left['id']}->b{right['id']} OVERLAP {overlap:.3f}s of source is used twice")
+    return findings
+
+
+def _shell_command(parts):
+    return " ".join(shlex.quote(str(part)) for part in parts)
 
 
 def repair(idx, picked, fps=FPS):
@@ -778,16 +1054,24 @@ def repair(idx, picked, fps=FPS):
     A boundary is only moved when it cannot collide with the neighbouring kept beat.
     """
     fixed = []
-    for i, b in enumerate(picked):
-        nxt = picked[i + 1] if i + 1 < len(picked) else None
-        prev = picked[i - 1] if i else None
+    # Boundary safety is a source-time property. The requested timeline may be reordered,
+    # so using the previous/next item in `picked` as a source floor/ceiling would make a
+    # perfectly valid reverse-order edit look overlapping or unrepairable.
+    source_order = sorted(picked, key=lambda beat: (beat["src_in"], beat["src_out"], beat["id"]))
+    source_position = {beat["id"]: index for index, beat in enumerate(source_order)}
+    for b in picked:
+        position = source_position[b["id"]]
+        nxt = source_order[position + 1] if position + 1 < len(source_order) else None
+        prev = source_order[position - 1] if position else None
+        source_floor = prev["src_out"] if prev else 0.0
+        max_out = b.get("_manual_max_src_out", float("inf"))
 
         # Use the same predicate as lint. A flat loud OUT is intentionally left as a
         # blocking finding; repair must never claim to have fixed a boundary it cannot move.
         loud = loud_out_finding(idx, b["src_out"], fps=fps)
         if loud:
             tr = quantise(loud["trough"], fps=fps)
-            ceiling = nxt["src_in"] if nxt else b["src_out"] + 0.5
+            ceiling = min(nxt["src_in"] if nxt else b["src_out"] + 0.5, max_out)
             can_repair = (loud["repairable"] and b["src_in"] < tr <= ceiling
                           and idx.at(tr) < loud["level"] - 6.0 and tr != b["src_out"])
             if can_repair:
@@ -809,9 +1093,11 @@ def repair(idx, picked, fps=FPS):
             protected = None
             if b.get("first_word_trustworthy"):
                 protected = protected_word_in(b.get("first_word_start"),
-                                              floor=prev["src_out"] if prev else 0.0,
+                                              floor=source_floor,
                                               fps=fps)
-                if protected is not None and b["src_in"] > protected:
+                if protected is not None:
+                    protected = max(protected, b.get("_manual_min_src_in", 0.0))
+                if protected is not None and not b.get("_manual_in") and b["src_in"] > protected:
                     fixed.append(f"b{b['id']} IN {b['src_in']:.3f} -> {protected:.3f} "
                                  "(protects trusted first word)")
                     b["src_in"] = protected
@@ -819,7 +1105,8 @@ def repair(idx, picked, fps=FPS):
                     continue
             on = idx.onset_after(b["src_in"])
             if on is not None:
-                new_in = quantise(max(prev["src_out"] if prev else 0.0,
+                new_in = quantise(max(source_floor,
+                                      b.get("_manual_min_src_in", 0.0),
                                       on - LEAD_FRAMES / float(fps)), fps=fps)
                 if b["src_in"] < new_in < b["src_out"] - MIN_BEAT:
                     fixed.append(f"b{b['id']} IN {b['src_in']:.3f} -> {new_in:.3f} (cuts {head:.2f}s dead air)")
@@ -900,9 +1187,13 @@ def apply_audio_ramps(destination, timeline, dry_run=False, track="content", fra
         cmd = ["capcutctl", "apply", "--project", str(destination), "--spec", spec_path]
         if dry_run:
             cmd.append("--dry-run")
-        print("\n$ capcutctl apply --project <destination> --spec <aroll-audio-ramps>")
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        print(result.stdout or result.stderr)
+        display = list(cmd)
+        display[display.index("--spec") + 1] = "<aroll-audio-ramps>"
+        print("\n$ " + _shell_command(display))
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        output = getattr(result, "stdout", "") or ""
+        if output:
+            print(output, end="" if output.endswith("\n") else "\n")
         return result.returncode
     finally:
         if spec_path:
@@ -913,6 +1204,7 @@ def cmd_cut(args):
     data = json.loads(Path(args.index).read_text())
     fps = authoritative_fps(data, getattr(args, "fps", None))
     stored_token = data.get("source_token", data.get("media_token"))
+    current_token = None
     if stored_token is not None:
         try:
             current_token = media_token(data["media"])
@@ -923,17 +1215,23 @@ def cmd_cut(args):
             print("A-roll index is stale for the current media; re-index before cutting",
                   file=sys.stderr)
             return 2
-    beats = {b["id"]: b for b in data["beats"]}
-    keep = parse_ids(args.keep) if args.keep else set(data["default_keep"])
-    if args.drop:
-        keep -= parse_ids(args.drop)
-    keep = [i for i in sorted(keep) if i in beats]
-    if not keep:
-        print("nothing kept", file=sys.stderr)
+
+    try:
+        decisions = resolve_editorial_decisions(data, args)
+        if getattr(args, "review", None) and current_token is None:
+            # The review token is meaningful only for an index produced by the current
+            # cache contract. Do not let an old token-less index masquerade as reviewed.
+            raise ValueError("review requires an A-roll index with a source_token")
+    except (OSError, TypeError, ValueError) as error:
+        print(f"A-roll decision rejected: {error}", file=sys.stderr)
         return 2
 
+    beats = {b["id"]: b for b in data["beats"]}
+    keep = decisions["kept"]
+    order = decisions["order"]
+
     idx = AudioIndex.build_or_load(data["media"])
-    picked = [dict(beats[i]) for i in keep]
+    picked = [dict(beats[i]) for i in order]
     # An index may have been produced at the default rate and later handed to a project
     # with a different FPS. Make the supplied/project rate authoritative before linting or
     # emitting any source boundary; otherwise core would validate a 30fps-looking plan for
@@ -942,15 +1240,22 @@ def cmd_cut(args):
         beat["src_in"] = quantise(beat["src_in"], fps=fps)
         beat["src_out"] = quantise(beat["src_out"], fps=fps)
 
-    if not args.no_repair:
+    try:
+        adjustments = apply_boundary_adjustments(idx, picked, decisions["boundaries"], fps=fps)
+    except (TypeError, ValueError) as error:
+        print(f"A-roll boundary decision rejected: {error}", file=sys.stderr)
+        return 2
+
+    if not getattr(args, "no_repair", False):
         repairs = repair(idx, picked, fps=fps)
-        for r in repairs:
-            print("  " + ("note: " if " remains blocking " in r else "fixed: ") + r)
-        for b, p in zip(keep, picked, strict=True):
-            beats[b]["src_in"], beats[b]["src_out"] = p["src_in"], p["src_out"]
     else:
-        for b, p in zip(keep, picked, strict=True):
-            beats[b]["src_in"], beats[b]["src_out"] = p["src_in"], p["src_out"]
+        repairs = []
+    for p in picked:
+        if p["src_out"] - p["src_in"] < MIN_BEAT:
+            print(f"A-roll boundary decision rejected: beat {p['id']} is shorter than {MIN_BEAT:.2f}s",
+                  file=sys.stderr)
+            return 2
+        beats[p["id"]]["src_in"], beats[p["id"]]["src_out"] = p["src_in"], p["src_out"]
 
     spans = [(f"b{p['id']}", p["src_in"], p["src_out"]) for p in picked]
     first_words = [
@@ -962,9 +1267,8 @@ def cmd_cut(args):
         for p in picked
     ]
     findings = lint(idx, spans, fps=fps, first_word_starts=first_words)
-    for (la, _, ea), (lb, sb, _) in pairwise(spans):
-        if sb < ea:
-            findings.append(f"{la}->{lb} OVERLAP {ea - sb:.3f}s of source is used twice")
+    overlap_findings = source_overlap_findings(picked, fps=fps)
+    findings.extend(overlap_findings)
 
     # pack the timeline with no gaps — this is the dead-space removal
     timeline, cursor = [], 0.0
@@ -975,7 +1279,8 @@ def cmd_cut(args):
         tl_in = quantise(cursor, fps=fps)
         tl_out = quantise(tl_in + dur, fps=fps)
         timeline.append({"beat": i, "tl_in": round(tl_in, 6), "tl_out": round(tl_out, 6),
-                         "src_in": round(b["src_in"], 6), "dur": round(dur, 6), "text": b["text"]})
+                         "src_in": round(b["src_in"], 6), "src_out": round(b["src_out"], 6),
+                         "src_dur": round(dur, 6), "dur": round(dur, 6), "text": b["text"]})
         cursor = tl_out
 
     timeline = add_audio_ramps(timeline, fps=fps)
@@ -984,19 +1289,53 @@ def cmd_cut(args):
     blocking_findings = [f for f in findings if "FIRST_WORD_CLIPPED" in f]
 
     scenes = ",".join(f"{t['tl_in']:.6f}:{t['tl_out']:.6f}@{t['src_in']:.6f}" for t in timeline)
+    editorial = {
+        "kept": keep,
+        "order": order,
+        "boundaries": decisions["boundaries"],
+    }
+    if decisions["review"]:
+        editorial["reviewFile"] = decisions["review"]["path"]
     plan = {"media": data["media"], "fps": fps,
+            **({"source_token": stored_token, "sourceToken": stored_token} if stored_token is not None else {}),
             "fps_contract": {"fps": fps, "quantized": True, "authority": "input"},
-            "kept": keep, "timeline": timeline,
+            "kept": keep, "order": order, "editorial": editorial, "adjustments": adjustments,
+            "repairs": repairs,
+            "timeline": timeline,
             "duration": round(cursor, 6), "lint": findings, "blocking_lint": blocking_findings,
             "scenes": scenes, "handoff": cut_handoff(destination, timeline, mode=handoff_mode, fps=fps)}
     plan_path = getattr(args, "plan", None) or args.index.replace(".aroll.json", ".plan.json")
     Path(plan_path).write_text(json.dumps(plan, ensure_ascii=False, indent=1))
 
     print(f"kept {len(keep)} beats -> {cursor:.2f}s (source {data['source_duration']:.1f}s)")
+    print("order: " + ",".join(str(beat_id) for beat_id in order))
+    if adjustments:
+        print("\nboundary adjustments:")
+        for adjustment in adjustments:
+            offsets = ", ".join(
+                f"{key}={value:+.6f}s" for key, value in sorted(adjustment["offsets"].items())
+            )
+            indexed = adjustment["indexed"]
+            resolved = adjustment["resolved"]
+            print(f"  b{adjustment['beat']}: {offsets}; "
+                  f"indexed {indexed['src_in']:.6f}->{indexed['src_out']:.6f}; "
+                  f"resolved {resolved['src_in']:.6f}->{resolved['src_out']:.6f}")
+    else:
+        print("\nboundary adjustments: none")
+    print("\nrepairs:")
+    if getattr(args, "no_repair", False):
+        print("  disabled (--no-repair)")
+    elif repairs:
+        for repair_note in repairs:
+            print("  " + ("note: " if " remains blocking " in repair_note else "fixed: ") + repair_note)
+    else:
+        print("  none")
     for t in timeline:
         # never slice the text: [:46] cut Arabic mid-word, and this is the table he actually
         # reads back after choosing beats. Text is the last field, so the numbers still line up.
-        print(f"  {t['tl_in']:>9.6f}->{t['tl_out']:>9.6f}  src {t['src_in']:>9.6f}  {t['text']}")
+        print(f"  b{t['beat']:<3} {t['tl_in']:>9.6f}->{t['tl_out']:>9.6f}  "
+              f"src {t['src_in']:>9.6f}->{t['src_out']:>9.6f}  "
+              f"dur {t['dur']:>8.6f}  {t['text']}")
     print(f"\nseam lint: {'CLEAN' if not findings else str(len(findings)) + ' findings'}")
     for f in findings:
         print("  ! " + f)
@@ -1007,28 +1346,33 @@ def cmd_cut(args):
         # `--force` useful for exploratory acoustic overrides, but never let it build a
         # cut that is known to remove the start of a trusted Arabic word.
         if blocking_findings:
-            print("\nrefusing to build with first-word clipping findings", file=sys.stderr)
+            print("\nrefusing to build with first-word clipping findings", flush=True)
             return 1
-        if findings and not args.force:
+        if overlap_findings:
+            print("\nrefusing to build with overlapping source ranges", flush=True)
+            return 1
+        if findings and not getattr(args, "force", False):
             print("\nrefusing to build with unresolved seam findings; re-run with --force to override",
-                  file=sys.stderr)
+                  flush=True)
             return 1
-        if args.project:
+        if getattr(args, "project", None):
             cmd = ["capcutctl", "new", "--project", args.project,
                    "--media", data["media"], "--scenes", scenes]
-            if args.dry_run:
+            if getattr(args, "dry_run", False):
                 cmd.append("--dry-run")
-            print("\n$ " + " ".join(cmd[:6]) + f" --scenes <{len(timeline)} scenes>")
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            print(result.stdout or result.stderr)
+            print("\n$ " + _shell_command(cmd))
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            output = getattr(result, "stdout", "") or ""
+            if output:
+                print(output, end="" if output.endswith("\n") else "\n")
             if result.returncode:
                 return result.returncode
             # `new` creates the editable 1x content track; apply all fades in one follow-up
             # transaction so root and active-timeline mirrors receive the same extras.
-            if args.dry_run:
+            if getattr(args, "dry_run", False):
                 return 0
             return apply_audio_ramps(args.project, timeline, track="content", fps=fps)
-        return apply_audio_ramps(args.into, timeline, dry_run=args.dry_run, track="content", fps=fps)
+        return apply_audio_ramps(args.into, timeline, dry_run=getattr(args, "dry_run", False), track="content", fps=fps)
     return 0
 
 
@@ -1116,6 +1460,10 @@ def main():
     ap.add_argument("media", nargs="?", help="the talking-head recording")
     ap.add_argument("--keep", help="beat ids to keep, e.g. 0,2,3,7-16")
     ap.add_argument("--drop", help="beat ids to remove from the default selection")
+    ap.add_argument("--order", help="final beat order; must be an exact permutation of kept ids")
+    ap.add_argument("--trim-beat", dest="trim_beat", action="append",
+                    help="safe inward trim, ID:in=SECONDS or ID:out=SECONDS; repeatable")
+    ap.add_argument("--review", help="v1 JSON decision file with sourceToken, keep/order, and boundaries")
     destination = ap.add_mutually_exclusive_group()
     destination.add_argument("--project", help="build this new CapCut project from the selection")
     destination.add_argument("--into", help="apply the cut handoff to an existing project")
@@ -1145,13 +1493,16 @@ def main():
     args.out = args.index
     args.media = media
 
+    editorial_requested = lambda: any((args.keep, args.drop, args.order, args.trim_beat, args.review,
+                                        args.project, args.into))
+
     # index once, reuse thereafter — the expensive half never runs twice
     if args.reindex or not os.path.exists(args.index) or not index_is_current(args.index, media):
         cmd_index(args)
-        if not (args.keep or args.drop or args.project or args.into):
+        if not editorial_requested():
             sys.exit(0)
         print()
-    elif not (args.keep or args.drop or args.project or args.into):
+    elif not editorial_requested():
         print_handout(json.loads(Path(args.index).read_text()), args.index)
         sys.exit(0)
 

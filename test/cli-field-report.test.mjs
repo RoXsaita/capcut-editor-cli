@@ -9,6 +9,7 @@ import {
   FIELD_REPORT_OPERATIONS,
   buildCutRecutSpec,
   buildScreenLayoutSpec,
+  buildArrollArgs,
   main,
   parseArgs,
   serializeCloseFailure,
@@ -76,6 +77,22 @@ test('field-report CLI flags parse as booleans and --into remains a target value
   assert.equal(status.waitForClose, true);
 });
 
+test('reviewed A-roll flags preserve order and repeated inward trims across the Node handoff', () => {
+  const args = parseArgs([
+    'cut', 'face.mp4', '--into', 'existing', '--review', 'decisions.json',
+    '--trim-beat', '10:out=-1.16', '--trim-beat', '18:out=-1.72', '--fps', '24',
+  ]);
+  assert.deepEqual(args.trimBeat, ['10:out=-1.16', '18:out=-1.72']);
+  assert.deepEqual(buildArrollArgs(args, 'face.mp4'), [
+    'face.mp4', '--review', 'decisions.json',
+    '--trim-beat', '10:out=-1.16', '--trim-beat', '18:out=-1.72', '--fps', '24',
+  ]);
+  const ordered = parseArgs(['cut', 'face.mp4', '--order', '2,0', '--keep', '0,2']);
+  assert.deepEqual(buildArrollArgs(ordered, 'face.mp4'), [
+    'face.mp4', '--keep', '0,2', '--order', '2,0',
+  ]);
+});
+
 test('layout screen emits the named transactional core contract', () => {
   const spec = buildScreenLayoutSpec({
     media: 'recording.mp4', at: 2.5, duration: 8,
@@ -94,12 +111,19 @@ test('layout screen emits the named transactional core contract', () => {
 });
 
 test('cut --into emits an anchored recut contract without project JSON writes', () => {
+  const sourceToken = { ino: 1, size: 2, mtime_ns: 3, content_hash: 'same' };
   const spec = buildCutRecutSpec({
     projectDir: '/tmp/existing-project',
     planFile: '/tmp/face.plan.json',
     plan: {
       media: '/tmp/face.mp4',
       kept: [0, 2],
+      order: [2, 0],
+      sourceToken,
+      source_token: sourceToken,
+      editorial: { order: [2, 0] },
+      adjustments: [{ beat: 2, offsets: { outOffset: -0.2 } }],
+      repairs: ['b2 OUT 2.500 -> 2.300 (trough)'],
       duration: 4.5,
       lint: [],
       handoff: { operations: [{ op: 'clip.fade', at: 0, track: 'content', in: 0.067, out: 0.067 }] },
@@ -115,6 +139,10 @@ test('cut --into emits an anchored recut contract without project JSON writes', 
   assert.deepEqual(op.preserve, ['broll', 'layout', 'sfx', 'music']);
   assert.equal(op.retimeAnchored, true);
   assert.equal(op.plan.timeline.length, 2);
+  assert.deepEqual(op.plan.order, [2, 0]);
+  assert.deepEqual(op.plan.sourceToken, sourceToken);
+  assert.deepEqual(op.plan.adjustments, [{ beat: 2, offsets: { outOffset: -0.2 } }]);
+  assert.deepEqual(op.plan.repairs, ['b2 OUT 2.500 -> 2.300 (trough)']);
   assert.equal(op.audioRamps.length, 1);
   assert.match(op.planFile, /face\.plan\.json$/);
 });
@@ -139,7 +167,9 @@ test('main cut --into builds the recut spec and allowlists Python arroll flags',
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-cli-main-'));
   const media = path.join(temp, 'face.mp4');
   const log = path.join(temp, 'python-args.json');
+  const review = path.join(temp, 'decisions.json');
   fs.writeFileSync(media, 'fixture media');
+  fs.writeFileSync(review, '{}');
   const project = writeCliProject(temp, media);
   const fakePython = path.join(temp, 'python3');
   fs.writeFileSync(fakePython, [
@@ -194,6 +224,19 @@ test('main cut --into builds the recut spec and allowlists Python arroll flags',
     });
     results.push(JSON.parse(stdout));
     pythonArgs.push(JSON.parse(fs.readFileSync(log, 'utf8')));
+
+    stdout = '';
+    await main([
+      'cut', media, '--into', project, '--review', review, '--dry-run',
+      '--force-running', '--no-backup', '--root', temp,
+    ], {
+      applySpec: (directory, spec, options) => {
+        applied.push({ directory, spec, options });
+        return { committed: false, project: directory, result: [] };
+      },
+    });
+    results.push(JSON.parse(stdout));
+    pythonArgs.push(JSON.parse(fs.readFileSync(log, 'utf8')));
   } finally {
     process.chdir(previousCwd);
     restoreOutput();
@@ -204,17 +247,67 @@ test('main cut --into builds the recut spec and allowlists Python arroll flags',
     fs.rmSync(temp, { recursive: true, force: true });
   }
 
-  assert.equal(results.length, 2);
-  assert.equal(results.every(result => result.result.committed), true);
-  assert.equal(applied.length, 2);
+  assert.equal(results.length, 3);
+  assert.equal(results.slice(0, 2).every(result => result.result.committed), true);
+  assert.equal(results[2].result.committed, false);
+  assert.equal(applied.length, 3);
   assert.equal(applied.every(call => call.spec.operations[0].op === 'cut.recut'), true);
   assert.equal(applied.every(call => call.spec.operations[0].contract === 'cut.recut.v1'), true);
-  for (const args of pythonArgs) {
-    assert.ok(args.includes('--keep'));
-    assert.ok(args.includes('--force'));
+  for (const [index, args] of pythonArgs.entries()) {
+    if (index < 2) {
+      assert.ok(args.includes('--keep'));
+      assert.ok(args.includes('--force'));
+    }
     for (const forbidden of ['--into', '--in-place', '--root', '--force-running', '--no-backup']) {
       assert.equal(args.includes(forbidden), false, `Python must not receive ${forbidden}`);
     }
+  }
+  const reviewArgs = pythonArgs[2];
+  assert.equal(reviewArgs.includes('--keep'), false);
+  assert.deepEqual(reviewArgs.slice(reviewArgs.indexOf('--review'), reviewArgs.indexOf('--review') + 2), [
+    '--review', review,
+  ]);
+});
+
+test('direct cut --project forwards review and dry-run flags to the Python editor', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-cli-project-'));
+  const media = path.join(temp, 'face.mp4');
+  const review = path.join(temp, 'decisions.json');
+  const log = path.join(temp, 'python-args.json');
+  const fakePython = path.join(temp, 'python3');
+  fs.writeFileSync(media, 'fixture media');
+  fs.writeFileSync(review, '{}');
+  fs.writeFileSync(fakePython, [
+    '#!/usr/bin/env node',
+    "const fs = require('node:fs');",
+    "fs.writeFileSync(process.env.CAPCUT_TEST_ARG_LOG, JSON.stringify(process.argv.slice(2)));",
+  ].join('\n'));
+  fs.chmodSync(fakePython, 0o755);
+
+  const run = spawnSync(process.execPath, [
+    path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'bin', 'capcutctl.mjs'),
+    'cut', media, '--review', review, '--project', 'A-roll Review', '--dry-run',
+  ], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PATH: `${temp}${path.delimiter}${process.env.PATH || ''}`,
+      CAPCUT_TEST_ARG_LOG: log,
+    },
+  });
+  try {
+    assert.equal(run.status, 0, run.stderr || run.stdout);
+    const args = JSON.parse(fs.readFileSync(log, 'utf8'));
+    assert.equal(args[1], media);
+    assert.deepEqual(args.slice(args.indexOf('--review'), args.indexOf('--review') + 2), [
+      '--review', review,
+    ]);
+    assert.deepEqual(args.slice(args.indexOf('--project'), args.indexOf('--project') + 2), [
+      '--project', 'A-roll Review',
+    ]);
+    assert.ok(args.includes('--dry-run'));
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
   }
 });
 

@@ -793,6 +793,33 @@ test('cut.recut source-maps anchors, keeps principal at 1x, mirrors ids, and is 
   assert.equal(stableJson(readJson(path.join(f.timelineDir, 'draft_info.json'))), timelineBefore);
 });
 
+test('cut.recut preserves an explicit reverse editorial order and rejects a non-permutation', NEEDS_FFMPEG, () => {
+  const f = recutFixture();
+  const reversed = recutSpec(f, [
+    { beat: 1, tl_in: 0, tl_out: 2, src_in: 3, dur: 2, text: 'second' },
+    { beat: 0, tl_in: 2, tl_out: 4, src_in: 0, dur: 2, text: 'first' },
+  ]);
+  reversed.operations[0].plan.order = [1, 0];
+  const result = applySpec(f.project, reversed, { forceRunning: true });
+  assert.equal(result.committed, true);
+  for (const dir of [f.project, f.timelineDir]) {
+    const principal = readJson(path.join(dir, 'draft_info.json')).tracks
+      .find(track => track.name === 'content').segments.filter(segment => !segment.desc?.startsWith('layout:'));
+    assert.deepEqual(principal.map(segment => segment.target_timerange), [
+      { start: 0, duration: 2_000_000 }, { start: 2_000_000, duration: 2_000_000 },
+    ]);
+    assert.deepEqual(principal.map(segment => segment.source_timerange), [
+      { start: 3_000_000, duration: 2_000_000 }, { start: 0, duration: 2_000_000 },
+    ]);
+    assert.deepEqual(principal.map(segment => segment.speed), [1, 1]);
+  }
+
+  const invalid = recutSpec(f);
+  invalid.operations[0].plan.order = [0, 0];
+  assert.throws(() => applySpec(f.project, invalid, { forceRunning: true }),
+    error => error instanceof CapcutError && error.code === 'CUT_PLAN_AMBIGUOUS');
+});
+
 test('cut.recut rejects malformed or ambiguous plans before changing either mirror', NEEDS_FFMPEG, () => {
   const f = recutFixture();
   const before = [f.project, f.timelineDir].map(dir => stableJson(readJson(path.join(dir, 'draft_info.json'))));

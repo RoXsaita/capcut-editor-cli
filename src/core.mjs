@@ -153,8 +153,8 @@ export function loadPreset(name) {
  * `spawnSync ffmpeg ENOENT`, which tells a new user nothing. Ask first, and say what to do.
  */
 const BINARY_CACHE = new Map();
-export function hasBinary(name) {
-  if (!BINARY_CACHE.has(name)) {
+export function hasBinary(name, { refresh = false } = {}) {
+  if (refresh || !BINARY_CACHE.has(name)) {
     const probe = spawnSync(process.platform === 'win32' ? 'where' : 'which', [name], { stdio: 'ignore' });
     BINARY_CACHE.set(name, probe.status === 0);
   }
@@ -172,6 +172,254 @@ export function requireBinary(name, what) {
   throw new CapcutError(
     `${name} is not on PATH, and ${what} needs it.\n  ${hint}`,
     { code: 'MISSING_DEPENDENCY', exitCode: 2 });
+}
+
+const PREFLIGHT_COMMAND_TIMEOUT_MS = 5_000;
+const PREFLIGHT_MIN_FREE_BYTES = 1 * 1024 ** 3;
+const DEFAULT_WHISPER_MODEL = 'mlx-community/whisper-large-v3-turbo';
+
+/**
+ * Run a small, bounded command for preflight.  A binary being discoverable with `which` does
+ * not mean it can start (a broken interpreter, a bad dylib, and a stuck wrapper all look fine
+ * in PATH), so preflight always executes the tools it says are ready.  Keep this helper free of
+ * a shell: PATH entries and error text are environment data, never command syntax.
+ */
+function runPreflightCommand(command, args, {
+  timeoutMs = PREFLIGHT_COMMAND_TIMEOUT_MS,
+  runner = spawnSync,
+} = {}) {
+  let result;
+  try {
+    result = runner(command, args, {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: timeoutMs,
+      killSignal: 'SIGKILL',
+      maxBuffer: 64 * 1024,
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      detail: `could not start (${error.code || error.message})`,
+      error,
+    };
+  }
+
+  const rawStdout = String(result?.stdout || '');
+  const stderr = String(result?.stderr || '').trim().replace(/\s+/g, ' ').slice(0, 240);
+  const stdout = rawStdout.trim().replace(/\s+/g, ' ').slice(0, 240);
+  if (result?.status === 0 && !result?.error) {
+    return { ok: true, detail: 'probe passed', stdout: rawStdout };
+  }
+
+  if (result?.error?.code === 'ETIMEDOUT' || result?.signal) {
+    return {
+      ok: false,
+      detail: `timed out after ${timeoutMs}ms${result.signal ? ` (${result.signal})` : ''}`,
+      error: result.error,
+    };
+  }
+
+  const reason = result?.error?.message || `exited with status ${result?.status ?? 'unknown'}`;
+  const output = stderr || stdout;
+  return {
+    ok: false,
+    detail: `${reason}${output ? `: ${output}` : ''}`,
+    error: result?.error,
+  };
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value < 0) return 'unknown';
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
+  let unit = 0;
+  let scaled = value;
+  while (scaled >= 1024 && unit < units.length - 1) {
+    scaled /= 1024;
+    unit += 1;
+  }
+  const decimals = unit === 0 ? 0 : scaled >= 100 ? 0 : scaled >= 10 ? 1 : 2;
+  return `${scaled.toFixed(decimals)} ${units[unit]}`;
+}
+
+function existingDirectory(file) {
+  let candidate = path.resolve(file);
+  while (!fs.existsSync(candidate)) {
+    const parent = path.dirname(candidate);
+    if (parent === candidate) return null;
+    candidate = parent;
+  }
+  try {
+    return fs.statSync(candidate).isDirectory() ? candidate : path.dirname(candidate);
+  } catch {
+    return null;
+  }
+}
+
+function preflightDisk(directory, {
+  statfs = fs.statfsSync,
+  minimumBytes = PREFLIGHT_MIN_FREE_BYTES,
+} = {}) {
+  const target = existingDirectory(directory);
+  if (!target) return { ok: false, detail: `could not find a filesystem for ${directory}` };
+  try {
+    const stats = statfs(target);
+    const blockSize = Number(stats?.bsize);
+    const availableBlocks = Number(stats?.bavail != null ? stats.bavail : stats?.bfree);
+    const available = blockSize > 0 && Number.isFinite(availableBlocks)
+      ? blockSize * availableBlocks : NaN;
+    if (!Number.isFinite(available) || available < 0) {
+      return { ok: false, detail: `filesystem statistics for ${target} are incomplete` };
+    }
+    const required = Number(minimumBytes);
+    const threshold = Number.isFinite(required) && required >= 0 ? required : PREFLIGHT_MIN_FREE_BYTES;
+    return {
+      ok: available >= threshold,
+      detail: `${formatBytes(available)} available at ${target} (minimum ${formatBytes(threshold)})`,
+      available,
+      target,
+      threshold,
+    };
+  } catch (error) {
+    return { ok: false, detail: `could not read filesystem statistics for ${target}: ${error.message}` };
+  }
+}
+
+function preflightWrite(directory, { writer = null } = {}) {
+  if (!fs.existsSync(directory)) return { ok: false, detail: `${directory} does not exist` };
+  try {
+    if (!fs.statSync(directory).isDirectory()) return { ok: false, detail: `${directory} is not a directory` };
+  } catch (error) {
+    return { ok: false, detail: `could not inspect ${directory}: ${error.message}` };
+  }
+
+  // A mode-bit/access check is not enough on ACLs, read-only mounts, or network filesystems.
+  // Create one uniquely named probe file and remove it immediately; never overwrite a user file.
+  if (typeof writer === 'function') {
+    try {
+      const result = writer(directory);
+      return result && typeof result === 'object' ? result : { ok: Boolean(result), detail: 'write probe passed' };
+    } catch (error) {
+      return { ok: false, detail: `write probe failed: ${error.message}` };
+    }
+  }
+  const probe = path.join(directory, `.capcutctl-preflight-${process.pid}-${crypto.randomUUID()}`);
+  let fd = null;
+  try {
+    fd = fs.openSync(probe, 'wx', 0o600);
+    fs.writeSync(fd, 'capcutctl preflight\n');
+    return { ok: true, detail: 'temporary write probe passed' };
+  } catch (error) {
+    return { ok: false, detail: `write probe failed: ${error.code || error.message}` };
+  } finally {
+    if (fd != null) {
+      try { fs.closeSync(fd); } catch { /* report the write result; cleanup is best effort */ }
+    }
+    try { fs.rmSync(probe, { force: true }); } catch { /* do not hide the permission result */ }
+  }
+}
+
+function preflightAssetPath(layouts, basename) {
+  const roots = assetSearchRoots(layouts.assetSearchPaths || []);
+  return roots.map(root => path.join(root, basename)).find(file => fs.existsSync(file)) || null;
+}
+
+function preflightWhisper({ binaryCheck, commandRunner }) {
+  const mlxOnPath = binaryCheck('mlx_whisper');
+  const mlx = mlxOnPath
+    ? commandRunner('mlx_whisper', ['--help'])
+    : { ok: false, detail: 'mlx_whisper is not on PATH' };
+  const pythonOnPath = binaryCheck('python3');
+  const whisper = pythonOnPath
+    ? commandRunner('python3', ['-c', 'import whisper'])
+    : { ok: false, detail: 'python3 is not on PATH' };
+  const mlxReady = Boolean(mlx.ok);
+  const whisperReady = Boolean(whisper.ok);
+  let detail;
+  if (mlxReady) {
+    detail = `mlx_whisper is runnable (default ${DEFAULT_WHISPER_MODEL} model path)`;
+    if (whisperReady) detail += '; openai-whisper fallback is also importable';
+  } else if (whisperReady) {
+    detail = 'openai-whisper is importable; use a supported local/official --model because the default MLX model is unavailable';
+  } else {
+    detail = `mlx_whisper: ${mlx.detail}; openai-whisper: ${whisper.detail}`;
+  }
+  return {
+    // tools/aroll.py's default is the Hugging Face `mlx-community/...` id.  The Python
+    // fallback accepts official plain model names (for example `base`), but cannot load that
+    // MLX repository id, so an importable fallback alone must not make the default cut look ready.
+    ok: mlxReady,
+    detail,
+    fix: mlxReady ? null
+      : whisperReady
+        ? 'install mlx-whisper (`uv tool install mlx-whisper`) for the default model, or pass an official plain --model such as `base`'
+        : 'install mlx-whisper (`uv tool install mlx-whisper`) or openai-whisper, then retry',
+    mlxReady,
+    whisperReady,
+  };
+}
+
+function preflightOcr({ binaryCheck, commandRunner, helperPath, sourcePath, samplePath }) {
+  if (process.platform !== 'darwin') {
+    return {
+      ok: false,
+      detail: `Apple Vision OCR is macOS-only (running on ${process.platform})`,
+      fix: 'run on macOS and build the helper with `swiftc -O -o tools/vision/ocr tools/vision/ocr.swift`',
+    };
+  }
+  if (!fs.existsSync(sourcePath)) {
+    return {
+      ok: false,
+      detail: `source not found: ${sourcePath}`,
+      fix: 'restore tools/vision/ocr.swift from the package',
+    };
+  }
+  const swift = binaryCheck('swiftc')
+    ? commandRunner('swiftc', ['-version'])
+    : { ok: false, detail: 'swiftc is not on PATH' };
+  if (!swift.ok) {
+    return {
+      ok: false,
+      detail: `Swift toolchain unavailable: ${swift.detail}`,
+      fix: 'install Xcode Command Line Tools (`xcode-select --install`)',
+    };
+  }
+  if (!fs.existsSync(helperPath)) {
+    return {
+      ok: false,
+      detail: 'Vision OCR helper is not built',
+      fix: 'swiftc -O -o tools/vision/ocr tools/vision/ocr.swift',
+    };
+  }
+  try {
+    if (!fs.statSync(helperPath).isFile()) throw new Error('helper path is not a file');
+    fs.accessSync(helperPath, fs.constants.X_OK);
+  } catch (error) {
+    return {
+      ok: false,
+      detail: `Vision OCR helper is not executable: ${error.message}`,
+      fix: 'swiftc -O -o tools/vision/ocr tools/vision/ocr.swift',
+    };
+  }
+  if (!samplePath || !fs.existsSync(samplePath)) {
+    return {
+      ok: false,
+      detail: 'no readable image is available for a Vision OCR probe',
+      fix: 'restore the bundled assets, then retry',
+    };
+  }
+  const probe = commandRunner(helperPath, [samplePath, '--languages', 'en-US,ar']);
+  let output;
+  try { output = JSON.parse(String(probe.stdout || '')); } catch { output = null; }
+  if (!probe.ok || !Array.isArray(output)) {
+    return {
+      ok: false,
+      detail: `Vision OCR helper probe failed: ${probe.ok ? 'invalid JSON output' : probe.detail}`,
+      fix: 'rebuild the helper with `swiftc -O -o tools/vision/ocr tools/vision/ocr.swift`',
+    };
+  }
+  return { ok: true, detail: 'swiftc and the Vision OCR helper probe passed' };
 }
 
 /**
@@ -1076,20 +1324,97 @@ function auditMediaOrigins(projectDir, state) {
  * validation with 12 error(s)` at the end of a polish. Report all of it up front, with the
  * command that fixes each one.
  */
-export function preflight() {
+export function preflight({
+  root = DEFAULT_ROOT,
+  binaryCheck = name => hasBinary(name, { refresh: true }),
+  commandRunner = (command, args) => runPreflightCommand(command, args),
+  statfs = fs.statfsSync,
+  writeProbe = null,
+  minimumFreeBytes = process.env.CAPCUTCTL_MIN_FREE_BYTES || PREFLIGHT_MIN_FREE_BYTES,
+} = {}) {
   const checks = [];
-  const add = (name, ok, detail, fix = null) => checks.push({ name, ok, detail, ...(fix ? { fix } : {}) });
+  const add = (name, ok, detail, fix = null, { blocking = true, ...extra } = {}) => checks.push({
+    name,
+    ok: Boolean(ok),
+    detail: detail || (ok ? 'passed' : 'failed'),
+    ...(fix ? { fix } : {}),
+    ...(blocking ? {} : { blocking: false }),
+    ...extra,
+  });
+
+  const binaryResults = new Map();
+  const available = name => {
+    if (!binaryResults.has(name)) {
+      let ok = false;
+      try { ok = Boolean(binaryCheck(name)); } catch { /* report as unavailable below */ }
+      binaryResults.set(name, ok);
+    }
+    return binaryResults.get(name);
+  };
+
+  const command = (name, args) => {
+    try {
+      const result = commandRunner(name, args);
+      if (result && typeof result === 'object') return result;
+      return { ok: Boolean(result), detail: Boolean(result) ? 'probe passed' : 'probe failed' };
+    } catch (error) {
+      return { ok: false, detail: `could not start (${error.code || error.message})` };
+    }
+  };
 
   for (const binary of ['ffmpeg', 'ffprobe']) {
-    add(binary, hasBinary(binary),
-      hasBinary(binary) ? 'on PATH' : 'not on PATH',
-      hasBinary(binary) ? null : (INSTALL_HINT[process.platform] || `install ${binary}`));
+    const ok = available(binary);
+    add(binary, ok, ok ? 'on PATH' : 'not on PATH',
+      ok ? null : (INSTALL_HINT[process.platform] || `install ${binary}`));
   }
+
+  const ffmpegProbe = available('ffmpeg')
+    ? command('ffmpeg', [
+      '-hide_banner', '-loglevel', 'error', '-f', 'lavfi',
+      '-i', 'color=c=black:s=2x2:r=1:d=0.1', '-frames:v', '1', '-f', 'null', '-',
+    ])
+    : { ok: false, detail: 'skipped because ffmpeg is not on PATH' };
+  add('ffmpeg probe', ffmpegProbe.ok, ffmpegProbe.ok ? 'executed a synthetic frame probe' : ffmpegProbe.detail,
+      ffmpegProbe.ok ? null : 'repair or reinstall ffmpeg, then retry `capcutctl preflight`');
+
+  const layouts = loadPreset('layouts');
+  const probeAsset = preflightAssetPath(layouts, 'suheilai-rect-indigo-1080x1920 (2).png');
+  const ffprobeArgs = probeAsset
+    ? ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', '--', probeAsset]
+    : ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=black:s=2x2:r=1:d=0.1', '-show_entries', 'stream=width,height', '-of', 'csv=p=0'];
+  const ffprobeProbe = available('ffprobe')
+    ? command('ffprobe', ffprobeArgs)
+    : { ok: false, detail: 'skipped because ffprobe is not on PATH' };
+  const ffprobeOutput = String(ffprobeProbe.stdout || '').trim();
+  const ffprobeOk = Boolean(ffprobeProbe.ok && /^\d+\s*,\s*\d+$/.test(ffprobeOutput));
+  const ffprobeFailure = ffprobeProbe.ok && !ffprobeOk
+    ? 'probe returned no valid stream dimensions'
+    : ffprobeProbe.detail;
+  const ffprobeDetail = ffprobeOk
+    ? `executed a media probe${probeAsset ? ` on ${probeAsset}` : ''}`
+    : ffprobeFailure;
+  add('ffprobe probe', ffprobeOk, ffprobeDetail,
+      ffprobeOk ? null : 'repair or reinstall ffprobe, then retry `capcutctl preflight`');
+
+  const whisper = preflightWhisper({ binaryCheck: available, commandRunner: command });
+  add('Whisper/MLX transcription', whisper.ok, whisper.detail, whisper.fix,
+      { mlxReady: whisper.mlxReady, whisperReady: whisper.whisperReady });
+
+  const ocr = preflightOcr({
+    binaryCheck: available,
+    commandRunner: command,
+    helperPath: path.join(PACKAGE_ROOT, 'tools', 'vision', 'ocr'),
+    sourcePath: path.join(PACKAGE_ROOT, 'tools', 'vision', 'ocr.swift'),
+    samplePath: probeAsset,
+  });
+  // OCR is deliberately non-blocking: frame QA remains useful without `--ocr`; the command
+  // itself reports the same build instruction when a user requests OCR specifically.
+  add('OCR tooling', ocr.ok, ocr.detail, ocr.fix, { blocking: false });
 
   const assets = ['suheilai-rect-indigo-1080x1920 (2).png', 'suheilai-circle-white-1080x1920.png'];
   for (const basename of assets) {
-    const roots = assetSearchRoots(loadPreset('layouts').assetSearchPaths || []);
-    const found = roots.map(root => path.join(root, basename)).find(file => fs.existsSync(file));
+    const roots = assetSearchRoots(layouts.assetSearchPaths || []);
+    const found = roots.map(assetRoot => path.join(assetRoot, basename)).find(file => fs.existsSync(file));
     add(`asset: ${basename}`, Boolean(found), found || `not found in ${roots.join(', ')}`,
       found ? null : 'reinstall, or set CAPCUTCTL_ASSET_DIR to a directory holding your own overlay');
   }
@@ -1108,17 +1433,30 @@ export function preflight() {
     (present.length ? '' : ' — polish will place none'),
     present.length === entries.length ? null
       : 'download the sounds you want in CapCut, then run `capcutctl harvest`, or point '
-        + '$CAPCUTCTL_PRESET_DIR at a directory with your own sfx.json');
+        + '$CAPCUTCTL_PRESET_DIR at a directory with your own sfx.json',
+    { blocking: false });
 
-  const root = DEFAULT_ROOT;
-  add('CapCut drafts folder', fs.existsSync(root), fs.existsSync(root) ? root : `${root} does not exist`,
-    fs.existsSync(root) ? null : 'install CapCut and open it once, or pass --root PATH');
+  const draftsFolder = fs.existsSync(root) && (() => {
+    try { return fs.statSync(root).isDirectory(); } catch { return false; }
+  })();
+  add('CapCut drafts folder', draftsFolder,
+    draftsFolder ? path.resolve(root) : `${root} does not exist or is not a directory`,
+    draftsFolder ? null : 'install CapCut and open it once, or pass --root PATH');
 
-  const blocking = checks.filter(c => !c.ok && !String(c.name).startsWith('sfx'));
+  const write = preflightWrite(root, { writer: writeProbe });
+  add('CapCut drafts folder write permission', write.ok, write.detail,
+      write.ok ? null : 'grant write permission to the CapCut drafts folder, or pass --root PATH');
+
+  const disk = preflightDisk(root, { statfs, minimumBytes: minimumFreeBytes });
+  add('free disk space', disk.ok, disk.detail,
+      disk.ok ? null : `free at least ${formatBytes(disk.threshold || Number(minimumFreeBytes) || PREFLIGHT_MIN_FREE_BYTES)} on the drafts volume, then retry`);
+
+  const blocking = checks.filter(c => c.blocking !== false && !c.ok);
   return {
     ok: blocking.length === 0,
+    draftsRoot: path.resolve(root),
     presetDir: presetFile('sfx'),
-    assetDirs: assetSearchRoots(loadPreset('layouts').assetSearchPaths || []),
+    assetDirs: assetSearchRoots(layouts.assetSearchPaths || []),
     checks,
   };
 }
@@ -1759,6 +2097,33 @@ function recutNormalizePlan(op, documentFps = null) {
     timeline.push({
       index, beat, targetStart, targetEnd, targetDuration,
       sourceStart, sourceEnd, sourceDuration, text: item.text || ''
+    });
+  }
+  const validateDeclaredBeatList = (value, field) => {
+    if (!Array.isArray(value)) recutFail(field + ' must be an array of integer beat ids.', 'CUT_PLAN_INVALID');
+    const seen = new Set();
+    for (const beat of value) {
+      if (!Number.isInteger(beat) || beat < 0 || seen.has(beat)) {
+        recutFail(field + ' contains a duplicate or invalid beat id.', 'CUT_PLAN_AMBIGUOUS', { field, beat });
+      }
+      seen.add(beat);
+    }
+    return value;
+  };
+  const declaredKept = op.plan.kept == null ? null : validateDeclaredBeatList(op.plan.kept, 'plan.kept');
+  const declaredOrder = op.plan.order == null ? null : validateDeclaredBeatList(op.plan.order, 'plan.order');
+  const sameBeatSet = (left, right) => left.length === right.length
+    && left.every(beat => right.includes(beat));
+  const timelineBeats = timeline.map(item => item.beat);
+  if (declaredKept && !sameBeatSet(declaredKept, timelineBeats)) {
+    recutFail('plan.kept must match the beats present in plan.timeline.', 'CUT_PLAN_AMBIGUOUS', {
+      kept: declaredKept, timeline: timelineBeats
+    });
+  }
+  if (declaredOrder && (!sameBeatSet(declaredOrder, timelineBeats)
+      || declaredOrder.some((beat, index) => beat !== timelineBeats[index]))) {
+    recutFail('plan.order must be an exact permutation in the same order as plan.timeline.', 'CUT_PLAN_AMBIGUOUS', {
+      order: declaredOrder, timeline: timelineBeats
     });
   }
   for (let i = 0; i < timeline.length; i++) {

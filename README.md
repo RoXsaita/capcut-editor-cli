@@ -192,6 +192,63 @@ capcutctl sync --project grok-build-gpt --dry-run
 capcutctl sync --project grok-build-gpt
 ```
 
+## Agent-reviewed A-roll decisions
+
+`cut` separates editorial judgement from timing mechanics. The first pass writes a numbered
+`VIDEO.aroll.json` handout. An agent can then keep useful beats, put them in a deliberate order,
+and trim excessive indexed silence without ever choosing a raw Whisper timestamp:
+
+```bash
+capcutctl cut "Face Takes.mp4" --lang ar
+capcutctl cut "Face Takes.mp4" \
+  --keep 0,2-3,6-10,12-13,16-18,21 \
+  --order 0,2,3,6,7,8,9,10,12,13,16,17,18,21 \
+  --trim-beat 10:out=-1.16 \
+  --trim-beat 18:out=-1.72 \
+  --project "A-roll Review" --dry-run
+```
+
+`--keep` remains backward compatible: when `--order` is omitted, retained ids are placed in
+source order. If `--order` is present it must be an exact permutation of the kept ids. Repeated
+`--trim-beat ID:in=SECONDS` and `ID:out=SECONDS` values are inward-only hints; the CLI resolves
+them against the acoustic index, quantizes them to the project FPS, and snaps them to a safe
+onset/trough. IN offsets are positive and OUT offsets are negative. Unsafe expansion, a trim
+that leaves a fragment, source overlap, a clipped trusted first word, or a stale index is
+rejected before a CapCut write; `--force` never overrides first-word protection.
+
+For a durable review handoff, save a v1 decision file. Copy `sourceToken` exactly from the
+current `source_token` field in `Face Takes.aroll.json`:
+
+```json
+{
+  "version": 1,
+  "sourceToken": {
+    "ino": 123, "inode": 123, "size": 456, "mtime_ns": 789,
+    "content_hash": "...", "fingerprint": "..."
+  },
+  "keep": [0, 2, 3, 6, 7, 8, 9, 10, 12, 13, 16, 17, 18, 21],
+  "order": [0, 2, 3, 6, 7, 8, 9, 10, 12, 13, 16, 17, 18, 21],
+  "boundaries": {
+    "10": { "outOffset": -1.16 },
+    "18": { "outOffset": -1.72 }
+  }
+}
+```
+
+Run it against a new project or an existing one with the same reviewed plan:
+
+```bash
+capcutctl cut "Face Takes.mp4" --review decisions.json --project "A-roll Review" --dry-run
+capcutctl cut "Face Takes.mp4" --review decisions.json --into "Existing Project" --dry-run
+capcutctl cut "Face Takes.mp4" --review decisions.json --into "Existing Project"
+```
+
+The dry run prints the final order, complete source/target ranges, resolved adjustments, repairs,
+and lint; the resolved plan also records the source token, FPS, and 1× source/target durations.
+`--into` uses the transactional `cut.recut.v1` path, so anchored
+B-roll, layouts, SFX, music, snapshots, mirror synchronization, idempotency, and rollback
+remain in one operation. Dry runs write no CapCut draft files.
+
 ## Edit specification
 
 Specs are JSON and versioned. Supported v1 operations:

@@ -14,14 +14,19 @@ from aroll import (
     AUDIO_RAMP_FRAMES,
     FRAME,
     add_audio_ramps,
+    apply_boundary_adjustments,
     audio_ramp_operations,
     cmd_cut,
     group_duplicates,
+    load_review,
     snap,
+    parse_order_spec,
+    parse_trim_specs,
+    resolve_editorial_decisions,
     suggested_keep,
     trustworthy_word_start,
 )
-from audio_index import AudioIndex
+from audio_index import AudioIndex, source_token
 
 
 def beat(identifier, text, take, start, end, **extra):
@@ -155,6 +160,187 @@ class ArollFindingsTest(unittest.TestCase):
 
         self.assertEqual(result, 1)
         run.assert_not_called()
+
+    def test_order_is_an_exact_permutation_and_trim_flags_are_inward_only(self):
+        data = {
+            "source_token": {"content_hash": "current"},
+            "beats": [beat(0, "one", 0, 0, 1), beat(1, "two", 0, 1, 2), beat(2, "three", 0, 2, 3)],
+            "default_keep": [0, 1, 2],
+        }
+        args = Namespace(keep="0,2", drop=None, order="2,0", trim_beat=None, review=None)
+        resolved = resolve_editorial_decisions(data, args)
+        self.assertEqual(resolved["kept"], [0, 2])
+        self.assertEqual(resolved["order"], [2, 0])
+
+        for order in ("2,2", "2,1", "2,9"):
+            with self.subTest(order=order):
+                args.order = order
+                with self.assertRaisesRegex(ValueError, "permutation|duplicate|unknown"):
+                    resolve_editorial_decisions(data, args)
+
+        with self.assertRaisesRegex(ValueError, "expands"):
+            parse_trim_specs(["1:in=-0.2"])
+        with self.assertRaisesRegex(ValueError, "expands"):
+            parse_trim_specs(["1:out=0.2"])
+        self.assertEqual(parse_order_spec("2,0"), [2, 0])
+
+    def test_review_file_requires_current_source_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            token = {"ino": 1, "size": 2, "mtime_ns": 3, "content_hash": "same"}
+            data = {
+                "source_token": token,
+                "beats": [beat(0, "one", 0, 0, 1), beat(1, "two", 0, 1, 2)],
+                "default_keep": [0, 1],
+            }
+            review = root / "decisions.json"
+            review.write_text(json.dumps({
+                "version": 1, "sourceToken": token, "keep": [0, 1], "order": [1, 0],
+                "boundaries": {"1": {"outOffset": -0.2}},
+            }))
+            loaded = load_review(review, data)
+            self.assertEqual(loaded["order"], [1, 0])
+            self.assertEqual(loaded["boundaries"], {1: {"outOffset": -0.2}})
+
+            stale = json.loads(review.read_text())
+            stale["sourceToken"] = {**token, "content_hash": "old"}
+            review.write_text(json.dumps(stale))
+            with self.assertRaisesRegex(ValueError, "stale"):
+                load_review(review, data)
+
+    def test_inward_trim_resolves_to_acoustic_onset_and_trough_with_equal_durations(self):
+        db = [-70.0] * 500
+        for start, end in ((100, 150), (250, 350)):
+            for index in range(start, end):
+                db[index] = -20.0
+        idx = AudioIndex(db, 0.01)
+        picked = [beat(0, "a useful beat", 0, 0.98, 4.5)]
+        adjustments = apply_boundary_adjustments(
+            idx, picked, {0: {"inOffset": 0.8, "outOffset": -0.7}}, fps=30,
+        )
+
+        self.assertEqual(len(adjustments), 1)
+        self.assertGreater(picked[0]["src_in"], 0.98)
+        self.assertLess(picked[0]["src_out"], 4.5)
+        self.assertLess(idx.at(picked[0]["src_out"]), -55.0)
+        self.assertAlmostEqual(
+            adjustments[0]["resolved"]["src_out"] - adjustments[0]["resolved"]["src_in"],
+            picked[0]["src_out"] - picked[0]["src_in"],
+        )
+
+    def test_cmd_cut_review_writes_ordered_one_x_plan_with_source_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            media = root / "face.mp4"
+            media.write_bytes(b"fixture media")
+            token = source_token(media)
+            index = root / "face.aroll.json"
+            plan = root / "face.plan.json"
+            data = {
+                "version": 3,
+                "media": str(media),
+                "source_token": token,
+                "fps": 30.0,
+                "source_duration": 3.0,
+                "beats": [
+                    beat(0, "first", 0, 0.0, 1.0),
+                    beat(1, "second", 0, 2.0, 3.0),
+                ],
+                "default_keep": [0, 1],
+            }
+            index.write_text(json.dumps(data))
+            review = root / "decisions.json"
+            review.write_text(json.dumps({
+                "version": 1, "sourceToken": token, "keep": [0, 1], "order": [1, 0],
+            }))
+            args = Namespace(
+                index=str(index), keep=None, drop=None, order=None, trim_beat=None,
+                review=str(review), no_repair=True, force=False, project=None, into=None,
+                dry_run=True, plan=str(plan), fps=None,
+            )
+            idx = AudioIndex([-20.0] * 100 + [-70.0] * 100
+                             + [-20.0] * 100 + [-70.0] * 100, 0.01)
+            with patch.object(__import__("aroll").AudioIndex, "build_or_load", return_value=idx):
+                self.assertEqual(cmd_cut(args), 0)
+
+            resolved = json.loads(plan.read_text())
+            self.assertEqual(resolved["order"], [1, 0])
+            self.assertEqual(resolved["sourceToken"], token)
+            self.assertEqual(resolved["editorial"]["reviewFile"], str(review.absolute()))
+            self.assertEqual([item["beat"] for item in resolved["timeline"]], [1, 0])
+            for item in resolved["timeline"]:
+                self.assertAlmostEqual(item["src_dur"], item["dur"])
+                self.assertAlmostEqual(item["tl_out"] - item["tl_in"], item["dur"])
+
+    def test_long_tail_trim_keeps_useful_beat_and_is_accepted_without_force(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            media = root / "face.mp4"
+            media.write_bytes(b"fixture media")
+            token = source_token(media)
+            index = root / "face.aroll.json"
+            plan = root / "face.plan.json"
+            index.write_text(json.dumps({
+                "version": 3,
+                "media": str(media),
+                "source_token": token,
+                "fps": 30.0,
+                "source_duration": 6.0,
+                "beats": [beat(
+                    0, "a useful beat with a long tail", 0, 1.0, 4.5,
+                    first_word="a", first_word_start=1.0, first_word_trustworthy=True,
+                )],
+                "default_keep": [0],
+            }))
+            args = Namespace(
+                index=str(index), keep="0", drop=None, order="0",
+                trim_beat=["0:out=-1.16"], review=None, no_repair=True, force=False,
+                project=None, into="existing project", dry_run=False, plan=str(plan), fps=None,
+            )
+            # Speech ends at 2.0s; the indexed beat deliberately carries a 2.5s tail.
+            idx = AudioIndex([-70.0] * 100 + [-20.0] * 100 + [-70.0] * 500, 0.01)
+            with patch.object(__import__("aroll").AudioIndex, "build_or_load", return_value=idx), \
+                    patch("aroll.subprocess.run") as run:
+                run.return_value.returncode = 0
+                run.return_value.stdout = ""
+                self.assertEqual(cmd_cut(args), 0)
+
+            resolved = json.loads(plan.read_text())
+            item = resolved["timeline"][0]
+            self.assertEqual(resolved["kept"], [0])
+            self.assertLess(item["src_out"], 4.5)
+            self.assertGreater(item["src_out"], 2.0)
+            self.assertEqual(resolved["lint"], [])
+            self.assertEqual(resolved["adjustments"][0]["offsets"], {"outOffset": -1.16})
+            self.assertAlmostEqual(item["src_dur"], item["dur"])
+            self.assertAlmostEqual(item["tl_out"] - item["tl_in"], item["dur"])
+            command = run.call_args.args[0]
+            self.assertEqual(command[:4], ["capcutctl", "apply", "--project", "existing project"])
+
+    def test_source_overlap_is_a_hard_refusal_even_with_force(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            media = root / "face.mp4"
+            media.write_bytes(b"fixture media")
+            token = source_token(media)
+            index = root / "face.aroll.json"
+            plan = root / "face.plan.json"
+            index.write_text(json.dumps({
+                "version": 3, "media": str(media), "source_token": token, "fps": 30.0,
+                "source_duration": 4.0,
+                "beats": [beat(0, "first", 0, 0.0, 2.0), beat(1, "overlap", 0, 1.5, 3.0)],
+                "default_keep": [0, 1],
+            }))
+            args = Namespace(
+                index=str(index), keep="0,1", drop=None, order="0,1", trim_beat=None,
+                review=None, no_repair=True, force=True, project="A-roll Review", into=None,
+                dry_run=False, plan=str(plan), fps=None,
+            )
+            idx = AudioIndex([-20.0] * 400, 0.01)
+            with patch.object(__import__("aroll").AudioIndex, "build_or_load", return_value=idx), \
+                    patch("aroll.subprocess.run") as run:
+                self.assertEqual(cmd_cut(args), 1)
+            run.assert_not_called()
 
 
 if __name__ == "__main__":

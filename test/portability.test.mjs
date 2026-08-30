@@ -98,6 +98,62 @@ test('preflight names every environment problem and the command that fixes it', 
   if (!sfx.ok) assert.equal(report.ok, hasBinary('ffmpeg') && hasBinary('ffprobe') && report.ok);
 });
 
+test('preflight exercises the toolchain and reports writable disk capacity', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-preflight-'));
+  const calls = [];
+  const binaries = new Set(['ffmpeg', 'ffprobe', 'mlx_whisper', 'python3', 'swiftc']);
+  const report = preflight({
+    root,
+    binaryCheck: name => binaries.has(name),
+    commandRunner: (command, args) => {
+      calls.push({ command, args });
+      return command === 'ffprobe' ? { ok: true, stdout: '2,2\n' } : { ok: true, stdout: '' };
+    },
+    statfs: directory => {
+      assert.equal(directory, root);
+      return { bsize: 4096, bavail: 1024 * 1024 };
+    },
+  });
+  const byName = new Map(report.checks.map(c => [c.name, c]));
+
+  assert.equal(byName.get('ffmpeg probe')?.ok, true);
+  assert.equal(byName.get('ffprobe probe')?.ok, true);
+  assert.equal(byName.get('Whisper/MLX transcription')?.ok, true);
+  assert.equal(byName.get('CapCut drafts folder write permission')?.ok, true);
+  assert.equal(byName.get('free disk space')?.ok, true);
+  assert.ok(calls.some(c => c.command === 'ffmpeg' && c.args.includes('lavfi')),
+    'ffmpeg preflight must execute a synthetic frame probe');
+  assert.ok(calls.some(c => c.command === 'ffprobe' && c.args.includes('-show_entries')),
+    'ffprobe preflight must inspect a real input');
+  assert.ok(calls.some(c => c.command === 'mlx_whisper' && c.args.includes('--help')),
+    'MLX preflight must start the executable');
+  assert.ok(calls.some(c => c.command === 'python3' && c.args.includes('import whisper')),
+    'fallback Whisper preflight must import the module');
+});
+
+test('preflight fails closed when a probe hangs or the drafts volume is full', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-preflight-fail-'));
+  const report = preflight({
+    root,
+    binaryCheck: () => true,
+    commandRunner: command => command === 'ffmpeg'
+      ? { ok: false, detail: 'timed out after 5000ms (SIGKILL)' }
+      : command === 'ffprobe' ? { ok: true, stdout: '2,2\n' } : { ok: true, stdout: '' },
+    statfs: () => ({ bsize: 4096, bavail: 1 }),
+    writeProbe: () => ({ ok: false, detail: 'write probe failed: EACCES' }),
+  });
+  const byName = new Map(report.checks.map(c => [c.name, c]));
+
+  assert.equal(report.ok, false);
+  assert.equal(byName.get('ffmpeg probe')?.ok, false);
+  assert.match(byName.get('ffmpeg probe')?.detail || '', /timed out/);
+  assert.equal(byName.get('free disk space')?.ok, false);
+  assert.equal(byName.get('CapCut drafts folder write permission')?.ok, false);
+  for (const name of ['ffmpeg probe', 'free disk space', 'CapCut drafts folder write permission']) {
+    assert.ok(byName.get(name)?.fix, `${name} must include a repair instruction`);
+  }
+});
+
 test('polish skips sounds this machine does not have instead of writing broken references', async () => {
   // The failure this replaces: on any machine but the one the palette was harvested from,
   // `polish` wrote every reference anyway and the transaction died with
