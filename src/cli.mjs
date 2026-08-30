@@ -13,26 +13,33 @@ import {
   inspectProject,
   listSnapshots,
   listProjects,
+  capcutStatus,
+  closeCapcut,
   readJson,
   resolveProject,
   restoreProjectSnapshot,
   syncMirrors
 } from './core.mjs';
 
-const HELP = `capcutctl — transactional CapCut timeline control
+export const HELP = `capcutctl — transactional CapCut timeline control
 
 Usage:
-  capcutctl cut VIDEO [--keep 0,2-9] [--project NAME] [--lang ar]
+  capcutctl cut VIDEO [--keep 0,2-9] [--project NAME] [--into PROJECT] [--lang ar]
                       — talking-head cleanup: transcribe, energy-sync, strip dead
-                        air, review table. Re-run with --keep to build.
-  capcutctl qa --project NAME --times 3,9,15 [--guide 960] [--sheet] [--label L]
-                      — composite real frames (+ a labelled contact sheet).
+                        air, review table. Re-run with --keep to build; --into recuts
+                        an existing project through the anchored cut.recut contract.
+  capcutctl qa --project NAME [--times 3,9,15|--at-cuts|--at-scenes|--at-broll]
+               [--guide 960] [--sheet] [--label L]
+                      — composite real frames (+ a labelled contact sheet); automatic
+                        sampling can target visual cuts, principal scenes, or B-roll.
   capcutctl find "agent running" --media FILE [--shows|--says] [--context]
                       — when is it on screen / when was it said.
 
   capcutctl projects [--root PATH] [--json]
   capcutctl rm --project NAME [--dry-run]      — to .recycle_bin, registry entry dropped
   capcutctl close                              — quit CapCut and wait for it to exit
+  capcutctl status [--json] [--wait-for-close] — report CapCut state; optionally request quit and return a branchable close result
+  capcutctl review --project NAME              — write outputs/<id>/proxy.mp4, edl.json, and contact-sheet.png (never CapCut export)
   capcutctl new --project NAME [--media FILE] [--scenes 0:6,6:12,12:18]
                 [--from TEMPLATE] [--blank] [--canvas 1080x1920] [--fps 30] [--dry-run]
   capcutctl inspect --project NAME_OR_PATH [--root PATH] [--json]
@@ -52,7 +59,7 @@ Usage:
   capcutctl volume --project NAME --at S --track NAME|N --level 0
   capcutctl fade --project NAME --at S --track NAME|N [--in 0.08] [--out 0.12]
   capcutctl keyframe --project NAME --at S --track NAME|N [--to 2.4] [--hold 1.6] [--plan]
-  capcutctl preview --project NAME --out preview.mp4 [--fps 6]
+  capcutctl preview --project NAME --out preview.mp4 [--fps 6] [--from S] [--to S]
   capcutctl diff --project NAME --against NAME|--snapshot NAME
   capcutctl harvest [--root PATH] [--projects A,B] [--out FILE]
   capcutctl init-spec [--output FILE]
@@ -62,6 +69,9 @@ Usage:
   capcutctl layout circle       --project NAME_OR_PATH --segments IDS|--at SECONDS [--track N] [--dry-run]
   capcutctl layout background   --project NAME_OR_PATH [--at SECONDS] [--include-template] [--dry-run]
   capcutctl layout broll        --project NAME_OR_PATH --at SECONDS --track N --row ROW [--scale S]
+  capcutctl layout screen       --project NAME_OR_PATH --at SECONDS --media FILE
+                                [--dur S] [--src S] [--src-dur S] [--track NAME] [--no-localize] [--dry-run]
+                                — add a centred rl2 screen recording through the layout.screen contract
   capcutctl brands              list known brands, their spoken aliases, and which have a logo
   capcutctl logo                --project NAME_OR_PATH --at S --brand NAME [--scale] [--hold] [--pos x,y]
   capcutctl endcard             --project NAME_OR_PATH [--text Follow] [--at S]
@@ -76,6 +86,8 @@ Usage:
                       — his transitions + matching SFX. --motivated: only on picture
                         changes (B-roll shot or layout class), not every A-roll splice.
                         Also clicks every rectangle/arrow/circle callout (Enter / click / select).
+                        rl2 click/typing events on the chopped B-roll (Mouse click / Typing).
+                        --no-interactions skips that pass.
   capcutctl timeline            --project NAME [--width 64]   — ASCII dump of the stacked timeline
   capcutctl finish              --project NAME [--plan] [--music] [--polish] [--regen]
                                 scorecard + ASCII. --plan is read-only. --music generates
@@ -114,7 +126,8 @@ export function parseArgs(argv) {
     const key = token.slice(2).replace(/-([a-z])/g, (_, char) => char.toUpperCase());
     if (['json', 'dryRun', 'forceRunning', 'noBackup', 'help', 'noOverlay', 'blank', 'includeTemplate', 'newTimelineId',
          'transcript', 'noTransitions', 'noSeam', 'auto', 'plan', 'noSfx', 'noZoom', 'retime', 'localize',
-         'noLocalize', 'motivated', 'regen', 'music', 'noMusic', 'polish'].includes(key)) result[key] = true;
+         'noLocalize', 'motivated', 'regen', 'music', 'noMusic', 'polish', 'noInteractions',
+         'waitForClose', 'force', 'reindex', 'noRepair', 'inPlace'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
       result[key] = argv[++i];
@@ -199,9 +212,220 @@ async function trackIndex(projectDir, spec) {
   return index;
 }
 
-export async function main(argv) {
+export const FIELD_REPORT_OPERATIONS = Object.freeze({
+  screenLayout: 'layout.screen',
+  cutRecut: 'cut.recut',
+});
+
+/**
+ * Builder B contract for `layout screen`. Core owns the native segment/material/frame
+ * construction; the CLI owns validation, media probing, and the transactional spec.
+ */
+export function buildScreenLayoutSpec({
+  media,
+  at,
+  duration,
+  sourceStart = 0,
+  sourceDuration = duration,
+  width,
+  height,
+  mediaDuration,
+  track = 'screen',
+  localize = true,
+} = {}) {
+  if (!media) throw new CapcutError('layout screen requires --media FILE.', { exitCode: 2 });
+  const target = Number(at);
+  const dur = Number(duration);
+  const src = Number(sourceStart);
+  const srcDur = Number(sourceDuration);
+  if (!Number.isFinite(target) || target < 0) throw new CapcutError('layout screen requires --at SECONDS >= 0.', { code: 'BAD_TIME', exitCode: 2 });
+  if (!Number.isFinite(dur) || dur <= 0) throw new CapcutError('layout screen requires media with a positive duration.', { code: 'BAD_TIME', exitCode: 2 });
+  if (!Number.isFinite(src) || src < 0 || !Number.isFinite(srcDur) || srcDur <= 0) {
+    throw new CapcutError('layout screen has an invalid source window.', { code: 'BAD_SOURCE_WINDOW', exitCode: 2 });
+  }
+  for (const [name, value] of [['width', width], ['height', height]]) {
+    if (value != null && (!Number.isFinite(Number(value)) || Number(value) <= 0)) {
+      throw new CapcutError(`layout screen has an invalid ${name}.`, { code: 'BAD_DIMENSIONS', exitCode: 2 });
+    }
+  }
+  if (mediaDuration != null && (!Number.isFinite(Number(mediaDuration)) || Number(mediaDuration) <= 0)) {
+    throw new CapcutError('layout screen has an invalid media duration.', { code: 'BAD_MEDIA_DURATION', exitCode: 2 });
+  }
+  if (mediaDuration != null && src + srcDur > Number(mediaDuration) / 1e6 + 1e-6) {
+    throw new CapcutError('layout screen source window exceeds the probed media duration.', {
+      code: 'BAD_SOURCE_WINDOW', exitCode: 2,
+      details: { sourceStart: src, sourceDuration: srcDur, mediaDuration: Number(mediaDuration) / 1e6 }
+    });
+  }
+  if (track == null || String(track).trim() === '') {
+    throw new CapcutError('layout screen requires a destination track name.', { code: 'TRACK_REQUIRED', exitCode: 2 });
+  }
+  const operation = {
+    op: FIELD_REPORT_OPERATIONS.screenLayout,
+    contract: 'layout.screen.v1',
+    media: path.resolve(media),
+    at: target,
+    duration: dur,
+    src,
+    srcDur,
+    track,
+    preset: 'screenRecording',
+    frame: 'screen-frame',
+    localize: Boolean(localize),
+    ...(width != null ? { width: Number(width) } : {}),
+    ...(height != null ? { height: Number(height) } : {}),
+    ...(mediaDuration != null ? { mediaDuration: Number(mediaDuration) } : {}),
+  };
+  return { version: 1, name: 'layout-screen', operations: [operation] };
+}
+
+/**
+ * Builder A/core contract for in-place A-roll recutting. `plan` is the normal arroll.py
+ * plan, while `preserve` tells core to source-map anchored B-roll, layout, SFX, and music.
+ */
+export function buildCutRecutSpec({ projectDir, plan, planFile = null, media = null, force = false } = {}) {
+  if (!projectDir) throw new CapcutError('cut --into requires a target project.', { exitCode: 2 });
+  if (!plan || !Array.isArray(plan.timeline) || !plan.timeline.length) {
+    throw new CapcutError('cut --into requires a non-empty arroll plan.', { code: 'CUT_PLAN_EMPTY', exitCode: 2 });
+  }
+  if (!media && !plan.media) {
+    throw new CapcutError('cut --into requires the source media in the arroll plan.', { code: 'CUT_MEDIA_MISSING', exitCode: 2 });
+  }
+  const sourceMedia = path.resolve(media || plan.media);
+  const operation = {
+    op: FIELD_REPORT_OPERATIONS.cutRecut,
+    contract: 'cut.recut.v1',
+    into: path.resolve(projectDir),
+    media: sourceMedia,
+    plan: {
+      media: sourceMedia,
+      kept: plan.kept || [],
+      timeline: plan.timeline,
+      duration: plan.duration,
+      lint: plan.lint || [],
+      ...(plan.fps != null ? { fps: plan.fps } : {}),
+      ...(plan.blocking_lint ? { blocking_lint: plan.blocking_lint } : {}),
+    },
+    audioRamps: (plan.handoff?.operations || []).filter(item => item?.op === 'clip.fade'),
+    preserve: ['broll', 'layout', 'sfx', 'music'],
+    retimeAnchored: true,
+    force: Boolean(force),
+    ...(planFile ? { planFile: path.resolve(planFile) } : {}),
+  };
+  return { version: 1, name: 'cut-recut', operations: [operation] };
+}
+
+export function statusPayload(capcut = capcutStatus(), { project = null, waitForClose = false, close = null } = {}) {
+  const running = Boolean(capcut?.running);
+  const pids = Array.isArray(capcut?.pids) ? capcut.pids.map(String) : [];
+  return {
+    version: 1,
+    state: running ? 'running' : 'closed',
+    running,
+    closed: !running,
+    pids,
+    processes: Array.isArray(capcut?.processes) ? capcut.processes : [],
+    openDraft: capcut?.openDraft || null,
+    openDraftInfo: capcut?.openDraftInfo || null,
+    capcut: { running, pids },
+    waitForClose: Boolean(waitForClose),
+    ...(project ? { project } : {}),
+    ...(close ? { close } : {}),
+  };
+}
+
+export function serializeCloseFailure(error) {
+  const reason = error?.reason || error?.details?.reason;
+  return {
+    code: error?.code || 'CAPCUT_CLOSE_FAILED',
+    exitCode: error?.exitCode ?? 2,
+    message: error?.message || String(error),
+    ...(reason ? { reason } : {}),
+    ...(error?.details != null ? { details: error.details } : {}),
+  };
+}
+
+function statusText(payload) {
+  const pids = payload.pids.length ? ` (PID ${payload.pids.join(', ')})` : '';
+  const line = `CapCut: ${payload.state}${pids}`;
+  if (payload.closeFailure) return `${line}\nclose failed [${payload.closeFailure.code}]: ${payload.closeFailure.message}`;
+  if (payload.waitForClose) return `${line}\nwait-for-close: ${payload.closed ? 'closed' : 'still running'}`;
+  return line;
+}
+
+// Keep the Python handoff deliberately explicit. These are the only arroll.py options that
+// belong to the analysis/plan step; --into/--in-place/--root and transaction-only flags stay
+// in this Node process and must never leak into argparse.
+const ARROLL_VALUE_OPTIONS = Object.freeze([
+  ['keep', '--keep'],
+  ['drop', '--drop'],
+  ['lang', '--lang'],
+  ['model', '--model'],
+]);
+const ARROLL_BOOLEAN_OPTIONS = Object.freeze([
+  ['reindex', '--reindex'],
+  ['noRepair', '--no-repair'],
+  ['force', '--force'],
+  ['dryRun', '--dry-run'],
+]);
+
+export function buildArrollArgs(args, media) {
+  const forwarded = [String(media)];
+  for (const [key, flag] of ARROLL_VALUE_OPTIONS) {
+    if (args?.[key] != null) forwarded.push(flag, String(args[key]));
+  }
+  for (const [key, flag] of ARROLL_BOOLEAN_OPTIONS) {
+    if (args?.[key]) forwarded.push(flag);
+  }
+  return forwarded;
+}
+
+async function runInPlaceCut(args, root, apply = applySpec) {
+  if (args.inPlace) {
+    if (args.into) throw new CapcutError('cut accepts either --into PROJECT or --in-place, not both.', { code: 'CUT_TARGET_CONFLICT', exitCode: 2 });
+    args.into = '.';
+  }
+  if (!args.into) throw new CapcutError('cut --into requires PROJECT.', { code: 'MISSING_PROJECT', exitCode: 2 });
+  if (args.project) throw new CapcutError('cut accepts either --project (new build) or --into (in-place recut), not both.', { code: 'CUT_TARGET_CONFLICT', exitCode: 2 });
+  const media = args._[1];
+  if (!media) throw new CapcutError('cut requires VIDEO.', { exitCode: 2 });
+  const projectDir = resolveProject(args.into, root);
+  const script = path.join(HERE, '..', 'tools', 'aroll.py');
+  const forwarded = buildArrollArgs(args, media);
+  const run = spawnSync('python3', [script, ...forwarded], { stdio: 'inherit' });
+  if (run.error) throw new CapcutError(`could not run ${script}: ${run.error.message}`, { exitCode: 2 });
+  if ((run.status ?? 1) !== 0) { process.exitCode = run.status ?? 1; return null; }
+
+  // The first invocation without --keep/--drop is intentionally still the review handout.
+  // This preserves the two-stage talking-head decision before any in-place mutation.
+  if (!args.keep && !args.drop) return null;
+  const mediaPath = path.resolve(media);
+  const planPath = path.join(path.dirname(mediaPath), `${path.basename(mediaPath).replace(/\.[^.]+$/, '')}.plan.json`);
+  if (!fs.existsSync(planPath)) {
+    throw new CapcutError(`aroll.py did not write its plan: ${planPath}`, { code: 'CUT_PLAN_MISSING', exitCode: 2 });
+  }
+  const plan = readJson(planPath);
+  const spec = buildCutRecutSpec({
+    projectDir,
+    plan,
+    planFile: planPath,
+    media: mediaPath,
+    force: Boolean(args.force),
+  });
+  return print({ plan: planPath, result: apply(projectDir, spec, {
+    dryRun: Boolean(args.dryRun), forceRunning: Boolean(args.forceRunning),
+    backup: !args.noBackup, label: 'cut-recut'
+  }) }, true);
+}
+
+export async function main(argv, dependencies = {}) {
   loadEnv();
   const command = argv[0];
+  if (command === 'cut' && (argv.includes('--into') || argv.includes('--in-place'))) {
+    const cutArgs = parseArgs(argv);
+    const cutRoot = cutArgs.root ? path.resolve(cutArgs.root) : DEFAULT_ROOT;
+    return runInPlaceCut(cutArgs, cutRoot, dependencies.applySpec || applySpec);
+  }
   if (command === 'cut' || command === 'qa' || command === 'find') {
     const tool = { cut: 'aroll.py', qa: 'frame_qa.py', find: 'find.py' }[command];
     const script = path.join(HERE, '..', 'tools', tool);
@@ -216,8 +440,10 @@ export async function main(argv) {
   if (command === 'layout' && args._[1] === 'list') {
     const { presets } = await import('./layouts.mjs');
     const p = presets();
-    return print(Object.entries(p.layouts).map(([name, l]) => ({ name, description: l.description }))
-      .concat([{ name: 'background', description: p.background.description }]), true);
+    const rows = Object.entries(p.layouts).map(([name, l]) => ({ name, description: l.description }))
+      .concat([{ name: 'background', description: p.background.description }]);
+    if (p.screenRecording) rows.push({ name: 'screenRecording', description: p.screenRecording.description });
+    return print(rows, true);
   }
   if (command === 'harvest') {
     const { harvestDrafts, writeHarvest, DEFAULT_HARVEST } = await import('./harvest.mjs');
@@ -238,8 +464,49 @@ export async function main(argv) {
                    brands: rows }, true);
   }
   if (command === 'close') {
-    const { closeCapcut } = await import('./create.mjs');
-    return print(closeCapcut(), true);
+    try {
+      return print(closeCapcut({ timeoutMs: args.timeout ? Number(args.timeout) : 25000 }), true);
+    } catch (error) {
+      if (!args.json) throw error;
+      const payload = statusPayload(capcutStatus({ root }), { waitForClose: true });
+      payload.closeFailure = serializeCloseFailure(error);
+      payload.ok = false;
+      process.exitCode = payload.closeFailure.exitCode;
+      return print(payload, true);
+    }
+  }
+  if (command === 'status') {
+    let project = null;
+    if (args.project) project = resolveProject(args.project, root);
+    let close = null;
+    let failure = null;
+    if (args.waitForClose) {
+      try {
+        close = closeCapcut({ timeoutMs: args.timeout ? Number(args.timeout) : 25000 });
+      } catch (error) {
+        failure = serializeCloseFailure(error);
+      }
+    }
+    const payload = statusPayload(capcutStatus({ root }), { project, waitForClose: Boolean(args.waitForClose), close });
+    if (failure) {
+      payload.ok = false;
+      payload.closeFailure = failure;
+      process.exitCode = failure.exitCode;
+    } else {
+      payload.ok = true;
+    }
+    return args.json || args.waitForClose ? print(payload, true) : print(statusText(payload));
+  }
+  if (command === 'review') {
+    if (!args.project) throw new CapcutError('review requires --project NAME.', { exitCode: 2 });
+    const projectDir = resolveProject(args.project, root);
+    const { reviewProject } = await import('./review.mjs');
+    return print(reviewProject(projectDir, {
+      outputRoot: path.resolve(args.outputRoot || args.out || 'outputs'),
+      id: args.id,
+      fps: args.fps != null ? Number(args.fps) : 6,
+      width: args.width != null ? Number(args.width) : 240,
+    }), true);
   }
   if (command === 'rm') {
     if (!args.project) throw new CapcutError('rm requires --project NAME.', { exitCode: 2 });
@@ -398,12 +665,15 @@ export async function main(argv) {
     return print(applySpec(projectDir, { version: 1, name: command, operations: [op] }, options), true);
   }
   if (command === 'polish') {
+    const { assertFirstPictureProof } = await import('./finish.mjs');
+    assertFirstPictureProof(await loadWorking(projectDir));
     const polishTrack = await trackIndex(projectDir, args.track);
     const spec = { version: 1, name: 'polish',
                    operations: [{ op: 'polish', ...(args.lead ? { lead: Number(args.lead) } : {}),
                                   ...(polishTrack != null ? { track: polishTrack } : {}),
                                   ...(args.noTransitions ? { noTransitions: true } : {}),
-                                  ...(args.motivated ? { motivated: true } : {}) }] };
+                                  ...(args.motivated ? { motivated: true } : {}),
+                                  ...(args.noInteractions ? { noInteractions: true } : {}) }] };
     return print(applySpec(projectDir, spec, options), true);
   }
   if (command === 'timeline') {
@@ -414,11 +684,12 @@ export async function main(argv) {
     return print(view.text);
   }
   if (command === 'finish' || command === 'music') {
-    const { finishScorecard, finishText } = await import('./finish.mjs');
+    const { assertFirstPictureProof, finishScorecard, finishText } = await import('./finish.mjs');
     const doc = await loadWorking(projectDir);
     const score = finishScorecard(doc, { projectDir, width: args.width ? Number(args.width) : 64 });
     const wantMusic = command === 'music' || (command === 'finish' && args.music && !args.noMusic);
     const wantPolish = command === 'finish' && args.polish;
+    if ((wantMusic || wantPolish) && !args.plan) assertFirstPictureProof(doc);
     if (args.plan || (!wantMusic && !wantPolish && command === 'finish')) {
       if (args.json) return print(score, true);
       return print(finishText(score));
@@ -430,25 +701,36 @@ export async function main(argv) {
         regen: Boolean(args.regen),
         volume: args.volume != null ? Number(args.volume) : DEFAULT_MUSIC_VOLUME,
         prompt: args.prompt || undefined,
+        dryRun: Boolean(args.dryRun),
       });
       const off = prepared.align?.offset || 0;
-      ops.push({
-        op: 'music',
+      score.musicPrepared = {
+        generated: prepared.generated,
+        wouldGenerate: prepared.wouldGenerate,
+        dryRun: Boolean(args.dryRun),
         file: prepared.file,
-        duration: prepared.duration,
-        volume: prepared.volume,
-        srcOffset: off < 0 ? -off : 0,
-        at: off > 0 ? off : 0,
-        fadeIn: 0.4,
-        fadeOut: 1.2,
-      });
-      score.musicPrepared = { generated: prepared.generated, beats: prepared.beats.length, align: prepared.align };
+        beats: prepared.beats.length,
+        align: prepared.align,
+      };
+      if (!args.dryRun) {
+        ops.push({
+          op: 'music',
+          file: prepared.file,
+          duration: prepared.duration,
+          volume: prepared.volume,
+          srcOffset: off < 0 ? -off : 0,
+          at: off > 0 ? off : 0,
+          fadeIn: 0.4,
+          fadeOut: 1.2,
+        });
+      }
     }
     if (wantPolish) {
       const polishTrack = await trackIndex(projectDir, args.track);
       ops.push({ op: 'polish', motivated: true, ...(polishTrack != null ? { track: polishTrack } : {}) });
     }
     if (!ops.length) {
+      if (args.dryRun && wantMusic) return print({ dryRun: true, score, result: null }, true);
       if (args.json) return print(score, true);
       return print(finishText(score));
     }
@@ -458,13 +740,43 @@ export async function main(argv) {
   }
   if (command === 'layout') {
     const name = args._[1];
-    if (!name) throw new CapcutError('layout requires a name: split-screen | circle | background | broll | auto | audit | list', { exitCode: 2 });
+    if (!name) throw new CapcutError('layout requires a name: split-screen | circle | background | broll | screen | auto | audit | list', { exitCode: 2 });
     const layoutsMod = await import('./layouts.mjs');
     const { buildLayoutSpec } = layoutsMod;
     layoutsMod.setCoreLoader(await import('./core.mjs'));
     if (name === 'audit' || (name === 'auto' && args.plan)) {
       const doc = await loadWorking(projectDir);
       return print(layoutsMod.layoutAudit(doc, await trackIndex(projectDir, args.track)), true);
+    }
+    if (name === 'screen') {
+      if (args.at == null || !args.media) {
+        throw new CapcutError('layout screen requires --at SECONDS and --media FILE.', { exitCode: 2 });
+      }
+      const { probeMedia } = await import('./create.mjs');
+      const media = path.resolve(args.media);
+      let probe;
+      try {
+        probe = probeMedia(media);
+      } catch (error) {
+        if (args.width && args.height && args.mediaDuration != null) {
+          probe = { width: Number(args.width), height: Number(args.height), duration: Math.round(Number(args.mediaDuration) * 1e6) };
+        } else throw error;
+      }
+      const duration = args.dur != null ? Number(args.dur) : Number(probe.duration) / 1e6;
+      const spec = buildScreenLayoutSpec({
+        media,
+        at: Number(args.at),
+        duration,
+        sourceStart: args.src != null ? Number(args.src) : 0,
+        sourceDuration: args.srcDur != null ? Number(args.srcDur) : duration,
+        width: probe.width,
+        height: probe.height,
+        mediaDuration: probe.duration,
+        track: args.track ?? 'screen',
+        localize: !args.noLocalize,
+      });
+      if (args.plan) return print(spec, true);
+      return print(applySpec(projectDir, spec, options), true);
     }
     const spec = buildLayoutSpec(projectDir, name, {
       segments: args.segments ? String(args.segments).split(',').map(s => s.trim()).filter(Boolean) : null,
@@ -626,8 +938,15 @@ export async function main(argv) {
   if (command === 'preview') {
     const out = args.out || 'preview.mp4';
     const script = path.join(HERE, '..', 'tools', 'frame_qa.py');
-    const r = spawnSync('python3', [script, '--project', projectDir, '--preview', path.resolve(out),
-      '--fps', String(args.fps || 6)], { stdio: 'inherit' });
+    const fps = args.fps == null ? 6 : Number(args.fps);
+    if (!Number.isFinite(fps) || fps <= 0) {
+      throw new CapcutError('preview requires --fps greater than zero.', { code: 'BAD_FPS', exitCode: 2 });
+    }
+    const previewArgs = [script, '--project', projectDir, '--preview', path.resolve(out),
+      '--fps', String(fps)];
+    if (args.from != null) previewArgs.push('--from', String(args.from));
+    if (args.to != null) previewArgs.push('--to', String(args.to));
+    const r = spawnSync('python3', previewArgs, { stdio: 'inherit' });
     if (r.error) throw new CapcutError(`could not run ${script}: ${r.error.message}`, { exitCode: 2 });
     process.exit(r.status ?? 1);
   }

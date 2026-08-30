@@ -10,13 +10,15 @@ This exists because doing it by hand got a shot wrong. A coarse OCR search repor
 "reading files 168-318"; source 168 is actually the sidebar drawer, and the file list
 does not start until 176. The B-roll sat on the wrong content until frames were checked.
 Runs are collapsed and reported with their FIRST STABLE second, not the first flicker.
+When --strip is used, frames carry requested/delivered PTS evidence from frame_qa's
+accuracy-checked extractor before they are put in the contact sheet.
 """
 import argparse
 import json
 import os
 import re
-import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -112,17 +114,25 @@ def main():
         picks.append((stable, f"{stable}s ({held}s)"))
 
     if a.strip and picks:
-        from frame_qa import contact_sheet
+        from frame_qa import contact_sheet, extract_frame
         out = os.path.abspath(a.strip)
-        tmp = os.path.join(os.environ.get("TMPDIR", "/tmp"), "capcutctl-find")
-        os.makedirs(tmp, exist_ok=True)
-        tiles = []
-        for t, label in picks[:12]:
-            f = os.path.join(tmp, f"f{t}.png")
-            subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", str(t), "-i", a.media,
-                            "-frames:v", "1", f], check=True)
-            tiles.append((f, label))
-        print(f"\n  -> {contact_sheet(tiles, out)}")
+        # Keep every extraction's intermediate images in a private per-invocation directory.
+        # The old shared /tmp/capcutctl-find/f{second}.png let concurrent searches overwrite
+        # one another and gave a local symlink a predictable write target.
+        with tempfile.TemporaryDirectory(prefix="capcutctl-find-") as tmp:
+            tiles = []
+            for i, (t, label) in enumerate(picks[:12]):
+                f = os.path.join(tmp, f"f{i:03d}.png")
+                sample = extract_frame(a.media, t)
+                sample.image.convert("RGB").save(f)
+                retry = "  re-extracted accurately" if sample.reextracted else ""
+                print(
+                    f"  frame {t:g}s requested PTS {sample.requested_pts:.6f}s "
+                    f"delivered PTS {sample.delivered_pts:.6f}s "
+                    f"drift {sample.drift:.6f}s ({sample.method}){retry}"
+                )
+                tiles.append((f, label))
+            print(f"\n  -> {contact_sheet(tiles, out)}")
         print("     OCR sees text it cannot see is occluded. Check the frames before you cut.")
 
 

@@ -302,3 +302,36 @@ test('zoom does not delete the endcard it never wrote', () => {
   opSignature(d, { zooms: [{ at: 10.4 }] });                 // zoom writes no endcard
   assert.equal(endcards(), 1, 'endcard survives a zoom-only pass');
 });
+
+test('an endcard-only rerun clears the legacy untagged cue on the same beat', () => {
+  // Cues written before SFX carried an owner are tagged plain `sig:sfx`, which only a pass
+  // rewriting BOTH owners may clear wholesale. So `capcutctl endcard` on a project written
+  // by an older version wrote its fresh sig:sfx:endcard cue and left the legacy one right
+  // beside it — two Culins on one beat.
+  const d = doc();
+  opSignature(d, { endcard: { text: 'Follow' } });
+  const cues = () => d.tracks.flatMap(t => t.segments || [])
+    .filter(x => (x.desc || '').startsWith('sig:sfx'));
+  assert.equal(cues().length, 1, 'the endcard cue was written');
+
+  // age the project: strip the attribution the way an older capcutctl left it
+  for (const s of cues()) s.desc = 'sig:sfx';
+
+  opSignature(d, { endcard: { text: 'Follow' } });
+  const after = cues();
+  assert.equal(after.length, 1, 'the legacy cue on this beat was swept, not doubled');
+  assert.equal(after[0].desc, 'sig:sfx:endcard');
+});
+
+test('the sweep is keyed on the beat, so an unrelated legacy cue survives', () => {
+  const d = doc();
+  opSignature(d, { endcard: { text: 'Follow' } });
+  const lane = d.tracks.find(t => t.name === 'sig-sfx');
+  const elsewhere = { ...structuredClone(lane.segments[0]), id: 'LEGACY-ELSEWHERE', desc: 'sig:sfx',
+    target_timerange: { start: US(2), duration: US(0.5) } };
+  lane.segments.push(elsewhere);
+
+  opSignature(d, { endcard: { text: 'Follow' } });
+  const kept = d.tracks.flatMap(t => t.segments || []).filter(x => x.id === 'LEGACY-ELSEWHERE');
+  assert.equal(kept.length, 1, 'a cue on a beat this pass does not touch is left alone');
+});

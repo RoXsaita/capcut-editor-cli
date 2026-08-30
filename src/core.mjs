@@ -2,15 +2,17 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { opLayoutApply, opLayoutBackground, opLayoutBroll } from './layouts.mjs';
-import { opPolish, opCalloutSfx, principalTrack } from './polish.mjs';
+import {
+  opLayoutApply, opLayoutBackground, opLayoutBroll, opLayoutScreen, SCREEN_LAYOUT_OPERATION, renumberTracks
+} from './layouts.mjs';
+import { opPolish, opCalloutSfx, opInteractions, principalTrack } from './polish.mjs';
 import { opPace } from './pace.mjs';
 import { opSignature } from './signature.mjs';
 import {
   opClipAdd, opReplaceMedia, opScaleKeyframe,
-  opClipShift, opClipTrim, opClipFade, opLocalizeAll, commitPreservedSlides
+  opClipShift, opClipTrim, opClipFade, opLocalizeAll
 } from './add.mjs';
 import { opMusic } from './music.mjs';
 
@@ -23,6 +25,44 @@ export const LIVE_FILE_NAMES = ['draft_info.json', 'draft_info.json.bak', 'templ
 
 /** Empty timeline between the real edit and the cloned Preset 3 leftover. The leftover is a parts bin, not the ending. */
 export const PRESET_PARK_GAP_US = 30_000_000;
+
+/** Microseconds are CapCut's native timeline unit. Keep all semantic duration APIs in it. */
+export const CAPCUT_TIME_UNIT = 'microseconds';
+const DURATION_TOLERANCE_US = 1;
+
+/**
+ * These are the two material identities known to be duplicated by the Preset 3 clone.
+ * `unique_id` survives CapCut's localized path/name changes; the id is retained as a
+ * compatibility fallback for older drafts that do not have a unique_id field.
+ *
+ * This is deliberately a small identity baseline, not a rule that all duplicate material
+ * ids are harmless. Any other identical duplicate remains a doctor warning and any
+ * conflicting duplicate remains an error.
+ */
+export const PRESET3_DUPLICATE_BASELINE = Object.freeze([
+  Object.freeze({
+    kind: 'videos',
+    id: '8CAD5C16-4D3A-4F36-9F3B-9C0597AC280C',
+    unique_id: '2e5dbc668950cfc24c11ce95f38fdefb',
+    type: 'photo',
+    width: 1080,
+    height: 1920,
+    duration: 10_800_000_000,
+  }),
+  Object.freeze({
+    kind: 'videos',
+    id: 'F42A3503-4585-4EDB-AFC6-EE1D7A8DBC71',
+    unique_id: '5a9f67ef216d717484d98e4fbf2574ed',
+    type: 'photo',
+    width: 1080,
+    height: 1920,
+    duration: 10_800_000_000,
+  }),
+]);
+
+// Names kept explicit for consumers that want to describe the baseline in their own output.
+export const KNOWN_PRESET3_DUPLICATES = PRESET3_DUPLICATE_BASELINE;
+export const PRESET3_DUPLICATE_MATERIALS = PRESET3_DUPLICATE_BASELINE;
 
 const PRESET_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'presets');
 
@@ -95,23 +135,497 @@ export function readJson(file) {
   }
 }
 
-export function capcutProcess() {
-  if (process.env.CAPCUTCTL_ASSUME_RUNNING === '1') return { running: true, pids: ['test'] };
-  const result = spawnSync('pgrep', ['-x', 'CapCut'], { encoding: 'utf8' });
-  const pids = result.status === 0 ? result.stdout.trim().split(/\s+/).filter(Boolean) : [];
-  return { running: pids.length > 0, pids };
+/** Read the capcutctl sidecar without making a missing or old sidecar fatal to a read. */
+export function createdMetadata(projectDir) {
+  if (!projectDir) return null;
+  try {
+    const value = readJson(path.join(projectDir, '.capcutctl', 'created.json'));
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+  } catch {
+    return null;
+  }
 }
 
-export function assertCapcutClosed({ forceRunning = false } = {}) {
-  const state = capcutProcess();
-  if (state.running && !forceRunning) {
+/**
+ * The parts-bin window recorded by `new`/the add operations. This is the one shared source
+ * of truth for all duration-aware readers; callers receive a fresh object they may mutate.
+ */
+export function preservedRange(projectDir) {
+  const value = createdMetadata(projectDir)?.preserved;
+  const start = Number(value?.start);
+  const end = Number(value?.end);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start) return null;
+  return { start, end };
+}
+
+export const getPreservedRange = preservedRange;
+export const parkedRange = preservedRange;
+
+function parseProcessLines(stdout) {
+  return String(stdout || '').split(/\r?\n/).flatMap(line => {
+    const match = line.match(/^\s*(\d+)\s+(.*)$/);
+    return match ? [{ pid: match[1], command: match[2].trim() }] : [];
+  });
+}
+
+function capcutProcessEntries(pids, spawn = spawnSync) {
+  const numeric = (pids || []).filter(pid => /^\d+$/.test(String(pid)));
+  if (!numeric.length) return [];
+  const result = spawn('ps', ['-p', numeric.join(','), '-o', 'pid=,command='], { encoding: 'utf8' });
+  if (result.error || result.status !== 0) return [];
+  return parseProcessLines(result.stdout);
+}
+
+function processRecord(entry) {
+  if (!entry) return null;
+  const pid = entry.pid ?? entry.id;
+  const command = entry.command ?? entry.cmd ?? entry.args;
+  if (pid == null && command == null) return null;
+  return { pid: pid == null ? null : String(pid), command: String(command || '') };
+}
+
+function processRecords(entries) {
+  return (Array.isArray(entries) ? entries : [entries]).map(processRecord).filter(Boolean);
+}
+
+function normalizeProcessPath(value) {
+  let candidate = String(value || '').trim();
+  if (!candidate) return null;
+  if ((candidate.startsWith('"') && candidate.endsWith('"'))
+      || (candidate.startsWith("'") && candidate.endsWith("'"))) {
+    candidate = candidate.slice(1, -1);
+  }
+  candidate = candidate
+    .replaceAll('\\ ', ' ')
+    .replaceAll('\\"', '"')
+    .replaceAll("\\'", "'")
+    .replaceAll('\\\\', '\\');
+  return expandHome(candidate);
+}
+
+function processPathCandidates(command) {
+  const candidates = [];
+  const add = value => {
+    const normalized = normalizeProcessPath(value);
+    if (normalized && !candidates.includes(normalized)) candidates.push(normalized);
+  };
+  const explicit = /(?:--(?:draft|project)(?:[-_]path)?|--path)\s*(?:=|\s)\s*("(?:\\.|[^"\\])*"|'[^']*'|[^\s]+)/gi;
+  for (const match of String(command || '').matchAll(explicit)) add(match[1]);
+  // Some CapCut versions put the draft path in a quoted launch argument without a flag.
+  const quoted = /(["'])(~?\/.*?)(?:\1)/g;
+  for (const match of String(command || '').matchAll(quoted)) add(match[2]);
+  return candidates;
+}
+
+function projectFromProcessPath(candidate, root) {
+  if (!candidate) return null;
+  let projectDir = candidate;
+  if (path.basename(projectDir) === 'draft_info.json') projectDir = path.dirname(projectDir);
+  if (path.basename(projectDir) === '.capcutctl') projectDir = path.dirname(projectDir);
+  if (!path.isAbsolute(projectDir) && root) projectDir = path.join(root, projectDir);
+  projectDir = path.resolve(projectDir);
+  return fs.existsSync(path.join(projectDir, 'draft_info.json')) ? projectDir : null;
+}
+
+/**
+ * Return process/path evidence for a draft CapCut appears to have open, or null when the
+ * platform does not expose a draft path. Discovery is intentionally best-effort: a running
+ * CapCut process is still a valid status result even when its command line is opaque.
+ */
+export function discoverOpenDraftInfo({ root = DEFAULT_ROOT, processes = undefined, processState = null } = {}) {
+  const suppliedState = processState != null;
+  const state = processState || capcutProcess();
+  if (!state.running && processes === undefined) return null;
+  const records = processes !== undefined
+    ? processRecords(processes)
+    : state.processes?.length
+      ? processRecords(state.processes)
+      : suppliedState
+        ? []
+        : processRecords(capcutProcessEntries(state.pids));
+  for (const record of records) {
+    for (const candidate of processPathCandidates(record.command)) {
+      const projectDir = projectFromProcessPath(candidate, root);
+      if (projectDir) return { path: projectDir, pid: record.pid, source: 'process-command' };
+    }
+    // A few launchers pass only the project name. Limit this fallback to actual projects in
+    // the requested root so a random command-line word cannot become an open draft.
+    if (root && fs.existsSync(root)) {
+      for (const project of listProjects(root)) {
+        if (record.command.includes(project.path) || record.command.includes(project.name)) {
+          return { path: project.path, pid: record.pid, source: 'project-name' };
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/** Return only the discovered draft path for callers that do not need process evidence. */
+export function discoverOpenDraft(options = {}) {
+  return discoverOpenDraftInfo(options)?.path || null;
+}
+
+/** Machine-readable CapCut/process state used by status and by other agents. */
+export function capcutStatus({ root = DEFAULT_ROOT, processState = null, processes = undefined } = {}) {
+  const state = processState || capcutProcess();
+  const openDraftInfo = discoverOpenDraftInfo({
+    root,
+    processState: state,
+    processes: processes !== undefined ? processes : state.processes,
+  });
+  const unknown = state.running == null || state.verified === false;
+  return {
+    state: unknown ? 'unknown' : state.running ? 'running' : 'closed',
+    running: state.running === true,
+    closed: !unknown && state.running === false,
+    unknown,
+    ...(state.probeError ? { probeError: state.probeError } : {}),
+    pids: Array.isArray(state.pids) ? state.pids : [],
+    processes: processRecords(state.processes),
+    openDraft: openDraftInfo?.path || null,
+    openDraftInfo,
+  };
+}
+
+export const getCapcutStatus = capcutStatus;
+
+export function capcutProcess({ spawn = spawnSync } = {}) {
+  if (process.env.CAPCUTCTL_ASSUME_RUNNING === '1') {
+    return { running: true, verified: true, pids: ['test'], processes: [{ pid: 'test', command: 'CapCut' }] };
+  }
+  let result;
+  try {
+    result = spawn('pgrep', ['-x', 'CapCut'], { encoding: 'utf8' });
+  } catch (error) {
+    return { running: null, verified: false, pids: [], processes: [], probeError: { message: error.message, code: error.code } };
+  }
+  // pgrep's status 1 is the only trustworthy "no process" result. An unavailable
+  // binary, permission error, signal, or any other status must not become "closed".
+  if (result?.error || ![0, 1].includes(result?.status)) {
+    return {
+      running: null,
+      verified: false,
+      pids: [],
+      processes: [],
+      probeError: {
+        message: result?.error?.message || `pgrep exited with status ${result?.status}`,
+        code: result?.error?.code,
+        status: result?.status,
+      },
+    };
+  }
+  const pids = result.status === 0 ? String(result.stdout || '').trim().split(/\s+/).filter(Boolean) : [];
+  return {
+    running: pids.length > 0,
+    verified: true,
+    pids,
+    processes: capcutProcessEntries(pids, spawn),
+  };
+}
+
+const defaultSleep = milliseconds => {
+  if (!(milliseconds > 0)) return;
+  spawnSync('sleep', [String(milliseconds / 1000)], { stdio: 'ignore' });
+};
+
+function normalizedProcessState(state) {
+  const unknown = state?.running == null || state?.unknown === true || state?.verified === false;
+  return {
+    running: unknown ? null : state.running === true,
+    unknown,
+    pids: Array.isArray(state?.pids) ? state.pids.map(String) : [],
+    ...(state?.probeError ? { probeError: state.probeError } : {}),
+  };
+}
+
+const closeReason = Object.freeze({
+  alreadyClosed: 'already_closed',
+  closed: 'closed',
+  timeout: 'timeout',
+  refused: 'quit_refused',
+  cancelled: 'quit_cancelled',
+  commandFailed: 'quit_command_failed',
+});
+
+/** Stable reason strings for callers that need to branch without parsing messages. */
+export const CAPCUT_CLOSE_FAILURE_REASONS = closeReason;
+
+/**
+ * Poll CapCut until it is gone. The probe and clock/sleep hooks make this deterministic in
+ * tests and let a host adapter use its own process backend without changing the contract.
+ */
+export function waitForCapcutClosed({
+  timeoutMs = 25_000,
+  intervalMs = 400,
+  probe = capcutProcess,
+  processProbe = null,
+  sleep = defaultSleep,
+  now = Date.now,
+  throwOnTimeout = false,
+} = {}) {
+  const check = processProbe || probe;
+  const startedAt = now();
+  const initial = normalizedProcessState(check());
+  if (initial.running === null) {
+    const result = {
+      wasRunning: null,
+      closed: false,
+      unknown: true,
+      reason: 'probe_unknown',
+      pids: initial.pids,
+      elapsedMs: 0,
+      probeError: initial.probeError,
+    };
+    if (!throwOnTimeout) return result;
+    throw new CapcutError('CapCut process state could not be verified.', {
+      code: 'CAPCUT_PROCESS_UNKNOWN',
+      exitCode: 3,
+      details: result,
+    });
+  }
+  if (!initial.running) {
+    return { wasRunning: false, closed: true, reason: closeReason.alreadyClosed, pids: [], elapsedMs: 0 };
+  }
+
+  const timeout = Math.max(0, Number(timeoutMs) || 0);
+  const interval = Math.max(0, Number(intervalMs) || 0);
+  const deadline = startedAt + timeout;
+  let latest = initial;
+  while (true) {
+    latest = normalizedProcessState(check());
+    if (latest.running === null) {
+      const result = {
+        wasRunning: true,
+        closed: false,
+        unknown: true,
+        reason: 'probe_unknown',
+        pids: latest.pids,
+        previousPids: initial.pids,
+        elapsedMs: Math.max(0, now() - startedAt),
+        probeError: latest.probeError,
+      };
+      if (!throwOnTimeout) return result;
+      throw new CapcutError('CapCut process state could not be verified while waiting for close.', {
+        code: 'CAPCUT_PROCESS_UNKNOWN',
+        exitCode: 3,
+        details: result,
+      });
+    }
+    if (!latest.running) {
+      return {
+        wasRunning: true,
+        closed: true,
+        reason: closeReason.closed,
+        pids: [],
+        previousPids: initial.pids,
+        elapsedMs: Math.max(0, now() - startedAt),
+      };
+    }
+    const current = now();
+    if (current >= deadline) break;
+    const waitMs = Math.min(interval, deadline - current);
+    if (!(waitMs > 0)) break;
+    sleep(waitMs);
+  }
+  const result = {
+    wasRunning: true,
+    closed: false,
+    timedOut: true,
+    reason: closeReason.timeout,
+    pids: latest.pids,
+    previousPids: initial.pids,
+    elapsedMs: Math.max(0, now() - startedAt),
+    errorCode: 'CLOSE_TIMEOUT',
+  };
+  if (!throwOnTimeout) return result;
+  const error = new CapcutError(
+    `CapCut did not close within ${timeout / 1000}s (pids ${latest.pids.join(', ')}).`,
+    {
+      code: 'CLOSE_TIMEOUT',
+      exitCode: 2,
+      details: result,
+    }
+  );
+  error.reason = closeReason.timeout;
+  throw error;
+}
+
+export const waitForClose = waitForCapcutClosed;
+
+function closeFailureCause(error) {
+  return {
+    name: error?.name,
+    message: error?.message || String(error),
+    ...(error?.code != null ? { code: error.code } : {}),
+    ...(error?.status != null ? { status: error.status } : {}),
+  };
+}
+
+/**
+ * Request a CapCut quit and wait for the process to disappear. A host may inject
+ * `requestQuit`/`processProbe`; the default uses macOS AppleScript and the shared poller.
+ */
+export function closeCapcut({
+  timeoutMs = 25_000,
+  intervalMs = 400,
+  probe = capcutProcess,
+  processProbe = null,
+  requestQuit = null,
+  quit = null,
+  executeQuit = null,
+  sleep = defaultSleep,
+  now = Date.now,
+} = {}) {
+  const check = processProbe || probe;
+  const before = normalizedProcessState(check());
+  if (before.running === null) {
+    throw new CapcutError('CapCut process state could not be verified; refusing to request quit.', {
+      code: 'CAPCUT_PROCESS_UNKNOWN',
+      exitCode: 3,
+      details: before,
+    });
+  }
+  if (!before.running) {
+    return { wasRunning: false, closed: true, reason: closeReason.alreadyClosed, pids: [], elapsedMs: 0 };
+  }
+
+  const quitFn = requestQuit || quit;
+  try {
+    if (quitFn) {
+      if (quitFn(before) === false) {
+        const refused = new Error('CapCut refused the quit request.');
+        refused.reason = closeReason.refused;
+        throw refused;
+      }
+    } else if (executeQuit) {
+      executeQuit(before);
+    } else {
+      execFileSync('osascript', ['-e', 'tell application "CapCut" to quit'], {
+        encoding: 'utf8',
+        timeout: timeoutMs,
+      });
+    }
+  } catch (error) {
+    const after = normalizedProcessState(check());
+    if (after.running === null) {
+      throw new CapcutError('CapCut process state could not be verified after the quit request.', {
+        code: 'CAPCUT_PROCESS_UNKNOWN',
+        exitCode: 3,
+        details: { before, after, cause: closeFailureCause(error) },
+      });
+    }
+    if (!after.running) {
+      return { wasRunning: true, closed: true, reason: closeReason.closed, pids: [], previousPids: before.pids };
+    }
+    const cancelled = error?.reason === closeReason.cancelled
+      || error?.code === 'CLOSE_CANCELLED'
+      || error?.status === -128
+      || /cancel/i.test(error?.message || '');
+    const commandFailed = error?.reason === closeReason.commandFailed
+      || error?.code === 'ENOENT'
+      || error?.code === 'EACCES';
+    const reason = cancelled ? closeReason.cancelled : commandFailed ? closeReason.commandFailed : closeReason.refused;
+    const code = cancelled ? 'CLOSE_CANCELLED' : commandFailed ? 'CLOSE_COMMAND_FAILED' : 'CLOSE_REFUSED';
+    const failure = new CapcutError(
+      `CapCut is still running (${after.pids.join(', ')}); quit failed (${reason}).`,
+      { code, exitCode: 2, details: { reason, pids: after.pids, previousPids: before.pids, cause: closeFailureCause(error) } }
+    );
+    failure.reason = reason;
+    throw failure;
+  }
+
+  const waited = waitForCapcutClosed({ timeoutMs, intervalMs, processProbe: check, sleep, now });
+  if (waited.closed) return waited;
+  const failure = new CapcutError(
+    `CapCut did not close within ${Number(timeoutMs) / 1000}s (pids ${waited.pids.join(', ')}).`,
+    { code: 'CLOSE_TIMEOUT', exitCode: 2, details: waited }
+  );
+  failure.reason = closeReason.timeout;
+  throw failure;
+}
+
+export function assertCapcutClosed({ forceRunning = false, probe = capcutProcess } = {}) {
+  const state = probe();
+  if ((state.running !== false || state.verified === false) && !forceRunning) {
+    const unknown = state.running == null || state.verified === false;
     throw new CapcutError(
-      `CapCut is running (PID ${state.pids.join(', ')}). Close it before writing, or pass --force-running if you accept auto-save races.`,
-      { code: 'CAPCUT_RUNNING', exitCode: 3, details: state }
+      unknown
+        ? 'CapCut process state could not be verified; refusing to write. Retry the probe or pass --force-running if you accept the risk.'
+        : `CapCut is running (PID ${state.pids.join(', ')}). Close it before writing, or pass --force-running if you accept auto-save races.`,
+      { code: unknown ? 'CAPCUT_PROCESS_UNKNOWN' : 'CAPCUT_RUNNING', exitCode: 3, details: state }
     );
   }
   return state;
 }
+
+/** End of the actual editable content (normally the gapless talking-head track). */
+export function contentEndUs(doc, projectDir = null) {
+  const parked = preservedRange(projectDir);
+  let end = 0;
+  try {
+    const { track } = principalTrack(doc);
+    for (const segment of track.segments || []) {
+      const target = segment.target_timerange;
+      if (!target || !Number.isFinite(target.start) || !Number.isFinite(target.duration)) continue;
+      if (parked && target.start >= parked.start - DURATION_TOLERANCE_US) continue;
+      end = Math.max(end, target.start + target.duration);
+    }
+  } catch {
+    // A malformed/partial draft may not have a principal track. Its declared duration is
+    // still a useful read result, and validation will report the structural problem.
+  }
+  if (end > 0) return parked ? Math.min(end, parked.start) : end;
+  if (parked) return parked.start;
+  return Number.isFinite(doc?.duration) ? doc.duration : 0;
+}
+
+/** Last target end on any track, excluding the top-level declared duration. */
+export function maxSegmentEndUs(doc) {
+  let end = 0;
+  for (const { segment } of allSegments(doc || {})) {
+    const target = segment.target_timerange;
+    if (!target || !Number.isFinite(target.start) || !Number.isFinite(target.duration)) continue;
+    end = Math.max(end, target.start + target.duration);
+  }
+  return end;
+}
+
+/**
+ * Full draft/parts-bin end. The declared duration is the floor; a parked range and actual
+ * segment ends are included because CapCut can retain/rearrange material beyond the edit end.
+ */
+export function draftEndUs(doc, projectDir = null, { includeSegments = true } = {}) {
+  const declared = Number.isFinite(doc?.duration) ? doc.duration : 0;
+  const parked = preservedRange(projectDir);
+  const segments = includeSegments ? maxSegmentEndUs(doc) : 0;
+  return Math.max(declared, parked?.end || 0, segments);
+}
+
+export const draftDurationUs = draftEndUs;
+
+/** Shared edit-vs-draft duration contract for readers, validators, and CLI adapters. */
+export function durationInfo(doc, projectDir = null) {
+  const editEnd = contentEndUs(doc, projectDir);
+  const draftEnd = draftEndUs(doc, projectDir);
+  const declared = Number.isFinite(doc?.duration) ? doc.duration : null;
+  return {
+    unit: CAPCUT_TIME_UNIT,
+    // `content` names the timeline concept; `edit` names the same value for callers that
+    // think in terms of an editing workflow. Keep both so adapters need no guesswork.
+    contentEndUs: editEnd,
+    contentDurationUs: editEnd,
+    editEndUs: editEnd,
+    editDurationUs: editEnd,
+    draftEndUs: draftEnd,
+    draftDurationUs: draftEnd,
+    declaredDraftDurationUs: declared,
+    parkedRange: preservedRange(projectDir),
+  };
+}
+
+export const projectDurations = durationInfo;
+export const durationSemantics = durationInfo;
 
 export function listProjects(root = DEFAULT_ROOT) {
   if (!fs.existsSync(root)) return [];
@@ -124,10 +638,15 @@ export function listProjects(root = DEFAULT_ROOT) {
     let info = null;
     let error = null;
     try { info = readJson(infoPath); } catch (caught) { error = caught.message; }
+    const durations = info ? durationInfo(info, projectDir) : null;
     entries.push({
       name: dirent.name,
       path: projectDir,
       duration: info?.duration ?? null,
+      contentDuration: durations?.contentDurationUs ?? null,
+      editDuration: durations?.editDurationUs ?? null,
+      draftDuration: durations?.draftDurationUs ?? null,
+      durations,
       fps: info?.fps ?? null,
       tracks: info?.tracks?.length ?? null,
       error
@@ -176,7 +695,10 @@ export function documentGroups(projectDir) {
 }
 
 export function loadProject(projectDir) {
-  const groups = documentGroups(projectDir).map(group => ({ ...group, doc: readJson(group.canonical) }));
+  const groups = documentGroups(projectDir).map(group => {
+    const doc = readJson(group.canonical);
+    return { ...group, doc, durations: durationInfo(doc, projectDir) };
+  });
   return { projectDir, groups, activeTimelineId: activeTimelineId(projectDir) };
 }
 
@@ -199,12 +721,82 @@ function issue(level, code, message, details = {}) {
   return { level, code, message, ...details };
 }
 
-export function validateDocument(doc, { file = '<memory>', checkFiles = true } = {}) {
+function normalizedAssetName(value) {
+  return path.basename(String(value?.path || ''))
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
+}
+
+function materialMatchesBaseline(kind, value, baseline) {
+  if (!baseline || (baseline.kind && baseline.kind !== kind)) return false;
+  const ids = [baseline.id, ...(Array.isArray(baseline.ids) ? baseline.ids : [])]
+    .filter(Boolean).map(String).map(id => id.toUpperCase());
+  const idMatches = ids.includes(String(value?.id || '').toUpperCase());
+  const uniqueIdMatches = baseline.unique_id != null
+    && String(value?.unique_id || '').toLowerCase() === String(baseline.unique_id).toLowerCase();
+  const assetMatches = baseline.assetName != null
+    && normalizedAssetName(value) === String(baseline.assetName).toLowerCase().replace(/[^a-z0-9]+/g, '');
+  if (!idMatches && !uniqueIdMatches && !assetMatches) return false;
+  for (const key of ['type', 'width', 'height', 'duration']) {
+    if (baseline[key] != null && value?.[key] !== baseline[key]) return false;
+  }
+  return true;
+}
+
+/** Whether this material is one of the explicitly known Preset 3 duplicate identities. */
+export function isKnownPreset3Duplicate(kind, value, baseline = PRESET3_DUPLICATE_BASELINE) {
+  return (Array.isArray(baseline) ? baseline : []).some(item => materialMatchesBaseline(kind, value, item));
+}
+
+export function knownPreset3DuplicateBaseline(projectDir) {
+  const name = path.basename(path.resolve(projectDir || ''));
+  const template = createdMetadata(projectDir)?.template;
+  const fromPreset3 = name.toLowerCase() === 'preset 3'
+    || String(template || '').trim().toLowerCase() === 'preset 3';
+  return fromPreset3 ? PRESET3_DUPLICATE_BASELINE : [];
+}
+
+function baselineDuplicateMatches(doc, baseline) {
+  const matches = [];
+  const seen = new Map();
+  for (const [kind, values] of Object.entries(doc?.materials || {})) {
+    if (!Array.isArray(values)) continue;
+    for (const value of values) {
+      if (!value?.id) continue;
+      const previous = seen.get(value.id);
+      if (previous && previous.kind === kind
+          && JSON.stringify(previous.value) === JSON.stringify(value)
+          && isKnownPreset3Duplicate(kind, value, baseline)) {
+        matches.push({ kind, id: value.id });
+      } else if (!previous) {
+        seen.set(value.id, { kind, value });
+      }
+    }
+  }
+  return matches;
+}
+
+export function validateDocument(doc, {
+  file = '<memory>',
+  checkFiles = true,
+  projectDir = null,
+  parked = null,
+  duplicateBaseline = [],
+} = {}) {
   const issues = [];
   if (!doc || typeof doc !== 'object') return [issue('error', 'DOC_TYPE', 'Draft must be an object.', { file })];
   if (!Array.isArray(doc.tracks)) issues.push(issue('error', 'TRACKS_TYPE', 'tracks must be an array.', { file }));
   if (!doc.materials || typeof doc.materials !== 'object') issues.push(issue('error', 'MATERIALS_TYPE', 'materials must be an object.', { file }));
   const materials = materialIndex(doc);
+  const parkedWindow = parked || preservedRange(projectDir);
+  const declaredDraftEndUs = Number.isFinite(doc.duration) ? doc.duration : null;
+  const durationGuard = {
+    declaredDraftEndUs,
+    effectiveDraftEndUs: declaredDraftEndUs == null
+      ? (parkedWindow?.end ?? null)
+      : Math.max(declaredDraftEndUs, parkedWindow?.end || 0),
+    parkedRange: parkedWindow,
+  };
   const seenSegmentIds = new Set();
   const seenMaterialIds = new Map();
   const seenTrackIds = new Set();
@@ -218,7 +810,9 @@ export function validateDocument(doc, { file = '<memory>', checkFiles = true } =
         if (JSON.stringify(previous.value) !== JSON.stringify(value)) {
           issues.push(issue('error', 'CONFLICTING_MATERIAL_ID', `Material id ${value.id} is reused with conflicting data.`, { file, id: value.id, kind, previousKind: previous.kind }));
         } else if (!previous.reported) {
-          issues.push(issue('warning', 'DUPLICATE_MATERIAL_ID', `CapCut repeats identical material id ${value.id}; it is treated as one logical material.`, { file, id: value.id, kind }));
+          if (!isKnownPreset3Duplicate(kind, value, duplicateBaseline)) {
+            issues.push(issue('warning', 'DUPLICATE_MATERIAL_ID', `CapCut repeats identical material id ${value.id}; it is treated as one logical material.`, { file, id: value.id, kind }));
+          }
           previous.reported = true;
         }
       } else seenMaterialIds.set(value.id, { kind, value, reported: false });
@@ -261,8 +855,20 @@ export function validateDocument(doc, { file = '<memory>', checkFiles = true } =
       }
     }
     const target = segment.target_timerange;
-    if (target && Number.isFinite(doc.duration) && target.start + target.duration > doc.duration + 1) {
-      issues.push(issue('error', 'SEGMENT_AFTER_END', `Segment ${segment.id} extends beyond draft duration.`, { file, id: segment.id }));
+    if (target && Number.isFinite(durationGuard.declaredDraftEndUs)
+        && target.start + target.duration > durationGuard.declaredDraftEndUs + DURATION_TOLERANCE_US) {
+      const targetEnd = target.start + target.duration;
+      const insidePark = Boolean(parkedWindow
+        && target.start >= parkedWindow.start - DURATION_TOLERANCE_US
+        && targetEnd <= parkedWindow.end + DURATION_TOLERANCE_US);
+      if (!insidePark) {
+        issues.push(issue('error', 'SEGMENT_AFTER_END', `Segment ${segment.id} extends beyond draft duration.`, {
+          file,
+          id: segment.id,
+          durationGuard,
+          targetEndUs: targetEnd,
+        }));
+      }
     }
     const source = segment.source_timerange;
     const material = materials.get(segment.material_id)?.value;
@@ -322,11 +928,24 @@ export function documentFingerprint(doc) {
   }));
 }
 
-export function doctor(projectDir, { checkFiles = true } = {}) {
+export function doctor(projectDir, { checkFiles = true, duplicateBaseline = null } = {}) {
   const state = loadProject(projectDir);
   const issues = [];
+  const requestedBaseline = duplicateBaseline === null
+    ? knownPreset3DuplicateBaseline(projectDir)
+    : duplicateBaseline === false ? [] : duplicateBaseline;
+  const baseline = Array.isArray(requestedBaseline) ? requestedBaseline : [];
+  const baselineDuplicates = [];
   for (const group of state.groups) {
-    issues.push(...validateDocument(group.doc, { file: group.canonical, checkFiles }));
+    issues.push(...validateDocument(group.doc, {
+      file: group.canonical,
+      checkFiles,
+      projectDir,
+      duplicateBaseline: baseline,
+    }));
+    for (const match of baselineDuplicateMatches(group.doc, baseline)) {
+      baselineDuplicates.push({ ...match, group: group.name, file: group.canonical });
+    }
     const canonicalHash = sha256(fs.readFileSync(group.canonical));
     for (const mirror of group.mirrors) {
       if (!fs.existsSync(mirror)) {
@@ -423,12 +1042,30 @@ export function doctor(projectDir, { checkFiles = true } = {}) {
     }
   }
 
-  const running = capcutProcess();
-  if (running.running) issues.push(issue('warning', 'CAPCUT_RUNNING', `CapCut is running (PID ${running.pids.join(', ')}). Writes are blocked by default.`, { pids: running.pids }));
+  const capcut = capcutStatus({ root: path.dirname(projectDir) });
+  if (capcut.running) issues.push(issue('warning', 'CAPCUT_RUNNING', `CapCut is running (PID ${capcut.pids.join(', ')}). Writes are blocked by default.`, { pids: capcut.pids }));
   return {
     project: projectDir,
     activeTimelineId: state.activeTimelineId,
-    documents: state.groups.map(group => ({ name: group.name, file: group.canonical })),
+    documents: state.groups.map(group => ({
+      name: group.name,
+      file: group.canonical,
+      duration: group.doc.duration ?? null,
+      contentDuration: group.durations.contentDurationUs,
+      editDuration: group.durations.editDurationUs,
+      draftDuration: group.durations.draftDurationUs,
+      durations: group.durations,
+    })),
+    durations: state.groups.map(group => ({ name: group.name, ...group.durations })),
+    capcut,
+    duplicateBaseline: {
+      enabled: baseline.length > 0,
+      source: baseline.length > 0 ? 'Preset 3' : null,
+      known: baseline.map(({ kind, id, unique_id, type, width, height, duration }) => ({
+        kind, id, unique_id, type, width, height, duration,
+      })),
+      matches: baselineDuplicates,
+    },
     errors: issues.filter(item => item.level === 'error').length,
     warnings: issues.filter(item => item.level === 'warning').length,
     issues
@@ -637,6 +1274,33 @@ export function isLocalMedia(projectDir, mediaPath) {
   return resolved === root || resolved.startsWith(root + path.sep);
 }
 
+function fileHash(file) {
+  const hash = crypto.createHash('sha256');
+  const buf = Buffer.allocUnsafe(1 << 20);
+  const fd = fs.openSync(file, 'r');
+  try {
+    let n;
+    while ((n = fs.readSync(fd, buf, 0, buf.length, null)) > 0) hash.update(buf.subarray(0, n));
+  } finally {
+    fs.closeSync(fd);
+  }
+  return hash.digest('hex');
+}
+
+/**
+ * The same bytes, not merely the same byte count.
+ *
+ * Byte size alone decided whether a colliding destination could be REUSED, and the copy
+ * then went ahead regardless: two genuinely different takes sharing a parent-folder name,
+ * a basename and a size resolved to one file, the second silently overwrote the first, and
+ * every material already pointing there played the wrong footage. Size stays the cheap
+ * gate; the hash is the answer. Only reached on a name collision, which is rare.
+ */
+function sameContents(a, b) {
+  if (fs.statSync(a).size !== fs.statSync(b).size) return false;
+  return fileHash(a) === fileHash(b);
+}
+
 export function localizeMedia(projectDir, source, fileName, { dryRun = false } = {}) {
   source = path.resolve(source);
   if (!fs.existsSync(source)) throw new CapcutError(`Source media does not exist: ${source}`, { code: 'MISSING_SOURCE' });
@@ -649,21 +1313,41 @@ export function localizeMedia(projectDir, source, fileName, { dryRun = false } =
   // then cannot tell three files named screen.mp4 apart in its "Link media" dialog.
   let safe = parent && parent !== '_' ? `${parent}__${base}` : base;
   let destination = path.join(mediaDir, safe);
-  if (fs.existsSync(destination) && path.resolve(destination) !== source) {
-    const a = fs.statSync(source);
-    const b = fs.statSync(destination);
-    if (a.size !== b.size) {
-      const tag = crypto.createHash('sha1').update(source).digest('hex').slice(0, 8);
-      const ext = path.extname(base);
-      safe = `${parent}__${path.basename(base, ext)}__${tag}${ext}`;
-      destination = path.join(mediaDir, safe);
-    }
+  // The tag is derived from the SOURCE PATH, so localizing the same file twice keeps
+  // resolving to the same destination instead of piling up copies.
+  if (fs.existsSync(destination) && path.resolve(destination) !== source
+      && !sameContents(source, destination)) {
+    const tag = crypto.createHash('sha1').update(source).digest('hex').slice(0, 8);
+    const ext = path.extname(base);
+    safe = `${parent}__${path.basename(base, ext)}__${tag}${ext}`;
+    destination = path.join(mediaDir, safe);
   }
   if (!dryRun) {
     fs.mkdirSync(mediaDir, { recursive: true });
     if (path.resolve(source) !== path.resolve(destination)) fs.copyFileSync(source, destination);
+    persistRl2Sidecar(projectDir, source);
   }
   return destination;
+}
+
+const RL2_SIDECARS = ['trace.ndjson', 'session.json', 'frames.ndjson', 'change.ndjson'];
+
+/**
+ * Keep the rl2 take's event trace next to the draft. Localized screen.mp4 lives in
+ * Resources/ and polish.interactions maps clicks/typing through chopped B-roll from
+ * this sidecar — without it the trace stays on Desktop and the edit has no events.
+ */
+export function persistRl2Sidecar(projectDir, source) {
+  const takeDir = path.dirname(path.resolve(source));
+  if (!fs.existsSync(path.join(takeDir, 'trace.ndjson'))) return null;
+  const dest = path.join(projectDir, '.capcutctl', 'rl2', path.basename(takeDir));
+  fs.mkdirSync(dest, { recursive: true });
+  for (const name of RL2_SIDECARS) {
+    const from = path.join(takeDir, name);
+    if (!fs.existsSync(from)) continue;
+    fs.copyFileSync(from, path.join(dest, name));
+  }
+  return dest;
 }
 
 function opMaterialRelink(doc, op, context) {
@@ -729,6 +1413,763 @@ function opTimelineSet(doc, op) {
   return { changed: 1 };
 }
 
+const RECUT_FPS = 30;
+const RECUT_TOLERANCE_US = 4;
+const RECUT_GAP_TOLERANCE_US = 20_000;
+const FPS_TOLERANCE = 1e-6;
+
+function recutFail(message, code = 'CUT_PLAN_INVALID', details = {}) {
+  throw new CapcutError('cut.recut: ' + message, { code, exitCode: 2, details });
+}
+
+function recutSeconds(value, field, { positive = false } = {}) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || (positive ? seconds <= 0 : seconds < 0)) {
+    recutFail(field + ' must be ' + (positive ? 'finite and positive' : 'finite and non-negative') + '.');
+  }
+  return Math.round(seconds * 1_000_000);
+}
+
+function recutFrameTime(value, field, fps = RECUT_FPS) {
+  const us = recutSeconds(value, field);
+  const frame = 1_000_000 / fps;
+  if (Math.abs(us - Math.round(us / frame) * frame) > RECUT_TOLERANCE_US) {
+    recutFail(field + ' is not frame-quantized at ' + fps + 'fps.', 'CUT_PLAN_UNQUANTIZED', { value, fps });
+  }
+  return us;
+}
+
+function canonicalMediaPath(value) {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const resolved = path.resolve(value);
+  try { return fs.realpathSync.native(resolved); }
+  catch { return resolved; }
+}
+
+function materialMediaPaths(material) {
+  return [material?.path, material?.original_path, material?.media_path]
+    .filter(value => typeof value === 'string' && value.trim())
+    .map(canonicalMediaPath)
+    .filter(Boolean);
+}
+
+/** Resolve a recut source by stable id first, then by canonical/original media path. */
+function recutMaterial(doc, identity) {
+  const index = materialIndex(doc);
+  const exact = index.get(identity)?.value;
+  if (exact) return exact;
+  const desired = canonicalMediaPath(identity);
+  if (!desired) return null;
+  for (const value of doc.materials?.videos || []) {
+    if (materialMediaPaths(value).includes(desired)) return value;
+  }
+  return null;
+}
+
+function recutProbeDuration(media, context = {}) {
+  if (typeof context.mediaDurationProbe === 'function') {
+    const value = Number(context.mediaDurationProbe(media));
+    return Number.isFinite(value) && value > 0 ? Math.round(value) : null;
+  }
+  try {
+    const output = execFileSync('ffprobe', [
+      '-v', 'error', '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1', media
+    ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const seconds = Number(String(output).trim());
+    return Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1_000_000) : null;
+  } catch {
+    return null;
+  }
+}
+
+function recutIsPrincipalContent(doc, segment) {
+  if (!segment || String(segment.desc || '').startsWith('layout:')) return false;
+  const material = recutMaterial(doc, segment.material_id);
+  return !material || !material.type || material.type === 'video';
+}
+
+function recutResolveTrack(doc, selector) {
+  if (selector == null || selector === '') {
+    const principal = principalTrack(doc);
+    if (principal.track.flag === 0) recutFail('the principal track is the main/cover track.', 'MAIN_TRACK');
+    return principal;
+  }
+  const text = String(selector);
+  let found;
+  if (/^\d+$/.test(text)) {
+    const index = Number(text);
+    found = doc.tracks?.[index] ? { index, track: doc.tracks[index] } : null;
+  } else {
+    const matches = (doc.tracks || []).map((track, index) => ({ track, index }))
+      .filter(entry => entry.track.name === text || entry.track.id === text);
+    if (matches.length !== 1) recutFail('track selector matched ' + matches.length + ' tracks: ' + text, 'CUT_TRACK_AMBIGUOUS');
+    found = matches[0];
+  }
+  if (!found || found.track.type !== 'video') recutFail('track ' + text + ' is not a video track.', 'BAD_TRACK');
+  if (found.track.flag === 0) recutFail('the principal track cannot be the main/cover track.', 'MAIN_TRACK');
+  return found;
+}
+
+function recutNormalizePlan(op, documentFps = null) {
+  if (op.contract !== 'cut.recut.v1') recutFail('requires contract cut.recut.v1.', 'CUT_CONTRACT');
+  if (!op.media || typeof op.media !== 'string') recutFail('media is required.', 'CUT_MEDIA_MISSING');
+  if (!op.plan || typeof op.plan !== 'object' || !Array.isArray(op.plan.timeline)) {
+    recutFail('plan.timeline is required.', 'CUT_PLAN_EMPTY');
+  }
+  if (!op.plan.timeline.length) recutFail('plan.timeline must not be empty.', 'CUT_PLAN_EMPTY');
+  if (op.retimeAnchored !== true) recutFail('retimeAnchored must be true.', 'CUT_ANCHOR_POLICY');
+  const preserve = new Set(op.preserve || []);
+  for (const kind of ['broll', 'layout', 'sfx', 'music']) {
+    if (!preserve.has(kind)) recutFail('preserve must include ' + kind + '.', 'CUT_PRESERVE_POLICY');
+  }
+  const media = path.resolve(op.media);
+  if (op.plan.media && path.resolve(String(op.plan.media)) !== media) {
+    recutFail('plan.media does not match media.', 'CUT_MEDIA_MISMATCH');
+  }
+  const requestedFps = op.plan.fps ?? op.fps ?? documentFps ?? RECUT_FPS;
+  const fps = Number(requestedFps);
+  if (!Number.isFinite(fps) || fps <= 0) recutFail('plan fps must be finite and positive.', 'CUT_PLAN_INVALID');
+  if (documentFps != null && (!Number.isFinite(Number(documentFps))
+      || Math.abs(fps - Number(documentFps)) > FPS_TOLERANCE)) {
+    recutFail(`plan fps ${fps} does not match the project fps ${documentFps}.`, 'CUT_FPS_MISMATCH', {
+      planFps: fps, projectFps: Number(documentFps)
+    });
+  }
+  const timeline = [];
+  const beats = new Set();
+  for (const [index, item] of op.plan.timeline.entries()) {
+    if (!item || typeof item !== 'object') recutFail('timeline entry ' + index + ' is not an object.');
+    const beat = item.beat == null ? index : Number(item.beat);
+    if (!Number.isInteger(beat) || beats.has(beat)) recutFail('timeline beat ' + index + ' is missing or duplicated.', 'CUT_PLAN_AMBIGUOUS');
+    beats.add(beat);
+    const targetStart = recutFrameTime(item.tl_in, 'timeline[' + index + '].tl_in', fps);
+    const targetEnd = recutFrameTime(item.tl_out, 'timeline[' + index + '].tl_out', fps);
+    const targetDuration = targetEnd - targetStart;
+    const declaredDuration = recutFrameTime(item.dur, 'timeline[' + index + '].dur', fps);
+    const sourceStart = recutFrameTime(item.src_in, 'timeline[' + index + '].src_in', fps);
+    const sourceDuration = recutFrameTime(item.src_dur ?? item.source_duration ?? item.dur,
+      'timeline[' + index + '].source duration', fps);
+    if (!(targetDuration > 0) || Math.abs(targetDuration - declaredDuration) > RECUT_TOLERANCE_US) {
+      recutFail('timeline[' + index + '] has inconsistent target duration.', 'CUT_PLAN_INVALID');
+    }
+    if (Math.abs(sourceDuration - targetDuration) > RECUT_TOLERANCE_US) {
+      recutFail('timeline[' + index + '] is not 1x.', 'CUT_PRINCIPAL_SPEED', {
+        targetDuration, sourceDuration
+      });
+    }
+    const sourceEnd = sourceStart + sourceDuration;
+    timeline.push({
+      index, beat, targetStart, targetEnd, targetDuration,
+      sourceStart, sourceEnd, sourceDuration, text: item.text || ''
+    });
+  }
+  for (let i = 0; i < timeline.length; i++) {
+    const item = timeline[i];
+    if (i && item.targetStart < timeline[i - 1].targetEnd - RECUT_TOLERANCE_US) {
+      recutFail('timeline target ranges overlap or are out of order.', 'CUT_PLAN_AMBIGUOUS');
+    }
+    if (i && Math.abs(item.targetStart - timeline[i - 1].targetEnd) > RECUT_TOLERANCE_US) {
+      recutFail('timeline target ranges must be packed from zero.', 'CUT_PLAN_GAP');
+    }
+    if (!i && item.targetStart > RECUT_TOLERANCE_US) recutFail('timeline must start at zero.', 'CUT_PLAN_GAP');
+  }
+  const sourceOrder = [...timeline].sort((a, b) => a.sourceStart - b.sourceStart);
+  for (let i = 1; i < sourceOrder.length; i++) {
+    if (sourceOrder[i].sourceStart < sourceOrder[i - 1].sourceEnd - RECUT_TOLERANCE_US) {
+      recutFail('timeline source ranges overlap.', 'CUT_PLAN_AMBIGUOUS');
+    }
+  }
+  const duration = recutFrameTime(op.plan.duration, 'plan.duration', fps);
+  const end = timeline.at(-1).targetEnd;
+  if (Math.abs(duration - end) > RECUT_TOLERANCE_US) recutFail('plan.duration does not match timeline.', 'CUT_PLAN_INVALID');
+
+  const blocking = [
+    ...(Array.isArray(op.plan.blocking_lint) ? op.plan.blocking_lint : []),
+    ...(Array.isArray(op.plan.lint) ? op.plan.lint.filter(item => item?.code === 'FIRST_WORD_CLIPPED') : [])
+  ];
+  if (blocking.length) recutFail('the supplied plan has blocking lint findings.', 'CUT_PLAN_BLOCKED', { findings: blocking });
+  if (Array.isArray(op.plan.lint) && op.plan.lint.length && !op.force) {
+    recutFail('the supplied plan has lint findings; pass --force to apply it.', 'CUT_PLAN_LINT', { findings: op.plan.lint });
+  }
+  const ramps = Array.isArray(op.audioRamps) ? op.audioRamps : [];
+  for (const [index, ramp] of ramps.entries()) {
+    if (!ramp || !Number.isFinite(Number(ramp.in)) || !Number.isFinite(Number(ramp.out))
+        || Number(ramp.in) < 0 || Number(ramp.out) < 0) {
+      recutFail('audioRamps[' + index + '] has invalid in/out values.', 'CUT_AUDIO_RAMP');
+    }
+  }
+  return { media, fps, timeline, duration, ramps };
+}
+
+function recutOldMap(doc, principal) {
+  const entries = (principal.track.segments || [])
+    .filter(segment => recutIsPrincipalContent(doc, segment))
+    .map(segment => {
+      const target = segment.target_timerange;
+      const source = segment.source_timerange;
+      if (!target || !source || !(target.duration > 0) || !(source.duration > 0)) {
+        recutFail('principal segment ' + (segment.id || '<unknown>') + ' has no usable source/target window.', 'CUT_PRINCIPAL_INVALID');
+      }
+      return {
+        segment,
+        targetStart: target.start,
+        targetEnd: target.start + target.duration,
+        targetDuration: target.duration,
+        sourceStart: source.start,
+        sourceEnd: source.start + source.duration,
+        sourceDuration: source.duration
+      };
+    })
+    .sort((a, b) => a.targetStart - b.targetStart);
+  if (!entries.length) recutFail('principal track has no A-roll segments.', 'CUT_PRINCIPAL_EMPTY');
+  if (entries[0].targetStart > RECUT_GAP_TOLERANCE_US) recutFail('principal A-roll does not start at zero.', 'CUT_PRINCIPAL_INVALID');
+  if (entries[0].targetStart < -RECUT_TOLERANCE_US) recutFail('principal A-roll starts before zero.', 'CUT_PRINCIPAL_INVALID');
+  for (let i = 1; i < entries.length; i++) {
+    if (entries[i].targetStart < entries[i - 1].targetEnd - RECUT_TOLERANCE_US) {
+      recutFail('principal A-roll target ranges overlap.', 'CUT_PRINCIPAL_AMBIGUOUS');
+    }
+    if (entries[i].targetStart - entries[i - 1].targetEnd > RECUT_GAP_TOLERANCE_US) {
+      recutFail('principal A-roll has an unmapped timeline gap.', 'CUT_PRINCIPAL_INVALID');
+    }
+  }
+  const sourceOrder = [...entries].sort((a, b) => a.sourceStart - b.sourceStart);
+  for (let i = 1; i < sourceOrder.length; i++) {
+    if (sourceOrder[i].sourceStart < sourceOrder[i - 1].sourceEnd - RECUT_TOLERANCE_US) {
+      recutFail('principal A-roll source ranges overlap.', 'CUT_PRINCIPAL_AMBIGUOUS');
+    }
+  }
+  if (entries.some(item => item.sourceStart < 0 || item.targetStart < 0)) {
+    recutFail('principal A-roll has a negative source or target window.', 'CUT_PRINCIPAL_INVALID');
+  }
+  return entries;
+}
+
+function recutSourceAt(old, timelineTime) {
+  return old.sourceStart + (timelineTime - old.targetStart) * old.sourceDuration / old.targetDuration;
+}
+
+function recutTargetAt(next, sourceTime) {
+  return next.targetStart + (sourceTime - next.sourceStart) * next.targetDuration / next.sourceDuration;
+}
+
+function recutFindTarget(oldMap, value) {
+  return oldMap.find(item => value >= item.targetStart - RECUT_TOLERANCE_US
+    && value < item.targetEnd - RECUT_TOLERANCE_US);
+}
+
+function recutFindSource(plan, value) {
+  return plan.find((item, index) => value >= item.sourceStart - RECUT_TOLERANCE_US
+    && (value < item.sourceEnd - RECUT_TOLERANCE_US || (index === plan.length - 1 && value <= item.sourceEnd + RECUT_TOLERANCE_US)));
+}
+
+function recutAnchorPieces(segment, oldMap, nextPlan) {
+  const target = segment.target_timerange;
+  if (!target || !(target.duration > 0)) recutFail('anchor ' + (segment.id || '<unknown>') + ' has no target window.', 'CUT_ANCHOR_INVALID');
+  const source = segment.source_timerange;
+  if (source && (!Number.isFinite(source.start) || !Number.isFinite(source.duration)
+      || source.start < 0 || source.duration <= 0)) {
+    recutFail('anchor ' + (segment.id || '<unknown>') + ' has an invalid source window.', 'CUT_ANCHOR_INVALID');
+  }
+  const start = target.start;
+  const end = target.start + target.duration;
+  const boundaries = [start, end];
+  for (const old of oldMap) {
+    if (old.targetStart > start && old.targetStart < end) boundaries.push(old.targetStart);
+    if (old.targetEnd > start && old.targetEnd < end) boundaries.push(old.targetEnd);
+    for (const next of nextPlan) {
+      for (const sourceBoundary of [next.sourceStart, next.sourceEnd]) {
+        const mapped = old.targetStart + (sourceBoundary - old.sourceStart) * old.targetDuration / old.sourceDuration;
+        if (mapped > start && mapped < end) boundaries.push(mapped);
+      }
+    }
+  }
+  const cuts = [...new Set(boundaries.map(value => Math.round(value)))].sort((a, b) => a - b);
+  const pieces = [];
+  for (let i = 0; i < cuts.length - 1; i++) {
+    const oldStart = cuts[i], oldEnd = cuts[i + 1];
+    if (!(oldEnd > oldStart)) continue;
+    const midpoint = oldStart + (oldEnd - oldStart) / 2;
+    const old = recutFindTarget(oldMap, midpoint);
+    if (!old) {
+      pieces.push({ oldStart, oldEnd, newStart: oldStart, newEnd: oldEnd, mapped: false });
+      continue;
+    }
+    const sourceMid = recutSourceAt(old, midpoint);
+    const next = recutFindSource(nextPlan, sourceMid);
+    if (!next) continue;
+    const sourceStart = recutSourceAt(old, oldStart);
+    const sourceEnd = recutSourceAt(old, oldEnd);
+    pieces.push({
+      oldStart, oldEnd,
+      newStart: recutTargetAt(next, sourceStart),
+      newEnd: recutTargetAt(next, sourceEnd),
+      mapped: true
+    });
+  }
+  const merged = [];
+  for (const piece of pieces) {
+    const previous = merged.at(-1);
+    if (previous && previous.mapped === piece.mapped
+        && previous.oldEnd === piece.oldStart
+        && Math.abs(previous.newEnd - piece.newStart) <= RECUT_TOLERANCE_US) {
+      previous.oldEnd = piece.oldEnd;
+      previous.newEnd = piece.newEnd;
+    } else merged.push({ ...piece });
+  }
+  return merged;
+}
+
+function recutChooseTemplate(planItem, oldMap) {
+  const matches = oldMap
+    .map(old => ({ old, overlap: Math.max(0, Math.min(old.sourceEnd, planItem.sourceEnd) - Math.max(old.sourceStart, planItem.sourceStart)) }))
+    .filter(item => item.overlap > RECUT_TOLERANCE_US);
+  if (!matches.length) recutFail('plan source window has no corresponding principal source.', 'CUT_SOURCE_UNMAPPED', { sourceStart: planItem.sourceStart, sourceEnd: planItem.sourceEnd });
+  const best = Math.max(...matches.map(item => item.overlap));
+  const winners = matches.filter(item => best - item.overlap <= RECUT_TOLERANCE_US);
+  if (winners.length !== 1 || matches.length !== 1) {
+    recutFail('a plan beat crosses multiple principal source windows.', 'CUT_PRINCIPAL_AMBIGUOUS', {
+      sourceStart: planItem.sourceStart, sourceEnd: planItem.sourceEnd
+    });
+  }
+  return winners[0].old;
+}
+
+function recutExplicitlyTiedToPrincipal(segment) {
+  return segment?.source_tied_to_principal === true
+    || segment?.tied_to_principal === true
+    || segment?.principal_source === true
+    || segment?.anchor_source === 'principal'
+    || segment?.anchor_source === 'a-roll'
+    || segment?.recut_source === 'a-roll'
+    || segment?.source_map === 'principal';
+}
+
+function recutIsParked(segment, projectDir) {
+  const range = preservedRange(projectDir);
+  const target = segment?.target_timerange;
+  return Boolean(range && target && Number.isFinite(target.start)
+    && target.start >= range.start - RECUT_TOLERANCE_US);
+}
+
+function recutValidateAnchors(doc, principal, oldMap, plan, projectDir = null) {
+  const mapped = [];
+  for (const [trackIndex, track] of (doc.tracks || []).entries()) {
+    for (const segment of track.segments || []) {
+      if (track === principal.track && recutIsPrincipalContent(doc, segment)) continue;
+      // Audio beds, SFX, and music are timeline assets by default. Mapping them through the
+      // A-roll source map silently deletes or retimes unrelated sound; only an explicit
+      // source_tied_to_principal marker opts them into source mapping. Parked template parts
+      // are likewise kept on the timeline so recutPark can move them as a unit afterward.
+      const material = recutMaterial(doc, segment.material_id);
+      const audioLike = track.type === 'audio'
+        || material?.type === 'audio'
+        || /(?:^|[-_])(sfx|music)(?:$|[-_])/i.test(String(track.name || ''));
+      const timelineAnchored = (audioLike && !recutExplicitlyTiedToPrincipal(segment))
+        || recutIsParked(segment, projectDir);
+      if (timelineAnchored) {
+        mapped.push({ trackIndex, track, segment, pieces: null, timelineAnchored: true });
+        continue;
+      }
+      const pieces = recutAnchorPieces(segment, oldMap, plan);
+      mapped.push({ trackIndex, track, segment, pieces });
+    }
+  }
+  return mapped;
+}
+
+function recutValidateRefs(doc, oldMap, anchors) {
+  const index = materialIndex(doc);
+  const segments = [
+    ...oldMap.map(item => item.segment),
+    ...anchors.map(item => item.segment)
+  ];
+  for (const segment of segments) {
+    for (const ref of segment.extra_material_refs || []) {
+      if (!index.has(ref)) recutFail('segment ' + segment.id + ' references missing extra ' + ref + '.', 'CUT_EXTRA_REF');
+    }
+  }
+}
+
+function recutStableSeed(op, plan) {
+  if (op.__seed) return op.__seed;
+  return 'cut.recut.v1|' + path.resolve(op.media || '') + '|'
+    + plan.timeline.map(item => [item.beat, item.tl_in, item.tl_out, item.src_in, item.dur].join(':')).join('|');
+}
+
+function recutPushMaterial(doc, kind, value) {
+  const values = ensureMaterialArray(doc, kind);
+  const existing = values.find(item => item.id === value.id);
+  if (existing) {
+    if (stableJson(existing) !== stableJson(value)) {
+      recutFail('generated material id ' + value.id + ' conflicts with existing data.', 'CUT_MATERIAL_CONFLICT');
+    }
+    return existing;
+  }
+  values.push(value);
+  return value;
+}
+
+function recutCloneExtras(doc, template, segmentId, seed) {
+  const index = materialIndex(doc);
+  const refs = [];
+  for (const [position, oldId] of (template.extra_material_refs || []).entries()) {
+    const found = index.get(oldId);
+    if (!found) recutFail('segment ' + template.id + ' references missing extra ' + oldId + '.', 'CUT_EXTRA_REF');
+    const copied = clone(found.value);
+    // The output segment/position is the stable logical identity. Including oldId here made
+    // a retry clone the clone (A -> cut:extra:A -> cut:extra:cut:extra:A), accumulating refs
+    // and eventually mutating a shared speed material. Every retimed/split output gets its
+    // own copy, including speed, mask, and fade extras.
+    copied.id = found.value?.type === 'audio_fade'
+      ? seededId(seed, 'fade:' + segmentId)
+      : seededId(seed, 'cut:extra:' + segmentId + ':' + position);
+    if ('bind_segment_id' in copied && (copied.bind_segment_id === template.id || copied.bind_segment_id === '')) {
+      copied.bind_segment_id = segmentId;
+    }
+    refs.push(recutPushMaterial(doc, found.kind, copied).id);
+  }
+  return refs;
+}
+
+function recutSetSpeed(doc, segment, speed) {
+  segment.speed = speed;
+  for (const ref of segment.extra_material_refs || []) {
+    for (const values of Object.values(doc.materials || {})) {
+      if (!Array.isArray(values)) continue;
+      const material = values.find(item => item?.id === ref && item.type === 'speed');
+      if (material) {
+        material.speed = speed;
+        material.mode = 0;
+        material.curve_speed = null;
+      }
+    }
+  }
+}
+
+function recutDetachSpeedMaterials(doc, original, segment, seed) {
+  const index = materialIndex(doc);
+  const refs = clone(segment.extra_material_refs || []);
+  for (const [position, ref] of refs.entries()) {
+    const found = index.get(ref);
+    if (!found || found.value?.type !== 'speed') continue;
+    const copied = clone(found.value);
+    // Do not key this by the old ref: the first recut replaces that ref, and a retry must
+    // resolve to the same detached material instead of accumulating one speed per retry.
+    copied.id = seededId(seed, 'cut:speed:' + segment.id + ':' + position);
+    refs[position] = recutPushMaterial(doc, found.kind, copied).id;
+  }
+  segment.extra_material_refs = refs;
+}
+
+function recutFilterRebaseKeyframes(segment, oldSource, newSource, keepSource = null) {
+  segment.keyframe_refs = clone(segment.keyframe_refs || []);
+  if (!oldSource || !newSource || !(oldSource.duration > 0)) {
+    segment.common_keyframes = clone(segment.common_keyframes || []);
+    return;
+  }
+  const keepStart = Math.max(oldSource.start, keepSource?.start ?? oldSource.start);
+  const keepEnd = Math.min(oldSource.start + oldSource.duration,
+    (keepSource?.start ?? oldSource.start) + (keepSource?.duration ?? oldSource.duration));
+  const keepDuration = keepEnd - keepStart;
+  if (!(keepDuration > 0)) {
+    segment.common_keyframes = [];
+    return;
+  }
+  const nextGroups = [];
+  for (const group of segment.common_keyframes || []) {
+    const sourceList = Array.isArray(group.keyframe_list) ? group.keyframe_list : [];
+    const timed = sourceList.filter(keyframe => Number.isFinite(Number(keyframe?.time_offset)));
+    // Unknown keyframe shapes are preserved as cloned data. Known timed points are filtered
+    // to the piece and rebased into its new absolute source window.
+    const keyframeList = timed.length
+      ? timed.filter(keyframe => Number(keyframe.time_offset) >= keepStart - RECUT_TOLERANCE_US
+          && Number(keyframe.time_offset) <= keepEnd + RECUT_TOLERANCE_US)
+        .map(keyframe => ({
+          ...clone(keyframe),
+          time_offset: Math.max(newSource.start,
+            Math.min(newSource.start + newSource.duration,
+              newSource.start + Math.round((Number(keyframe.time_offset) - keepStart)
+                * newSource.duration / keepDuration)))
+        }))
+      : clone(sourceList);
+    if (keyframeList.length) nextGroups.push({ ...clone(group), keyframe_list: keyframeList });
+  }
+  segment.common_keyframes = nextGroups;
+}
+
+function recutBuildPrincipal(doc, old, planItem, material, seed, usedIds) {
+  const segment = clone(old.segment);
+  let id = old.segment.id;
+  if (usedIds.has(id)) id = seededId(seed, 'cut:principal:' + planItem.index + ':' + planItem.beat);
+  usedIds.add(id);
+  segment.id = id;
+  segment.material_id = material.id;
+  segment.target_timerange = { start: planItem.targetStart, duration: planItem.targetDuration };
+  segment.source_timerange = { start: planItem.sourceStart, duration: planItem.sourceDuration };
+  segment.render_timerange = segment.render_timerange
+    ? { ...segment.render_timerange, start: planItem.targetStart, duration: planItem.targetDuration }
+    : segment.render_timerange;
+  segment.extra_material_refs = recutCloneExtras(doc, old.segment, id, seed);
+  segment.common_keyframes = clone(old.segment.common_keyframes || []);
+  recutFilterRebaseKeyframes(segment, old.segment.source_timerange, segment.source_timerange, {
+    start: planItem.sourceStart,
+    duration: planItem.sourceDuration,
+  });
+  recutSetSpeed(doc, segment, 1);
+  return segment;
+}
+
+function recutRewriteAnchor(doc, original, piece, pieceIndex, seed) {
+  const segment = clone(original);
+  const target = original.target_timerange;
+  const source = original.source_timerange;
+  const targetDuration = piece.newEnd - piece.newStart;
+  segment.id = pieceIndex === 0 ? original.id : seededId(seed, 'cut:anchor:' + original.id + ':' + pieceIndex);
+  segment.target_timerange = { start: Math.round(piece.newStart), duration: Math.round(targetDuration) };
+  if (source && target?.duration > 0) {
+    const from = (piece.oldStart - target.start) / target.duration;
+    const to = (piece.oldEnd - target.start) / target.duration;
+    const sourceStart = source.start + Math.round(source.duration * from);
+    const sourceEnd = source.start + Math.round(source.duration * to);
+    segment.source_timerange = { start: sourceStart, duration: Math.max(0, sourceEnd - sourceStart) };
+    segment.speed = segment.target_timerange.duration > 0
+      ? segment.source_timerange.duration / segment.target_timerange.duration : 1;
+    recutFilterRebaseKeyframes(segment, source, segment.source_timerange, segment.source_timerange);
+  } else {
+    segment.keyframe_refs = clone(segment.keyframe_refs || []);
+    segment.common_keyframes = clone(segment.common_keyframes || []);
+  }
+  if (segment.render_timerange?.duration) {
+    segment.render_timerange.start = segment.target_timerange.start;
+    segment.render_timerange.duration = segment.target_timerange.duration;
+  }
+  // Every retimed piece gets cloned extras, including piece zero. This prevents a split
+  // segment from retaining a shared speed/fade/mask ref while still keeping the clone
+  // deterministic across root/timeline mirrors and retries.
+  segment.extra_material_refs = recutCloneExtras(doc, original, segment.id, seed);
+  recutSetSpeed(doc, segment, segment.speed ?? 1);
+  return segment;
+}
+
+function recutRamp(planItem, index, ramps, fps) {
+  const matching = ramps.find(item => item?.at != null
+    && Math.abs(Number(item.at) * 1_000_000 - planItem.targetStart) <= 1_000_000 / fps);
+  const source = matching || ramps[index] || {};
+  const fallback = 2 / fps;
+  const fadeIn = source.in == null ? (source.in_frames == null ? fallback : Number(source.in_frames) / fps) : Number(source.in);
+  const fadeOut = source.out == null ? (source.out_frames == null ? fallback : Number(source.out_frames) / fps) : Number(source.out);
+  if (!Number.isFinite(fadeIn) || !Number.isFinite(fadeOut) || fadeIn < 0 || fadeOut < 0) {
+    recutFail('invalid audio ramp for beat ' + planItem.beat + '.', 'CUT_AUDIO_RAMP');
+  }
+  return { in: fadeIn, out: fadeOut };
+}
+
+function recutPark(doc, context, contentEnd, originalParkedIds = null) {
+  const projectDir = context.projectDir;
+  const range = preservedRange(projectDir);
+  if (!range || !context.shared) return 0;
+  if (!context.shared.preserved) {
+    context.shared.preserved = {
+      file: path.join(projectDir, SIDECAR_RELATIVE),
+      created: createdMetadata(projectDir),
+      window: range,
+      total: 0,
+      parkedIds: originalParkedIds ? [...originalParkedIds] : null,
+    };
+  }
+  const state = context.shared.preserved;
+  if (!state.created || !state.window) return 0;
+  if (state.parkedIds == null && originalParkedIds) state.parkedIds = [...originalParkedIds];
+  if (state.recutDelta === undefined) {
+    const currentStart = state.window.start + (state.total || 0);
+    const desiredStart = contentEnd + PRESET_PARK_GAP_US;
+    state.recutDelta = desiredStart > currentStart + RECUT_TOLERANCE_US ? desiredStart - currentStart : 0;
+    if (state.recutDelta) {
+      state.total = (state.total || 0) + state.recutDelta;
+      state.next = {
+        start: state.window.start + state.total,
+        end: state.window.end + state.total
+      };
+    }
+    state.contentEnd = contentEnd;
+  }
+  const delta = state.recutDelta;
+  if (delta) {
+    const from = state.window.start + (state.total || 0) - delta;
+    const parkedIds = new Set(state.parkedIds || []);
+    const shifted = new Set();
+    for (const track of doc.tracks || []) {
+      for (const segment of track.segments || []) {
+        if (parkedIds.size
+          ? parkedIds.has(segment.id)
+          : (segment.target_timerange?.start || 0) >= from) {
+          segment.target_timerange.start += delta;
+          if (segment.render_timerange?.duration) segment.render_timerange.start += delta;
+          shifted.add(segment.id);
+        }
+      }
+    }
+    if (parkedIds.size) {
+      const missing = [...parkedIds].filter(id => !shifted.has(id));
+      if (missing.length) {
+        recutFail('parked timeline no longer contains the preserved segment(s): ' + missing.join(', '), 'PARKED_TIMELINE_MISMATCH', { missing });
+      }
+      const misplaced = [...parkedIds].filter(id => {
+        const entry = allSegments(doc).find(item => item.segment.id === id);
+        return !entry || entry.segment.target_timerange.start < state.next.start - RECUT_TOLERANCE_US;
+      });
+      if (misplaced.length) {
+        recutFail('parked timeline does not agree with its sidecar range.', 'PARKED_TIMELINE_MISMATCH', {
+          ids: misplaced, expectedStart: state.next.start
+        });
+      }
+    }
+    doc.duration = Math.max(doc.duration || 0, maxSegmentEndUs(doc), state.next.end);
+  }
+  return delta;
+}
+
+function opCutRecut(doc, op, context = {}) {
+  if (op.into && context.projectDir && path.resolve(op.into) !== path.resolve(context.projectDir)) {
+    recutFail('into does not match the target project.', 'CUT_PROJECT_MISMATCH');
+  }
+  const normalized = recutNormalizePlan(op, doc.fps);
+  const explicitTrack = op.track ?? op.plan.track;
+  const principal = recutResolveTrack(doc, explicitTrack);
+  const oldMap = recutOldMap(doc, principal);
+  const templates = normalized.timeline.map(item => recutChooseTemplate(item, oldMap));
+  const anchors = recutValidateAnchors(doc, principal, oldMap, normalized.timeline, context.projectDir);
+  recutValidateRefs(doc, oldMap, anchors);
+  const seed = recutStableSeed(op, normalized);
+  const material = recutMaterial(doc, normalized.media);
+  if (!context.dryRun && !fs.existsSync(normalized.media)) recutFail('media does not exist: ' + normalized.media, 'MISSING_SOURCE');
+  const requiredSourceEnd = Math.max(...normalized.timeline.map(item => item.sourceEnd));
+  const probedDuration = fs.existsSync(normalized.media) ? recutProbeDuration(normalized.media, context) : null;
+  if (!context.dryRun && probedDuration == null) {
+    recutFail('could not verify the duration of source media: ' + normalized.media, 'MEDIA_DURATION_UNKNOWN');
+  }
+  const sourceDuration = probedDuration ?? Number(material?.duration);
+  if (!(sourceDuration > 0)) recutFail('source media has no verified duration.', 'MEDIA_DURATION_UNKNOWN');
+  if (requiredSourceEnd > sourceDuration + RECUT_TOLERANCE_US) {
+    recutFail('plan source exceeds the actual media duration.', 'SOURCE_AFTER_END', {
+      requiredSourceEnd, mediaDuration: sourceDuration
+    });
+  }
+
+  let sourceMaterial = material;
+  let sourceMaterialNeedsPush = false;
+  if (!sourceMaterial) {
+    const templateMaterial = recutMaterial(doc, oldMap[0].segment.material_id);
+    if (!templateMaterial) recutFail('principal material is missing.', 'MISSING_MATERIAL_SOURCE');
+    sourceMaterial = clone(templateMaterial);
+    sourceMaterial.id = seededId(seed, 'cut:material:' + normalized.media);
+    sourceMaterial.type = 'video';
+    sourceMaterial.path = normalized.media;
+    sourceMaterial.material_name = path.basename(normalized.media);
+    sourceMaterial.duration = sourceDuration;
+    sourceMaterialNeedsPush = true;
+  } else {
+    if (sourceMaterial.type && sourceMaterial.type !== 'video') recutFail('media material is not video.', 'CUT_MEDIA_TYPE');
+    // A localized/original material may already exist under the path, but its draft metadata
+    // can be stale after replacing the file in place. Detach a verified-duration copy instead
+    // of mutating a material shared by anchors or unrelated clips.
+    if (probedDuration != null && (!Number.isFinite(sourceMaterial.duration)
+        || Math.abs(sourceMaterial.duration - probedDuration) > RECUT_TOLERANCE_US)) {
+      sourceMaterial = clone(sourceMaterial);
+      sourceMaterial.id = seededId(seed, 'cut:material:' + normalized.media);
+      sourceMaterial.path = normalized.media;
+      sourceMaterial.material_name = path.basename(normalized.media);
+      sourceMaterial.duration = probedDuration;
+      sourceMaterialNeedsPush = true;
+    }
+  }
+
+  const originalParkedIds = new Set();
+  const parkedWindow = preservedRange(context.projectDir);
+  if (parkedWindow) {
+    for (const { segment } of allSegments(doc)) {
+      if (segment.target_timerange?.start >= parkedWindow.start - RECUT_TOLERANCE_US) {
+        originalParkedIds.add(segment.id);
+      }
+    }
+  }
+  const before = new Map((doc.tracks || []).map(track => [track, clone(track.segments || [])]));
+  const usedIds = new Set();
+  const principalSegments = [];
+  for (let i = 0; i < normalized.timeline.length; i++) {
+    principalSegments.push(recutBuildPrincipal(doc, templates[i], normalized.timeline[i], sourceMaterial, seed, usedIds));
+  }
+
+  if (sourceMaterialNeedsPush) recutPushMaterial(doc, 'videos', sourceMaterial);
+  const dropped = [];
+  const partialDropped = [];
+  let retimed = 0;
+  let split = 0;
+  const replacementById = new Map();
+  for (const anchor of anchors) {
+    if (anchor.timelineAnchored) {
+      replacementById.set(anchor.segment.id, [clone(anchor.segment)]);
+      continue;
+    }
+    const pieces = anchor.pieces || [];
+    const kept = pieces.filter(piece => piece.newEnd > piece.newStart);
+    if (!kept.length) {
+      dropped.push(anchor.segment.id);
+      replacementById.set(anchor.segment.id, []);
+      continue;
+    }
+    if (kept.length > 1) split++;
+    if (pieces.some(piece => !piece.mapped)) partialDropped.push(anchor.segment.id);
+    const rewritten = kept.map((piece, index) => {
+      if (piece.newStart !== piece.oldStart || piece.newEnd - piece.newStart !== piece.oldEnd - piece.oldStart) retimed++;
+      return recutRewriteAnchor(doc, anchor.segment, piece, index, seed);
+    });
+    replacementById.set(anchor.segment.id, rewritten);
+  }
+  const contentEnd = normalized.duration;
+  for (const track of doc.tracks || []) {
+    const original = before.get(track) || [];
+    if (track === principal.track) {
+      const preserved = original.filter(segment => !recutIsPrincipalContent(doc, segment))
+        .flatMap(segment => replacementById.get(segment.id) || []);
+      track.segments = [...principalSegments, ...preserved];
+    } else {
+      track.segments = original.flatMap(segment => {
+        const replacement = replacementById.get(segment.id);
+        return replacement || [segment];
+      });
+    }
+    track.segments.sort((a, b) => (a.target_timerange?.start || 0) - (b.target_timerange?.start || 0));
+  }
+  // Parking must be the final positional operation. Running it against the pre-reconstruction
+  // clone and then assigning that clone back was the source of the sidecar/timeline split.
+  const parkedDeltaUs = recutPark(doc, context, contentEnd, originalParkedIds);
+  for (const segment of principalSegments) {
+    const ramp = recutRamp(normalized.timeline[principalSegments.indexOf(segment)], principalSegments.indexOf(segment),
+      normalized.ramps, normalized.fps);
+    opClipFade(doc, { op: 'clip.fade', selector: { id: segment.id }, in: ramp.in, out: ramp.out, __seed: seed });
+  }
+  renumberTracks(doc);
+  doc.duration = Math.max(doc.duration || 0, normalized.duration, maxSegmentEndUs(doc));
+  return {
+    changed: principalSegments.length + retimed + split + dropped.length,
+    operation: 'cut.recut',
+    contract: 'cut.recut.v1',
+    track: principal.index,
+    trackId: principal.track.id,
+    principal: {
+      before: oldMap.length,
+      after: principalSegments.length,
+      durationUs: normalized.duration,
+      speed: 1
+    },
+    anchors: { retimed, split, dropped, partialDropped },
+    audioRamps: principalSegments.length,
+    parkedDeltaUs
+  };
+}
+
 export function applyOperations(doc, operations, context) {
   const results = [];
   for (const [index, op] of (operations || []).entries()) {
@@ -752,8 +2193,11 @@ export function applyOperations(doc, operations, context) {
     else if (op.op === 'layout.apply') result = opLayoutApply(doc, op, context);
     else if (op.op === 'layout.background') result = opLayoutBackground(doc, op, context);
     else if (op.op === 'layout.broll') result = opLayoutBroll(doc, op, context);
+    else if (op.op === SCREEN_LAYOUT_OPERATION) result = opLayoutScreen(doc, op, context);
+    else if (op.op === 'cut.recut') result = opCutRecut(doc, op, context);
     else if (op.op === 'polish') result = opPolish(doc, op, context);
     else if (op.op === 'polish.callouts') result = opCalloutSfx(doc, op);
+    else if (op.op === 'polish.interactions') result = opInteractions(doc, op, context);
     else if (op.op === 'pace') result = opPace(doc, op, context);
     else if (op.op === 'signature') result = opSignature(doc, op, context);
     else if (op.op === 'clip.add') result = opClipAdd(doc, op, context);
@@ -842,29 +2286,239 @@ function pidAlive(pid) {
   catch (error) { return error.code !== 'ESRCH'; }
 }
 
+function fileIdentity(fileOrFd) {
+  try {
+    const stat = typeof fileOrFd === 'number' ? fs.fstatSync(fileOrFd) : fs.statSync(fileOrFd);
+    return { dev: stat.dev, ino: stat.ino };
+  } catch {
+    return null;
+  }
+}
+
+function sameFileIdentity(a, b) {
+  const left = typeof a === 'object' ? a : fileIdentity(a);
+  const right = typeof b === 'object' ? b : fileIdentity(b);
+  return Boolean(left && right && left.dev === right.dev && left.ino === right.ino);
+}
+
+/**
+ * Inspect capcutctl's project write lock without taking it. `stale` means the lock can be
+ * safely reclaimed by the transactional writer; `locked` means another live owner remains.
+ */
+export function projectLockStatus(projectDir, { pidProbe = pidAlive } = {}) {
+  const file = path.resolve(projectDir, '.capcutctl', 'write.lock');
+  const base = {
+    path: file,
+    owner: null,
+    ownerPid: null,
+    ownerToken: null,
+    startedAt: null,
+    identity: fileIdentity(file),
+    stale: false,
+    ownedByCurrentProcess: false,
+  };
+  if (!fs.existsSync(file)) return { ...base, locked: false, status: 'unlocked' };
+
+  let value;
+  try {
+    value = readJson(file);
+  } catch (error) {
+    return {
+      ...base,
+      // A partially written lock is not evidence that the owner is dead. Treat it as
+      // live/unknown so a concurrent writer cannot reclaim it while its owner is starting.
+      locked: true,
+      stale: false,
+      status: 'invalid',
+      error: error.message,
+    };
+  }
+  const pid = Number(value?.pid);
+  const validPid = Number.isInteger(pid) && pid > 0;
+  let alive = false;
+  try {
+    alive = validPid && Boolean(pidProbe(pid));
+  } catch (error) {
+    return {
+      ...base,
+      locked: true,
+      stale: false,
+      status: 'unknown',
+      owner: { pid: validPid ? pid : value?.pid ?? null, startedAt: value?.startedAt ?? null, alive: null },
+      ownerPid: validPid ? pid : value?.pid ?? null,
+      ownerToken: value?.ownerToken ?? null,
+      startedAt: value?.startedAt ?? null,
+      error: error.message,
+    };
+  }
+  if (!validPid) {
+    return {
+      ...base,
+      locked: true,
+      stale: false,
+      status: 'invalid',
+      owner: { pid: value?.pid ?? null, startedAt: value?.startedAt ?? null, alive: null },
+      ownerPid: value?.pid ?? null,
+      ownerToken: value?.ownerToken ?? null,
+      startedAt: value?.startedAt ?? null,
+    };
+  }
+  const owner = {
+    pid: validPid ? pid : value?.pid ?? null,
+    startedAt: value?.startedAt ?? null,
+    alive,
+  };
+  const ownedByCurrentProcess = validPid && pid === process.pid;
+  const stale = !alive;
+  return {
+    path: file,
+    identity: base.identity,
+    locked: !stale,
+    status: stale ? 'stale' : ownedByCurrentProcess ? 'owned' : 'locked',
+    owner,
+    ownerPid: owner.pid,
+    ownerToken: value?.ownerToken ?? null,
+    startedAt: owner.startedAt,
+    alive,
+    stale,
+    ownedByCurrentProcess,
+  };
+}
+
+export const getProjectLockStatus = projectLockStatus;
+export const lockStatus = projectLockStatus;
+
+function lockOwner(token = uuid()) {
+  return { pid: process.pid, ownerToken: token, startedAt: new Date().toISOString() };
+}
+
+function writeLockOwner(fd, owner) {
+  const data = Buffer.from(stableJson(owner));
+  fs.ftruncateSync(fd, 0);
+  fs.writeSync(fd, data, 0, data.length, 0);
+  fs.fsyncSync(fd);
+}
+
+function lockHandle(file, fd, owner, reclaim = null) {
+  return {
+    file,
+    fd,
+    token: owner.ownerToken,
+    identity: fileIdentity(fd),
+    reclaim,
+  };
+}
+
+function releaseReclaimGate(gate) {
+  if (!gate) return;
+  try { fs.closeSync(gate.fd); } catch {}
+  if (sameFileIdentity(gate.file, gate.identity)) {
+    try { fs.unlinkSync(gate.file); } catch {}
+  }
+}
+
+function lockError(file, status) {
+  return new CapcutError(`Another capcutctl write is active: ${file}`, {
+    code: 'LOCKED',
+    exitCode: 4,
+    details: status,
+  });
+}
+
+/**
+ * Take over a stale lock without unlinking its pathname. The reclaim gate serializes
+ * reclaimers; the lock file itself is rewritten through the already-existing inode while
+ * normal contenders are still excluded by O_EXCL. This closes the stale-check/unlink race.
+ */
+function reclaimStaleLock(projectDir, file, staleStatus) {
+  const gateFile = `${file}.reclaim`;
+  let gateFd;
+  try {
+    gateFd = fs.openSync(gateFile, 'wx');
+    const gateOwner = lockOwner();
+    writeLockOwner(gateFd, gateOwner);
+    const gate = { file: gateFile, fd: gateFd, identity: fileIdentity(gateFd) };
+    let lockFd = null;
+    let acquired = false;
+    try {
+      lockFd = fs.openSync(file, 'r+');
+      const identity = fileIdentity(lockFd);
+      if (!sameFileIdentity(identity, staleStatus.identity)) {
+        throw lockError(file, { ...staleStatus, status: 'replaced' });
+      }
+      let latest;
+      try {
+        latest = JSON.parse(fs.readFileSync(lockFd, 'utf8'));
+      } catch (error) {
+        throw lockError(file, { ...staleStatus, status: 'invalid', stale: false, error: error.message });
+      }
+      const pid = Number(latest?.pid);
+      if (!Number.isInteger(pid) || pid <= 0) {
+        throw lockError(file, { ...staleStatus, status: 'invalid', stale: false });
+      }
+      let alive;
+      try { alive = pidAlive(pid); }
+      catch (error) { throw lockError(file, { ...staleStatus, status: 'unknown', stale: false, error: error.message }); }
+      if (alive) throw lockError(file, { ...staleStatus, status: 'locked', stale: false, ownerPid: pid });
+
+      const owner = lockOwner();
+      writeLockOwner(lockFd, owner);
+      acquired = true;
+      return lockHandle(file, lockFd, owner, gate);
+    } catch (error) {
+      if (lockFd != null && !acquired) try { fs.closeSync(lockFd); } catch {}
+      throw error;
+    } finally {
+      if (!acquired) releaseReclaimGate(gate);
+    }
+  } catch (error) {
+    if (error?.code === 'EEXIST') {
+      throw lockError(file, { ...staleStatus, status: 'reclaiming', locked: true, stale: false });
+    }
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
 function acquireLock(projectDir, retried = false) {
   const dir = path.join(projectDir, '.capcutctl');
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, 'write.lock');
+  const owner = lockOwner();
   try {
     const fd = fs.openSync(file, 'wx');
-    fs.writeFileSync(fd, stableJson({ pid: process.pid, startedAt: new Date().toISOString() }));
-    return { file, fd };
+    const identity = fileIdentity(fd);
+    try {
+      writeLockOwner(fd, owner);
+      return lockHandle(file, fd, owner);
+    } catch (error) {
+      try { fs.closeSync(fd); } catch {}
+      if (sameFileIdentity(file, identity)) try { fs.unlinkSync(file); } catch {}
+      throw error;
+    }
   } catch (error) {
     if (error.code !== 'EEXIST') throw error;
-    let stale = false;
-    try { stale = !pidAlive(readJson(file).pid); } catch { stale = true; }
-    if (stale && !retried) {
-      try { fs.unlinkSync(file); } catch {}
+    const status = projectLockStatus(projectDir);
+    if (status.stale && !retried) {
+      const reclaimed = reclaimStaleLock(projectDir, file, status);
+      if (reclaimed) return reclaimed;
       return acquireLock(projectDir, true);
     }
-    throw new CapcutError(`Another capcutctl write is active: ${file}`, { code: 'LOCKED', exitCode: 4 });
+    throw lockError(file, status);
   }
 }
 
 function releaseLock(lock) {
+  // Remove the reclaim gate while the lock inode is still ours. A future writer cannot
+  // mistake a live replacement lock for the gate owned by this transaction.
+  releaseReclaimGate(lock?.reclaim);
+  let sameOwner = false;
+  const sameIdentity = sameFileIdentity(lock.file, lock.identity);
+  if (sameIdentity) {
+    try { sameOwner = readJson(lock.file).ownerToken === lock.token; } catch {}
+    if (sameOwner) try { fs.unlinkSync(lock.file); } catch {}
+  }
   try { fs.closeSync(lock.fd); } catch {}
-  try { fs.unlinkSync(lock.file); } catch {}
 }
 
 function stageWrites(writes, transactionId) {
@@ -897,59 +2551,145 @@ function cleanStaged(staged) {
   for (const item of staged || []) try { if (fs.existsSync(item.temp)) fs.unlinkSync(item.temp); } catch {}
 }
 
+/**
+ * Capture the exact bytes at every commit destination. This is deliberately independent of
+ * the durable history snapshot: `--no-backup` still needs to recover if the second mirror
+ * rename or a sidecar rename fails halfway through a transaction.
+ */
+function captureRollbackJournal(files) {
+  const seen = new Set();
+  return [...(files || [])].filter(file => {
+    const resolved = path.resolve(file);
+    if (seen.has(resolved)) return false;
+    seen.add(resolved);
+    return true;
+  }).map(file => {
+    const resolved = path.resolve(file);
+    if (!fs.existsSync(resolved)) return { file: resolved, existed: false, data: null };
+    return { file: resolved, existed: true, data: fs.readFileSync(resolved) };
+  });
+}
+
+function restoreRollbackJournal(journal) {
+  for (const item of journal || []) {
+    if (item.existed) {
+      fs.mkdirSync(path.dirname(item.file), { recursive: true });
+      fs.writeFileSync(item.file, item.data);
+    } else if (fs.existsSync(item.file)) {
+      fs.unlinkSync(item.file);
+    }
+  }
+}
+
+function pendingSidecarRange(sidecarWrite, projectDir) {
+  if (!sidecarWrite) return preservedRange(projectDir);
+  try {
+    const value = JSON.parse(String(sidecarWrite.data));
+    const range = value?.preserved;
+    const start = Number(range?.start);
+    const end = Number(range?.end);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start) return null;
+    return { start, end };
+  } catch {
+    return null;
+  }
+}
+
 export function executeTransaction(projectDir, mutator, {
   dryRun = false,
   forceRunning = false,
   backup = true,
   label = 'edit',
-  forceWriteAll = false
+  forceWriteAll = false,
+  processProbe = null,
+  extraWrites = null,
 } = {}) {
   // A dry run writes nothing, so refusing it while CapCut is open cost a quit-and-relaunch
   // just to see a plan — and his loop is "look in CapCut, then edit". Reads can be torn by an
   // auto-save; that yields a parse error or a stale plan, never a damaged project.
-  assertCapcutClosed({ forceRunning: forceRunning || dryRun });
-  const state = loadProject(projectDir);
-  const working = state.groups.map(group => ({ ...group, doc: clone(group.doc) }));
-  const result = mutator(working);
-  const validation = working.flatMap(group => validateDocument(group.doc, { file: group.canonical, checkFiles: !dryRun }));
-  const errors = validation.filter(item => item.level === 'error');
-  if (errors.length) throw new CapcutError(`Transaction failed validation with ${errors.length} error(s).`, { code: 'VALIDATION_FAILED', details: errors });
-  const changedGroups = working.filter((group, index) => forceWriteAll || stableJson(group.doc) !== stableJson(state.groups[index].doc));
-  const preview = {
-    dryRun,
-    project: projectDir,
-    changedGroups: changedGroups.map(group => group.name),
-    documents: changedGroups.map(group => group.canonical),
-    result,
-    validation
-  };
-  if (dryRun || !changedGroups.length) return { ...preview, committed: false, snapshot: null };
-
-  const lock = acquireLock(projectDir);
+  assertCapcutClosed({ forceRunning: forceRunning || dryRun, probe: processProbe || capcutProcess });
+  // Dry runs intentionally remain write-free, including the lock directory. Real writes
+  // acquire the project lock before the first project read and keep it through post-doctor.
+  const lock = dryRun ? null : acquireLock(projectDir);
   let snapshot = null;
+  let journal = null;
   let staged = [];
+  let commitAttempted = false;
   try {
-    if (backup) snapshot = createSnapshot(projectDir, label);
-    const transactionId = uuid();
+    const state = loadProject(projectDir);
+    const working = state.groups.map(group => ({ ...group, doc: clone(group.doc) }));
+    const result = mutator(working);
+    const pendingWrites = typeof extraWrites === 'function'
+      ? (extraWrites({ projectDir, state, working, result }) || [])
+      : [];
+    const sidecarWrite = pendingWrites.find(item => path.resolve(item.file) === path.resolve(projectDir, SIDECAR_RELATIVE));
+    const parked = pendingSidecarRange(sidecarWrite, projectDir);
+    const validation = working.flatMap(group => validateDocument(group.doc, {
+      file: group.canonical,
+      checkFiles: !dryRun,
+      projectDir,
+      parked,
+      duplicateBaseline: knownPreset3DuplicateBaseline(projectDir),
+    }));
+    const errors = validation.filter(item => item.level === 'error');
+    if (errors.length) throw new CapcutError(`Transaction failed validation with ${errors.length} error(s).`, { code: 'VALIDATION_FAILED', details: errors });
+    const changedGroups = working.filter((group, index) => forceWriteAll || stableJson(group.doc) !== stableJson(state.groups[index].doc));
     const writes = [];
     for (const group of changedGroups) {
       const data = stableJson(group.doc);
       for (const file of group.mirrors) writes.push({ file, data });
     }
+    for (const write of pendingWrites) {
+      if (!write?.file || typeof write.data !== 'string') throw new CapcutError('Transaction extra write is invalid.', { code: 'BAD_TRANSACTION_WRITE' });
+      const file = path.resolve(write.file);
+      const current = fs.existsSync(file) ? fs.readFileSync(file) : null;
+      const data = Buffer.from(write.data);
+      if (!current || !current.equals(data)) writes.push({ file, data: write.data });
+    }
+    const preview = {
+      dryRun,
+      project: projectDir,
+      changedGroups: changedGroups.map(group => group.name),
+      documents: changedGroups.map(group => group.canonical),
+      changedFiles: writes.map(write => path.resolve(write.file)),
+      durations: working.map(group => ({ name: group.name, ...durationInfo(group.doc, projectDir) })),
+      result,
+      validation
+    };
+    if (dryRun || !writes.length) return { ...preview, committed: false, snapshot: null };
+
+    journal = captureRollbackJournal(writes.map(write => write.file));
+    if (backup) snapshot = createSnapshot(projectDir, label);
+    const transactionId = uuid();
     staged = stageWrites(writes, transactionId);
+    commitAttempted = true;
     commitStaged(staged);
     const post = doctor(projectDir, { checkFiles: true });
     if (post.errors) throw new CapcutError(`Post-write validation found ${post.errors} errors.`, { code: 'POST_WRITE_VALIDATION', details: post.issues });
     return { ...preview, committed: true, snapshot, postDoctor: post };
   } catch (error) {
-    if (snapshot) restoreSnapshot(snapshot, projectDir);
+    let rollbackError = null;
+    if (commitAttempted || snapshot) {
+      if (snapshot) {
+        try { restoreSnapshot(snapshot, projectDir); }
+        catch (caught) { rollbackError = caught; }
+      }
+      if (journal) {
+        try { restoreRollbackJournal(journal); }
+        catch (caught) { rollbackError = rollbackError || caught; }
+      }
+    }
+    if (!commitAttempted && !snapshot) throw error;
     const cause = error instanceof CapcutError
       ? { code: error.code, message: error.message, details: error.details }
       : { message: error?.message || String(error) };
-    throw new CapcutError(`Transaction rolled back: ${error.message}`, { code: 'ROLLED_BACK', details: { snapshot, cause } });
+    throw new CapcutError(`Transaction rolled back: ${error.message}`, {
+      code: 'ROLLED_BACK',
+      details: { snapshot, cause, ...(rollbackError ? { rollbackError: rollbackError.message } : {}) }
+    });
   } finally {
     cleanStaged(staged);
-    releaseLock(lock);
+    if (lock) releaseLock(lock);
   }
 }
 
@@ -962,7 +2702,19 @@ export function applySpec(projectDir, spec, options = {}) {
     // independently, so an op that mints ids must mint the SAME ids in each pass or the
     // mirrors drift apart. This was a per-op list and adding `signature` without adding it
     // here produced exactly that drift — silently, until doctor caught it.
-    if (!op.__seed) op.__seed = uuid();
+    if (!op.__seed) {
+      // These two operations are safe to retry only when their generated ids are stable.
+      // Their CLI contracts carry no caller-generated id, and applyOperations runs once per
+      // mirror, so a fresh UUID here would make a second identical invocation churn the draft.
+      if (op.op === 'layout.screen') {
+        op.__seed = ['layout.screen', op.media, op.at, op.duration, op.src, op.srcDur,
+          JSON.stringify(op.selector || op.recordingSelector || null),
+          JSON.stringify(op.pipSelector || null)].join('|');
+      } else if (op.op === 'cut.recut') {
+        op.__seed = ['cut.recut.v1', op.media,
+          (op.plan?.timeline || []).map(item => [item.beat, item.tl_in, item.tl_out, item.src_in, item.dur].join(':')).join('|')].join('|');
+      } else op.__seed = uuid();
+    }
   }
   // One object shared by every op AND by both document passes. Endcard sliding needs it:
   // each op used to re-read created.json and measure from the ORIGINAL window, so two ops in
@@ -970,9 +2722,25 @@ export function applySpec(projectDir, spec, options = {}) {
   const shared = {};
   const tx = executeTransaction(projectDir, groups => groups.map(group => ({
     group: group.name,
-    operations: applyOperations(group.doc, operations, { projectDir, group: group.name, shared, dryRun: Boolean(options.dryRun) })
-  })), { ...options, label: options.label || spec.name || 'apply' });
-  if (tx.committed) commitPreservedSlides(shared);
+    operations: applyOperations(group.doc, operations, {
+      projectDir,
+      group: group.name,
+      shared,
+      dryRun: Boolean(options.dryRun),
+      mediaDurationProbe: options.mediaDurationProbe,
+    })
+  })), {
+    ...options,
+    label: options.label || spec.name || 'apply',
+    extraWrites: () => {
+      const state = shared?.preserved;
+      if (!state?.file || !state.created || (!state.next && state.contentEnd == null)) return [];
+      const created = clone(state.created);
+      if (state.next) created.preserved = state.next;
+      if (state.contentEnd != null) created.contentEnd = state.contentEnd;
+      return [{ file: state.file, data: stableJson(created) }];
+    },
+  });
   return tx;
 }
 
@@ -985,10 +2753,21 @@ export function restoreProjectSnapshot(projectDir, snapshotNameOrPath, options =
     throw new CapcutError('Snapshot must be a named entry inside this project\'s .capcutctl/history directory.', { code: 'SNAPSHOT_SCOPE', exitCode: 2 });
   }
   const manifestFile = path.join(snapshotDir, 'manifest.json');
-  if (!fs.existsSync(manifestFile)) throw new CapcutError(`Snapshot not found: ${snapshotNameOrPath}`, { code: 'SNAPSHOT_NOT_FOUND', exitCode: 2 });
   const lock = acquireLock(projectDir);
   let rescue = null;
+  let journal = null;
   try {
+    // Do not inspect or load the snapshot until the project lock is held. A restore is a
+    // write transaction too; otherwise a concurrent apply could read/change the same
+    // mirrors between the preflight and this restore.
+    if (!fs.existsSync(manifestFile)) {
+      throw new CapcutError(`Snapshot not found: ${snapshotNameOrPath}`, { code: 'SNAPSHOT_NOT_FOUND', exitCode: 2 });
+    }
+    const manifest = readJson(manifestFile);
+    journal = captureRollbackJournal([
+      ...(manifest.files || []).map(item => path.join(projectDir, item.relative)),
+      ...(manifest.absent || []).map(item => path.join(projectDir, item)),
+    ]);
     if (options.backup !== false) rescue = createSnapshot(projectDir, options.label || 'before-restore');
     // Restore into THIS projectDir, not the absolute path baked into the manifest.
     // CapCut (and `mv`) rename draft folders; the snapshot already lives inside
@@ -1000,6 +2779,7 @@ export function restoreProjectSnapshot(projectDir, snapshotNameOrPath, options =
     return { restored: snapshotDir, rescue, postDoctor: post };
   } catch (error) {
     if (rescue) restoreSnapshot(rescue, projectDir);
+    if (journal) restoreRollbackJournal(journal);
     const cause = error instanceof CapcutError
       ? { code: error.code, message: error.message, details: error.details }
       : { message: error?.message || String(error) };
@@ -1050,14 +2830,19 @@ export function syncMirrors(projectDir, options = {}) {
 
 export function inspectProject(projectDir) {
   const state = loadProject(projectDir);
+  const capcut = capcutStatus({ root: path.dirname(projectDir) });
   return {
     project: projectDir,
     activeTimelineId: state.activeTimelineId,
-    capcut: capcutProcess(),
+    capcut,
     groups: state.groups.map(group => ({
       name: group.name,
       file: group.canonical,
       duration: group.doc.duration,
+      contentDuration: group.durations.contentDurationUs,
+      editDuration: group.durations.editDurationUs,
+      draftDuration: group.durations.draftDurationUs,
+      durations: group.durations,
       fps: group.doc.fps,
       canvas: group.doc.canvas_config,
       tracks: (group.doc.tracks || []).map((track, index) => ({

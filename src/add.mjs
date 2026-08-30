@@ -3,17 +3,30 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { CapcutError, clone, uuid, allSegments, selectSegments, stableJson, localizeMedia, isLocalMedia, PRESET_PARK_GAP_US } from './core.mjs';
-import { insertOverlayTrack, renumberTracks } from './layouts.mjs';
+import {
+  CapcutError, clone, uuid, allSegments, selectSegments, stableJson, localizeMedia,
+  isLocalMedia, PRESET_PARK_GAP_US, contentEndUs as sharedContentEndUs,
+  maxSegmentEndUs as sharedMaxSegmentEndUs,
+} from './core.mjs';
+import {
+  insertOverlayTrack, renumberTracks, recordMediaProvenance, commitMediaProvenance,
+  sourceTakeId
+} from './layouts.mjs';
 import { principalTrack } from './polish.mjs';
 
 const US = s => Math.round(s * 1e6);
 const S = us => us / 1e6;
 const r3 = n => Math.round(n * 1000) / 1000;
 
+// Extras a newly placed clip must NEVER inherit from the segment it is modelled on.
+// `transitions` belongs here: a transition is a property of the ORIGINAL cut, not of the clip.
+// Cloning one onto a fresh B-roll clip puts it at the end of an overlay with no clip after it,
+// which CapCut silently drops on load and `doctor` rejects as TRANSITION_ORPHANED — every `add`
+// against a project that had already been polished rolled back. `polish` owns transitions; it
+// clears and rebuilds them all on the finish pass, so there is nothing to preserve here.
 const LOOK_KINDS = new Set([
   'common_mask', 'video_effects', 'material_animations',
-  'filters', 'adjusts', 'effects', 'chromas', 'hsl'
+  'filters', 'adjusts', 'effects', 'chromas', 'hsl', 'transitions'
 ]);
 
 let SEED = null;
@@ -188,6 +201,7 @@ function slidePreserved(doc, context, clipEndUs, op = {}, { wasAtUs = null } = {
 
 /** Persist the slid endcard window once, after both documents committed. */
 export function commitPreservedSlides(shared) {
+  commitMediaProvenance(shared);
   const state = shared?.preserved;
   if (!state?.file || !state.created) return;
   if (!state.next && state.contentEnd == null) return;
@@ -198,32 +212,9 @@ export function commitPreservedSlides(shared) {
   fs.writeFileSync(state.file, stableJson(created));
 }
 
-/**
- * End of the real edit: last clip on the talking-head track that is not inside the
- * parked Preset 3 leftover. Wrap/Follow/music use this, never draft duration —
- * duration includes the leftover parts-bin.
- */
-export function contentEndUs(doc, projectDir = null) {
-  let parked = null;
-  if (projectDir) {
-    try {
-      const created = JSON.parse(fs.readFileSync(path.join(projectDir, '.capcutctl', 'created.json'), 'utf8'));
-      if (created?.preserved?.start > 0) parked = created.preserved.start;
-    } catch { /* no sidecar */ }
-  }
-  let end = 0;
-  try {
-    const { track } = principalTrack(doc);
-    for (const s of track.segments || []) {
-      const start = s.target_timerange?.start || 0;
-      if (parked != null && start >= parked - 1) continue;
-      const e = start + (s.target_timerange?.duration || 0);
-      if (e > end) end = e;
-    }
-  } catch { /* no principal track */ }
-  if (end > 0) return parked != null ? Math.min(end, parked) : end;
-  if (parked != null) return parked;
-  return doc.duration || 0;
+/** Backward-compatible add-module export; the implementation lives in core's shared contract. */
+export function contentEndUs(...args) {
+  return sharedContentEndUs(...args);
 }
 
 /**
@@ -237,7 +228,7 @@ export function parkPresetLeftover(doc, context = {}, op = {}) {
   const state = slideState(projectDir, context.shared || (context.shared = {}));
   if (!state.window?.start) return { slid: 0 };
   if (op.__park === undefined) {
-    const contentEnd = contentEndUs(doc, projectDir);
+    const contentEnd = sharedContentEndUs(doc, projectDir);
     const desired = contentEnd + PRESET_PARK_GAP_US;
     const from = state.window.start + (state.total || 0);
     op.__park = from >= desired - 1000 ? 0 : desired - from;
@@ -259,7 +250,13 @@ export function parkPresetLeftover(doc, context = {}, op = {}) {
       }
     }
   }
-  doc.duration = Math.max(doc.duration || 0, state.next.end);
+  // `state.next.end` is only where created.json SAYS the leftover ends. The parts bin is
+  // there to be rearranged in CapCut, so a leftover segment can legitimately end past that
+  // recorded window — and shifting it by `delta` then put it beyond doc.duration, which
+  // post-write validation rejects as SEGMENT_AFTER_END and rolls the whole wrap/zoom
+  // transaction back. Measure what is actually on the timeline instead.
+  const end = Math.max(state.next.end, sharedMaxSegmentEndUs(doc));
+  doc.duration = Math.max(doc.duration || 0, end);
   return { slid: delta, preserved: state.next };
 }
 
@@ -300,6 +297,28 @@ function ensureMaterial(doc, op, context) {
   return material;
 }
 
+function annotateMediaSource(material, segment, originalPath, localizedPath, context) {
+  if (!material || !originalPath) return null;
+  const original = path.resolve(originalPath);
+  const localized = localizedPath ? path.resolve(localizedPath) : path.resolve(material.path || original);
+  const takeId = sourceTakeId(original);
+  // These fields are intentionally redundant with media-map.json: they survive a project
+  // copy even when a sidecar is omitted, and let polish associate RL2 events per take.
+  material.source_take_id = takeId;
+  material.source_path = original;
+  if (localized !== original) material.original_path = original;
+  if (segment) segment.source_take_id = takeId;
+  if (localized !== original) {
+    recordMediaProvenance(context, {
+      materialId: material.id,
+      originalPath: original,
+      localizedPath: localized,
+      sourceTakeId: takeId,
+    });
+  }
+  return takeId;
+}
+
 /**
  * Place a clip on a named overlay. Never invents CapCut structure — clones a
  * plain segment already in the draft. Overlap is refused here (TRACK_OVERLAP
@@ -309,6 +328,10 @@ function ensureMaterial(doc, op, context) {
 export function opClipAdd(doc, op, context = {}) {
   SEED = op.__seed || null;
   if (!op.media) throw new CapcutError('clip.add requires media.', { code: 'NO_MEDIA', exitCode: 2 });
+  // applySpec reuses the operation object for root and active-timeline passes. Preserve the
+  // caller's source before the first pass replaces `op.media` with its localized destination.
+  const originalMedia = path.resolve(op.__sourceMedia || op.media);
+  op.__sourceMedia ||= originalMedia;
   const atUs = US(op.at);
   const durUs = US(op.duration);
   if (!(durUs > 0)) throw new CapcutError('clip.add: --dur must be positive.', { code: 'BAD_TIME', exitCode: 2 });
@@ -370,6 +393,7 @@ export function opClipAdd(doc, op, context = {}) {
   // `pace` reads the material first and only falls back to the segment, so a clip whose
   // material still says 1x reports as un-ramped forever.
   setSpeedMaterial(doc, segment, speed);
+  annotateMediaSource(material, segment, originalMedia, material.path, context);
   dest.track.segments = dest.track.segments || [];
   dest.track.segments.push(segment);
   dest.track.segments.sort((a, b) => (a.target_timerange?.start || 0) - (b.target_timerange?.start || 0));
@@ -394,6 +418,10 @@ export function opClipAdd(doc, op, context = {}) {
 export function opReplaceMedia(doc, op, context = {}) {
   SEED = op.__seed || null;
   if (!op.path) throw new CapcutError('replace.media requires path.', { code: 'NO_MEDIA', exitCode: 2 });
+  // The same operation is applied to root and active-timeline documents. Keep the original
+  // source before the first pass replaces `op.path` with its localized destination.
+  const originalPath = path.resolve(op.__sourcePath || op.path);
+  op.__sourcePath ||= originalPath;
   const found = selectSegments(doc, op.selector || {});
   if (!found.length) throw new CapcutError(`replace.media: no segment matched ${JSON.stringify(op.selector)}.`, { code: 'SELECTOR_EMPTY' });
   // Silently relinking found[0] meant an ambiguous selector swapped one clip's media and left
@@ -450,6 +478,7 @@ export function opReplaceMedia(doc, op, context = {}) {
         { code: 'SOURCE_AFTER_END', exitCode: 2 });
     }
   }
+  annotateMediaSource(material, seg, originalPath, dest, context);
   return { changed: 1, id: seg.id, materialId: material.id, path: dest, shared: shared && true };
 }
 
@@ -494,8 +523,18 @@ export function opLocalizeAll(doc, op, context = {}) {
       if ('media_path' in mat) mat.media_path = '';
       mat.material_name = path.basename(dest);
       if (!(mat.duration > 0)) mat.duration = probeDurationUs(dest);
+      annotateMediaSource(mat, null, src, dest, context);
     }
   }
+  // Which paths this run actually put inside the project. A sibling record for the same id
+  // may still point at the CapCut cache or at a file that no longer exists — the very
+  // condition localize is run to fix — so `best` must be chosen by whether the path is GOOD,
+  // not by `duration > 0` alone. It used to copy the un-localized path back over the
+  // localized one: a silent revert, or a MISSING_MEDIA rollback when the path was gone.
+  const localized = new Set(seen.values());
+  const pathRank = m => (localized.has(m.path) ? 4 : 0)
+                      + (isLocalMedia(projectDir, m.path) ? 2 : 0)
+                      + (typeof m.path === 'string' && m.path && fs.existsSync(m.path) ? 1 : 0);
   for (const kind of kinds) {
     const byId = new Map();
     for (const mat of doc.materials?.[kind] || []) {
@@ -505,13 +544,23 @@ export function opLocalizeAll(doc, op, context = {}) {
     }
     for (const clones of byId.values()) {
       if (clones.length < 2) continue;
-      const best = clones.find(m => m.duration > 0) || clones[0];
+      // Stable sort, so equally-ranked records keep their order and this still resolves to
+      // the old "first record with a duration" when no path is better than any other.
+      const best = [...clones].sort((a, b) =>
+        pathRank(b) - pathRank(a) || (b.duration > 0) - (a.duration > 0))[0];
+      // The winning path may carry no probed duration yet; do not zero out one we have.
+      const duration = best.duration > 0
+        ? best.duration
+        : (clones.find(m => m.duration > 0)?.duration ?? best.duration);
       for (const m of clones) {
         m.path = best.path;
-        m.duration = best.duration;
+        m.duration = duration;
         m.material_name = best.material_name;
         if (best.width) m.width = best.width;
         if (best.height) m.height = best.height;
+        for (const key of ['original_path', 'source_path', 'source_take_id']) {
+          if (best[key] != null) m[key] = best[key];
+        }
         if ('media_path' in m) m.media_path = '';
       }
     }
@@ -695,5 +744,3 @@ export function opClipFade(doc, op) {
   entry.segment.extra_material_refs = [...(entry.segment.extra_material_refs || []), copied.id];
   return { changed: 1, id: entry.segment.id, fadeId: copied.id, in: r3(S(fadeIn)), out: r3(S(fadeOut)), updated: false };
 }
-
-

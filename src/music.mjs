@@ -28,9 +28,12 @@ function mmss(t) {
 }
 
 /** Timed instrumental prompt: picture-change hits in the score, quiet under speech, out at the CTA. */
-export function musicPrompt(doc, { duration = null, hits = null } = {}) {
-  const dur = duration ?? S(doc.duration || 0);
-  const changes = hits || pictureChanges(doc);
+export function musicPrompt(doc, { duration = null, hits = null, projectDir = null } = {}) {
+  const dur = duration ?? S(contentEndUs(doc, projectDir));
+  const changes = (hits || pictureChanges(doc)).filter(hit => {
+    const t = Number(hit?.t);
+    return Number.isFinite(t) && t >= 0 && t < dur;
+  });
   const last = changes.at(-1)?.t ?? dur * 0.9;
   const cta = Math.max(dur * 0.9, last);
   const lines = [
@@ -210,6 +213,16 @@ export function promptHash(prompt) {
   return crypto.createHash('sha256').update(prompt).digest('hex').slice(0, 16);
 }
 
+function readMusicMeta(file) {
+  if (!fs.existsSync(file)) return {};
+  try {
+    const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  } catch {
+    return {};
+  }
+}
+
 function ensureAudioTrack(doc, name) {
   let track = doc.tracks.find(t => t.type === 'audio' && t.name === name);
   if (track) return track;
@@ -332,14 +345,41 @@ export function opMusic(doc, op, context = {}) {
   };
 }
 
-export async function prepareMusic(projectDir, doc, { regen = false, volume = DEFAULT_MUSIC_VOLUME, prompt: override } = {}) {
+export async function prepareMusic(projectDir, doc, {
+  regen = false,
+  volume = DEFAULT_MUSIC_VOLUME,
+  prompt: override,
+  dryRun = false,
+} = {}) {
   const hits = pictureChanges(doc);
-  const prompt = override || musicPrompt(doc, { hits });
+  const prompt = override || musicPrompt(doc, { hits, projectDir });
   const hash = promptHash(prompt);
   const paths = musicCachePaths(projectDir);
+  const prev = readMusicMeta(paths.meta);
+  const cached = fs.existsSync(paths.file);
+  const stale = !cached || prev.hash !== hash;
+  if (dryRun) {
+    const usableCache = cached && !stale;
+    const beats = usableCache && Array.isArray(prev.beats) ? prev.beats : [];
+    const duration = usableCache && Number.isFinite(Number(prev.duration))
+      ? Number(prev.duration)
+      : S(contentEndUs(doc, projectDir));
+    return {
+      hash,
+      prompt,
+      generated: false,
+      wouldGenerate: Boolean(regen || stale),
+      duration,
+      beats,
+      hits: hits.map(h => ({ t: h.t, kind: h.kind })),
+      align: beatOffset(beats, hits),
+      volume,
+      file: paths.file,
+      model: 'lyria-3-pro-preview',
+      dryRun: true,
+    };
+  }
   fs.mkdirSync(paths.dir, { recursive: true });
-  const prev = fs.existsSync(paths.meta) ? JSON.parse(fs.readFileSync(paths.meta, 'utf8')) : {};
-  const stale = !fs.existsSync(paths.file) || prev.hash !== hash;
   let generated = false;
   if (regen || stale) {
     const buf = await generateLyria({ prompt });

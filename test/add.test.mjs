@@ -4,7 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { applySpec, doctor, readJson, stableJson } from '../src/core.mjs';
+import { applySpec, doctor, isLocalMedia, localizeMedia, readJson, stableJson } from '../src/core.mjs';
+import { opClipAdd, opLocalizeAll, opReplaceMedia, parkPresetLeftover } from '../src/add.mjs';
 
 function fixture({ duration = 10_000_000, endcard = false } = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-add-'));
@@ -476,4 +477,189 @@ test('replace-media and trim refuse upfront instead of rolling the transaction b
     /SOURCE_AFTER_END|exceeds/);
 
   assert.equal(doctor(f.project).errors, 0);
+});
+
+/** A project dir carrying only the sidecar the park reads. */
+function parked({ start, end }) {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-park-'));
+  fs.mkdirSync(path.join(temp, '.capcutctl'), { recursive: true });
+  fs.writeFileSync(path.join(temp, '.capcutctl', 'created.json'),
+    JSON.stringify({ preserved: { start, end } }));
+  return temp;
+}
+
+test('parking the leftover measures duration from the segments it moved', () => {
+  // created.json said the parts bin ended at 48s; the user had since dragged a clip in it
+  // out to 60s, which is what the parts bin is FOR. The duration floor came from the stale
+  // sidecar, so the shifted clip landed past doc.duration: SEGMENT_AFTER_END, and the whole
+  // wrap/zoom transaction rolled back.
+  const projectDir = parked({ start: 40_000_000, end: 48_000_000 });
+  const seg = (id, start, dur) => ({ id, material_id: 'V', extra_material_refs: [],
+    target_timerange: { start, duration: dur }, source_timerange: { start: 0, duration: dur } });
+  const doc = {
+    duration: 60_000_000,
+    materials: { videos: [{ id: 'V', type: 'video', path: '/a/cam.mp4' }] },
+    tracks: [
+      { type: 'video', id: 't0', flag: 0, segments: [] },
+      { type: 'video', id: 'face', segments: [seg('FACE', 0, 38_000_000)] },
+      { type: 'video', id: 'bin', segments: [seg('LEFTOVER', 45_000_000, 15_000_000)] },
+    ],
+  };
+
+  const r = parkPresetLeftover(doc, { projectDir, shared: {} }, {});
+  assert.ok(r.slid > 0, 'the leftover was parked');
+  const end = Math.max(...doc.tracks.flatMap(t => t.segments)
+    .map(s => s.target_timerange.start + s.target_timerange.duration));
+  assert.equal(end, 60_000_000 + r.slid);
+  assert.ok(doc.duration >= end, `duration ${doc.duration} must cover the parked leftover at ${end}`);
+});
+
+test('localizing does not copy an un-relinked sibling back over the relink', () => {
+  // CapCut repeats material ids. The pass that makes the duplicates agree picked its winner
+  // by `duration > 0` alone, so a sibling still pointing at a file that no longer exists —
+  // the very condition localize is run to fix — overwrote the path just localized.
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-loc-'));
+  const project = path.join(temp, 'Project');
+  fs.mkdirSync(project, { recursive: true });
+  const take = path.join(temp, 'take-a');
+  fs.mkdirSync(take);
+  const source = path.join(take, 'screen.mp4');
+  fs.writeFileSync(source, 'take-a-bytes');
+
+  const doc = { materials: { videos: [
+    { id: 'DUP', type: 'video', path: source, duration: 0 },
+    { id: 'DUP', type: 'video', path: path.join(temp, 'gone.mp4'), duration: 5_000_000 },
+  ] } };
+  opLocalizeAll(doc, {}, { projectDir: project });
+
+  const [a, b] = doc.materials.videos;
+  assert.equal(a.path, b.path, 'the duplicates still agree');
+  assert.ok(isLocalMedia(project, a.path), `${a.path} should sit inside the project`);
+  assert.ok(fs.existsSync(a.path));
+  assert.equal(a.duration, 5_000_000, 'the only duration we had is not thrown away');
+});
+
+test('two different takes with the same name and the same size get different files', () => {
+  // Byte size alone decided whether a colliding destination could be reused, and the copy
+  // went ahead either way — so the second take silently overwrote the first and every
+  // material already pointing there played the wrong footage.
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-collide-'));
+  const project = path.join(temp, 'Project');
+  fs.mkdirSync(project, { recursive: true });
+  const make = (root, bytes) => {
+    const dir = path.join(temp, root, 'take');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'screen.mp4');
+    fs.writeFileSync(file, bytes);
+    return file;
+  };
+  const one = make('a', 'AAAA');
+  const two = make('b', 'BBBB');                 // same parent name, same basename, same size
+
+  const destOne = localizeMedia(project, one);
+  const destTwo = localizeMedia(project, two);
+  assert.notEqual(destOne, destTwo, 'the second take must not claim the first take\'s file');
+  assert.equal(fs.readFileSync(destOne, 'utf8'), 'AAAA');
+  assert.equal(fs.readFileSync(destTwo, 'utf8'), 'BBBB');
+
+  // and localizing the same source again resolves to the file it already made
+  assert.equal(localizeMedia(project, one), destOne);
+  assert.equal(localizeMedia(project, two), destTwo);
+  assert.equal(fs.readdirSync(path.join(project, 'Resources', 'CapcutctlMedia')).length, 2);
+});
+
+test('localize copies an rl2 trace sidecar next to the draft', () => {
+  const f = fixture();
+  const take = path.join(f.temp, 'windows-2-20260829-195938');
+  fs.mkdirSync(take);
+  fs.writeFileSync(path.join(take, 'screen.mp4'), 'pixels');
+  fs.writeFileSync(path.join(take, 'trace.ndjson'), '{"type":"click"}\n');
+  fs.writeFileSync(path.join(take, 'session.json'), '{"schema":1}\n');
+  localizeMedia(f.project, path.join(take, 'screen.mp4'));
+  const dest = path.join(f.project, '.capcutctl', 'rl2', 'windows-2-20260829-195938');
+  assert.equal(fs.existsSync(path.join(dest, 'trace.ndjson')), true);
+  assert.equal(fs.existsSync(path.join(dest, 'session.json')), true);
+});
+
+test('localization and relink persist an atomic material-to-original map', () => {
+  const f = fixture();
+  const source = path.join(f.temp, 'Original Take', 'screen.mp4');
+  fs.mkdirSync(path.dirname(source), { recursive: true });
+  fs.writeFileSync(source, 'original-source');
+  const doc = readJson(path.join(f.project, 'draft_info.json'));
+  const result = opReplaceMedia(doc, {
+    selector: { id: 'SUBJECT' }, path: source, localize: true, mediaDuration: 60_000_000
+  }, { projectDir: f.project });
+  assert.equal(result.changed, 1);
+
+  const material = doc.materials.videos.find(item => item.id === 'VIDEO');
+  const mapFile = path.join(f.project, '.capcutctl', 'media-map.json');
+  const map = readJson(mapFile);
+  assert.equal(map.version, 1);
+  assert.equal(map.materials.VIDEO.originalPath, fs.realpathSync(source));
+  assert.equal(map.materials.VIDEO.localizedPath, fs.realpathSync(material.path));
+  assert.equal(map.paths[fs.realpathSync(material.path)], fs.realpathSync(source));
+  assert.equal(material.original_path, source);
+  assert.match(material.source_take_id, /^rl2-/);
+  assert.doesNotThrow(() => JSON.parse(fs.readFileSync(mapFile, 'utf8')));
+  assert.equal(fs.readdirSync(path.join(f.project, '.capcutctl')).some(name => name.endsWith('.tmp')), false);
+});
+
+test('two localized RL2 takes with the same directory and file basenames keep distinct identities', () => {
+  const f = fixture();
+  const makeTake = name => {
+    const dir = path.join(f.temp, name, 'take');
+    fs.mkdirSync(dir, { recursive: true });
+    const media = path.join(dir, 'screen.mp4');
+    fs.writeFileSync(media, `${name}-pixels`);
+    fs.writeFileSync(path.join(dir, 'trace.ndjson'), JSON.stringify({ type: 'click', host: 100 }) + '\n');
+    fs.writeFileSync(path.join(dir, 'session.json'), JSON.stringify({ start_host: 90 }));
+    return media;
+  };
+  const one = makeTake('first');
+  const two = makeTake('second');
+  const doc = readJson(path.join(f.project, 'draft_info.json'));
+  const first = opClipAdd(doc, { ...addOp(f, { media: one, id: 'TAKE-ONE', track: 'take-one', at: 1, duration: 1, src: 0 }), localize: true }, { projectDir: f.project });
+  const second = opClipAdd(doc, { ...addOp(f, { media: two, id: 'TAKE-TWO', track: 'take-two', at: 3, duration: 1, src: 0 }), localize: true }, { projectDir: f.project });
+  const segments = doc.tracks.flatMap(track => track.segments).filter(segment => ['TAKE-ONE', 'TAKE-TWO'].includes(segment.id));
+  const materials = segments.map(segment => doc.materials.videos.find(item => item.id === segment.material_id));
+  assert.equal(first.changed, 1);
+  assert.equal(second.changed, 1);
+  assert.equal(new Set(materials.map(item => item.source_take_id)).size, 2);
+  assert.equal(new Set(materials.map(item => item.path)).size, 2);
+  const rl2Root = path.join(f.project, '.capcutctl', 'rl2');
+  const sidecars = fs.readdirSync(rl2Root).filter(name => fs.statSync(path.join(rl2Root, name)).isDirectory());
+  assert.equal(sidecars.length, 2);
+  for (const material of materials) {
+    const matching = sidecars.filter(name => name.endsWith(material.source_take_id.slice(-12)));
+    assert.equal(matching.length, 1, material.source_take_id);
+    const session = readJson(path.join(rl2Root, matching[0], 'session.json'));
+    assert.equal(session.capcutctl.source_take_id, material.source_take_id);
+    assert.equal(session.capcutctl.material_id, material.id);
+  }
+});
+
+test('polish leaves no overlapping segments on any lane, end to end', () => {
+  // The seam woosh and the click that the same callout triggers used to share one track.
+  const f = fixture();
+  const plate = path.join(f.temp, 'rect-16-9-1080x608.gif');
+  fs.writeFileSync(plate, 'plate-bytes');
+  applySpec(f.project, { version: 1, operations: [
+    { ...addOp(f, { at: 1, duration: 1.5, desc: 'screen a' }) },
+    { ...addOp(f, { at: 3, duration: 1.5, src: 40, desc: 'screen b' }) },
+    { ...addOp(f, { media: plate, at: 1.2, duration: 1, src: 0, track: 'callouts',
+                    desc: 'callout', mediaDuration: 5_000_000 }) },
+    { ...addOp(f, { media: plate, at: 3.2, duration: 1, src: 0, track: 'callouts',
+                    desc: 'callout', mediaDuration: 5_000_000 }) },
+    { op: 'polish' },
+  ] }, { forceRunning: true });
+
+  const report = doctor(f.project);
+  assert.deepEqual(report.issues.filter(i => i.code === 'TRACK_OVERLAP').map(i => i.message), []);
+  assert.equal(report.errors, 0, JSON.stringify(report.issues, null, 2));
+
+  const doc = readJson(path.join(f.project, 'draft_info.json'));
+  const clicks = doc.tracks.find(t => t.name === 'polish-callout');
+  assert.ok(clicks && clicks.segments.length === 2, 'both callouts got a click');
+  assert.ok(doc.tracks.find(t => t.name === 'polish-sfx').segments.length > 0, 'and the seams got wooshes');
 });

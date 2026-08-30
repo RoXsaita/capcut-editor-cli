@@ -1,6 +1,10 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import { CapcutError, clone, uuid, allSegments, loadPreset } from './core.mjs';
+import {
+  CapcutError, clone, uuid, allSegments, loadPreset, contentEndUs as sharedContentEndUs
+} from './core.mjs';
 
 export function sfxPresets() {
   return loadPreset('sfx');
@@ -16,19 +20,53 @@ function mint(key) {
 const US = s => Math.round(s * 1e6);
 const arr = (doc, kind) => (doc.materials[kind] ||= []);
 
+const SCREEN_RECORDING_DESC = 'layout:screen-recording';
+
+/** Generated screen decorations are not independent footage or callout plates. */
+function isScreenHelper(segment) {
+  const desc = String(segment?.desc || '');
+  return desc.startsWith('layout:') && desc !== SCREEN_RECORDING_DESC;
+}
+
+function contentBoundaryUs(doc, projectDir = null) {
+  let end = Number(sharedContentEndUs(doc, projectDir));
+  const declared = Number(doc?.contentEnd);
+  if (Number.isFinite(declared) && declared > 0) {
+    const declaredUs = declared > 100_000 ? Math.round(declared) : US(declared);
+    end = end > 0 ? Math.min(end, declaredUs) : declaredUs;
+  }
+  if (!(end > 0)) end = Number(doc?.duration) || 0;
+  return end;
+}
+
+function inContent(doc, segment, projectDir = null) {
+  const start = Number(segment?.target_timerange?.start);
+  return Number.isFinite(start) && start < contentBoundaryUs(doc, projectDir);
+}
+
+function isVisibleBroll(doc, segment) {
+  const desc = String(segment?.desc || '');
+  if (isScreenHelper(segment) || desc.startsWith('sig:')) return false;
+  const material = (doc.materials?.videos || []).find(item => item.id === segment.material_id);
+  if (!material) return false;
+  if (material.type && material.type !== 'video') return false;
+  const file = String(material.path || '').toLowerCase();
+  if (/\.(png|jpe?g|gif|webp|heic)$/.test(file)) return false;
+  return Boolean(segment.source_timerange && segment.target_timerange);
+}
+
 function r2(n) { return Math.round(n * 100) / 100; }
 
-function coveringBroll(doc, t, principalIndex) {
+function coveringBroll(doc, t, principalIndex, projectDir = null) {
   const us = US(t);
-  const plates = new Set((doc.materials?.videos || []).filter(m => m.type && m.type !== 'video').map(m => m.id));
+  if (us < 0 || us >= contentBoundaryUs(doc, projectDir)) return null;
   const videos = new Map((doc.materials?.videos || []).map(m => [m.id, m]));
   for (let i = 0; i < principalIndex; i++) {
     const track = doc.tracks[i];
     if (!track || track.type !== 'video' || track.flag === 0) continue;
     for (const s of track.segments || []) {
       if (!s.target_timerange) continue;
-      if ((s.desc || '').startsWith('layout:')) continue;
-      if (plates.has(s.material_id)) continue;
+      if (!isVisibleBroll(doc, s) || !inContent(doc, s, projectDir)) continue;
       const a = s.target_timerange.start, b = a + s.target_timerange.duration;
       if (a - 20000 < us && us < b - 20000) {
         const m = videos.get(s.material_id);
@@ -47,6 +85,7 @@ function coveringBroll(doc, t, principalIndex) {
 }
 
 function coveringLayout(doc, t, principal) {
+  if (!principal) return 'none';
   const us = US(t);
   const masks = new Map((doc.materials?.common_mask || []).map(m => [m.id, m]));
   const seg = (principal.track.segments || []).find(s => {
@@ -103,20 +142,22 @@ function shotChanged(a, b) {
  * An A-roll splice over an unchanged files list is not a picture change —
  * decorating those is what made grok-build-final feel machine-made.
  */
-export function pictureChanges(doc, { minGap = 0.9, track = null } = {}) {
-  const principal = principalTrack(doc, track);
+export function pictureChanges(doc, { minGap = 0.9, track = null, projectDir = null } = {}) {
+  const principal = optionalPrincipal(doc, track);
+  // With no talking head above it, every visible video track is B-roll.
+  const brollBelow = principal ? principal.index : doc.tracks.length;
   const marks = [];
   const seen = new Set();
   for (const { segment, track: tr } of allSegments(doc)) {
     if (tr.type !== 'video' || !(tr.segments || []).length) continue;
-    if ((segment.desc || '').startsWith('layout:')) continue;
+    if (isScreenHelper(segment) || !inContent(doc, segment, projectDir)) continue;
     const t = segment.target_timerange.start / 1e6;
     if (t <= 0.001) continue;
     const key = Math.round(t * 30) / 30;
     if (seen.has(key)) continue;
     seen.add(key);
-    const beforeB = coveringBroll(doc, t - 0.05, principal.index);
-    const afterB = coveringBroll(doc, t + 0.05, principal.index);
+    const beforeB = coveringBroll(doc, t - 0.05, brollBelow, projectDir);
+    const afterB = coveringBroll(doc, t + 0.05, brollBelow, projectDir);
     const beforeL = coveringLayout(doc, t - 0.05, principal);
     const afterL = coveringLayout(doc, t + 0.05, principal);
     const brollChanged = shotChanged(beforeB, afterB);
@@ -133,12 +174,12 @@ export function pictureChanges(doc, { minGap = 0.9, track = null } = {}) {
 }
 
 /** Cut points that a viewer actually sees: a scene change on any visual track. */
-export function cutPoints(doc, { minGap = 0.9 } = {}) {
+export function cutPoints(doc, { minGap = 0.9, projectDir = null } = {}) {
   const marks = new Map();
   for (const { segment, track } of allSegments(doc)) {
     if (track.type !== 'video' || !(track.segments || []).length) continue;
     const desc = segment.desc || '';
-    if (desc.startsWith('layout:')) continue;              // bars and plates are not cuts
+    if (isScreenHelper(segment) || !inContent(doc, segment, projectDir)) continue;
     const t = segment.target_timerange.start / 1e6;
     if (t <= 0.001) continue;                              // the first frame is not a cut
     const key = Math.round(t * 30) / 30;                   // frame-quantised
@@ -273,6 +314,24 @@ export function principalTrack(doc, explicit = null) {
   return top.at(-1);
 }
 
+/**
+ * The principal track when there is one, `null` when there is not.
+ *
+ * Seams and sweeps are a nice-to-have; transitions are not. `--no-transitions` exists
+ * precisely for drafts with no gapless-from-zero video track (B-roll that starts at 2s),
+ * so the sweep/no-sweep decision must degrade there instead of throwing. `opPolish` still
+ * calls `principalTrack` directly for the transition pass, so a draft that genuinely needs
+ * one still fails loudly.
+ */
+function optionalPrincipal(doc, explicit = null) {
+  try {
+    return principalTrack(doc, explicit);
+  } catch (err) {
+    if (err instanceof CapcutError && err.code === 'NO_PRINCIPAL_TRACK') return null;
+    throw err;
+  }
+}
+
 /** Clone a segment's extra materials so the two halves of a split do not share state. */
 function cloneRefs(doc, segment, key) {
   const out = [];
@@ -335,9 +394,13 @@ export function sliceAt(doc, track, t, key) {
  */
 export function planPolish(doc, opts = {}) {
   const p = sfxPresets();
-  let cuts = cutPoints(doc, { minGap: opts.minGap ?? 0.9 });
+  let cuts = cutPoints(doc, { minGap: opts.minGap ?? 0.9, projectDir: opts.projectDir ?? null });
   if (opts.motivated) {
-    const allowed = pictureChanges(doc, { minGap: opts.minGap ?? 0.9, track: opts.track ?? null });
+    const allowed = pictureChanges(doc, {
+      minGap: opts.minGap ?? 0.9,
+      track: opts.track ?? null,
+      projectDir: opts.projectDir ?? null,
+    });
     cuts = cuts.filter(c => allowed.some(a => Math.abs(a.t - c.t) < 0.08));
     // a picture change with no clip-boundary still needs a seam if the principal can be sliced
     for (const a of allowed) {
@@ -351,7 +414,7 @@ export function planPolish(doc, opts = {}) {
   // cut claimed to be a layout change and took a sweep — 8 of 13 seams here, a 62%
   // Horizontal Triptych share against the ~45% ceiling in his hand-cut projects.
   // Compare the actual layout class either side instead.
-  const principalT = principalTrack(doc, opts.track ?? null);
+  const principalT = optionalPrincipal(doc, opts.track ?? null);
   const layoutChange = t =>
     coveringLayout(doc, t - 0.05, principalT) !== coveringLayout(doc, t + 0.05, principalT);
 
@@ -381,21 +444,34 @@ export function planPolish(doc, opts = {}) {
   return plan;
 }
 
+/** A callout is a still or a GIF he drops on top; footage is never one. */
+const PLATE_EXT = /\.(gif|png|webp|apng|jpe?g|heic)$/;
+
 /**
  * Highlight GIFs/PNGs he drops on a UI element: rectangles, arrows, circles.
  * Not the split-screen indigo bar, not the circle-layout white ring, not the logo.
+ *
+ * The basename is a hint, never the whole test. Matching on it alone put a click on the
+ * first frame of any real clip whose file happened to be called `arrow-keys-demo.mp4` — so
+ * the file has to BE a still or a GIF as well.
+ *
+ * Deliberately the extension and not `material.type`, which is how `coveringBroll` tells a
+ * plate from a clip: `clip.add` stamps every material it makes `type: 'video'` whatever the
+ * file is, so a plate dropped in through capcutctl rather than through CapCut would read as
+ * footage and silently lose its click.
  */
 export function isCalloutPlate(material, segment) {
   const desc = segment?.desc || '';
   if (desc.startsWith('layout:') || desc.startsWith('sig:')) return false;
   const file = path.basename(material?.path || '').toLowerCase();
   if (!file) return false;
+  if (!PLATE_EXT.test(file)) return false;
   if (file.includes('indigo')) return false;
   if (file.includes('suheilai-circle-white')) return false;
   return /arrow|rectangle|^rect-|\bcircle\b/.test(file);
 }
 
-export function calloutPlates(doc, { minGap = 0.15 } = {}) {
+export function calloutPlates(doc, { minGap = 0.15, projectDir = null } = {}) {
   const videos = new Map((doc.materials?.videos || []).map(m => [m.id, m]));
   const hits = [];
   for (const { segment, track } of allSegments(doc)) {
@@ -404,6 +480,7 @@ export function calloutPlates(doc, { minGap = 0.15 } = {}) {
     if (!isCalloutPlate(m, segment)) continue;
     const tr = segment.target_timerange;
     if (!tr) continue;
+    if (!inContent(doc, segment, projectDir)) continue;
     hits.push({ t: r2(tr.start / 1e6), file: path.basename(m.path || ''), id: segment.id });
   }
   hits.sort((a, b) => a.t - b.t);
@@ -415,11 +492,20 @@ export function calloutPlates(doc, { minGap = 0.15 } = {}) {
   return out;
 }
 
+/** The lane the clicks live on. Deliberately NOT the seam lane — see `opCalloutSfx`. */
+const CALLOUT_LANE = 'polish-callout';
+
 /**
  * Enter/click/select on each callout appearance, alternating the two variants.
  * Coincident with the picture — these are clicks, not seam wooshes.
+ *
+ * On its own lane, because a click and a seam woosh legitimately collide. A callout
+ * appearing IS a cut, so `opPolish` has already put a seam cue at [t - lead, t - lead + dur]
+ * — a window that always contains t — and dropping the click at t onto the same track
+ * produced overlapping segments: two TRACK_OVERLAP warnings from doctor and a state the
+ * CapCut UI cannot make on one track. Every polished project with callouts hit it.
  */
-export function opCalloutSfx(doc, op = {}) {
+export function opCalloutSfx(doc, op = {}, context = {}) {
   SEED = op.__seed || SEED || null;
   const p = sfxPresets();
   const names = p.rules?.calloutSfx || [
@@ -432,23 +518,320 @@ export function opCalloutSfx(doc, op = {}) {
   for (const track of doc.tracks) {
     track.segments = (track.segments || []).filter(s => (s.desc || '') !== 'polish:callout');
   }
-  const lane = ensureAudioTrack(doc, 'polish-sfx');
-  const plates = calloutPlates(doc);
+  const projectDir = op.projectDir || context.projectDir || null;
+  const plates = calloutPlates(doc, { projectDir });
+  if (!plates.length) {
+    // do not leave an empty lane behind when the last callout is removed
+    doc.tracks = doc.tracks.filter(t => t.name !== CALLOUT_LANE || (t.segments || []).length);
+    doc.tracks.forEach((t, i) => (t.segments || []).forEach(s => { s.track_render_index = i; }));
+    return { changed: 0, sfx: 0, cues: [] };
+  }
+  const lane = ensureAudioTrack(doc, CALLOUT_LANE);
   const cues = [];
-  const maxEnd = (doc.duration || 0) / 1e6;
+  const maxEnd = contentBoundaryUs(doc, projectDir) / 1e6;
   for (const [i, plate] of plates.entries()) {
     const name = names[i % names.length];
     const audioId = ensureAudio(doc, name);
     const tpl = p.audioTemplates[name];
     const dur = Math.min((tpl.duration || US(0.5)) / 1e6, 1.2);
     if (plate.t >= maxEnd) continue;
-    const clipped = Math.max(0.05, Math.min(dur, maxEnd - plate.t));
+    // two callouts closer together than the click is long would overlap each other too
+    const ceiling = Math.min(maxEnd, plates[i + 1]?.t ?? maxEnd);
+    const clipped = Math.max(0.05, Math.min(dur, ceiling - plate.t));
     lane.segments.push(audioSegment(doc, audioId, plate.t, clipped, `callout:${i}:${plate.t}`, volume, 'polish:callout'));
     cues.push({ t: plate.t, sfx: name, file: plate.file });
   }
   lane.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
   doc.tracks.forEach((t, i) => (t.segments || []).forEach(s => { s.track_render_index = i; }));
   return { changed: cues.length, sfx: cues.length, cues };
+}
+
+const INTERACT_LANE = 'polish-interact';
+const INTERACT_DESC = /^polish:(click|type)$/;
+
+function isBrollFootage(doc, segment) {
+  return isVisibleBroll(doc, segment);
+}
+
+/** Every on-screen B-roll window, in timeline order. Chopped clips are the map — a click in a skipped source gap has no timeline. */
+export function brollWindows(doc, { projectDir = null } = {}) {
+  const videos = new Map((doc.materials?.videos || []).map(m => [m.id, m]));
+  let principal = null;
+  try { principal = optionalPrincipal(doc, null); } catch { /* malformed drafts are still inspectable */ }
+  const brollCeiling = principal ? principal.index : doc.tracks.length;
+  const out = [];
+  for (const { segment, trackIndex } of allSegments(doc)) {
+    const track = doc.tracks[trackIndex];
+    if (!track || track.type !== 'video' || track.flag === 0) continue;
+    if (trackIndex >= brollCeiling) continue;
+    if (!isBrollFootage(doc, segment)) continue;
+    if (!inContent(doc, segment, projectDir)) continue;
+    const st = segment.source_timerange, tt = segment.target_timerange;
+    if (!(tt.duration > 0) || !(st.duration > 0)) continue;
+    out.push({
+      srcIn: st.start / 1e6,
+      srcOut: (st.start + st.duration) / 1e6,
+      tgtIn: tt.start / 1e6,
+      speed: st.duration / tt.duration,
+      path: videos.get(segment.material_id)?.path || '',
+      id: segment.id,
+      takeId: segment.source_take_id || segment.rl2_take_id
+        || videos.get(segment.material_id)?.source_take_id
+        || videos.get(segment.material_id)?.rl2_take_id || null,
+    });
+  }
+  out.sort((a, b) => a.tgtIn - b.tgtIn);
+  return out;
+}
+
+export function mapVtToTimeline(windows, vt) {
+  for (const w of windows) {
+    if (vt >= w.srcIn && vt < w.srcOut) return r2(w.tgtIn + (vt - w.srcIn) / w.speed);
+  }
+  return null;
+}
+
+function eventHost(ev) {
+  if (Number.isFinite(ev.host)) return ev.host;
+  if (Number.isFinite(ev.input_time)) return ev.input_time;
+  if (Number.isFinite(ev.start)) return ev.start;
+  return null;
+}
+
+function eventVt(ev, session, frames) {
+  if (Number.isFinite(ev.vt)) return ev.vt;
+  const host = eventHost(ev);
+  if (host == null) return null;
+  if (frames?.length) {
+    let best = frames[0], bestD = Math.abs(frames[0].host - host);
+    for (const f of frames) {
+      const d = Math.abs(f.host - host);
+      if (d < bestD) { best = f; bestD = d; }
+    }
+    if (Number.isFinite(best.vt)) return best.vt;
+  }
+  const origin = session?.clock?.first_frame_host ?? session?.start_host;
+  if (Number.isFinite(origin)) return host - origin;
+  return null;
+}
+
+function readNdjson(file) {
+  if (!file || !fs.existsSync(file)) return [];
+  const out = [];
+  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+    if (!line.trim()) continue;
+    try { out.push(JSON.parse(line)); } catch { /* skip a truncated line */ }
+  }
+  return out;
+}
+
+export function findRl2Sessions(projectDir, doc) {
+  const dirs = new Set();
+  const add = d => {
+    if (d && fs.existsSync(path.join(d, 'trace.ndjson'))) dirs.add(d);
+  };
+  if (projectDir) {
+    const root = path.join(projectDir, '.capcutctl', 'rl2');
+    if (fs.existsSync(root)) {
+      for (const name of fs.readdirSync(root)) add(path.join(root, name));
+    }
+  }
+  const homes = [
+    path.join(os.homedir(), 'Desktop', 'Screen Recordings'),
+    path.join(os.homedir(), 'Movies', 'rl2'),
+  ];
+  for (const m of doc.materials?.videos || []) {
+    const p = typeof m.path === 'string' ? m.path : '';
+    if (!p) continue;
+    const resolved = p.includes('##_draftpath_placeholder') && projectDir
+      ? path.join(projectDir, p.split('##/', 1)[1] || '')
+      : p;
+    add(path.dirname(resolved));
+    const base = path.basename(p);
+    const take = /^(.*)__screen\.mp4$/i.exec(base);
+    if (take) for (const home of homes) add(path.join(home, take[1]));
+  }
+  return [...dirs];
+}
+
+function loadSession(dir) {
+  const sessionFile = path.join(dir, 'session.json');
+  let session = {};
+  if (fs.existsSync(sessionFile)) {
+    try { session = JSON.parse(fs.readFileSync(sessionFile, 'utf8')); } catch { session = {}; }
+  }
+  const manifestFile = path.join(dir, 'take.json');
+  if (fs.existsSync(manifestFile)) {
+    try {
+      const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+      if (manifest && typeof manifest === 'object' && !Array.isArray(manifest)) {
+        session.capcutctl = {
+          ...(session.capcutctl && typeof session.capcutctl === 'object' ? session.capcutctl : {}),
+          ...manifest,
+        };
+      }
+    } catch {}
+  }
+  return {
+    dir,
+    session,
+    sourceTakeId: sessionTakeId(session),
+    events: readNdjson(path.join(dir, 'trace.ndjson')),
+    frames: readNdjson(path.join(dir, 'frames.ndjson')),
+  };
+}
+
+function sessionTakeId(session) {
+  const metadata = session?.capcutctl || session?.capcutCtl || session?.metadata || {};
+  return session?.source_take_id || session?.sourceTakeId || metadata.source_take_id
+    || metadata.sourceTakeId || null;
+}
+
+function sessionSourcePath(session) {
+  const metadata = session?.capcutctl || session?.capcutCtl || session?.metadata || {};
+  return session?.source_path || session?.sourcePath || metadata.source_path || metadata.sourcePath || null;
+}
+
+function sessionLocalizedPath(session) {
+  const metadata = session?.capcutctl || session?.capcutCtl || session?.metadata || {};
+  return session?.localized_path || session?.localizedPath || metadata.localized_path || metadata.localizedPath || null;
+}
+
+/** Associate a trace with its own chopped take before converting source time to timeline time. */
+function windowsForSession(windows, loaded) {
+  const { dir, session, sourceTakeId } = loaded;
+  if (sourceTakeId) return windows.filter(window => window.takeId === sourceTakeId);
+
+  // Once any material carries an explicit identity, an unmarked legacy session must not
+  // attach to it by a human-readable basename. That is exactly how two `take/screen.mp4`
+  // recordings used to cross-wire. Legacy fallback remains available for old, all-unmarked
+  // projects.
+  const legacyWindows = windows.some(window => window.takeId)
+    ? windows.filter(window => !window.takeId)
+    : windows;
+
+  const source = sessionSourcePath(session);
+  const localized = sessionLocalizedPath(session);
+  const normalized = value => {
+    try { return path.resolve(String(value)); } catch { return null; }
+  };
+  const sourcePath = normalized(source);
+  const localizedPath = normalized(localized);
+  const byPath = legacyWindows.filter(window => {
+    const windowPath = normalized(window.path);
+    return (localizedPath && windowPath === localizedPath) || (sourcePath && windowPath === sourcePath);
+  });
+  if (byPath.length) return byPath;
+
+  // Legacy sidecars had no identity. A directory basename is a useful fallback only when it
+  // identifies one window; ambiguous same-basename takes must be ignored rather than mapped to
+  // the first recording by accident.
+  const name = path.basename(dir);
+  const byName = legacyWindows.filter(window => path.basename(window.path || '').startsWith(`${name}__`));
+  return byName.length === 1 ? byName : [];
+}
+
+/**
+ * Clicks and typing_bursts from an rl2 take, mapped onto the chopped B-roll.
+ * in_capture:false is the recorder's own UI — skip it. A moment that did not survive
+ * the B-roll cut has no timeline and is dropped, not guessed onto a neighbour.
+ */
+export function planInteractions(doc, { projectDir = null, minGap = 0.15 } = {}) {
+  const windows = brollWindows(doc, { projectDir });
+  if (!windows.length) return [];
+  const cues = [];
+  for (const dir of findRl2Sessions(projectDir, doc)) {
+    const loaded = loadSession(dir);
+    const { session, events, frames } = loaded;
+    const sessionWindows = windowsForSession(windows, loaded);
+    if (!sessionWindows.length) continue;
+    for (const ev of events) {
+      const kind = ev.type === 'click' ? 'click'
+                 : ev.type === 'typing_burst' ? 'type'
+                 : null;
+      if (!kind) continue;
+      if (kind === 'click' && ev.in_capture === false) continue;
+      const vt = eventVt(ev, session, frames);
+      if (!Number.isFinite(vt)) continue;
+      const t = mapVtToTimeline(sessionWindows, vt);
+      if (t == null) continue;
+      if (US(t) >= contentBoundaryUs(doc, projectDir)) continue;
+      let dur = 0.3;
+      if (kind === 'type') {
+        const host0 = eventHost(ev);
+        const host1 = Number.isFinite(ev.end) ? ev.end : null;
+        if (host0 != null && host1 != null && host1 > host0) dur = Math.min(1.5, host1 - host0);
+        else dur = 0.6;
+      }
+      cues.push({ t: r2(t), kind, dur: r2(dur), vt: r2(vt) });
+    }
+  }
+  cues.sort((a, b) => a.t - b.t);
+  const out = [];
+  for (const c of cues) {
+    if (out.length && c.t - out.at(-1).t < minGap) continue;
+    out.push(c);
+  }
+  return out;
+}
+
+export function opInteractions(doc, op = {}, context = {}) {
+  SEED = op.__seed || SEED || null;
+  if (op.skip) return { changed: 0, sfx: 0, cues: [], skipped: true };
+  const p = sfxPresets();
+  const volume = op.volume ?? p.rules.volume ?? 1;
+  for (const track of doc.tracks) {
+    track.segments = (track.segments || []).filter(s => !INTERACT_DESC.test(s.desc || ''));
+  }
+  const plan = planInteractions(doc, { projectDir: context.projectDir, minGap: op.minGap });
+  if (!plan.length) {
+    doc.tracks = doc.tracks.filter(t => t.name !== INTERACT_LANE || (t.segments || []).length);
+    doc.tracks.forEach((t, i) => (t.segments || []).forEach(s => { s.track_render_index = i; }));
+    return { changed: 0, sfx: 0, cues: [], sessions: findRl2Sessions(context.projectDir, doc).length };
+  }
+  const lane = ensureAudioTrack(doc, INTERACT_LANE);
+  const clickName = p.accents?.click;
+  const typeName = p.accents?.typing;
+  const cues = [];
+  const maxEnd = contentBoundaryUs(doc, context.projectDir) / 1e6;
+  for (const [i, hit] of plan.entries()) {
+    const name = hit.kind === 'type' ? typeName : clickName;
+    if (!name) continue;
+    const audioId = ensureAudio(doc, name);
+    const tpl = p.audioTemplates[name];
+    const fileDur = (tpl.duration || US(0.5)) / 1e6;
+    const dur = Math.min(hit.dur || 0.3, fileDur, 1.5);
+    if (hit.t >= maxEnd) continue;
+    const ceiling = Math.min(maxEnd, plan[i + 1]?.t ?? maxEnd);
+    const clipped = Math.max(0.05, Math.min(dur, ceiling - hit.t));
+    lane.segments.push(audioSegment(doc, audioId, hit.t, clipped, `interact:${i}:${hit.t}`, volume, `polish:${hit.kind}`));
+    cues.push({ t: hit.t, kind: hit.kind, sfx: name, vt: hit.vt });
+  }
+  lane.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
+  doc.tracks.forEach((t, i) => (t.segments || []).forEach(s => { s.track_render_index = i; }));
+  return { changed: cues.length, sfx: cues.length, cues };
+}
+
+/**
+ * First seconds are full-face with nothing on screen. His recut of the Hermes Telegram
+ * open replaced that with split-screen proof. Flag it; do not invent the B-roll.
+ */
+export function coldOpen(doc, { seconds = 5, projectDir = null } = {}) {
+  const principal = optionalPrincipal(doc, null);
+  if (!principal) return null;
+  const t0 = (principal.track.segments[0]?.target_timerange?.start || 0) / 1e6;
+  const contentEnd = contentBoundaryUs(doc, projectDir) / 1e6;
+  const sampleEnd = Math.min(t0 + seconds, contentEnd);
+  let n = 0, covered = 0;
+  for (let t = t0 + 0.2; t < sampleEnd; t += 0.5) {
+    n++;
+    if (coveringBroll(doc, t, principal.index, projectDir)) covered++;
+  }
+  if (!n) return null;
+  if (covered / n >= 0.5) return null;
+  const layout = coveringLayout(doc, t0 + 0.25, principal);
+  if (layout !== 'full-face') return null;
+  return { seconds: Math.min(seconds, Math.max(0, sampleEnd - t0)), layout, covered, samples: n };
 }
 
 /**
@@ -500,7 +883,7 @@ export function opPolish(doc, op, context = {}) {
     doc.materials.transitions = [];
   }
 
-  const plan = planPolish(doc, { ...op, motivated: Boolean(op.motivated) });
+  const plan = planPolish(doc, { ...op, motivated: Boolean(op.motivated), projectDir: context.projectDir });
   const lane = ensureAudioTrack(doc, 'polish-sfx');
 
   // Every transition rides the principal track, and the principal track gets sliced to
@@ -538,18 +921,20 @@ export function opPolish(doc, op, context = {}) {
     const tpl = p.audioTemplates[cue.sfx];
     const dur = Math.min((tpl.duration || US(0.5)) / 1e6, 1.2);
     const start = Math.max(0, cue.t - lead);
-    const maxEnd = (doc.duration || 0) / 1e6;
+    const maxEnd = contentBoundaryUs(doc, context.projectDir) / 1e6;
     if (start >= maxEnd) continue;
     const clipped = Math.max(0.05, Math.min(dur, maxEnd - start));
     lane.segments.push(audioSegment(doc, audioId, start, clipped, `${i}:${cue.t}`, volume));
   }
   lane.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
-  const callouts = opCalloutSfx(doc, { volume, __seed: op.__seed });
+  const callouts = opCalloutSfx(doc, { volume, __seed: op.__seed, projectDir: context.projectDir });
+  const interactions = opInteractions(doc, { volume, __seed: op.__seed, skip: op.noInteractions }, context);
   return { changed: plan.length, transitions, removedTransitions: removed, sfx: plan.length,
            principalTrack: principal ? principal.index : null,
            variety: seamVariety(plan),
            sliced: slices.split, alreadyCut: slices.existing,
            callouts: callouts.cues,
+           interactions: interactions.cues,
            ...(slices.refused.length ? { keyframedSoNotSliced: slices.refused } : {}),
            ...(skipped.length ? { noTransition: skipped } : {}),
            cues: plan.map(c => ({ t: c.t, pair: c.pair, transition: c.transition, sfx: c.sfx })) };

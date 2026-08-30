@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { pictureChanges, planPolish, cutPoints } from '../src/polish.mjs';
 import { renderTimeline } from '../src/timeline.mjs';
 import { beatOffset, musicPrompt, detectBeats, opMusic } from '../src/music.mjs';
-import { finishScorecard, finishText } from '../src/finish.mjs';
+import { assertFirstPictureProof, finishScorecard, finishText } from '../src/finish.mjs';
 import { parseArgs } from '../src/cli.mjs';
 
 const US = s => Math.round(s * 1e6);
@@ -160,6 +160,47 @@ test('finish scorecard flags same-screen cuts', () => {
   assert.ok(score.sameScreenCuts.length >= 1, score.sameScreenCuts);
   assert.ok(score.musicPrompt.includes('Instrumental'));
   assert.ok(score.timeline.includes('▓'));
+});
+
+test('finish scorecard and music prompt use contentEnd instead of the parked draft tail', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-finish-duration-'));
+  const sidecar = path.join(temp, '.capcutctl', 'created.json');
+  fs.mkdirSync(path.dirname(sidecar), { recursive: true });
+  fs.writeFileSync(sidecar, JSON.stringify({
+    preserved: { start: US(20), end: US(38) },
+    contentEnd: US(20),
+  }));
+  const d = grokLike();
+  d.duration = US(48);
+  try {
+    const score = finishScorecard(d, { projectDir: temp });
+    assert.equal(score.duration, 20);
+    assert.match(score.musicPrompt, /20\.0-second/);
+    assert.doesNotMatch(score.musicPrompt, /48\.0-second/);
+    assert.equal(score.pictureChanges.some(hit => hit.t >= 20), false);
+    assert.equal(score.polishPlan.some(hit => hit.t >= 20), false);
+    const prompt = musicPrompt(d, { projectDir: temp });
+    assert.match(prompt, /20\.0-second/);
+    assert.doesNotMatch(prompt, /48\.0-second/);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test('finish scorecard flags a cold open and is quiet when the first seconds have B-roll', () => {
+  const covered = finishScorecard(grokLike());
+  assert.equal(covered.coldOpen, null);
+  assert.equal(covered.firstPictureProof.ok, true);
+  const d = grokLike();
+  d.tracks[1].segments = [];
+  d.tracks[2].segments = d.tracks[2].segments.map(s => ({ ...s, extra_material_refs: [] }));
+  const score = finishScorecard(d);
+  assert.ok(score.coldOpen, score.coldOpen);
+  assert.equal(score.firstPictureProof.ok, false);
+  assert.match(finishText(score), /cold-open/);
+  assert.match(finishText(score), /first-picture: FAIL/);
+  assert.throws(() => assertFirstPictureProof(d), error =>
+    error.code === 'FIRST_PICTURE_NOT_PROOF' && error.exitCode === 2);
 });
 
 test('finish scorecard reports existing same-screen transitions separately', () => {

@@ -1,5 +1,7 @@
 import fs from 'node:fs';
-import { pictureChanges, planPolish, cutPoints, seamVariety, principalTrack } from './polish.mjs';
+import { CapcutError } from './core.mjs';
+import { contentEndUs } from './add.mjs';
+import { pictureChanges, planPolish, cutPoints, seamVariety, principalTrack, coldOpen } from './polish.mjs';
 import { renderTimeline } from './timeline.mjs';
 import { musicPrompt, musicCachePaths } from './music.mjs';
 
@@ -65,19 +67,45 @@ function countFaceZooms(doc) {
 }
 
 /**
+ * The opening proof is a safety gate for finalization. A plain `cut --keep` remains a
+ * review/build stage; only finish/polish writes call the assertion below.
+ */
+export function firstPictureProof(doc, { seconds = 5 } = {}) {
+  const miss = coldOpen(doc, { seconds });
+  return miss
+    ? { ok: false, code: 'FIRST_PICTURE_NOT_PROOF', ...miss }
+    : { ok: true, code: 'FIRST_PICTURE_PROOF' };
+}
+
+export function assertFirstPictureProof(doc, options = {}) {
+  const proof = firstPictureProof(doc, options);
+  if (!proof.ok) {
+    throw new CapcutError(
+      'Refusing finalization: the first picture is full-face without proof B-roll. '
+      + 'Add or anchor B-roll over the opening, then run finish/polish again.',
+      { code: proof.code, exitCode: 2, details: proof }
+    );
+  }
+  return proof;
+}
+
+// Alias kept intentionally descriptive for callers integrating the finish boundary.
+export const requireFirstPictureProof = assertFirstPictureProof;
+
+/**
  * Read-only scorecard for the finish pass. Does not write.
  */
 export function finishScorecard(doc, { projectDir = null, width = 64 } = {}) {
-  const duration = S(doc.duration || 0);
-  const allCuts = cutPoints(doc);
-  const picture = pictureChanges(doc);
-  const trans = transitionTimes(doc);
+  const duration = S(contentEndUs(doc, projectDir));
+  const allCuts = cutPoints(doc, { projectDir }).filter(cut => cut.t < duration);
+  const picture = pictureChanges(doc, { projectDir }).filter(hit => hit.t < duration);
+  const trans = transitionTimes(doc).filter(hit => hit.atClip < duration);
   const nearPicture = t => picture.some(p => Math.abs(p.t - t) < 0.12);
   // transition is stored on the clip BEFORE the cut, so t is the cut time ≈ clip end
   const sameScreenTransitions = trans.filter(t => !nearPicture(t.t));
   const sameScreenCuts = allCuts.filter(c => !nearPicture(c.t));
-  const motivated = planPolish(doc, { motivated: true });
-  const unmotivated = planPolish(doc, { motivated: false });
+  const motivated = planPolish(doc, { motivated: true, projectDir });
+  const unmotivated = planPolish(doc, { motivated: false, projectDir });
   const logos = (doc.tracks || []).flatMap(t => (t.segments || [])
     .filter(s => (s.desc || '').startsWith('sig:logo'))
     .map(s => ({ at: r2(S(s.target_timerange.start)), desc: s.desc })));
@@ -88,6 +116,7 @@ export function finishScorecard(doc, { projectDir = null, width = 64 } = {}) {
               || (t.name === 'sig-endcard' && !(s.desc || '').startsWith('sig:sfx')))
     .map(s => ({ at: r2(S(s.target_timerange.start)), desc: s.desc || t.name })));
   const timeline = renderTimeline(doc, { width });
+  const proof = firstPictureProof(doc);
   return {
     duration: r2(duration),
     timeline: timeline.text,
@@ -101,15 +130,18 @@ export function finishScorecard(doc, { projectDir = null, width = 64 } = {}) {
     variety: seamVariety(motivated),
     polishPlan: motivated.map(c => ({ t: c.t, pair: c.pair, transition: c.transition, sfx: c.sfx })),
     music: musicState(doc, projectDir),
-    musicPrompt: musicPrompt(doc, { hits: picture }),
+    musicPrompt: musicPrompt(doc, { projectDir, duration, hits: picture }),
     logos,
     endcard,
     faceZooms: countFaceZooms(doc),
     brollHot: volumeOutliers(doc),
+    coldOpen: coldOpen(doc),
+    firstPictureProof: proof,
     laws: [
       'Transition only on a picture change (B-roll shot or layout class), never on an A-roll splice over the same screen.',
       'Do not recut speech to a beat. Generate and offset the bed so beats land on picture changes.',
       'Music is background: ~0.08, fade in, out before the CTA. Captions happen outside CapCut.',
+      'The first picture is proof. A 5s+ full-face open with nothing on screen is a miss.',
     ],
   };
 }
@@ -130,6 +162,12 @@ export function finishText(score) {
   }
   if (score.brollHot.length) {
     lines.push(`B-roll at full volume: ${score.brollHot.map(b => `${b.at}s`).join(', ')}`);
+  }
+  if (score.coldOpen) {
+    lines.push(`cold-open: first ${score.coldOpen.seconds}s are ${score.coldOpen.layout} with no screen — hook on the payoff`);
+  }
+  if (score.firstPictureProof && !score.firstPictureProof.ok) {
+    lines.push('first-picture: FAIL — finalization is blocked until proof B-roll covers the opening');
   }
   lines.push('', 'music prompt:', score.musicPrompt);
   return lines.join('\n');

@@ -406,6 +406,17 @@ export function opSignature(doc, op, context = {}) {
   const cues = pending.filter(Boolean);
   if (cues.length) {
     const { audioSegmentFor, ensureAudioLane } = sigAudio();
+    // Cues written before SFX carried an owner are tagged plain `sig:sfx`, and only a pass
+    // that rewrites BOTH owners may clear those wholesale (above). A logo-only or
+    // endcard-only rerun therefore left the legacy cue sitting on the very beat it had just
+    // rewritten — two Culins on one frame. Sweep the stragglers by TIME instead: a legacy
+    // cue on a beat we are writing now IS this cue, whoever wrote it.
+    const tol = US(0.25);
+    const onABeatWeRewrite = s => cues.some(c =>
+      Math.abs((s.target_timerange?.start || 0) - US(Math.max(0, c.at))) <= tol);
+    for (const t of doc.tracks) {
+      t.segments = (t.segments || []).filter(s => (s.desc || '') !== 'sig:sfx' || !onABeatWeRewrite(s));
+    }
     const lane = ensureAudioLane(doc, 'sig-sfx', mint);
     for (const c of cues) lane.segments.push(audioSegmentFor(doc, c, mint));
     lane.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
