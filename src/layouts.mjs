@@ -1386,19 +1386,6 @@ function ensureScreenMaterial(doc, op, context, screen, sourceStartUs, sourceDur
   // diagnostics. Canonicalization is still used by sourceTakeId and the map writer, so symlink
   // aliases cannot create two identities for one take.
   const source = path.resolve(expand(op.media));
-  // The third door into a project, and the one this skill actively recommends — so it obeys the
-  // same origin contract as clip.add. A recording that was already cropped to the half-frame
-  // defeats the whole point of layout.screen, which exists to compute that framing natively.
-  const canvasConfig = doc.canvas_config || {};
-  const declaredWidth = op.width == null ? Number(screen.source.width) : Number(op.width);
-  const declaredHeight = op.height == null ? Number(screen.source.height) : Number(op.height);
-  assertOrigin({
-    file: source, width: declaredWidth, height: declaredHeight,
-    canvas: [canvasConfig.width || 1080, canvasConfig.height || 1920],
-    label: 'layout.screen', projectDir: context.projectDir || null,
-    generated: op.generated === true, derivedFrom: op.derivedFrom || null,
-    derivedOffset: op.derivedOffset, allowEphemeral: op.allowEphemeral === true,
-  });
   let destination = source;
   if (op.localize !== false && context.projectDir) {
     destination = localizeMedia(context.projectDir, source, undefined, { dryRun: context.dryRun });
@@ -1597,6 +1584,23 @@ export function opLayoutScreen(doc, op = {}, context = {}) {
   // The CLI contract supplies media/at/duration and asks this operation to create the
   // recording. Direct callers may instead point at a recording already present in the draft;
   // both paths feed the same layer-building transaction below.
+  // The origin contract gates this operation FIRST — before the preset assets are resolved.
+  // layout.screen is the verb that replaces the ffmpeg crop, so a source that was already
+  // cropped to the half-frame defeats its whole purpose; refusing it must not depend on
+  // whether an unrelated indigo PNG happens to be on this machine (on CI it is not, and the
+  // caller got ASSET_NOT_FOUND instead of the reason they actually needed).
+  if (op.media) {
+    const canvasConfig = doc.canvas_config || {};
+    assertOrigin({
+      file: path.resolve(expandHome(String(op.media))),
+      width: op.width == null ? Number(screen.source.width) : Number(op.width),
+      height: op.height == null ? Number(screen.source.height) : Number(op.height),
+      canvas: [canvasConfig.width || 1080, canvasConfig.height || 1920],
+      label: 'layout.screen', projectDir: context.projectDir || null,
+      generated: op.generated === true, derivedFrom: op.derivedFrom || null,
+      derivedOffset: op.derivedOffset, allowEphemeral: op.allowEphemeral === true,
+    });
+  }
   resolveAsset(doc, screen.frame.asset, projectDir);
   resolveAsset(doc, circle.overlay.asset, projectDir);
 
