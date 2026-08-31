@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -26,15 +26,18 @@ export const HELP = `capcutctl — transactional CapCut timeline control
 
 Usage:
   capcutctl cut VIDEO [--keep 0,2-9] [--order 0,2,3] [--trim-beat ID:out=-1.16]
+                      [--recover-beat ID:out=0.8]
                       [--review decisions.json] [--project NAME] [--into PROJECT] [--lang ar]
                       — talking-head cleanup and reviewed A-roll assembly. Use --order
                         for an exact kept-beat permutation, --trim-beat for safe inward
-                        acoustic trims, or --review for a source-tokened decision file.
+                        acoustic trims, opt-in word/acoustic outward recovery, or --review
+                        for a source-tokened decision file.
                         --into recuts an existing project transactionally.
   capcutctl qa --project NAME [--times 3,9,15|--at-cuts|--at-scenes|--at-broll]
-               [--guide 960] [--sheet] [--label L]
-                      — composite real frames (+ a labelled contact sheet); automatic
-                        sampling can target visual cuts, principal scenes, or B-roll.
+               [--guide 960] [--sheet] [--label L] [--cut-window S]
+                      — targeted native-resolution pixel QA; --at-cuts samples both
+                        sides of each cut. --preview is a separate streamed proxy job
+                        and cannot be combined with selectors, --times, --sheet, or --expect.
   capcutctl find "agent running" --media FILE [--shows|--says] [--context]
                       — when is it on screen / when was it said.
 
@@ -65,6 +68,9 @@ Usage:
   capcutctl fade --project NAME --at S --track NAME|N [--in 0.08] [--out 0.12]
   capcutctl keyframe --project NAME --at S --track NAME|N [--to 2.4] [--hold 1.6] [--plan]
   capcutctl preview --project NAME --out preview.mp4 [--fps 6] [--from S] [--to S]
+                    [--resolution 360x640|--native] [--no-cache]
+                      — lightweight streamed proxy; defaults to 360x640 and never writes
+                        one PNG per frame. Use qa for bounded seam/pixel evidence.
   capcutctl diff --project NAME --against NAME|--snapshot NAME
   capcutctl harvest [--root PATH] [--projects A,B] [--out FILE]
   capcutctl init-spec [--output FILE]
@@ -149,7 +155,7 @@ const r2 = n => Math.round(n * 100) / 100;
 
 export function parseArgs(argv) {
   const result = { _: [] };
-  const repeatValueKeys = new Set(['trimBeat']);
+  const repeatValueKeys = new Set(['trimBeat', 'recoverBeat']);
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i];
     if (!token.startsWith('--')) { result._.push(token); continue; }
@@ -158,7 +164,7 @@ export function parseArgs(argv) {
          'transcript', 'noTransitions', 'noSeam', 'auto', 'plan', 'noSfx', 'noZoom', 'retime', 'localize',
          'noLocalize', 'motivated', 'regen', 'music', 'noMusic', 'polish', 'noInteractions',
          'waitForClose', 'force', 'reindex', 'noRepair', 'inPlace',
-         'generated', 'allowEphemeral'].includes(key)) result[key] = true;
+         'generated', 'allowEphemeral', 'native', 'noCache'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
       const value = argv[++i];
@@ -419,6 +425,7 @@ const ARROLL_VALUE_OPTIONS = Object.freeze([
   ['order', '--order'],
   ['review', '--review'],
   ['trimBeat', '--trim-beat'],
+  ['recoverBeat', '--recover-beat'],
   ['lang', '--lang'],
   ['model', '--model'],
   ['fps', '--fps'],
@@ -443,6 +450,26 @@ export function buildArrollArgs(args, media) {
     if (args?.[key]) forwarded.push(flag);
   }
   return forwarded;
+}
+
+function runPython(script, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('python3', [script, ...args], { stdio: 'inherit' });
+    const forward = signal => { if (child.exitCode == null && child.signalCode == null) child.kill(signal); };
+    const onInt = () => forward('SIGINT');
+    const onTerm = () => forward('SIGTERM');
+    const cleanup = () => {
+      process.off('SIGINT', onInt);
+      process.off('SIGTERM', onTerm);
+    };
+    process.on('SIGINT', onInt);
+    process.on('SIGTERM', onTerm);
+    child.once('error', error => { cleanup(); reject(error); });
+    child.once('exit', (code, signal) => {
+      cleanup();
+      resolve(code ?? (signal === 'SIGINT' ? 130 : signal === 'SIGTERM' ? 143 : 1));
+    });
+  });
 }
 
 async function runInPlaceCut(args, root, apply = applySpec) {
@@ -496,9 +523,11 @@ export async function main(argv, dependencies = {}) {
   if (command === 'cut' || command === 'qa' || command === 'find') {
     const tool = { cut: 'aroll.py', qa: 'frame_qa.py', find: 'find.py' }[command];
     const script = path.join(HERE, '..', 'tools', tool);
-    const r = spawnSync('python3', [script, ...argv.slice(1)], { stdio: 'inherit' });
-    if (r.error) throw new CapcutError(`could not run ${script}: ${r.error.message}`, { exitCode: 2 });
-    process.exit(r.status ?? 1);
+    let status;
+    try { status = await runPython(script, argv.slice(1)); }
+    catch (error) { throw new CapcutError(`could not run ${script}: ${error.message}`, { exitCode: 2 }); }
+    process.exitCode = status;
+    return;
   }
   const args = parseArgs(argv);
   if (!command || args.help || command === 'help') return print(HELP);
@@ -1034,13 +1063,18 @@ export async function main(argv, dependencies = {}) {
     if (!Number.isFinite(fps) || fps <= 0) {
       throw new CapcutError('preview requires --fps greater than zero.', { code: 'BAD_FPS', exitCode: 2 });
     }
-    const previewArgs = [script, '--project', projectDir, '--preview', path.resolve(out),
+    const previewArgs = ['--project', projectDir, '--preview', path.resolve(out),
       '--fps', String(fps)];
     if (args.from != null) previewArgs.push('--from', String(args.from));
     if (args.to != null) previewArgs.push('--to', String(args.to));
-    const r = spawnSync('python3', previewArgs, { stdio: 'inherit' });
-    if (r.error) throw new CapcutError(`could not run ${script}: ${r.error.message}`, { exitCode: 2 });
-    process.exit(r.status ?? 1);
+    if (args.resolution != null) previewArgs.push('--resolution', String(args.resolution));
+    if (args.native) previewArgs.push('--native');
+    if (args.noCache) previewArgs.push('--no-cache');
+    let status;
+    try { status = await runPython(script, previewArgs); }
+    catch (error) { throw new CapcutError(`could not run ${script}: ${error.message}`, { exitCode: 2 }); }
+    process.exitCode = status;
+    return;
   }
   if (command === 'diff') {
     const { listSnapshots } = await import('./core.mjs');

@@ -41,7 +41,7 @@ from audio_index import SIL, SOFT, AudioIndex, lint, loud_out_finding, source_to
 
 FPS = 30.0
 FRAME = 1.0 / FPS
-AROLL_INDEX_VERSION = 4
+AROLL_INDEX_VERSION = 5
 LEAD_FRAMES = 2          # start this many frames before the onset, so the attack survives
 AUDIO_RAMP_FRAMES = 2     # native audio fade on both sides of every generated splice
 HESITATION = 0.60        # silence longer than this inside a beat is dead air
@@ -679,6 +679,10 @@ def cmd_index(args):
                 "first_word_start": word["start"] if word else None,
                 "first_word_trustworthy": trusted,
             }
+            if source_words:
+                last = source_words[-1]
+                beat["last_word"] = (last.get("word") or last.get("text") or "").strip()
+                beat["last_word_end"] = _word_end(last)
             if foreign:
                 beat["foreign_lead"] = " ".join(
                     (entry.get("word") or entry.get("text") or "").strip()
@@ -703,6 +707,15 @@ def cmd_index(args):
         "version": AROLL_INDEX_VERSION, "media": media, "fps": fps,
         "source_token": token, "media_token": token,
         "source_duration": round(len(idx.db) * idx.bin, 3),
+        "words": [
+            {
+                "text": (word.get("word") or word.get("text") or "").strip(),
+                "start": _word_start(word), "end": _word_end(word),
+                "segment": word.get("_aroll_segment"),
+            }
+            for word in all_words
+            if _word_start(word) is not None and _word_end(word) is not None
+        ],
         "beats": beats,
         "takes": [{"id": t, "beats": [b["id"] for b in beats if b["take"] == t],
                    "duration": round(sum(b["dur"] for b in beats if b["take"] == t), 2)}
@@ -892,6 +905,50 @@ def parse_trim_specs(specs):
     return out
 
 
+def parse_recovery_specs(specs):
+    """Parse reviewed outward search windows: ID:in=SECONDS / ID:out=SECONDS."""
+    if specs is None:
+        return {}
+    if isinstance(specs, str):
+        specs = [specs]
+    if not isinstance(specs, (list, tuple)):
+        raise ValueError("--recover-beat expects one or more ID:in=SECONDS or ID:out=SECONDS values")
+    out = {}
+    pattern = re.compile(r"^\s*(\d+)\s*:\s*(in|out)\s*=\s*"
+                         r"([+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*$")
+    for raw in specs:
+        match = pattern.fullmatch(str(raw))
+        if not match:
+            raise ValueError(f"bad --recover-beat {raw!r}; use ID:in=SECONDS or ID:out=SECONDS")
+        beat_id, side, raw_value = int(match.group(1)), match.group(2), match.group(3)
+        value = _finite_offset(raw_value, f"--recover-beat {raw!r}")
+        if value <= 0:
+            raise ValueError(f"--recover-beat {raw!r} needs a positive outward search window")
+        if side in out.setdefault(beat_id, {}):
+            raise ValueError(f"duplicate {side} recovery for beat {beat_id}")
+        out[beat_id][side] = value
+    return out
+
+
+def parse_recoveries(value):
+    """Validate the review-file recovery map using the CLI's one compact parser."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("recoveries must be an object keyed by beat id")
+    specs = []
+    for raw_id, rule in value.items():
+        if not re.fullmatch(r"\d+", str(raw_id)):
+            raise ValueError(f"recoveries contains an invalid beat id: {raw_id!r}")
+        if not isinstance(rule, dict) or not rule:
+            raise ValueError(f"recoveries[{raw_id!r}] must contain in or out")
+        unknown = set(rule) - {"in", "out"}
+        if unknown:
+            raise ValueError(f"recoveries[{raw_id!r}] has unsupported fields: {sorted(unknown)}")
+        specs.extend(f"{raw_id}:{side}={amount}" for side, amount in rule.items())
+    return parse_recovery_specs(specs)
+
+
 def _ids_known(values, beats, field):
     unknown = sorted(set(values) - set(beats))
     if unknown:
@@ -926,6 +983,7 @@ def load_review(path, data):
         "keep": keep,
         "order": order,
         "boundaries": parse_boundaries(review.get("boundaries")),
+        "recoveries": parse_recoveries(review.get("recoveries")),
         "sourceToken": review["sourceToken"],
     }
 
@@ -933,10 +991,10 @@ def load_review(path, data):
 def resolve_editorial_decisions(data, args):
     """Resolve flags or a review file into a strict keep/order/boundary decision."""
     review_path = getattr(args, "review", None)
-    direct = [name for name in ("keep", "drop", "order", "trim_beat")
+    direct = [name for name in ("keep", "drop", "order", "trim_beat", "recover_beat")
               if getattr(args, name, None) not in (None, "", [])]
     if review_path and direct:
-        raise ValueError("--review cannot be combined with --keep, --drop, --order, or --trim-beat")
+        raise ValueError("--review cannot be combined with --keep, --drop, --order, --trim-beat, or --recover-beat")
 
     beats = {beat["id"]: beat for beat in data.get("beats", [])}
     review = load_review(review_path, data) if review_path else None
@@ -951,6 +1009,7 @@ def resolve_editorial_decisions(data, args):
         else:
             ordered = sorted(set(kept))
         boundaries = review["boundaries"]
+        recoveries = review["recoveries"]
     else:
         if getattr(args, "keep", None):
             kept = sorted(parse_ids(args.keep))
@@ -963,6 +1022,7 @@ def resolve_editorial_decisions(data, args):
             kept = [beat_id for beat_id in kept if beat_id not in dropped]
         ordered = parse_order_spec(args.order, "order") if getattr(args, "order", None) else sorted(set(kept))
         boundaries = parse_trim_specs(getattr(args, "trim_beat", None))
+        recoveries = parse_recovery_specs(getattr(args, "recover_beat", None))
 
     if not kept:
         raise ValueError("nothing kept")
@@ -975,10 +1035,20 @@ def resolve_editorial_decisions(data, args):
     not_kept = sorted(set(boundaries) - set(kept))
     if not_kept:
         raise ValueError(f"boundary adjustments target beats that are not kept: {not_kept}")
+    unknown_recoveries = sorted(set(recoveries) - set(beats))
+    if unknown_recoveries:
+        raise ValueError(f"outward recoveries contain unknown beat ids: {unknown_recoveries}")
+    not_kept = sorted(set(recoveries) - set(kept))
+    if not_kept:
+        raise ValueError(f"outward recoveries target beats that are not kept: {not_kept}")
+    both = sorted(set(boundaries) & set(recoveries))
+    if both:
+        raise ValueError(f"beats cannot be trimmed and recovered in one decision: {both}")
     return {
         "kept": sorted(set(kept)),
         "order": ordered,
         "boundaries": boundaries,
+        "recoveries": recoveries,
         "review": review,
     }
 
@@ -1059,6 +1129,170 @@ def apply_boundary_adjustments(idx, picked, boundaries, fps=FPS):
     return adjustments
 
 
+def _quietest_between(idx, start, end):
+    step = _number(getattr(idx, "bin", None))
+    if step is None or step <= 0 or end < start:
+        return None
+    count = max(1, int(math.floor((end - start) / step)) + 1)
+    points = [min(end, start + index * step) for index in range(count)] + [end]
+    return min(points, key=idx.at)
+
+
+def _quiet_frame_between(idx, start, end, fps):
+    first = math.ceil(float(start) * float(fps) - 1e-9)
+    last = math.floor(float(end) * float(fps) + 1e-9)
+    if last < first:
+        return None
+    points = [frame / float(fps) for frame in range(first, last + 1)]
+    best = min(points, key=idx.at)
+    return best if idx.at(best) < SOFT else None
+
+
+def _recovery_words(data):
+    words = []
+    for raw in data.get("words") or []:
+        start, end = _number(raw.get("start")), _number(raw.get("end"))
+        text = str(raw.get("text") or raw.get("word") or "").strip()
+        if start is not None and end is not None and end > start and text:
+            words.append({"text": text, "start": start, "end": end,
+                          "segment": raw.get("segment")})
+    return sorted(words, key=lambda word: (word["start"], word["end"]))
+
+
+def _refuse_recovery(beat_id, side, amount, reason):
+    raise ValueError(f"beat {beat_id} {side.upper()} recovery requested {amount:.3f}s; refused: {reason}")
+
+
+def _overlap_reason(beat, picked, indexed_beats, start, end, fps):
+    tolerance = 0.5 / float(fps)
+    for other in picked:
+        if other["id"] == beat["id"]:
+            continue
+        if start < other["src_out"] - tolerance and end > other["src_in"] + tolerance:
+            return f"candidate overlaps kept beat {other['id']}"
+    for other in indexed_beats:
+        if other.get("id") == beat["id"] or other.get("take") == beat.get("take"):
+            continue
+        if start < float(other.get("src_out", 0)) - tolerance \
+                and end > float(other.get("src_in", 0)) + tolerance:
+            return f"candidate enters take {other.get('take')} at beat {other.get('id')}"
+    return None
+
+
+def apply_outward_recoveries(idx, picked, recoveries, data, fps=FPS):
+    """Apply opt-in word-evidenced expansion to a quiet acoustic boundary."""
+    if not recoveries:
+        return []
+    words = _recovery_words(data)
+    if not words:
+        raise ValueError("outward recovery requires a v5 A-roll index with word-level evidence")
+    source_end = _number(data.get("source_duration"))
+    if source_end is None or source_end <= 0:
+        raise ValueError("outward recovery requires a finite source duration")
+    indexed_beats = data.get("beats") or []
+    frame = 1.0 / float(fps)
+    adjustments = []
+
+    for beat in picked:
+        rule = recoveries.get(beat["id"])
+        if not rule:
+            continue
+        indexed = {"src_in": beat["src_in"], "src_out": beat["src_out"]}
+        for side in ("in", "out"):
+            if side not in rule:
+                continue
+            amount = rule[side]
+            base_in, base_out = beat["src_in"], beat["src_out"]
+            if side == "out":
+                limit = quantise(base_out + amount, fps=fps)
+                if limit > source_end + 0.5 * frame:
+                    _refuse_recovery(beat["id"], side, amount, "candidate exceeds media EOF")
+                limit = min(limit, source_end)
+                candidates = [word for word in words
+                              if word["end"] > base_out + 0.5 * frame
+                              and word["end"] <= limit + 0.5 * frame]
+                if not candidates:
+                    _refuse_recovery(beat["id"], side, amount,
+                                     "no complete word-level transcript evidence in the search window")
+                continuous = []
+                for word in candidates:
+                    if not _continuous_source(idx, base_out, word["end"]):
+                        break
+                    continuous.append(word)
+                if not continuous:
+                    _refuse_recovery(beat["id"], side, amount,
+                                     "candidate is separated by silence or dead air")
+                chosen = None
+                for index, word in enumerate(continuous):
+                    upper = min(limit, continuous[index + 1]["start"] if index + 1 < len(continuous) else limit)
+                    trough = _quiet_frame_between(idx, word["end"], upper, fps)
+                    if trough is not None:
+                        chosen = (index, trough)
+                        break
+                if chosen is None or chosen[1] <= base_out + 0.5 * frame:
+                    _refuse_recovery(beat["id"], side, amount,
+                                     "no quiet acoustic OUT boundary after the evidenced word")
+                index, resolved = chosen
+                evidence = continuous[:index + 1]
+                if resolved + 0.5 * frame < max(word["end"] for word in evidence):
+                    _refuse_recovery(beat["id"], side, amount, "resolved OUT would clip the protected last word")
+                reason = _overlap_reason(beat, picked, indexed_beats, base_out, resolved, fps)
+                if reason:
+                    _refuse_recovery(beat["id"], side, amount, reason)
+                beat["src_out"] = resolved
+                beat["text"] = _merge_text((beat.get("text", ""), " ".join(w["text"] for w in evidence)))
+                beat["last_word"], beat["last_word_end"] = evidence[-1]["text"], evidence[-1]["end"]
+                beat["_manual_max_src_out"] = resolved
+                beat["_manual_out"] = beat["_recovered_out"] = True
+            else:
+                limit = quantise(base_in - amount, fps=fps)
+                if limit < -0.5 * frame:
+                    _refuse_recovery(beat["id"], side, amount, "candidate precedes media start")
+                limit = max(0.0, limit)
+                candidates = [word for word in words
+                              if word["start"] < base_in - 0.5 * frame
+                              and word["start"] >= limit - 0.5 * frame
+                              and word["end"] > limit]
+                if not candidates:
+                    _refuse_recovery(beat["id"], side, amount,
+                                     "no complete word-level transcript evidence in the search window")
+                evidence = []
+                resolved = None
+                for word in reversed(candidates):
+                    evidence.insert(0, word)
+                    lower = max(limit, word["start"] - 0.30)
+                    onset = idx.onset_after(lower)
+                    if onset is None or onset > word["start"] + 0.10:
+                        continue
+                    candidate = quantise(max(0.0, onset - LEAD_FRAMES / float(fps)), fps=fps)
+                    if candidate < base_in - 0.5 * frame and _continuous_source(idx, onset, base_in):
+                        resolved = candidate
+                        break
+                if resolved is None:
+                    _refuse_recovery(beat["id"], side, amount,
+                                     "candidate is separated by silence or has no acoustic onset")
+                if resolved > min(word["start"] for word in evidence) + 0.5 * frame:
+                    _refuse_recovery(beat["id"], side, amount, "resolved IN would clip the protected first word")
+                reason = _overlap_reason(beat, picked, indexed_beats, resolved, base_in, fps)
+                if reason:
+                    _refuse_recovery(beat["id"], side, amount, reason)
+                beat["src_in"] = resolved
+                beat["text"] = _merge_text((" ".join(w["text"] for w in evidence), beat.get("text", "")))
+                beat["first_word"], beat["first_word_start"] = evidence[0]["text"], evidence[0]["start"]
+                beat["first_word_trustworthy"] = True
+                beat["_manual_min_src_in"] = resolved
+                beat["_manual_in"] = beat["_recovered_in"] = True
+
+            adjustments.append({
+                "beat": beat["id"], "side": side, "requested": amount,
+                "indexed": indexed,
+                "resolved": {"src_in": beat["src_in"], "src_out": beat["src_out"]},
+                "evidence": [{"word": word["text"], "start": word["start"], "end": word["end"]}
+                             for word in evidence],
+            })
+    return adjustments
+
+
 def source_overlap_findings(picked, fps=FPS):
     """Check every source-neighbour pair, independent of requested timeline order."""
     tolerance = 0.5 / float(fps)
@@ -1099,15 +1333,17 @@ def coalesce_continuous(idx, picked, boundaries=None):
     for index, beat in enumerate(picked):
         previous = picked[index - 1]["id"] if index else None
         following = picked[index + 1]["id"] if index + 1 < len(picked) else None
-        if beat.get("continuation_of") is not None and beat["continuation_of"] != previous:
+        if beat.get("continuation_of") is not None and beat["continuation_of"] != previous \
+                and not beat.get("_recovered_in"):
             raise ValueError(f"beat {beat['id']} starts with b{beat['continuation_of']}'s speech; "
                              f"keep b{beat['continuation_of']} immediately before it")
-        if beat.get("continued_by") is not None and beat["continued_by"] != following:
+        if beat.get("continued_by") is not None and beat["continued_by"] != following \
+                and not beat.get("_recovered_out"):
             raise ValueError(f"beat {beat['id']} ends inside b{beat['continued_by']}'s continuous speech; "
                              f"keep b{beat['continued_by']} immediately after it")
     clips = []
     for beat in picked:
-        previous = beat.get("continuation_of")
+        previous = None if beat.get("_recovered_in") else beat.get("continuation_of")
         if previous is None and beat.get("foreign_lead"):
             raise ValueError(f"beat {beat['id']} starts with unrepresented prior speech "
                              f"({beat['foreign_lead']!r})")
@@ -1128,6 +1364,9 @@ def coalesce_continuous(idx, picked, boundaries=None):
             clip["beats"].append(beat["id"])
             clip["src_out"] = beat["src_out"]
             clip["text"] = _merge_text((clip["text"], beat.get("foreign_lead", ""), beat["text"]))
+            for key in ("last_word", "last_word_end"):
+                if key in beat:
+                    clip[key] = beat[key]
             for key in ("_manual_max_src_out", "_manual_out"):
                 if key in beat:
                     clip[key] = beat[key]
@@ -1342,6 +1581,9 @@ def cmd_cut(args):
 
     try:
         adjustments = apply_boundary_adjustments(idx, picked, decisions["boundaries"], fps=fps)
+        recoveries = apply_outward_recoveries(
+            idx, picked, decisions["recoveries"], data, fps=fps,
+        )
     except (TypeError, ValueError) as error:
         print(f"A-roll boundary decision rejected: {error}", file=sys.stderr)
         return 2
@@ -1399,13 +1641,15 @@ def cmd_cut(args):
         "kept": keep,
         "order": order,
         "boundaries": decisions["boundaries"],
+        "recoveries": decisions["recoveries"],
     }
     if decisions["review"]:
         editorial["reviewFile"] = decisions["review"]["path"]
     plan = {"media": data["media"], "fps": fps,
             **({"source_token": stored_token, "sourceToken": stored_token} if stored_token is not None else {}),
             "fps_contract": {"fps": fps, "quantized": True, "authority": "input"},
-            "kept": keep, "order": order, "editorial": editorial, "adjustments": adjustments,
+            "kept": keep, "order": order, "editorial": editorial,
+            "adjustments": adjustments, "recoveries": recoveries,
             "repairs": repairs,
             "timeline": timeline,
             "duration": round(cursor, 6), "lint": findings, "blocking_lint": blocking_findings,
@@ -1428,6 +1672,17 @@ def cmd_cut(args):
                   f"resolved {resolved['src_in']:.6f}->{resolved['src_out']:.6f}")
     else:
         print("\nboundary adjustments: none")
+    if recoveries:
+        print("\noutward recoveries:")
+        for recovery in recoveries:
+            resolved = recovery["resolved"]
+            evidence = " ".join(word["word"] for word in recovery["evidence"])
+            print(f"  b{recovery['beat']} {recovery['side'].upper()} requested "
+                  f"{recovery['requested']:.6f}s; resolved "
+                  f"{resolved['src_in']:.6f}->{resolved['src_out']:.6f}; "
+                  f"word evidence: {evidence}")
+    else:
+        print("\noutward recoveries: none")
     print("\nrepairs:")
     if getattr(args, "no_repair", False):
         print("  disabled (--no-repair)")
@@ -1575,7 +1830,9 @@ def main():
     ap.add_argument("--order", help="final beat order; must be an exact permutation of kept ids")
     ap.add_argument("--trim-beat", dest="trim_beat", action="append",
                     help="safe inward trim, ID:in=SECONDS or ID:out=SECONDS; repeatable")
-    ap.add_argument("--review", help="v1 JSON decision file with sourceToken, keep/order, and boundaries")
+    ap.add_argument("--recover-beat", dest="recover_beat", action="append",
+                    help="reviewed outward recovery window, ID:in=SECONDS or ID:out=SECONDS; repeatable")
+    ap.add_argument("--review", help="v1 JSON decision file with sourceToken, keep/order, boundaries, and recoveries")
     destination = ap.add_mutually_exclusive_group()
     destination.add_argument("--project", help="build this new CapCut project from the selection")
     destination.add_argument("--into", help="apply the cut handoff to an existing project")
@@ -1605,7 +1862,8 @@ def main():
     args.out = args.index
     args.media = media
 
-    editorial_requested = lambda: any((args.keep, args.drop, args.order, args.trim_beat, args.review,
+    editorial_requested = lambda: any((args.keep, args.drop, args.order, args.trim_beat,
+                                        args.recover_beat, args.review,
                                         args.project, args.into))
 
     # index once, reuse thereafter — the expensive half never runs twice

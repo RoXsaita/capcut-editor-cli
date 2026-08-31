@@ -15,12 +15,14 @@ from aroll import (
     FRAME,
     add_audio_ramps,
     apply_boundary_adjustments,
+    apply_outward_recoveries,
     audio_ramp_operations,
     cmd_cut,
     group_duplicates,
     load_review,
     snap,
     parse_order_spec,
+    parse_recovery_specs,
     parse_trim_specs,
     resolve_editorial_decisions,
     suggested_keep,
@@ -182,6 +184,10 @@ class ArollFindingsTest(unittest.TestCase):
             parse_trim_specs(["1:in=-0.2"])
         with self.assertRaisesRegex(ValueError, "expands"):
             parse_trim_specs(["1:out=0.2"])
+        self.assertEqual(parse_recovery_specs(["1:out=0.2", "2:in=0.3"]),
+                         {1: {"out": 0.2}, 2: {"in": 0.3}})
+        with self.assertRaisesRegex(ValueError, "positive"):
+            parse_recovery_specs(["1:out=0"])
         self.assertEqual(parse_order_spec("2,0"), [2, 0])
 
     def test_review_file_requires_current_source_token(self):
@@ -201,6 +207,7 @@ class ArollFindingsTest(unittest.TestCase):
             loaded = load_review(review, data)
             self.assertEqual(loaded["order"], [1, 0])
             self.assertEqual(loaded["boundaries"], {1: {"outOffset": -0.2}})
+            self.assertEqual(loaded["recoveries"], {})
 
             stale = json.loads(review.read_text())
             stale["sourceToken"] = {**token, "content_hash": "old"}
@@ -227,6 +234,120 @@ class ArollFindingsTest(unittest.TestCase):
             adjustments[0]["resolved"]["src_out"] - adjustments[0]["resolved"]["src_in"],
             picked[0]["src_out"] - picked[0]["src_in"],
         )
+
+    def test_reviewed_outward_recovery_requires_word_and_acoustic_evidence(self):
+        db = [-70.0] * 300
+        for index in range(50, 124):
+            db[index] = -20.0
+        idx = AudioIndex(db, 0.01)
+        data = {
+            "source_duration": 3.0,
+            "words": [
+                {"text": "مرحبا", "start": 0.55, "end": 0.95, "segment": 0},
+                {"text": "يوم", "start": 0.95, "end": 1.20, "segment": 0},
+            ],
+            "beats": [beat(0, "مرحبا", 0, 0.5, 1.0)],
+        }
+        picked = [dict(data["beats"][0])]
+        recovered = apply_outward_recoveries(idx, picked, {0: {"out": 0.5}}, data, fps=30)
+        picked_again = [dict(data["beats"][0])]
+        recovered_again = apply_outward_recoveries(
+            idx, picked_again, {0: {"out": 0.5}}, data, fps=30)
+        self.assertEqual(recovered_again, recovered)
+        self.assertEqual(picked_again[0]["src_out"], picked[0]["src_out"])
+        self.assertEqual(recovered[0]["side"], "out")
+        self.assertEqual([row["word"] for row in recovered[0]["evidence"]], ["يوم"])
+        self.assertGreater(picked[0]["src_out"], 1.20)
+        self.assertLess(idx.at(picked[0]["src_out"]), -45)
+        self.assertAlmostEqual(picked[0]["src_out"] * 30, round(picked[0]["src_out"] * 30))
+        self.assertIn("يوم", picked[0]["text"])
+
+        in_db = [-70.0] * 200
+        for index in range(30, 100):
+            in_db[index] = -20.0
+        in_data = {
+            "source_duration": 2.0,
+            "words": [{"text": "أول", "start": 0.35, "end": 0.60, "segment": 0}],
+            "beats": [beat(0, "كلمة", 0, 0.5, 1.0)],
+        }
+        in_picked = [dict(in_data["beats"][0])]
+        recovered_in = apply_outward_recoveries(
+            AudioIndex(in_db, 0.01), in_picked, {0: {"in": 0.3}}, in_data, fps=30)
+        self.assertEqual(recovered_in[0]["side"], "in")
+        self.assertLessEqual(in_picked[0]["src_in"], 0.35)
+        self.assertEqual(in_picked[0]["first_word"], "أول")
+
+        silent = AudioIndex(db[:100] + [-70.0] * 20 + db[120:], 0.01)
+        with self.assertRaisesRegex(ValueError, "silence|dead air"):
+            apply_outward_recoveries(silent, [dict(data["beats"][0])],
+                                      {0: {"out": 0.5}}, data, fps=30)
+
+        with self.assertRaisesRegex(ValueError, "EOF"):
+            apply_outward_recoveries(idx, [dict(data["beats"][0])],
+                                      {0: {"out": 3.0}}, data, fps=30)
+
+    def test_outward_recovery_refuses_kept_overlap_and_another_take(self):
+        idx = AudioIndex([-20.0] * 130 + [-70.0] * 200, 0.01)
+        words = [{"text": "tail", "start": 0.95, "end": 1.20, "segment": 0}]
+        first = beat(0, "first", 0, 0.5, 1.0)
+        second = beat(1, "second", 0, 1.1, 1.8)
+        data = {"source_duration": 3.0, "words": words, "beats": [first, second]}
+        with self.assertRaisesRegex(ValueError, "overlaps kept beat"):
+            apply_outward_recoveries(idx, [dict(first), dict(second)],
+                                      {0: {"out": 0.5}}, data, fps=30)
+
+        other_take = beat(1, "retry", 1, 1.1, 1.8)
+        data["beats"] = [first, other_take]
+        with self.assertRaisesRegex(ValueError, "enters take"):
+            apply_outward_recoveries(idx, [dict(first)], {0: {"out": 0.5}}, data, fps=30)
+
+    def test_outward_recovery_handoff_is_one_x_for_new_and_transactional_paths(self):
+        for mode in ("project", "into"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                media = root / "face.mp4"
+                media.write_bytes(b"fixture media")
+                token = source_token(media)
+                index = root / "face.aroll.json"
+                plan = root / "face.plan.json"
+                index.write_text(json.dumps({
+                    "version": 5, "media": str(media), "source_token": token, "fps": 30.0,
+                    "source_duration": 3.0,
+                    "words": [
+                        {"text": "مرحبا", "start": 0.55, "end": 0.95, "segment": 0},
+                        {"text": "يوم", "start": 0.95, "end": 1.20, "segment": 0},
+                    ],
+                    "beats": [beat(0, "مرحبا", 0, 0.5, 1.0)],
+                    "default_keep": [0],
+                }))
+                args = Namespace(
+                    index=str(index), keep="0", drop=None, order="0", trim_beat=None,
+                    recover_beat=["0:out=0.5"], review=None, no_repair=True, force=False,
+                    project="new project" if mode == "project" else None,
+                    into="existing project" if mode == "into" else None,
+                    dry_run=True, plan=str(plan), fps=None,
+                )
+                db = [-70.0] * 300
+                for sample in range(50, 124):
+                    db[sample] = -20.0
+                with patch.object(__import__("aroll").AudioIndex, "build_or_load",
+                                  return_value=AudioIndex(db, 0.01)), \
+                        patch("aroll.subprocess.run") as run:
+                    run.return_value.returncode = 0
+                    run.return_value.stdout = ""
+                    self.assertEqual(cmd_cut(args), 0)
+
+                resolved = json.loads(plan.read_text())
+                clip = resolved["timeline"][0]
+                self.assertEqual(clip["speed"], 1.0)
+                self.assertEqual(clip["src_dur"], clip["dur"])
+                self.assertEqual(clip["tl_out"] - clip["tl_in"], clip["dur"])
+                self.assertEqual(resolved["recoveries"][0]["evidence"][0]["word"], "يوم")
+                command = run.call_args.args[0]
+                if mode == "project":
+                    self.assertEqual(command[:4], ["capcutctl", "new", "--project", "new project"])
+                else:
+                    self.assertEqual(command[:4], ["capcutctl", "apply", "--project", "existing project"])
 
     def test_cmd_cut_review_writes_ordered_one_x_plan_with_source_token(self):
         with tempfile.TemporaryDirectory() as tmp:

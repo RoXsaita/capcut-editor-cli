@@ -18,17 +18,24 @@ Usage:
     python3 frame_qa.py --project NAME --times 1.5,6,41.5 --out qa/
     python3 frame_qa.py --project NAME --at-cuts --at-scenes --at-broll --out qa/
     python3 frame_qa.py --project NAME --preview preview.mp4 [--from 4 --to 20]
+        (a streamed proxy job; do not combine it with targeted selectors or --sheet)
     python3 frame_qa.py --project NAME --times 6 --rects-only
 """
 import argparse
+import hashlib
 import json
+import math
 import os
 import re
+import select
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 from collections import OrderedDict
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,10 +50,18 @@ DRAFTS = os.path.expanduser("~/Movies/CapCut/User Data/Projects/com.lveditor.dra
 _FRAME_EPS = 1.0 / 24
 _DEFAULT_FRAME_PERIOD = 1.0 / 30.0
 _SEEK_PREROLL = 2.0
+_PREVIEW_COMPOSITOR_VERSION = "preview-v3"
+_DEFAULT_PREVIEW_BOUNDS = (360, 640)
+_DEFAULT_CUT_OFFSET = None  # one timeline frame, resolved from the draft FPS
+_PREVIEW_HWACCEL = None
 
 
 class FrameExtractionError(SystemExit):
     """A frame could not be extracted with a trustworthy presentation timestamp."""
+
+
+class PreviewCancelled(FrameExtractionError):
+    """The user interrupted a preview and all of its children were stopped."""
 
 
 @dataclass
@@ -73,6 +88,131 @@ class FrameSample:
     @property
     def drift_over_one_frame(self):
         return self.drift > self.frame_period + 1e-6
+
+
+class _PreviewRuntime:
+    """Own preview children and the exact temporary workspace for cancellation cleanup."""
+
+    def __init__(self):
+        self.children = set()
+        self.cancelled = False
+        self._previous_handlers = {}
+
+    def __enter__(self):
+        global _ACTIVE_PREVIEW
+        if _ACTIVE_PREVIEW is not None:
+            raise RuntimeError("preview runtime cannot be nested")
+        _ACTIVE_PREVIEW = self
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            try:
+                self._previous_handlers[signum] = signal.getsignal(signum)
+                signal.signal(signum, self._handle_signal)
+            except (ValueError, OSError):
+                # Signal registration is only legal in the main thread. Tests and library
+                # callers may render from a worker, where child tracking still works.
+                continue
+        return self
+
+    def __exit__(self, exc_type, _exc, _tb):
+        global _ACTIVE_PREVIEW
+        if exc_type is not None or self.cancelled:
+            self.terminate_children()
+        for signum, handler in self._previous_handlers.items():
+            try:
+                signal.signal(signum, handler)
+            except (ValueError, OSError):
+                continue
+        _ACTIVE_PREVIEW = None
+        return False
+
+    def _handle_signal(self, signum, _frame):
+        self.cancelled = True
+        self.terminate_children()
+
+    def add(self, process):
+        self.children.add(process)
+        return process
+
+    def discard(self, process):
+        self.children.discard(process)
+
+    def terminate_children(self):
+        for process in tuple(self.children):
+            _terminate_process(process)
+
+
+_ACTIVE_PREVIEW = None
+
+
+def _terminate_process(process):
+    """Terminate a tracked ffmpeg process and its process group, when available."""
+    if process is None:
+        return
+    try:
+        if process.poll() is not None:
+            return
+    except (AttributeError, OSError):
+        pass
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+    except (AttributeError, OSError, ProcessLookupError):
+        try:
+            process.terminate()
+        except (AttributeError, OSError):
+            return
+    try:
+        process.wait(timeout=1)
+    except (AttributeError, OSError, subprocess.TimeoutExpired):
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        except (AttributeError, OSError, ProcessLookupError):
+            with suppress(AttributeError, OSError):
+                process.kill()
+
+
+def _start_process(command, **kwargs):
+    """Start a child, isolating it into a process group during preview work."""
+    if _ACTIVE_PREVIEW is None:
+        return subprocess.Popen(command, **kwargs)
+    kwargs.setdefault("start_new_session", True)
+    return _ACTIVE_PREVIEW.add(subprocess.Popen(command, **kwargs))
+
+
+def _run_command(command, **kwargs):
+    """`subprocess.run` outside previews; tracked Popen inside them."""
+    if _ACTIVE_PREVIEW is None:
+        return subprocess.run(command, **kwargs)
+    check = kwargs.pop("check", False)
+    capture_output = kwargs.pop("capture_output", False)
+    text = kwargs.pop("text", False)
+    if capture_output:
+        kwargs.setdefault("stdout", subprocess.PIPE)
+        kwargs.setdefault("stderr", subprocess.PIPE)
+    process = _start_process(command, **kwargs)
+    try:
+        stdout, stderr = process.communicate()
+    finally:
+        _ACTIVE_PREVIEW.discard(process)
+    if _ACTIVE_PREVIEW.cancelled:
+        raise PreviewCancelled("preview cancelled")
+    result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    if check and result.returncode:
+        raise subprocess.CalledProcessError(
+            result.returncode, command, output=stdout, stderr=stderr
+        )
+    if text:
+        # Popen(text=True) is not used above because raw-video callers share this helper;
+        # decode the captured streams only for the small ffprobe/error responses.
+        for attr in ("stdout", "stderr"):
+            value = getattr(result, attr)
+            if isinstance(value, bytes):
+                setattr(result, attr, value.decode(errors="replace"))
+    return result
+
+
+def _check_preview_cancelled():
+    if _ACTIVE_PREVIEW is not None and _ACTIVE_PREVIEW.cancelled:
+        raise PreviewCancelled("preview cancelled")
 
 # grab() memoises decoded frames. Sized for the 3-6 stills a QA run asks for it was
 # a plain dict; a default-fps --preview asks for ~1300 distinct stills and the same
@@ -262,7 +402,7 @@ def _extract_path(path, requested, method):
             raise ValueError(f"unknown frame extraction method: {method}")
         command += ["-an", "-sn", "-frames:v", "1", "-fps_mode", "vfr", tmp]
         try:
-            result = subprocess.run(command, check=True, capture_output=True, text=True)
+            result = _run_command(command, check=True, capture_output=True, text=True)
         except subprocess.CalledProcessError as exc:
             detail = (exc.stderr or "").strip()
             suffix = f": {detail[-300:]}" if detail else ""
@@ -341,15 +481,18 @@ def _copy_sample(sample, image=None):
     )
 
 
-def grab(path, t, return_info=False, fps=None):
-    """Return a cached image, or a ``FrameSample`` when ``return_info`` is true."""
-    key = (path, round(float(t), 6))
+def grab(path, t, return_info=False, fps=None, size=None):
+    """Return a cached image, optionally decoded/resized for a proxy canvas."""
+    size_key = tuple(size) if size else None
+    key = (path, round(float(t), 6), size_key)
     if key in _CACHE and (not return_info or key in _FRAME_INFO):
         _CACHE.move_to_end(key)
         if return_info:
             return _copy_sample(_FRAME_INFO[key])
         return _CACHE[key].copy()
     sample = extract_frame(path, t, fps=fps)
+    if size and sample.image.size != tuple(size):
+        sample = _copy_sample(sample, sample.image.resize(tuple(size), Image.LANCZOS))
     _cache_put(key, sample.image)
     _FRAME_INFO[key] = _copy_sample(sample)
     if return_info:
@@ -366,7 +509,8 @@ def place(canvas, im, clip, W, H, blur=False, mask=None):
     tf = clip.get("transform", {})
     cx = W / 2 + tf.get("x", 0.0) * (W / 2)
     cy = H / 2 - tf.get("y", 0.0) * (H / 2)          # y positive = UP
-    im = im.resize((w, h), Image.LANCZOS)
+    if im.size != (w, h):
+        im = im.resize((w, h), Image.LANCZOS)
     if blur:
         im = im.filter(ImageFilter.GaussianBlur(radius=max(2, w * 0.04)))
     if mask:
@@ -462,9 +606,11 @@ def _missing_media_error(context, issues):
     )
 
 
-def render(proj, tl, t, z="track", frame_reports=None, allow_missing=False):
+def render(proj, tl, t, z="track", frame_reports=None, allow_missing=False,
+           output_size=None, frame_provider=None):
     cc = tl.get("canvas_config", {})
-    W, H = cc.get("width", 1080), cc.get("height", 1920)
+    native_w, native_h = cc.get("width", 1080), cc.get("height", 1920)
+    W, H = tuple(output_size) if output_size else (native_w, native_h)
     idx = {}
     for k, v in (tl.get("materials") or {}).items():
         if isinstance(v, list):
@@ -505,12 +651,14 @@ def render(proj, tl, t, z="track", frame_reports=None, allow_missing=False):
                 blur = True
             if kk in ("masks", "common_mask") and s.get("enable_video_mask", True):
                 mask = (mm.get("resource_type"), mm.get("config"))
-        sample = grab(p, st, return_info=True, fps=tl.get("fps"))
+        sample = (frame_provider(p, st) if frame_provider is not None
+                  else grab(p, st, return_info=True, fps=tl.get("fps")))
         image = sample.image if isinstance(sample, FrameSample) else sample
         if frame_reports is not None and isinstance(sample, FrameSample):
             frame_reports.append((p, sample))
         rc = place(canvas, image, s.get("clip") or {}, W, H, blur, mask)
-        rows.append((ti, s["id"][:8], os.path.basename(p)[:34], rc))
+        label = os.path.basename(p)[:34]
+        rows.append((ti, s["id"][:8], label, rc))
     return canvas, rows, W, H
 
 
@@ -531,8 +679,107 @@ def contact_sheet(tiles, out, tile_w=240, pad=6, bar=22):
         x = pad + i * (tile_w + pad)
         sheet.paste(im, (x, bar + pad))
         d.text((x + 2, 5), str(label)[:44], fill=(255, 235, 90))
-    sheet.save(out)
+    sheet.save(out, compress_level=1)
     return out
+
+
+def write_simple_targeted(proj, tl, times, out_dir, sheet=None, labels=None,
+                          guides=None, tile_w=240, z="track"):
+    """Export identity, single-source A-roll seam frames and its sheet in one ffmpeg pass."""
+    if z != "track":
+        return None
+    content_start, content_end = content_edit_range(proj, tl)
+    segments = simple_aroll_segments(proj, tl, content_start, content_end)
+    if not segments:
+        return None
+    mapped = []
+    for timeline_time in times:
+        row = next((item for item in segments
+                    if item["timeline_start"] <= timeline_time < item["timeline_end"]), None)
+        if row is None:
+            return None
+        mapped.append((timeline_time, row, source_time(row["segment"], timeline_time)))
+    paths = {row["path"] for _timeline_time, row, _source_time in mapped}
+    source_times = [source_time_ for _timeline_time, _row, source_time_ in mapped]
+    if len(paths) != 1 or source_times != sorted(source_times):
+        return None
+
+    source = paths.pop()
+    info = _probe_video_info(source)
+    if not info:
+        return None
+    try:
+        period = 1.0 / float(info.get("fps") or tl.get("fps") or 30)
+    except (TypeError, ValueError, ZeroDivisionError):
+        period = _DEFAULT_FRAME_PERIOD
+    unique = sorted(set(round(value, 6) for value in source_times))
+    half = max(period, 1e-4) * 0.49
+    seek_start = max(0.0, unique[0] - _SEEK_PREROLL)
+    selector = "+".join(
+        f"between(t\\,{max(0.0, value - seek_start - half):.9f}\\,{value - seek_start + half:.9f})"
+        for value in unique
+    )
+    canvas = tl.get("canvas_config") or {}
+    width, height = int(canvas.get("width") or 1080), int(canvas.get("height") or 1920)
+    filters = [f"select='{selector}'", f"scale={width}:{height}:flags=fast_bilinear"]
+    for guide in (guides or [height / 2]):
+        filters.append(f"drawbox=x=0:y={max(0, round(float(guide)) - 2)}:w=iw:h=4:color=red:t=fill")
+
+    tmp = tempfile.mkdtemp(prefix="capcutctl-targeted-")
+    try:
+        pattern = os.path.join(tmp, "%06d.png")
+        command = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+            *_preview_decode_options(), "-ss", f"{seek_start:.9f}", "-i", source,
+            "-t", f"{unique[-1] - seek_start + half + period:.9f}",
+        ]
+        if sheet:
+            filter_graph = ",".join(filters) + (
+                f",split=2[full][small];[small]scale={int(tile_w)}:-1:flags=fast_bilinear,"
+                f"tile={len(unique)}x1:padding=6:margin=6[sheet]"
+            )
+            raw_sheet = os.path.join(tmp, "sheet.png")
+            command += [
+                "-filter_complex", filter_graph,
+                "-map", "[full]", "-an", "-fps_mode", "vfr", "-compression_level", "1", pattern,
+                "-map", "[sheet]", "-frames:v", "1", "-compression_level", "1", raw_sheet,
+            ]
+        else:
+            raw_sheet = None
+            command += ["-vf", ",".join(filters), "-an", "-fps_mode", "vfr",
+                        "-compression_level", "1", pattern]
+        result = _run_command(command, check=False, capture_output=True, text=True)
+        if result.returncode:
+            raise FrameExtractionError(f"targeted QA ffmpeg failed: {(result.stderr or '').strip()}")
+        generated = sorted(Path(tmp).glob("[0-9]*.png"))
+        if len(generated) != len(unique):
+            raise FrameExtractionError(
+                f"targeted QA decoded {len(generated)} frames for {len(unique)} source requests")
+        by_source = dict(zip(unique, generated, strict=True))
+        os.makedirs(out_dir, exist_ok=True)
+        tiles = []
+        labels = labels or []
+        for index, (timeline_time, row, source_time_) in enumerate(mapped):
+            destination = os.path.join(out_dir, f"t{timeline_time:g}.png")
+            shutil.copyfile(by_source[round(source_time_, 6)], destination)
+            label = labels[index] if index < len(labels) else f"t={timeline_time:g}"
+            tiles.append((destination, label))
+            print(f"\n=== t={timeline_time}  z=track  canvas {width}x{height}")
+            print(f"  frame requested/delivered PTS {source_time_:.6f}s (targeted-batch)")
+            print(f"  trk{row['track_index']:<2} {str(row['segment'].get('id') or '')[:8]} "
+                  f"{os.path.basename(source)[:34]} x0..{width} y0..{height}  {width}x{height}")
+            print(f"  -> {destination}")
+        if sheet and raw_sheet:
+            image = Image.open(raw_sheet).convert("RGB")
+            draw = ImageDraw.Draw(image)
+            stride = int(tile_w) + 6
+            for index, (_destination, label) in enumerate(tiles):
+                draw.text((6 + index * stride, 5), str(label)[:44], fill=(255, 235, 90))
+            image.save(sheet, compress_level=1)
+            print(f"\n  -> {sheet}")
+        return tiles
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 OCR_BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vision", "ocr")
@@ -605,13 +852,14 @@ def main():
     ap.add_argument("--project")
     ap.add_argument("--times", help="comma-separated seconds")
     ap.add_argument("--at-cuts", action="store_true",
-                    help="sample every visual segment boundary")
+                    help="sample one native frame on each side of every visual cut")
     ap.add_argument("--at-scenes", action="store_true",
                     help="sample the midpoint of every principal-track scene")
     ap.add_argument("--at-broll", action="store_true",
                     help="sample the midpoint of every B-roll segment")
     ap.add_argument("--selftest", action="store_true")
-    ap.add_argument("--out", default="qa")
+    ap.add_argument("--out", default=None,
+                    help="targeted QA frame directory (incompatible with --preview)")
     ap.add_argument("--z", choices=["track", "render_index"], default="track")
     ap.add_argument("--guide", type=float, action="append", default=[],
                     help="draw a horizontal guide at this y (repeatable); 960 = the half line")
@@ -625,40 +873,81 @@ def main():
                          "(repeatable). Exit 1 if any expectation fails.")
     ap.add_argument("--ocr", action="store_true", help="print the text found in each frame")
     ap.add_argument("--languages", default="en-US,ar")
-    ap.add_argument("--width", type=int, default=240, help="tile width in the contact sheet")
+    ap.add_argument("--width", type=int, default=None, help="tile width in the contact sheet")
     ap.add_argument("--preview", nargs="?", const="preview.mp4", default=None,
-                    help="write a 6fps compositor proxy (optional path)")
+                    help="write a streamed watchable proxy (optional path; separate from targeted QA)")
     ap.add_argument("--fps", type=float, default=6, help="preview frame rate (default 6)")
     ap.add_argument("--allow-missing", action="store_true",
                     help="explicitly allow degraded black output for missing video media")
     ap.add_argument("--from", dest="from_time", type=float,
                     help="preview start in timeline seconds (default: content start)")
     ap.add_argument("--to", dest="to_time", type=float,
-                    help="preview end in timeline seconds (default: content end)")
+                     help="preview end in timeline seconds (default: content end)")
+    ap.add_argument("--resolution", help="proxy bound such as 360x640 (default; preserves aspect ratio)")
+    ap.add_argument("--native", action="store_true",
+                    help="opt into native-resolution preview encoding")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="do not read or write the fingerprinted preview cache")
+    ap.add_argument("--cut-window", type=float,
+                    help="distance in seconds from each cut for targeted samples (default: one frame)")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(_selftest())
     if a.preview:
         if not a.project:
             ap.error("--project is required")
+        conflicts = []
+        if a.times:
+            conflicts.append("--times")
+        if a.at_cuts:
+            conflicts.append("--at-cuts")
+        if a.at_scenes:
+            conflicts.append("--at-scenes")
+        if a.at_broll:
+            conflicts.append("--at-broll")
+        if a.sheet is not None:
+            conflicts.append("--sheet")
         if a.expect:
-            # --preview writes a movie, not per-timestamp stills, so there is nothing to
-            # OCR. Exiting 0 having verified none of the expectations is the failure mode
-            # the unmatched-timestamp check exists to prevent; refuse instead.
-            ap.error("--preview cannot check --expect (it renders a movie, not frames at "
-                     "--times); run the same --expect without --preview")
+            conflicts.append("--expect")
+        if a.out is not None:
+            conflicts.append("--out")
+        if a.label:
+            conflicts.append("--label")
+        if a.ocr:
+            conflicts.append("--ocr")
+        if a.rects_only:
+            conflicts.append("--rects-only")
+        if a.guide:
+            conflicts.append("--guide")
+        if a.width is not None:
+            conflicts.append("--width")
+        if conflicts:
+            joined = ", ".join(conflicts)
+            ap.error(f"--preview cannot be combined with {joined}; run separate targeted QA and preview commands")
         proj, tl, path = load_project(a.project)
         print(f"timeline: {path}")
         try:
             render_start, render_end = resolve_preview_range(
                 proj, tl, start=a.from_time, end=a.to_time
             )
+            estimate = preview_estimate(
+                proj, tl, fps=a.fps, start=render_start, end=render_end,
+                resolution=a.resolution, native=a.native, allow_missing=a.allow_missing,
+            )
         except (TypeError, ValueError) as exc:
             ap.error(str(exc))
         print(f"rendered range: {render_start:.3f}s -> {render_end:.3f}s")
-        out = write_preview(proj, tl, a.preview, fps=a.fps, z=a.z,
-                            start=render_start, end=render_end,
-                            allow_missing=a.allow_missing)
+        print(format_preview_estimate(estimate), end="")
+        try:
+            out = write_preview(proj, tl, a.preview, fps=a.fps, z=a.z,
+                                start=render_start, end=render_end,
+                                allow_missing=a.allow_missing, resolution=a.resolution,
+                                native=a.native, cache=not a.no_cache, announce=False)
+        except PreviewCancelled:
+            print("preview cancelled", file=sys.stderr)
+            raise SystemExit(130) from None
+        except FrameExtractionError as exc:
+            ap.error(str(exc))
         print(f"  -> {out}")
         return
     selectors = a.at_cuts or a.at_scenes or a.at_broll
@@ -666,63 +955,101 @@ def main():
         ap.error("--project and --times or one of --at-cuts/--at-scenes/--at-broll are required")
     proj, tl, path = load_project(a.project)
     print(f"timeline: {path}")
-    os.makedirs(a.out, exist_ok=True)
+    qa_out = a.out or "qa"
+    os.makedirs(qa_out, exist_ok=True)
     expectations = parse_expect(a.expect)
     try:
         rendered = qa_sample_times(
             tl, proj, times=a.times, at_cuts=a.at_cuts,
-            at_scenes=a.at_scenes, at_broll=a.at_broll,
+            at_scenes=a.at_scenes, at_broll=a.at_broll, cut_window=a.cut_window,
         )
     except (TypeError, ValueError) as exc:
         ap.error(str(exc))
     if not rendered:
         ap.error("no QA sample times found")
+    if not (a.rects_only or a.ocr or expectations or a.allow_missing):
+        sheet_path = None
+        if a.sheet:
+            sheet_path = a.sheet if os.path.isabs(a.sheet) else os.path.join(qa_out, a.sheet)
+            os.makedirs(os.path.dirname(os.path.abspath(sheet_path)), exist_ok=True)
+        with _PreviewRuntime():
+            fast = write_simple_targeted(
+                proj, tl, rendered, qa_out, sheet=sheet_path, labels=a.label,
+                guides=a.guide, tile_w=a.width or 240, z=a.z,
+            )
+        if fast is not None:
+            return
     failures = []
     tiles = []
     # An expectation whose timestamp is never rendered is a different failure from a
     # phrase that was looked for and missing. Printing it as the latter read like an
     # OCR miss and sent the last reader hunting for text that was never searched for.
     unchecked = sorted(t for t in expectations if not any(times_close(t, u) for u in rendered))
-    for t in rendered:
-        frame_reports = []
-        if a.allow_missing:
-            img, rows, W, H = render(proj, tl, t, a.z, frame_reports=frame_reports,
-                                     allow_missing=True)
-        else:
-            img, rows, W, H = render(proj, tl, t, a.z, frame_reports=frame_reports)
-        print(f"\n=== t={t}  z={a.z}  canvas {W}x{H}")
-        report_extractions(t, frame_reports)
-        for ti, sid, nm, rc in rows:
-            if rc is None:
-                print(f"  trk{ti:<2} {sid} {nm}")
+    cc = tl.get("canvas_config") or {}
+    native_size = (int(cc.get("width") or 1080), int(cc.get("height") or 1920))
+    with _PreviewRuntime():
+        # Decode the finite set of native seam samples once per source. This keeps the
+        # targeted path pixel-accurate at the timeline canvas size without launching one
+        # ffmpeg process per cut; stills and unusual/VFR sources fall back to grab().
+        print(f"targeted QA: preparing {len(rendered)} native samples; batched source decoding",
+              flush=True)
+        provider = _PreviewFrameProvider(proj, tl, rendered, native_size)
+        content_start, content_end = content_edit_range(proj, tl)
+        simple_target = simple_aroll_segments(proj, tl, content_start, content_end)
+        simple_target = (simple_target
+                         if simple_target and all(
+                             any(row["timeline_start"] <= t < row["timeline_end"]
+                                 for row in simple_target) for t in rendered)
+                         else None)
+        simple_target = (simple_target
+                         if simple_target and all(row["path"] in provider.batch_paths
+                                                  for row in simple_target)
+                         else None)
+        print(f"targeted QA: {len(rendered)} native samples ready", flush=True)
+        for t in rendered:
+            frame_reports = []
+            if simple_target and a.z == "track":
+                img, rows, reports, W, H = _render_simple_aroll_frame(
+                    t, simple_target, provider, native_size)
+                frame_reports.extend(reports)
             else:
-                x, y, w, h = rc
-                print(f"  trk{ti:<2} {sid} {nm:<34} x{x}..{x+w} y{y}..{y+h}  {w}x{h}")
-        wanted = [p for et, phrases in expectations.items() if times_close(et, t) for p in phrases]
-        if a.rects_only:
-            # --rects-only skips the PNGs, never the assertions: this mode used to exit 0
-            # with --expect on the command line having checked nothing at all. OCR needs a
-            # file on disk, so give it a throwaway one rather than an output artefact.
-            if wanted or a.ocr:
-                with tempfile.TemporaryDirectory(prefix="fqa-rects-") as td:
-                    f = os.path.join(td, "frame.png")
-                    img.convert("RGB").save(f)
-                    report_frame(f, t, wanted, a.ocr, a.languages, failures)
-            continue
-        d = ImageDraw.Draw(img)
-        for g in (a.guide or [H / 2]):
-            d.line([0, g, W, g], fill=(255, 0, 0, 255), width=4)
-            d.text((14, g + 8), f"y={g:g}", fill=(255, 90, 90, 255))
-        f = os.path.join(a.out, f"t{t:g}.png")
-        img.convert("RGB").save(f)
-        print(f"  -> {f}")
-        if a.ocr or wanted:
-            report_frame(f, t, wanted, a.ocr, a.languages, failures)
-        tiles.append((f, a.label[len(tiles)] if len(tiles) < len(a.label) else f"t={t:g}"))
+                kwargs = {"frame_reports": frame_reports, "frame_provider": provider}
+                if a.allow_missing:
+                    kwargs["allow_missing"] = True
+                img, rows, W, H = render(proj, tl, t, a.z, **kwargs)
+            print(f"\n=== t={t}  z={a.z}  canvas {W}x{H}")
+            report_extractions(t, frame_reports)
+            for ti, sid, nm, rc in rows:
+                if rc is None:
+                    print(f"  trk{ti:<2} {sid} {nm}")
+                else:
+                    x, y, w, h = rc
+                    print(f"  trk{ti:<2} {sid} {nm:<34} x{x}..{x+w} y{y}..{y+h}  {w}x{h}")
+            wanted = [p for et, phrases in expectations.items() if times_close(et, t) for p in phrases]
+            if a.rects_only:
+                # --rects-only skips the PNGs, never the assertions: this mode used to exit 0
+                # with --expect on the command line having checked nothing at all. OCR needs a
+                # file on disk, so give it a throwaway one rather than an output artefact.
+                if wanted or a.ocr:
+                    with tempfile.TemporaryDirectory(prefix="fqa-rects-") as td:
+                        f = os.path.join(td, "frame.png")
+                        img.convert("RGB").save(f, compress_level=1)
+                        report_frame(f, t, wanted, a.ocr, a.languages, failures)
+                continue
+            d = ImageDraw.Draw(img)
+            for g in (a.guide or [H / 2]):
+                d.line([0, g, W, g], fill=(255, 0, 0, 255), width=4)
+                d.text((14, g + 8), f"y={g:g}", fill=(255, 90, 90, 255))
+            f = os.path.join(qa_out, f"t{t:g}.png")
+            img.convert("RGB").save(f, compress_level=1)
+            print(f"  -> {f}")
+            if a.ocr or wanted:
+                report_frame(f, t, wanted, a.ocr, a.languages, failures)
+            tiles.append((f, a.label[len(tiles)] if len(tiles) < len(a.label) else f"t={t:g}"))
 
     if a.sheet and tiles:
-        out = a.sheet if os.path.isabs(a.sheet) else os.path.join(a.out, a.sheet)
-        print(f"\n  -> {contact_sheet(tiles, out, a.width)}")
+        out = a.sheet if os.path.isabs(a.sheet) else os.path.join(qa_out, a.sheet)
+        print(f"\n  -> {contact_sheet(tiles, out, a.width or 240)}")
 
     if failures or unchecked:
         print(f"\n{len(failures) + len(unchecked)} expectation(s) failed:")
@@ -734,19 +1061,11 @@ def main():
 
 
 def preview_times(duration_s, fps=6):
-    """Inclusive 0 .. last-frame-inside-duration at `fps` stills/sec."""
+    """CFR input timestamps that ffmpeg can encode without overrunning the range."""
     if duration_s <= 0 or fps <= 0:
         return []
-    step = 1.0 / fps
-    times = []
-    t = 0.0
-    last = max(0.0, duration_s - _FRAME_EPS)
-    while t < last - 1e-9:
-        times.append(round(t, 6))
-        t += step
-    if not times or times[-1] < last - step * 0.25:
-        times.append(round(last, 6))
-    return times
+    count = max(1, math.floor(float(duration_s) * float(fps) + 1e-9))
+    return [round(index / float(fps), 6) for index in range(count)]
 
 
 def atempo_chain(speed):
@@ -938,6 +1257,18 @@ def _material_index(tl):
     return index
 
 
+def _typed_material_index(tl):
+    """Index material refs with their CapCut collection kind as well as their value."""
+    index = {}
+    for kind, values in (tl.get("materials") or {}).items():
+        if not isinstance(values, list):
+            continue
+        for material in values:
+            if isinstance(material, dict) and material.get("id"):
+                index[material["id"]] = (kind, material)
+    return index
+
+
 def _is_broll(track, segment, material):
     """Recognise B-roll while ignoring generated plates, rings, and endcards."""
     track_name = str(track.get("name") or "").lower()
@@ -994,7 +1325,7 @@ def merge_sample_times(*groups):
 
 
 def qa_sample_times(tl, project_dir=None, times=None, at_cuts=False,
-                    at_scenes=False, at_broll=False):
+                    at_scenes=False, at_broll=False, cut_window=None):
     """Build deterministic QA samples from explicit times and semantic selectors.
 
     Cuts are every visual segment start, scenes are the midpoint of principal
@@ -1011,8 +1342,21 @@ def qa_sample_times(tl, project_dir=None, times=None, at_cuts=False,
     principal = _content_track_index(tl, content_end)
     materials = _material_index(tl)
     if at_cuts:
+        try:
+            frame_period = 1.0 / float(tl.get("fps") or 30)
+        except (TypeError, ValueError):
+            frame_period = _DEFAULT_FRAME_PERIOD
+        offset = frame_period if cut_window is None else float(cut_window)
+        if not np.isfinite(offset) or offset <= 0:
+            raise ValueError("--cut-window must be finite and greater than zero")
         for _index, _track, _segment, start, _end in _content_segments(tl, content_end):
-            derived.append(start)
+            if start <= _content_start + 1e-6:
+                # There is no frame before t=0; retain the opening proof frame and sample
+                # the first frame after it below when it is inside the edit.
+                derived.append(start)
+            else:
+                derived.extend((max(_content_start, start - offset),
+                                min(content_end - _FRAME_EPS, start + offset)))
     if at_scenes and principal is not None:
         for index, _track, _segment, start, end in _content_segments(tl, content_end):
             if index == principal:
@@ -1024,18 +1368,664 @@ def qa_sample_times(tl, project_dir=None, times=None, at_cuts=False,
     return merge_sample_times(explicit, derived)
 
 
-def write_preview(proj, tl, out_path, fps=6, z="track", start=None, end=None,
-                  allow_missing=False):
-    """6fps compositor stills + timeline audio over the requested content range."""
+def parse_preview_resolution(value):
+    """Parse a proxy bound such as ``360x640`` without silently changing aspect ratio."""
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    match = re.fullmatch(r"(\d+)x(\d+)", text)
+    if not match:
+        raise ValueError(f"preview resolution must be WIDTHxHEIGHT, got {value!r}")
+    width, height = (int(part) for part in match.groups())
+    if width < 2 or height < 2:
+        raise ValueError("preview resolution must be at least 2x2")
+    return width, height
+
+
+def _even(value):
+    return max(2, int(value) - (int(value) % 2))
+
+
+def preview_dimensions(tl, resolution=None, native=False):
+    """Return the actual proxy canvas, preserving the timeline's aspect ratio."""
+    canvas = tl.get("canvas_config") or {}
+    native_width = int(canvas.get("width") or 1080)
+    native_height = int(canvas.get("height") or 1920)
+    if native:
+        return _even(native_width), _even(native_height)
+    bounds = parse_preview_resolution(resolution) or _DEFAULT_PREVIEW_BOUNDS
+    scale = min(bounds[0] / native_width, bounds[1] / native_height, 1.0)
+    return _even(round(native_width * scale)), _even(round(native_height * scale))
+
+
+def _json_fingerprint(value):
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _media_fingerprint(project_dir, tl):
+    rows = []
+    seen = set()
+    for values in (tl.get("materials") or {}).values():
+        if not isinstance(values, list):
+            continue
+        for material in values:
+            if not isinstance(material, dict):
+                continue
+            raw = material.get("path")
+            if not isinstance(raw, str) or raw in seen:
+                continue
+            seen.add(raw)
+            resolved = resolve(project_dir, raw)
+            try:
+                stat = os.stat(resolved)
+                rows.append({"path": raw, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
+            except OSError:
+                rows.append({"path": raw, "missing": True})
+    return rows
+
+
+def content_fingerprint(project_dir, tl):
+    """Fingerprint draft JSON plus media identity, without hashing multi-GB recordings."""
+    return _json_fingerprint({"timeline": tl, "media": _media_fingerprint(project_dir, tl)})
+
+
+def preview_cache_key(project_dir, tl, start, end, fps, resolution, native=False, z="track",
+                      allow_missing=False, mode=None):
+    """Stable cache key for one rendered preview request."""
+    width, height = preview_dimensions(tl, resolution, native)
+    return _json_fingerprint({
+        "compositor": _PREVIEW_COMPOSITOR_VERSION,
+        "content": content_fingerprint(project_dir, tl),
+        "range": [round(float(start), 6), round(float(end), 6)],
+        "fps": round(float(fps), 6),
+        "resolution": [width, height],
+        "z": z,
+        "allow_missing": bool(allow_missing),
+        "mode": mode,
+    })
+
+
+def preview_cache_path(project_dir, key):
+    return os.path.join(project_dir, ".capcutctl", "preview-cache", f"{key}.mp4")
+
+
+def _identity_clip(segment, materials=None, typed_materials=None):
+    clip = segment.get("clip") or {}
+    scale = clip.get("scale") or {}
+    transform = clip.get("transform") or {}
+    def close(value, target):
+        return abs(float(value) - target) <= 1e-6
     try:
-        render_start, render_end = resolve_preview_range(proj, tl, start, end)
-    except ValueError as exc:
+        refs = segment.get("extra_material_refs") or []
+        visual_refs = []
+        for ref in refs:
+            kind, material = ((typed_materials or {}).get(ref, (None, (materials or {}).get(ref, {}))))
+            material = material or {}
+            material_type = material.get("type")
+            # CapCut attaches several no-op bookkeeping records to every clip. The
+            # compositor only changes pixels for the visual collections below; retaining
+            # those records would incorrectly disable the fast A-roll path on real drafts.
+            if kind in {"speeds", "audio_fades", "placeholder_infos", "canvases",
+                        "sound_channel_mappings", "material_colors", "loudnesses",
+                        "vocal_separations"} or material_type in {
+                            "audio_fade", "speed", "placeholder_info", "canvas_color",
+                            "none", "vocal_separation",
+                        }:
+                continue
+            if (kind in {"video_effects", "masks", "common_mask", "effects"}
+                    or material.get("name") == "Blur"):
+                visual_refs.append(ref)
+        return (close(scale.get("x", 1), 1) and close(scale.get("y", 1), 1)
+                and close(transform.get("x", 0), 0) and close(transform.get("y", 0), 0)
+                and close(clip.get("rotation", 0), 0)
+                and close(segment.get("alpha", clip.get("alpha", 1)), 1)
+                and not any((clip.get("flip") or {}).values())
+                and not segment.get("reverse", False)
+                and not visual_refs
+                and not segment.get("enable_video_mask", False)
+                and not segment.get("common_keyframes")
+                and not segment.get("keyframe_refs"))
+    except (TypeError, ValueError):
+        return False
+
+
+def simple_aroll_segments(project_dir, tl, start, end):
+    """Return a concat-safe A-roll EDL, or ``None`` for a composited timeline."""
+    _content_start, content_end = content_edit_range(project_dir, tl)
+    principal = _content_track_index(tl, content_end)
+    if principal is None:
+        return None
+    entries = list(_content_segments(tl, content_end))
+    principal_entries = [entry for entry in entries
+                         if entry[0] == principal and entry[4] > start and entry[3] < end]
+    other_video = [entry for entry in entries
+                   if entry[0] != principal and entry[4] > start and entry[3] < end]
+    if not principal_entries or other_video:
+        return None
+    if any(track.get("type") == "audio" and track.get("segments")
+           for track in tl.get("tracks") or []):
+        return None
+    materials = _material_index(tl)
+    typed_materials = _typed_material_index(tl)
+    selected = []
+    cursor = start
+    for _index, _track, segment, seg_start, seg_end in sorted(principal_entries, key=lambda row: row[3]):
+        overlap_start = max(start, seg_start)
+        overlap_end = min(end, seg_end)
+        if overlap_end <= overlap_start:
+            continue
+        if overlap_start > cursor + 1e-4 or not _identity_clip(segment, materials, typed_materials):
+            return None
+        material = materials.get(segment.get("material_id"))
+        media_path, error = _material_path(project_dir, material)
+        if error or not media_path or media_path.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")):
+            return None
+        src_start, src_duration = source_span(segment)
+        target_duration = seg_end - seg_start
+        if src_duration <= 0 or target_duration <= 0:
+            return None
+        speed = src_duration / target_duration
+        selected.append({
+            "segment": segment,
+            "path": media_path,
+                "timeline_start": overlap_start,
+                "timeline_end": overlap_end,
+                "track_index": principal,
+                "source_start": src_start + (overlap_start - seg_start) * speed,
+            "source_duration": (overlap_end - overlap_start) * speed,
+            "target_duration": overlap_end - overlap_start,
+            "speed": speed,
+        })
+        cursor = overlap_end
+    if not selected or cursor < end - 1e-4:
+        return None
+    return selected
+
+
+def preview_mode(project_dir, tl, start, end):
+    return "a-roll-concat" if simple_aroll_segments(project_dir, tl, start, end) else "compositor-stream"
+
+
+def preview_estimate(project_dir, tl, fps=6, start=None, end=None, resolution=None, native=False,
+                     z="track", allow_missing=False):
+    """Describe the bounded work before any decoder or encoder starts."""
+    try:
+        fps = float(fps)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("preview FPS must be finite and greater than zero") from exc
+    if not np.isfinite(fps) or fps <= 0:
+        raise ValueError("preview FPS must be finite and greater than zero")
+    render_start, render_end = resolve_preview_range(project_dir, tl, start, end)
+    width, height = preview_dimensions(tl, resolution, native)
+    duration = render_end - render_start
+    frames = len(preview_times(duration, fps))
+    mode = preview_mode(project_dir, tl, render_start, render_end)
+    return {
+        "range": {"start": render_start, "end": render_end, "duration": duration},
+        "fps": fps,
+        "frames": frames,
+        "frameCount": frames,
+        "resolution": {"width": width, "height": height},
+        "mode": mode,
+        "temporary": "streamed rawvideo; no per-frame PNGs; bounded audio workspace",
+        "cache": "fingerprinted project preview cache" if not allow_missing else "disabled for degraded media",
+        "z": z,
+    }
+
+
+def format_preview_estimate(estimate):
+    r = estimate["range"]
+    size = estimate["resolution"]
+    return ("preview preflight:\n"
+            f"  range: {r['start']:.3f}s -> {r['end']:.3f}s ({r['duration']:.3f}s)\n"
+            f"  output: {size['width']}x{size['height']} @ {estimate['fps']:g}fps\n"
+            f"  frames: {estimate['frames']} CFR frames\n"
+            f"  mode: {estimate['mode']}\n"
+            f"  temp: {estimate['temporary']}\n")
+
+
+def _emit_preview_progress(callback, completed, total, started):
+    elapsed = max(0.0, time.monotonic() - started)
+    eta = (elapsed * (total - completed) / completed) if completed else None
+    if callback is not None:
+        callback(completed, total, elapsed, eta)
+        return
+    percent = 100 if total <= 0 else round(completed * 100 / total)
+    eta_text = "--" if eta is None else f"{eta:.1f}s"
+    print(f"preview {completed}/{total} ({percent}%) elapsed {elapsed:.1f}s ETA {eta_text}", flush=True)
+
+
+def _atomic_copy(source, destination):
+    destination = os.path.abspath(destination)
+    os.makedirs(os.path.dirname(destination) or ".", exist_ok=True)
+    if os.path.abspath(source) == destination:
+        return destination
+    temporary = f"{destination}.tmp-{os.getpid()}"
+    try:
+        shutil.copyfile(source, temporary)
+        os.replace(temporary, destination)
+    finally:
+        with suppress(FileNotFoundError):
+            os.unlink(temporary)
+    return destination
+
+
+def _probe_video_info(path):
+    """Return source dimensions/fps/audio presence, or ``None`` when probing fails."""
+    try:
+        result = _run_command([
+            "ffprobe", "-v", "error", "-show_streams", "-of", "json", path,
+        ], check=False, capture_output=True, text=True)
+        if result.returncode:
+            return None
+        data = json.loads(result.stdout or "{}")
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    streams = data.get("streams") or []
+    video = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
+    if not video:
+        return None
+    try:
+        width = int(video["width"])
+        height = int(video["height"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    fps = None
+    rate = str(video.get("avg_frame_rate") or video.get("r_frame_rate") or "")
+    if "/" in rate:
+        numerator, denominator = rate.split("/", 1)
+        try:
+            fps = float(numerator) / float(denominator)
+        except (TypeError, ValueError, ZeroDivisionError):
+            fps = None
+    return {"width": width, "height": height, "fps": fps, "audio": any(
+        stream.get("codec_type") == "audio" for stream in streams
+    )}
+
+
+def _preview_decode_options():
+    """Use Apple's decoder when this ffmpeg build exposes it; return [] elsewhere."""
+    global _PREVIEW_HWACCEL
+    if _PREVIEW_HWACCEL is not None:
+        return _PREVIEW_HWACCEL
+    _PREVIEW_HWACCEL = []
+    if sys.platform != "darwin":
+        return _PREVIEW_HWACCEL
+    try:
+        result = _run_command(
+            ["ffmpeg", "-hide_banner", "-hwaccels"],
+            check=False, capture_output=True, text=True,
+        )
+        available = f"{result.stdout or ''}\n{result.stderr or ''}"
+        if "videotoolbox" in available:
+            _PREVIEW_HWACCEL = ["-hwaccel", "videotoolbox"]
+    except OSError:
+        pass
+    return _PREVIEW_HWACCEL
+
+
+def _source_preview_dimensions(info, output_size):
+    """Keep batch-decoded source frames small while retaining their original aspect ratio."""
+    if not info or not info.get("width") or not info.get("height"):
+        return None
+    width, height = info["width"], info["height"]
+    max_width, max_height = output_size
+    scale = min(max_width / width, max_height / height, 1.0)
+    return _even(round(width * scale)), _even(round(height * scale))
+
+
+def _preview_requests(project_dir, tl, times):
+    """Collect unique source timestamps needed by a compositor preview."""
+    materials = _material_index(tl)
+    requests = OrderedDict()
+    for timeline_time in times:
+        us = int(float(timeline_time) * 1e6)
+        for track in tl.get("tracks") or []:
+            if track.get("type") != "video":
+                continue
+            for segment in track.get("segments") or []:
+                timerange = segment.get("target_timerange") or {}
+                try:
+                    seg_start = int(timerange["start"])
+                    seg_end = seg_start + int(timerange["duration"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if not seg_start <= us < seg_end:
+                    continue
+                media, error = _material_path(project_dir, materials.get(segment.get("material_id")))
+                if error or not media or media.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                    continue
+                requested = round(source_time(segment, float(timeline_time)), 6)
+                requests.setdefault(media, [])
+                if requested not in requests[media]:
+                    requests[media].append(requested)
+    return requests
+
+
+def _decode_batch(path, requests, output_size, timeline_fps):
+    """Decode requested source frames through one ffmpeg process and no frame files."""
+    if not requests:
+        return {}
+    ordered = sorted({float(value) for value in requests})
+    info = _probe_video_info(path)
+    source_size = _source_preview_dimensions(info, output_size)
+    if source_size is None:
+        return {}
+    source_fps = info.get("fps") or timeline_fps or 30
+    try:
+        period = 1.0 / float(source_fps)
+    except (TypeError, ValueError, ZeroDivisionError):
+        period = _DEFAULT_FRAME_PERIOD
+    period = max(period, 1e-4)
+    # The windows are half-open and narrower than one source frame. For ordinary CFR media
+    # that yields exactly one output per requested timestamp while still tolerating a request
+    # between two source frames. If a VFR source violates that contract, the caller falls back
+    # to the accurate single-frame path rather than silently shifting all later requests.
+    seek_start = max(0.0, ordered[0] - _SEEK_PREROLL)
+    windows = []
+    half = period * 0.49
+    for requested in ordered:
+        lo = max(0.0, requested - seek_start - half)
+        hi = requested - seek_start + half
+        windows.append(f"between(t\\,{lo:.9f}\\,{hi:.9f})")
+    selector = "+".join(windows)
+    vf = f"select='{selector}',scale={source_size[0]}:{source_size[1]}:flags=fast_bilinear"
+    decode_options = _preview_decode_options()
+    command = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", *decode_options,
+        "-ss", f"{seek_start:.9f}", "-i", path, "-t",
+        f"{ordered[-1] - seek_start + half + period:.9f}",
+        "-vf", vf, "-an", "-sn", "-fps_mode", "vfr", "-f", "rawvideo",
+        "-pix_fmt", "rgb24", "-",
+    ]
+    process = _start_process(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    frame_bytes = source_size[0] * source_size[1] * 3
+    images = []
+    try:
+        while True:
+            _check_preview_cancelled()
+            data = process.stdout.read(frame_bytes)
+            if not data:
+                break
+            while len(data) < frame_bytes:
+                rest = process.stdout.read(frame_bytes - len(data))
+                if not rest:
+                    break
+                data += rest
+            if len(data) != frame_bytes:
+                break
+            images.append(Image.frombytes("RGB", source_size, data).convert("RGBA"))
+        return_code = process.wait()
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
+        if _ACTIVE_PREVIEW is not None:
+            _ACTIVE_PREVIEW.discard(process)
+    _check_preview_cancelled()
+    if return_code != 0 or len(images) != len(ordered):
+        if decode_options:
+            # VideoToolbox can legally drop a frame at a seek boundary on some HEVC
+            # builds. Retry the same bounded window in software rather than falling all
+            # the way back to one ffmpeg process per sample.
+            global _PREVIEW_HWACCEL
+            _PREVIEW_HWACCEL = []
+            return _decode_batch(path, requests, output_size, timeline_fps)
+        return {}
+    return {
+        (path, round(requested, 6)): FrameSample(
+            image=image,
+            requested_pts=requested,
+            delivered_pts=requested,
+            frame_period=period,
+            method="preview-batch",
+        )
+        for requested, image in zip(ordered, images, strict=True)
+    }
+
+
+class _PreviewFrameProvider:
+    """Serve low-resolution batch frames to the compositor, with an accurate fallback."""
+
+    def __init__(self, project_dir, tl, times, output_size):
+        self.project_dir = project_dir
+        self.tl = tl
+        self.output_size = output_size
+        self.frames = {}
+        self.source_sizes = {}
+        self.batch_paths = set()
+        for path, requests in _preview_requests(project_dir, tl, times).items():
+            info = _probe_video_info(path)
+            self.source_sizes[path] = _source_preview_dimensions(info, output_size)
+            decoded = _decode_batch(path, requests, output_size, tl.get("fps"))
+            if decoded:
+                self.frames.update(decoded)
+                self.batch_paths.add(path)
+
+    def __call__(self, path, timeline_time):
+        key = (path, round(float(timeline_time), 6))
+        sample = self.frames.get(key)
+        if sample is not None:
+            return _copy_sample(sample)
+        size = self.source_sizes.get(path)
+        return grab(path, timeline_time, return_info=True, fps=self.tl.get("fps"), size=size)
+
+
+def _render_simple_aroll_frame(t, segments, provider, output_size):
+    """Render an identity A-roll sample without rescanning the whole timeline."""
+    row = next((item for item in segments
+                if item["timeline_start"] <= t < item["timeline_end"]), None)
+    if row is None:
+        raise FrameExtractionError(f"render t={float(t):g}s: no A-roll segment covers the sample")
+    sample = provider(row["path"], source_time(row["segment"], t))
+    image = sample.image if isinstance(sample, FrameSample) else sample
+    report = [(row["path"], sample)] if isinstance(sample, FrameSample) else []
+    width, height = output_size
+    clip = row["segment"].get("clip") or {}
+    if image.size == output_size:
+        canvas = image.copy().convert("RGBA")
+        rect = (0, 0, width, height)
+    else:
+        canvas = Image.new("RGBA", output_size, (0, 0, 0, 255))
+        rect = place(canvas, image, clip, width, height)
+    segment_id = str(row["segment"].get("id") or "<unnamed>")[:8]
+    label = os.path.basename(row["path"])[:34]
+    return canvas, [(row["track_index"], segment_id, label, rect)], report, width, height
+
+
+def _run_progress_encoder(command, total_frames, fps, started, callback):
+    """Run a filter-graph encoder while translating ffmpeg progress into preview progress."""
+    process = _start_process(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    last = 0
+    heartbeat = time.monotonic()
+    try:
+        while True:
+            _check_preview_cancelled()
+            ready = []
+            if process.stderr is not None:
+                try:
+                    ready, _writeable, _exceptional = select.select([process.stderr], [], [], 0.5)
+                except (OSError, ValueError):
+                    ready = [process.stderr]
+            if ready:
+                raw_line = process.stderr.readline()
+                if raw_line:
+                    line = raw_line.decode(errors="replace") if isinstance(raw_line, bytes) else raw_line
+                    if line.startswith("out_time_us=") or line.startswith("out_time_ms="):
+                        try:
+                            value = float(line.split("=", 1)[1])
+                            seconds = value / (1e6 if line.startswith("out_time_us=") else 1e3)
+                            completed = min(total_frames, max(last, math.floor(seconds * float(fps) + 1e-6)))
+                            if completed > last:
+                                last = completed
+                                _emit_preview_progress(callback, completed, total_frames, started)
+                        except (TypeError, ValueError):
+                            pass
+            now = time.monotonic()
+            if now - heartbeat >= 1.0 and process.poll() is None:
+                _emit_preview_progress(callback, last, total_frames, started)
+                heartbeat = now
+            if process.poll() is not None:
+                break
+        if process.stderr is not None:
+            for raw_line in process.stderr:
+                line = raw_line.decode(errors="replace") if isinstance(raw_line, bytes) else raw_line
+                if line.startswith("out_time_us=") or line.startswith("out_time_ms="):
+                    try:
+                        value = float(line.split("=", 1)[1])
+                        seconds = value / (1e6 if line.startswith("out_time_us=") else 1e3)
+                        completed = min(total_frames, max(last, math.floor(seconds * float(fps) + 1e-6)))
+                        if completed > last:
+                            last = completed
+                            _emit_preview_progress(callback, completed, total_frames, started)
+                    except (TypeError, ValueError):
+                        pass
+        if process.stderr is not None:
+            process.stderr.close()
+        return_code = process.wait()
+    finally:
+        if _ACTIVE_PREVIEW is not None:
+            _ACTIVE_PREVIEW.discard(process)
+    _check_preview_cancelled()
+    if return_code != 0:
+        raise subprocess.CalledProcessError(return_code, command)
+    _emit_preview_progress(callback, total_frames, total_frames, started)
+
+
+def _write_simple_preview(project_dir, tl, segments, output, fps, duration, output_size,
+                          total_frames, started, callback):
+    """Encode a plain A-roll from one filter graph, including its original speech audio."""
+    infos = {row["path"]: _probe_video_info(row["path"]) for row in segments}
+    filters = []
+    video_labels = []
+    audio_labels = []
+    for index, row in enumerate(segments):
+        source_start = max(0.0, row["source_start"])
+        source_duration = max(0.001, row["source_duration"])
+        speed = max(1e-6, row["speed"])
+        video_label = f"v{index}"
+        video_filter = (
+            f"[{index}:v]trim=duration={source_duration:.9f},"
+            f"setpts=PTS-STARTPTS/{speed:.9f}[{video_label}]"
+        )
+        filters.append(video_filter)
+        video_labels.append(f"[{video_label}]")
+        audio_label = f"a{index}"
+        if (infos.get(row["path"]) or {}).get("audio", True):
+            audio_filter = (
+                f"[{index}:a]atrim=duration={source_duration:.9f},"
+                f"asetpts=PTS-STARTPTS"
+            )
+            tempo = atempo_chain(speed)
+            if tempo:
+                audio_filter += f",{tempo}"
+            volume = row["segment"].get("volume")
+            if volume is not None:
+                audio_filter += f",volume={float(volume):.6f}"
+            audio_filter += f"[{audio_label}]"
+        else:
+            audio_filter = (
+                f"anullsrc=r=44100:cl=stereo,atrim=duration={row['target_duration']:.9f},"
+                f"asetpts=PTS-STARTPTS[{audio_label}]"
+            )
+        filters.append(audio_filter)
+        audio_labels.append(f"[{audio_label}]")
+    count = len(segments)
+    filters.append("".join(video_labels) + f"concat=n={count}:v=1:a=0[vcat]")
+    filters.append("".join(audio_labels) + f"concat=n={count}:v=0:a=1[acat]")
+    filters.append(
+        f"[vcat]fps={float(fps):.9f},scale={output_size[0]}:{output_size[1]}:"
+        f"force_original_aspect_ratio=decrease,pad={output_size[0]}:{output_size[1]}:"
+        f"(ow-iw)/2:(oh-ih)/2:color=black,trim=end_frame={total_frames}[vout]"
+    )
+    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
+    # Open one bounded input per edit. A single full-source input makes every atrim branch
+    # wait while ffmpeg decodes the entire 225s take, even though the EDL keeps only 67.8s.
+    for row in segments:
+        command += ["-ss", f"{max(0.0, row['source_start']):.9f}",
+                    "-t", f"{max(0.001, row['source_duration']):.9f}", "-i", row["path"]]
+    command += [
+        "-filter_complex", ";".join(filters), "-map", "[vout]", "-map", "[acat]",
+        "-t", f"{duration:.9f}", "-r", f"{float(fps):.9f}", "-c:v", "libx264",
+        "-pix_fmt", "yuv420p", "-crf", "23", "-c:a", "aac", "-ar", "44100",
+        "-movflags", "+faststart", "-progress", "pipe:2", "-stats_period", "0.5", output,
+    ]
+    return _run_progress_encoder(command, total_frames, fps, started, callback)
+
+
+def _encode_compositor_stream(project_dir, tl, times, output, fps, z, output_size, provider,
+                              allow_missing, audio, duration, started, callback):
+    """Render compositor frames into one long-lived ffmpeg rawvideo encoder."""
+    command = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+        "-f", "rawvideo", "-pix_fmt", "rgb24", "-s:v", f"{output_size[0]}x{output_size[1]}",
+        "-framerate", f"{float(fps):.9f}", "-i", "-",
+    ]
+    if audio:
+        command += ["-i", audio, "-map", "0:v:0", "-map", "1:a:0"]
+    else:
+        command += ["-map", "0:v:0"]
+    command += [
+        "-t", f"{duration:.9f}", "-r", f"{float(fps):.9f}", "-c:v", "libx264",
+        "-pix_fmt", "yuv420p", "-crf", "23",
+    ]
+    if audio:
+        command += ["-c:a", "aac", "-shortest"]
+    command += ["-movflags", "+faststart", output]
+    process = _start_process(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.PIPE)
+    rendered_at_low_resolution = provider is not None and bool(provider.batch_paths)
+    try:
+        for index, timeline_time in enumerate(times, start=1):
+            _check_preview_cancelled()
+            kwargs = {}
+            if allow_missing:
+                kwargs["allow_missing"] = True
+            if rendered_at_low_resolution:
+                kwargs.update({"output_size": output_size, "frame_provider": provider})
+            image, _rows, _width, _height = render(project_dir, tl, timeline_time, z, **kwargs)
+            if image.size != output_size:
+                image = image.resize(output_size, Image.LANCZOS)
+            process.stdin.write(image.convert("RGB").tobytes())
+            _emit_preview_progress(callback, index, len(times), started)
+        process.stdin.close()
+        stderr = process.stderr.read() if process.stderr is not None else b""
+        if process.stderr is not None:
+            process.stderr.close()
+        return_code = process.wait()
+    except BaseException:
+        _terminate_process(process)
+        raise
+    finally:
+        if _ACTIVE_PREVIEW is not None:
+            _ACTIVE_PREVIEW.discard(process)
+    _check_preview_cancelled()
+    if return_code != 0:
+        detail = stderr.decode(errors="replace") if isinstance(stderr, bytes) else str(stderr or "")
+        raise subprocess.CalledProcessError(return_code, command, stderr=detail)
+
+
+def write_preview(proj, tl, out_path, fps=6, z="track", start=None, end=None,
+                  allow_missing=False, resolution=None, native=False, cache=True,
+                  progress=None, announce=True):
+    """Write a bounded preview without materialising full-resolution frame files."""
+    try:
+        estimate = preview_estimate(
+            proj, tl, fps=fps, start=start, end=end, resolution=resolution, native=native,
+            z=z, allow_missing=allow_missing,
+        )
+    except (TypeError, ValueError) as exc:
         raise FrameExtractionError(str(exc)) from exc
-    duration_s = render_end - render_start
-    offsets = preview_times(duration_s, fps)
-    times = [round(render_start + offset, 6) for offset in offsets]
-    if not times:
+    render_start = estimate["range"]["start"]
+    render_end = estimate["range"]["end"]
+    duration_s = estimate["range"]["duration"]
+    total_frames = estimate["frames"]
+    if total_frames <= 0:
         raise FrameExtractionError("preview: rendered range is empty")
+    output_size = (estimate["resolution"]["width"], estimate["resolution"]["height"])
+    mode = estimate["mode"]
+    if announce:
+        print(format_preview_estimate(estimate), end="")
     materials = _material_index(tl)
     issues = _missing_media(proj, tl, materials, render_start, render_end)
     if issues and not allow_missing:
@@ -1043,36 +2033,48 @@ def write_preview(proj, tl, out_path, fps=6, z="track", start=None, end=None,
             f"preview {render_start:g}-{render_end:g}s", issues)
     out_path = os.path.abspath(out_path)
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-    # A default --fps 6 pass over a content range writes full-size PNGs plus the wavs.
-    # Leaking that per invocation (>1GB) is what the finally is for.
+    cache_enabled = bool(cache and not allow_missing)
+    key = preview_cache_key(
+        proj, tl, render_start, render_end, fps, resolution, native=native, z=z,
+        allow_missing=allow_missing, mode=mode,
+    )
+    cached = preview_cache_path(proj, key)
+    if cache_enabled and os.path.isfile(cached) and os.path.getsize(cached) > 0:
+        _atomic_copy(cached, out_path)
+        print(f"preview cache hit: {cached}")
+        return out_path
+
+    times = [round(render_start + offset, 6) for offset in preview_times(duration_s, fps)]
+    started = time.monotonic()
     tmp = tempfile.mkdtemp(prefix="capcutctl-preview-")
+    encoded = os.path.join(tmp, "preview.mp4")
     try:
-        frames_dir = os.path.join(tmp, "frames")
-        os.makedirs(frames_dir)
-        for i, t in enumerate(times):
-            if allow_missing:
-                img, _, _, _ = render(proj, tl, t, z, allow_missing=True)
+        with _PreviewRuntime():
+            _emit_preview_progress(progress, 0, total_frames, started)
+            if mode == "a-roll-concat":
+                segments = simple_aroll_segments(proj, tl, render_start, render_end)
+                _write_simple_preview(
+                    proj, tl, segments, encoded, fps, duration_s, output_size,
+                    total_frames, started, progress,
+                )
             else:
-                img, _, _, _ = render(proj, tl, t, z)
-            img.convert("RGB").save(os.path.join(frames_dir, f"f{i:06d}.png"))
-        video = os.path.join(tmp, "video.mp4")
-        subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(fps),
-             "-i", os.path.join(frames_dir, "f%06d.png"),
-             "-t", f"{duration_s:.9f}",
-             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "23", video],
-            check=True)
-        audio = _timeline_audio(proj, tl, tmp, duration_s, render_start)
-        if audio:
-            subprocess.run(
-                ["ffmpeg", "-y", "-loglevel", "error", "-i", video, "-i", audio,
-                 "-t", f"{duration_s:.9f}",
-                 "-c:v", "copy", "-c:a", "aac", "-shortest", out_path],
-                check=True)
-        else:
-            subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", video,
-                            "-t", f"{duration_s:.9f}", "-c", "copy", out_path],
-                           check=True)
+                provider = None if native else _PreviewFrameProvider(proj, tl, times, output_size)
+                audio = _timeline_audio(proj, tl, tmp, duration_s, render_start)
+                _encode_compositor_stream(
+                    proj, tl, times, encoded, fps, z, output_size, provider,
+                    allow_missing, audio, duration_s, started, progress,
+                )
+            if not os.path.isfile(encoded) or os.path.getsize(encoded) <= 0:
+                raise FrameExtractionError("preview encoder produced no output")
+            if cache_enabled:
+                try:
+                    os.makedirs(os.path.dirname(cached), exist_ok=True)
+                    _atomic_copy(encoded, cached)
+                except OSError as exc:
+                    print(f"note: preview cache unavailable: {exc}", file=sys.stderr)
+            _atomic_copy(encoded, out_path)
+    except PreviewCancelled:
+        raise
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return out_path
@@ -1141,7 +2143,7 @@ def _timeline_audio(proj, tl, tmp, duration_s, range_start=0.0):
             cmd += ["-af", ",".join(af)]
         cmd += ["-ac", "1", "-ar", "44100", wav]
         try:
-            subprocess.run(cmd, check=True)
+            _run_command(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             slices.append((overlap_start - range_start, wav))
         except subprocess.CalledProcessError:
             continue
@@ -1149,8 +2151,8 @@ def _timeline_audio(proj, tl, tmp, duration_s, range_start=0.0):
         return None
     # Mix onto a silent bed so gaps stay gaps.
     bed = os.path.join(tmp, "bed.wav")
-    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
-                    "-i", "anullsrc=r=44100:cl=mono", "-t", str(max(0.05, duration_s)), bed], check=True)
+    _run_command(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+                  "-i", "anullsrc=r=44100:cl=mono", "-t", str(max(0.05, duration_s)), bed], check=True)
     inputs = ["-i", bed]
     filters = []
     mix = ["[0:a]"]
@@ -1162,8 +2164,8 @@ def _timeline_audio(proj, tl, tmp, duration_s, range_start=0.0):
     n = 1 + len(slices)
     filters.append("".join(mix) + f"amix=inputs={n}:dropout_transition=0:normalize=0[aout]")
     mixed = os.path.join(tmp, "mix.wav")
-    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", *inputs,
-                    "-filter_complex", ";".join(filters), "-map", "[aout]", mixed], check=True)
+    _run_command(["ffmpeg", "-y", "-loglevel", "error", *inputs,
+                  "-filter_complex", ";".join(filters), "-map", "[aout]", mixed], check=True)
     return mixed
 
 

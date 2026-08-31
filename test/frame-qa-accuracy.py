@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -233,8 +234,120 @@ class PreviewAndSamplingTests(unittest.TestCase):
             at_scenes=True,
             at_broll=True,
         )
-        self.assertEqual(samples, [0.0, 1.0, 2.0, 4.0, 5.0, 6.0])
+        self.assertEqual(samples, [0.0, 1.0, 2.0, 3.966667, 4.0, 4.033333, 5.0, 6.0])
         self.assertEqual(frame_qa.merge_sample_times([4, 1, 4.0000001, 2]), [1.0, 2.0, 4.0])
+
+    def test_preview_estimate_describes_bounded_proxy_work(self):
+        estimate = frame_qa.preview_estimate(str(self.project), self.tl, fps=2)
+        self.assertEqual(estimate["resolution"], {"width": 360, "height": 640})
+        self.assertEqual(estimate["frames"], 16)
+        self.assertEqual(estimate["mode"], "compositor-stream")
+        self.assertIn("no per-frame PNGs", estimate["temporary"])
+
+    def test_a_roll_fast_path_ignores_capcut_bookkeeping_refs(self):
+        timeline = {
+            "duration": 4_000_000,
+            "canvas_config": {"width": 32, "height": 32},
+            "tracks": [{
+                "type": "video", "name": "content", "flag": 2, "segments": [
+                    segment("s0", 0, 2), segment("s1", 2, 2),
+                ],
+            }],
+            "materials": {
+                "videos": [{"id": "VIDEO", "path": str(self.project / "screen.mp4")}],
+                "speeds": [{"id": "SPEED", "type": "speed", "speed": 1.0}],
+                "placeholder_infos": [{"id": "PLACEHOLDER", "type": "placeholder_info"}],
+                "canvases": [{"id": "CANVAS", "type": "canvas_color", "color": ""}],
+                "sound_channel_mappings": [{"id": "CHANNEL", "type": "none"}],
+                "material_colors": [{"id": "COLOR"}],
+                "loudnesses": [{"id": "LOUDNESS"}],
+                "vocal_separations": [{"id": "VOCALS", "type": "vocal_separation"}],
+            },
+        }
+        refs = ["SPEED", "PLACEHOLDER", "CANVAS", "CHANNEL", "COLOR", "LOUDNESS", "VOCALS"]
+        for item in timeline["tracks"][0]["segments"]:
+            item["extra_material_refs"] = refs
+        self.assertEqual(
+            frame_qa.preview_mode(str(self.project), timeline, 0, 4), "a-roll-concat"
+        )
+
+    def test_preview_rejects_targeted_selectors_instead_of_ignoring_them(self):
+        output = io.StringIO()
+        with patch.object(sys, "argv", [
+                "frame_qa.py", "--project", str(self.project), "--preview", "preview.mp4",
+                "--at-cuts", "--sheet",
+        ]), contextlib.redirect_stderr(output):
+            with self.assertRaises(SystemExit) as caught:
+                frame_qa.main()
+        self.assertEqual(caught.exception.code, 2)
+        self.assertIn("--at-cuts", output.getvalue())
+        self.assertIn("--sheet", output.getvalue())
+        self.assertIn("separate targeted QA and preview commands", output.getvalue())
+
+    def test_preview_cache_reuses_the_full_fingerprint(self):
+        calls = []
+
+        class NoBatchFrames:
+            batch_paths = set()
+
+        def fake_encoder(_project, _tl, _times, output, *_args, **_kwargs):
+            calls.append(output)
+            Path(output).write_bytes(b"proxy")
+
+        output_a = self.project / "a.mp4"
+        output_b = self.project / "b.mp4"
+        with patch.object(frame_qa, "_PreviewFrameProvider", return_value=NoBatchFrames()), \
+                patch.object(frame_qa, "_timeline_audio", return_value=None), \
+                patch.object(frame_qa, "_encode_compositor_stream", side_effect=fake_encoder):
+            frame_qa.write_preview(
+                str(self.project), self.tl, str(output_a), fps=2, cache=True, announce=False
+            )
+            frame_qa.write_preview(
+                str(self.project), self.tl, str(output_b), fps=2, cache=True, announce=False
+            )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(output_b.read_bytes(), b"proxy")
+
+    def test_cancelled_preview_removes_its_workspace_and_encoder(self):
+        class Child:
+            pid = 2**31 - 1
+
+            def __init__(self):
+                self.stdin = io.BytesIO()
+                self.terminated = False
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                self.terminated = True
+
+            def kill(self):
+                self.terminated = True
+
+            def wait(self, timeout=None):
+                return -2
+
+        child = Child()
+        workspace = self.project / "preview-work"
+        workspace.mkdir()
+
+        class NoBatchFrames:
+            batch_paths = set()
+
+        with patch.object(frame_qa, "preview_mode", return_value="compositor-stream"), \
+                patch.object(frame_qa, "_PreviewFrameProvider", return_value=NoBatchFrames()), \
+                patch.object(frame_qa, "_timeline_audio", return_value=None), \
+                patch.object(frame_qa, "_start_process", return_value=child), \
+                patch.object(frame_qa, "render", side_effect=frame_qa.PreviewCancelled("stop")), \
+                patch.object(frame_qa.tempfile, "mkdtemp", return_value=str(workspace)):
+            with self.assertRaises(frame_qa.PreviewCancelled):
+                frame_qa.write_preview(
+                    str(self.project), self.tl, str(self.project / "cancelled.mp4"),
+                    fps=2, cache=False, announce=False,
+                )
+        self.assertTrue(child.terminated)
+        self.assertFalse(workspace.exists())
 
     def test_at_broll_includes_screen_recording_but_excludes_generated_helpers(self):
         timeline = json.loads(json.dumps(self.tl))
@@ -378,6 +491,145 @@ class RealFfmpegPreviewTests(unittest.TestCase):
         self.assertLessEqual(float(values["duration"]), requested + 1e-3)
         self.assertAlmostEqual(float(values["duration"]), 1.0, places=2)
         self.assertEqual(int(values["nb_frames"]), 6)
+
+    def test_simple_aroll_preview_preserves_audio_duration_and_pixels(self):
+        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+            self.skipTest("ffmpeg and ffprobe are required for the real preview regression")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            media = root / "talking head.mp4"
+            subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "color=c=red:s=32x32:r=8:d=2",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=2",
+                "-map", "0:v:0", "-map", "1:a:0", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-shortest", str(media),
+            ], check=True)
+            timeline = {
+                "duration": 2_000_000,
+                "canvas_config": {"width": 32, "height": 32},
+                "tracks": [{
+                    "type": "video", "name": "content", "flag": 2, "segments": [{
+                        "id": "content", "material_id": "VIDEO", "volume": 1,
+                        "target_timerange": {"start": 0, "duration": 2_000_000},
+                        "source_timerange": {"start": 0, "duration": 2_000_000},
+                    }],
+                }],
+                "materials": {"videos": [{"id": "VIDEO", "path": str(media)}]},
+            }
+            output = root / "preview.mp4"
+            self.assertEqual(frame_qa.preview_mode(str(root), timeline, 0, 2), "a-roll-concat")
+            frame_qa.write_preview(
+                str(root), timeline, str(output), fps=4, resolution="32x32", cache=False,
+                announce=False,
+            )
+            probe = subprocess.run([
+                "ffprobe", "-v", "error", "-show_entries",
+                "stream=codec_type,width,height,r_frame_rate,nb_frames,duration",
+                "-of", "json", str(output),
+            ], check=True, capture_output=True, text=True)
+            streams = json.loads(probe.stdout)["streams"]
+            video = next(stream for stream in streams if stream["codec_type"] == "video")
+            audio = next(stream for stream in streams if stream["codec_type"] == "audio")
+            first_frame = subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(output),
+                "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+            ], check=True, capture_output=True).stdout
+
+        self.assertEqual((int(video["width"]), int(video["height"])), (32, 32))
+        self.assertEqual(video["r_frame_rate"], "4/1")
+        self.assertEqual(int(video["nb_frames"]), 8)
+        self.assertAlmostEqual(float(audio["duration"]), 2.0, places=2)
+        self.assertGreater(first_frame[0], first_frame[1] * 2)
+        self.assertGreater(first_frame[0], first_frame[2] * 2)
+
+    def test_compositor_preview_matches_native_compositor_at_sampled_timestamps(self):
+        """The proxy may differ only by H.264 rounding: mean channel error <= 8/255."""
+        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+            self.skipTest("ffmpeg and ffprobe are required for the visual regression")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = root / "base.mp4"
+            overlay = root / "overlay.mp4"
+            for output, colour in ((base, "red"), (overlay, "blue")):
+                subprocess.run([
+                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                    "-f", "lavfi", "-i", f"color=c={colour}:s=32x32:r=8:d=1",
+                    "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(output),
+                ], check=True)
+            timeline = {
+                "duration": 1_000_000,
+                "fps": 8,
+                "canvas_config": {"width": 32, "height": 32},
+                "tracks": [
+                    {"type": "video", "name": "content", "flag": 2, "segments": [
+                        {**segment("base", 0, 1, material="BASE"), "clip": {
+                            "alpha": 1, "flip": {"horizontal": False, "vertical": False},
+                            "rotation": 0, "scale": {"x": 1, "y": 1},
+                            "transform": {"x": 0, "y": 0},
+                        }},
+                    ]},
+                    {"type": "video", "name": "overlay", "flag": 2, "segments": [
+                        {**segment("overlay", 0, 1, material="OVERLAY"), "clip": {
+                            "alpha": 1, "flip": {"horizontal": False, "vertical": False},
+                            "rotation": 0, "scale": {"x": 0.5, "y": 0.5},
+                            "transform": {"x": 0.45, "y": 0.35},
+                        }},
+                    ]},
+                ],
+                "materials": {"videos": [
+                    {"id": "BASE", "path": str(base)},
+                    {"id": "OVERLAY", "path": str(overlay)},
+                ]},
+            }
+            output = root / "compositor-preview.mp4"
+            frame_qa.write_preview(
+                str(root), timeline, str(output), fps=4, resolution="32x32", cache=False,
+                announce=False,
+            )
+            actual = subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(output),
+                "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+            ], check=True, capture_output=True).stdout
+            expected = [np.asarray(frame_qa.render(str(root), timeline, t)[0].convert("RGB"))
+                        for t in frame_qa.preview_times(1, 4)]
+            actual = np.frombuffer(actual, dtype=np.uint8).reshape((-1, 32, 32, 3))
+
+        self.assertEqual(len(actual), len(expected))
+        for got, want in zip(actual, expected):
+            mean_error = np.abs(got.astype(np.int16) - want.astype(np.int16)).mean()
+            self.assertLessEqual(mean_error, 8, mean_error)
+
+    def test_simple_targeted_qa_writes_full_size_cut_frames_and_sheet_in_one_pass(self):
+        if not shutil.which("ffmpeg"):
+            self.skipTest("ffmpeg is required for targeted QA")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            media = root / "face.mp4"
+            subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "color=c=red:s=32x32:r=8:d=2",
+                "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(media),
+            ], check=True)
+            timeline = {
+                "duration": 2_000_000, "fps": 8,
+                "canvas_config": {"width": 32, "height": 32},
+                "tracks": [{"type": "video", "name": "content", "flag": 2, "segments": [
+                    segment("left", 0, 1, material="VIDEO"),
+                    {**segment("right", 1, 1, material="VIDEO"),
+                     "source_timerange": {"start": 1_000_000, "duration": 1_000_000}},
+                ]}],
+                "materials": {"videos": [{"id": "VIDEO", "path": str(media)}]},
+            }
+            output = root / "cuts"
+            sheet = root / "sheet.png"
+            tiles = frame_qa.write_simple_targeted(
+                str(root), timeline, [0.875, 1.125], str(output), sheet=str(sheet),
+            )
+            self.assertEqual(len(tiles), 2)
+            with Image.open(tiles[0][0]) as image:
+                self.assertEqual(image.size, (32, 32))
+            self.assertTrue(sheet.is_file())
 
 
 if __name__ == "__main__":

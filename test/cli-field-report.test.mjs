@@ -91,6 +91,15 @@ test('reviewed A-roll flags preserve order and repeated inward trims across the 
   assert.deepEqual(buildArrollArgs(ordered, 'face.mp4'), [
     'face.mp4', '--keep', '0,2', '--order', '2,0',
   ]);
+  const recovery = parseArgs([
+    'cut', 'face.mp4', '--keep', '4',
+    '--recover-beat', '4:out=0.8', '--recover-beat', '4:in=0.2',
+  ]);
+  assert.deepEqual(recovery.recoverBeat, ['4:out=0.8', '4:in=0.2']);
+  assert.deepEqual(buildArrollArgs(recovery, 'face.mp4'), [
+    'face.mp4', '--keep', '4',
+    '--recover-beat', '4:out=0.8', '--recover-beat', '4:in=0.2',
+  ]);
 });
 
 test('layout screen emits the named transactional core contract', () => {
@@ -330,6 +339,44 @@ test('preview rejects zero and non-finite FPS instead of silently using 6', asyn
   }
 });
 
+test('preview forwards bounded proxy controls to the streamed QA worker', async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-preview-options-'));
+  const project = path.join(temp, 'project');
+  fs.mkdirSync(project, { recursive: true });
+  fs.writeFileSync(path.join(project, 'draft_info.json'), '{}');
+  const log = path.join(temp, 'args.json');
+  const fakePython = path.join(temp, 'python3');
+  fs.writeFileSync(fakePython, [
+    '#!/usr/bin/env node',
+    "const fs = require('node:fs');",
+    "fs.writeFileSync(process.env.CAPCUT_TEST_ARG_LOG, JSON.stringify(process.argv.slice(2)));",
+  ].join('\n'));
+  fs.chmodSync(fakePython, 0o755);
+  try {
+    const run = spawnSync(process.execPath, [
+      path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'bin', 'capcutctl.mjs'),
+      'preview', '--project', project, '--out', path.join(temp, 'review.mp4'), '--fps', '6',
+      '--from', '2', '--to', '5', '--resolution', '540x960', '--native', '--no-cache',
+    ], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${temp}${path.delimiter}${process.env.PATH || ''}`,
+        CAPCUT_TEST_ARG_LOG: log,
+      },
+    });
+    assert.equal(run.status, 0, run.stderr || run.stdout);
+    const args = JSON.parse(fs.readFileSync(log, 'utf8'));
+    assert.ok(args.includes('--resolution') && args.includes('540x960'));
+    assert.ok(args.includes('--native'));
+    assert.ok(args.includes('--no-cache'));
+    assert.deepEqual(args.slice(args.indexOf('--from'), args.indexOf('--from') + 2), ['--from', '2']);
+    assert.deepEqual(args.slice(args.indexOf('--to'), args.indexOf('--to') + 2), ['--to', '5']);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 test('help and layout list expose the supported screen and automatic QA surface', async () => {
   let output = '';
   const restoreOutput = setOutput(chunk => { output += String(chunk); return true; });
@@ -338,6 +385,8 @@ test('help and layout list expose the supported screen and automatic QA surface'
     assert.match(output, /--at-cuts/);
     assert.match(output, /--at-scenes/);
     assert.match(output, /--at-broll/);
+    assert.match(output, /--resolution 360x640/);
+    assert.match(output, /--no-cache/);
     assert.match(output, /layout screen.*--media FILE/);
     assert.match(output, /--src S.*--src-dur S/);
 

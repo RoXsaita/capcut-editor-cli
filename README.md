@@ -205,6 +205,7 @@ capcutctl cut "Face Takes.mp4" \
   --order 0,2,3,6,7,8,9,10,12,13,16,17,18,21 \
   --trim-beat 10:out=-1.16 \
   --trim-beat 18:out=-1.72 \
+  --recover-beat 21:out=0.8 \
   --project "A-roll Review" --dry-run
 ```
 
@@ -215,6 +216,13 @@ them against the acoustic index, quantizes them to the project FPS, and snaps th
 onset/trough. IN offsets are positive and OUT offsets are negative. Unsafe expansion, a trim
 that leaves a fragment, source overlap, a clipped trusted first word, or a stale index is
 rejected before a CapCut write; `--force` never overrides first-word protection.
+
+Outward recovery is separate and opt-in: `--recover-beat ID:out=SECONDS` searches that far
+past the indexed OUT (`in` searches before IN). It expands only when the v5 index contains a
+complete word there, the audio is continuous to that word, and a quiet acoustic boundary is
+available afterward. It rejects silence, another take, a kept-source overlap, media bounds,
+and any result that would still clip the protected first/last word. The dry run reports the
+requested window, resolved frame-quantized range, word evidence, or the exact refusal reason.
 
 For a durable review handoff, save a v1 decision file. Copy `sourceToken` exactly from the
 current `source_token` field in `Face Takes.aroll.json`:
@@ -231,6 +239,9 @@ current `source_token` field in `Face Takes.aroll.json`:
   "boundaries": {
     "10": { "outOffset": -1.16 },
     "18": { "outOffset": -1.72 }
+  },
+  "recoveries": {
+    "21": { "out": 0.8 }
   }
 }
 ```
@@ -450,14 +461,36 @@ track below it, and `track_render_index` is renumbered after any insert.
 
 ### Rendered-pixel QA
 
-`doctor` validates structure and cannot see the picture. To check the frame itself:
+`doctor` is structural validation: it checks IDs, mirrors, timing, media and references, but
+cannot see the picture. `qa` is targeted native-resolution pixel evidence:
 
 ```bash
 capcutctl qa --project grok-build-gpt --times 1.5,6,41.5 --guide 960 --out qa/
+capcutctl qa --project grok-build-gpt --at-cuts --sheet --out qa/cuts/
+capcutctl qa --project grok-build-gpt --at-cuts --cut-window 0.08 --out qa/cuts/
 ```
 
-It composites any timeline frame outside CapCut and prints each segment's on-canvas
-rect.
+`--at-cuts` samples one frame on each side of every visual cut; the samples stay at the
+timeline's original resolution. `--times`, `--at-scenes`, and `--at-broll` select bounded
+additional evidence. A contact sheet is optional. These targeted selectors and `--sheet`
+cannot be combined with a motion preview, because a movie does not verify the same frames.
+
+For a watchable proxy, request a separate streamed job:
+
+```bash
+capcutctl preview --project grok-build-gpt --out qa/review.mp4
+capcutctl preview --project grok-build-gpt --out qa/native.mp4 --native --no-cache
+```
+
+Previews default to a 360x640 aspect-preserving proxy. Plain A-roll uses one ffmpeg
+trim/concat graph for video and speech; composited timelines stream resized raw frames into
+one encoder. No per-frame PNGs are materialised. The command prints its range, resolution,
+CFR frame estimate, mode, elapsed time and ETA, and caches successful previews under
+`.capcutctl/preview-cache/`. The cache key includes the draft/media fingerprint, range, FPS,
+resolution, z-order and compositor version.
+
+The automated proxy visual regression compares sampled frames with the native compositor at
+the same timestamps and allows a mean per-channel error of 8/255 for H.264 colour rounding.
 
 ## Recovery
 
