@@ -4,8 +4,8 @@ This repository **is public**. It was flipped from private after the checks belo
 passed, so most of this file is now a record of what was verified and a checklist for
 the next release rather than a gate in front of one.
 
-The npm/Homebrew/GitHub Releases decision is still open, and nothing here publishes
-anything. See *Releasing* at the bottom for the deliberate stopping point.
+Distribution is source-first through GitHub Releases. npm and Homebrew publishing remain
+out of scope; `"private": true` stays in `package.json` as the registry guard.
 
 ## What was verified before going public
 
@@ -46,7 +46,7 @@ Never `git init` the parent. Never upload the umbrella as a zip.
 - [ ] Branch protection on `main`: require `Node 20`, `Node 24`, `Python and shell quality`
 - [ ] `gh label create ai-review-approved` (see `.github/AUTOMATION.md`)
 - [ ] Enable private vulnerability reporting
-- [ ] Description and topics set (see below)
+- [x] Description and topics set (see below)
 
 Suggested description:
 
@@ -92,5 +92,7 @@ There is no publish workflow, on purpose. A release is:
    asserts this, but read it anyway.
 3. Bump the version in the three files above; `npm test` will confirm they agree.
 4. Tag: `git tag -a v0.1.1 -m 'v0.1.1' && git push origin v0.1.1`.
-5. **Stop.** Publishing to npm, Homebrew, or GitHub Releases is a separate, explicit
-   decision. Do not do it as part of a remediation, a cleanup, or a version bump.
+5. Create a GitHub Release from that tag. GitHub provides the source ZIP and tarball;
+   do not attach an npm package unless npm distribution is separately approved.
+6. Stop. Do not publish to npm or Homebrew without a new explicit decision and the
+   corresponding install and maintenance plan.
