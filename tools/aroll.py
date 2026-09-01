@@ -999,15 +999,9 @@ def resolve_editorial_decisions(data, args):
     beats = {beat["id"]: beat for beat in data.get("beats", [])}
     review = load_review(review_path, data) if review_path else None
     if review:
-        if review["keep"] is None:
-            kept = list(data.get("default_keep", []))
-        else:
-            kept = review["keep"]
+        kept = list(data.get("default_keep", [])) if review["keep"] is None else review["keep"]
         _ids_known(kept, beats, "review.keep")
-        if review["order"] is not None:
-            ordered = review["order"]
-        else:
-            ordered = sorted(set(kept))
+        ordered = review["order"] if review["order"] is not None else sorted(set(kept))
         boundaries = review["boundaries"]
         recoveries = review["recoveries"]
     else:
@@ -1062,7 +1056,7 @@ def _trough_before(idx, t, lower, upper, win=0.45):
     step = _number(getattr(idx, "bin", None))
     if step is None or step <= 0:
         return None
-    count = max(1, int(math.floor((hi - lo) / step)) + 1)
+    count = max(1, math.floor((hi - lo) / step) + 1)
     candidates = [min(hi, lo + index * step) for index in range(count)]
     candidates.append(hi)
     return min(candidates, key=lambda value: idx.at(value))
@@ -1133,7 +1127,7 @@ def _quietest_between(idx, start, end):
     step = _number(getattr(idx, "bin", None))
     if step is None or step <= 0 or end < start:
         return None
-    count = max(1, int(math.floor((end - start) / step)) + 1)
+    count = max(1, math.floor((end - start) / step) + 1)
     points = [min(end, start + index * step) for index in range(count)] + [end]
     return min(points, key=idx.at)
 
@@ -1324,7 +1318,7 @@ def _continuous_source(idx, start, end):
     step = _number(getattr(idx, "bin", None))
     if step is None or step <= 0 or end < start:
         return False
-    samples = int(math.ceil((end - start) / step))
+    samples = math.ceil((end - start) / step)
     return all(idx.at(min(end, start + sample * step)) >= SIL for sample in range(samples + 1))
 
 
@@ -1599,10 +1593,7 @@ def cmd_cut(args):
     except ValueError as error:
         print(f"A-roll boundary decision rejected: {error}", file=sys.stderr)
         return 2
-    if not getattr(args, "no_repair", False):
-        repairs = repair(idx, clips, fps=fps)
-    else:
-        repairs = []
+    repairs = [] if getattr(args, "no_repair", False) else repair(idx, clips, fps=fps)
 
     spans = [(f"b{clip['id']}", clip["src_in"], clip["src_out"]) for clip in clips]
     first_words = [
@@ -1862,9 +1853,9 @@ def main():
     args.out = args.index
     args.media = media
 
-    editorial_requested = lambda: any((args.keep, args.drop, args.order, args.trim_beat,
-                                        args.recover_beat, args.review,
-                                        args.project, args.into))
+    def editorial_requested():
+        return any((args.keep, args.drop, args.order, args.trim_beat,
+                    args.recover_beat, args.review, args.project, args.into))
 
     # index once, reuse thereafter — the expensive half never runs twice
     if args.reindex or not os.path.exists(args.index) or not index_is_current(args.index, media):

@@ -73,8 +73,11 @@ test('the declared floor matches what the shipped scripts actually need', () => 
   assert.match(pyproject, /target-version = "py311"/, 'ruff must lint against the declared floor');
 
   const ci = fs.readFileSync(path.join(PACKAGE_ROOT, '.github', 'workflows', 'ci.yml'), 'utf8');
-  assert.match(ci, new RegExp(`python-version: "${MIN_PYTHON_TEXT}"`),
+  assert.match(ci, new RegExp(`PYTHON_FLOOR: "${MIN_PYTHON_TEXT}"`),
     'CI must exercise the floor, not something newer that hides a 3.11 break');
+  // Both jobs must use it, or the linted Python and the run Python are different versions.
+  assert.equal((ci.match(/python-version: \$\{\{ env\.PYTHON_FLOOR \}\}/g) || []).length, 2,
+    'every setup-python step must take the version from PYTHON_FLOOR');
 });
 
 test('every third-party import the shipped tools make at module scope is declared', () => {
