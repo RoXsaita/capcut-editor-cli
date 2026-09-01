@@ -75,6 +75,8 @@ Usage:
   capcutctl diff --project NAME --against NAME|--snapshot NAME
   capcutctl harvest [--root PATH] [--projects A,B] [--out FILE]
   capcutctl init-spec [--output FILE]
+  capcutctl contract [--json]                  — the machine-readable command/option surface
+                                                 the skills repo validates its docs against
 
   capcutctl scenes --project NAME_OR_PATH [--track N] [--transcript] [--name SUBSTR]
   capcutctl layout split-screen --project NAME_OR_PATH --segments IDS|--at SECONDS [--track N] [--dry-run]
@@ -545,6 +547,13 @@ export async function main(argv, dependencies = {}) {
       .concat([{ name: 'background', description: p.background.description }]);
     if (p.screenRecording) rows.push({ name: 'screenRecording', description: p.screenRecording.description });
     return print(rows, true);
+  }
+  if (command === 'contract') {
+    // The machine-readable command/option surface, for the skills repository and anything
+    // else that documents this CLI. Always JSON: it exists to be parsed, not read.
+    const { buildContract } = await import('./contract.mjs');
+    const pkg = readJson(path.join(HERE, '..', 'package.json'));
+    return print(buildContract({ version: pkg.version }), true);
   }
   if (command === 'harvest') {
     const { harvestDrafts, writeHarvest, DEFAULT_HARVEST } = await import('./harvest.mjs');

@@ -55,6 +55,30 @@ command, not an import traceback. See [SETUP.md](SETUP.md#the-python-runtime).
 capcutctl preflight     # checks deps, the Python runtime, artwork, SFX palette, drafts folder
 ```
 
+## The CLI contract
+
+`capcutctl contract` emits the command and option surface as JSON, and
+[`docs/cli-contract.json`](docs/cli-contract.json) is the checked-in copy that
+[`capcut-skills`](https://github.com/RoXsaita/capcut-skills) validates its documentation
+against. It carries `contractVersion` (the shape of the document, bumped only when the
+schema changes) and `cliVersion` (this release).
+
+```bash
+capcutctl contract | jq '.commands.status'
+node bin/capcutctl.mjs contract > docs/cli-contract.json   # after changing the help text
+```
+
+`npm test` fails if that file is stale, if the help text advertises a command the CLI does
+not dispatch, or if a dispatched command is missing from the help text.
+
+**`--dry-run` is a guarantee about transactional edit commands** — the ones that go through
+the snapshot-and-validate machinery. It is not a claim about everything that writes a file:
+`snapshot`, `init-spec --output`, `harvest --out` and `review` all produce output and none
+of them take it, because a no-op flag added for symmetry would make the guarantee mean
+less. The contract's `dryRun.commands` is the exact list, and the test suite both checks
+that list against the source and drives a real transaction to prove the flag holds the
+write back.
+
 ## Development checks
 
 ```bash
