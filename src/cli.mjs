@@ -530,7 +530,9 @@ export async function main(argv, dependencies = {}) {
     const script = path.join(HERE, '..', 'tools', tool);
     // Resolve and verify the interpreter first. A missing runtime is a named CapcutError
     // with an install line, never a ModuleNotFoundError traceback from a child process.
-    const python = pythonForTool(tool);
+    // The argv goes in because some requirements are flag-triggered: find.py only imports
+    // frame_qa, and so only needs NumPy and Pillow, when --strip asks for a contact sheet.
+    const python = pythonForTool(tool, { argv: argv.slice(1) });
     let status;
     try { status = await runPython(python.executable, script, argv.slice(1)); }
     catch (error) { throw new CapcutError(`could not run ${script}: ${error.message}`, { exitCode: 2 }); }

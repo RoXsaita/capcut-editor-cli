@@ -30,8 +30,10 @@ export const MIN_PYTHON_TEXT = MIN_PYTHON.join('.');
  * A module listed here is a hard requirement: the command cannot start without it, so we
  * check it before spawning rather than letting Python raise ModuleNotFoundError.
  *
- * find.py imports frame_qa lazily, and only for --strip. It stays out of the hard set so a
- * plain `find` keeps working on a machine with no NumPy; preflight still reports the gap.
+ * find.py imports frame_qa lazily, and only for --strip, so it is not a hard requirement.
+ * That flag-triggered need lives in CONDITIONAL_TOOL_IMPORTS below rather than being
+ * dropped: a plain `find` must keep working on a machine with no NumPy, and `find --strip`
+ * must still fail up front instead of tracebacking out of a lazy import.
  */
 export const TOOL_IMPORTS = Object.freeze({
   'aroll.py': Object.freeze([]),
@@ -40,6 +42,37 @@ export const TOOL_IMPORTS = Object.freeze({
   'frame_qa.py': Object.freeze(['numpy', 'PIL']),
   'rasterize.py': Object.freeze([]),
 });
+
+/**
+ * Imports a tool needs only when a particular flag is used, keyed by tool basename.
+ *
+ * A lazy import is still a hard requirement once its flag is on the command line — and a
+ * worse failure than an eager one, because it raises after the work is done. `find --strip`
+ * searches the transcript, prints its hits, and only then imports frame_qa to build the
+ * contact sheet: without this, the user pays for the search and gets a traceback anyway.
+ */
+export const CONDITIONAL_TOOL_IMPORTS = Object.freeze({
+  'find.py': Object.freeze([
+    Object.freeze({ flag: '--strip', imports: Object.freeze(['numpy', 'PIL']) }),
+  ]),
+});
+
+/** Present as `--flag`, `--flag=value` or `--flag value`, without matching `--flag-other`. */
+function argvHasFlag(argv, flag) {
+  return argv.some(arg => arg === flag || arg.startsWith(`${flag}=`));
+}
+
+/**
+ * What this invocation must be able to import: the tool's hard requirements, plus whatever
+ * a flag on this particular command line pulls in lazily.
+ */
+export function toolImports(toolBasename, argv = []) {
+  const required = [...(TOOL_IMPORTS[toolBasename] || [])];
+  for (const rule of CONDITIONAL_TOOL_IMPORTS[toolBasename] || []) {
+    if (argvHasFlag(argv, rule.flag)) required.push(...rule.imports);
+  }
+  return [...new Set(required)];
+}
 
 /** Every third-party module the package's Python side can need, and how to install it. */
 export const RUNTIME_IMPORTS = Object.freeze(['numpy', 'PIL']);
@@ -241,12 +274,19 @@ export function missingImports(executable, modules, { runner = spawnSync } = {})
  */
 export function pythonForTool(toolBasename, options = {}) {
   const resolved = resolvePython(options);
-  const required = TOOL_IMPORTS[toolBasename] || [];
+  const argv = options.argv || [];
+  const required = toolImports(toolBasename, argv);
   const imports = options.imports || missingImports;
   const missing = imports(resolved.executable, required, options);
   if (missing.length) {
+    // Name the flag when a flag is what created the requirement. "find.py needs numpy" is
+    // baffling on a command that has never needed NumPy before.
+    const triggers = (CONDITIONAL_TOOL_IMPORTS[toolBasename] || [])
+      .filter(rule => argvHasFlag(argv, rule.flag) && rule.imports.some(m => missing.includes(m)))
+      .map(rule => rule.flag);
+    const because = triggers.length ? ` (needed for ${triggers.join(', ')})` : '';
     throw new CapcutError(
-      `${toolBasename} needs ${missing.join(', ')}, which ${resolved.executable} cannot import`,
+      `${toolBasename} needs ${missing.join(', ')}${because}, which ${resolved.executable} cannot import`,
       {
         code: 'PYTHON_MISSING_DEPENDENCY',
         exitCode: 2,

@@ -17,6 +17,7 @@ import {
   pythonCandidates,
   pythonForTool,
   resetPythonCache,
+  toolImports,
   resolvePython,
 } from '../src/python.mjs';
 
@@ -213,6 +214,40 @@ test('a missing dependency is a named error carrying the fix, never a traceback'
   const bare = stubImports({ 'python3': { has: [] } });
   assert.doesNotThrow(() => pythonForTool('aroll.py', { env: {}, refresh: true, probe, imports: bare }));
   assert.doesNotThrow(() => pythonForTool('find.py', { env: {}, refresh: true, probe, imports: bare }));
+});
+
+test('a lazy import is still checked up front once its flag is on the command line', () => {
+  // find.py imports frame_qa only under --strip, and only after the search has printed its
+  // hits. Left unchecked that is the worst version of the failure this module exists to
+  // remove: the user waits for the whole search and gets a traceback at the end anyway.
+  assert.deepEqual(toolImports('find.py'), []);
+  assert.deepEqual(toolImports('find.py', ['--media', 'a.mp4', 'query']), []);
+  assert.deepEqual(toolImports('find.py', ['--strip']), ['numpy', 'PIL']);
+  assert.deepEqual(toolImports('find.py', ['--strip=sheet.png']), ['numpy', 'PIL']);
+  assert.deepEqual(toolImports('find.py', ['--strip', 'sheet.png']), ['numpy', 'PIL']);
+  // A different flag that merely starts the same way is not --strip.
+  assert.deepEqual(toolImports('find.py', ['--strip-audio']), []);
+
+  const probe = stubProbe({ 'python3': { version: [3, 12, 0] } });
+  const bare = stubImports({ 'python3': { has: [] } });
+  const options = { env: {}, refresh: true, probe, imports: bare };
+
+  // Plain find keeps working on a machine with no NumPy. That is the whole reason these
+  // imports are conditional rather than hard.
+  assert.doesNotThrow(() => pythonForTool('find.py', { ...options, argv: ['--media', 'a.mp4', 'q'] }));
+
+  assert.throws(
+    () => pythonForTool('find.py', { ...options, argv: ['--media', 'a.mp4', '--strip', 'q'] }),
+    error => {
+      assert.equal(error.code, 'PYTHON_MISSING_DEPENDENCY');
+      assert.deepEqual(error.details.missing, ['numpy', 'PIL']);
+      // The message has to explain why a command that never needed NumPy suddenly does.
+      assert.match(error.message, /needed for --strip/);
+      assert.match(error.details.fix, /pip install numpy pillow/);
+      assert.doesNotMatch(error.message, /Traceback|ModuleNotFoundError/);
+      return true;
+    },
+  );
 });
 
 test('preflight reports the interpreter the commands will actually spawn', () => {
