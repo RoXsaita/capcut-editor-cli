@@ -66,6 +66,17 @@ function runPacked(box, args, extraEnv = {}) {
   for (const key of ['CAPCUTCTL_ASSET_DIR', 'CAPCUTCTL_PRESET_DIR', 'CAPCUTCTL_PYTHON']) {
     if (!(key in extraEnv)) delete env[key];
   }
+  // Send the child's coverage somewhere the test runner never reads.
+  //
+  // Under `node --test --experimental-test-coverage` each test file runs with
+  // NODE_V8_COVERAGE pointing at the run's collection directory, and children inherit it.
+  // The unpacked copy of src/*.mjs then reports as a second, barely-exercised set of files
+  // and drags the total from ~89% to ~67% — a measurement artefact that reads exactly like
+  // a coverage regression. Deleting the variable is not enough (the runner supplies it per
+  // file), so point it at a directory that is thrown away with the sandbox.
+  const dropped = path.join(box.root, 'coverage-discard');
+  fs.mkdirSync(dropped, { recursive: true });
+  env.NODE_V8_COVERAGE = dropped;
   return spawnSync(process.execPath, [box.bin, ...args], { encoding: 'utf8', env, timeout: 180_000 });
 }
 
