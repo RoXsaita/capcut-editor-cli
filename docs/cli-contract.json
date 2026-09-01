@@ -75,13 +75,22 @@
     },
     "cut": {
       "options": [
+        "--drop",
+        "--dry-run",
+        "--force",
+        "--fps",
+        "--in-place",
         "--into",
         "--keep",
         "--lang",
+        "--model",
+        "--no-repair",
         "--order",
         "--project",
         "--recover-beat",
+        "--reindex",
         "--review",
+        "--selftest",
         "--trim-beat"
       ],
       "transactional": false
@@ -125,7 +134,9 @@
         "--context",
         "--media",
         "--says",
-        "--shows"
+        "--settle",
+        "--shows",
+        "--strip"
       ],
       "transactional": false
     },
@@ -142,6 +153,7 @@
     "harvest": {
       "options": [
         "--out",
+        "--plan",
         "--projects",
         "--root"
       ],
@@ -253,6 +265,7 @@
         "--auto",
         "--cover",
         "--max",
+        "--min-gap",
         "--project",
         "--speed",
         "--track"
@@ -265,6 +278,8 @@
         "--lead",
         "--motivated",
         "--no-interactions",
+        "--no-sfx",
+        "--no-transitions",
         "--project",
         "--track"
       ],
@@ -299,17 +314,31 @@
     },
     "qa": {
       "options": [
+        "--allow-missing",
         "--at-broll",
         "--at-cuts",
         "--at-scenes",
         "--cut-window",
         "--expect",
+        "--fps",
+        "--from",
         "--guide",
         "--label",
+        "--languages",
+        "--native",
+        "--no-cache",
+        "--ocr",
+        "--out",
         "--preview",
         "--project",
+        "--rects-only",
+        "--resolution",
+        "--selftest",
         "--sheet",
-        "--times"
+        "--times",
+        "--to",
+        "--width",
+        "--z"
       ],
       "transactional": false
     },

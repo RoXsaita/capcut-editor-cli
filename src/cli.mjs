@@ -73,7 +73,7 @@ Usage:
                       — lightweight streamed proxy; defaults to 360x640 and never writes
                         one PNG per frame. Use qa for bounded seam/pixel evidence.
   capcutctl diff --project NAME --against NAME|--snapshot NAME
-  capcutctl harvest [--root PATH] [--projects A,B] [--out FILE]
+  capcutctl harvest [--root PATH] [--projects A,B] [--out FILE] [--plan]
   capcutctl init-spec [--output FILE]
   capcutctl contract [--json]                  — the machine-readable command/option surface
                                                  the skills repo validates its docs against
@@ -92,10 +92,11 @@ Usage:
   capcutctl zoom                --project NAME_OR_PATH --at S[,S...] | --auto  [--to 1.15] [--hold 1.6]
   capcutctl wrap                --project NAME_OR_PATH --words TRANSCRIPT.json [--text Follow] [--plan]
                                 brand logos from what he says + the endcard, in one pass
-  capcutctl pace                --project NAME_OR_PATH [--track N] [--max 100]
+  capcutctl pace                --project NAME_OR_PATH [--track N] [--max 100] [--min-gap 5.0]
                                 no flags = print the plan; --auto applies it
                                 --at T --speed X | --at T --cover IN-OUT for one clip
   capcutctl polish              --project NAME_OR_PATH [--lead 0.14] [--track N] [--motivated] [--dry-run]
+                                [--no-transitions] [--no-sfx] [--no-interactions]
                                 transitions ride the principal (talking-head) track; it is sliced to fit
                       — his transitions + matching SFX. --motivated: only on picture
                         changes (B-roll shot or layout class), not every A-roll splice.

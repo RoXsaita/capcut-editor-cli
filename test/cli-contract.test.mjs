@@ -5,7 +5,9 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { HELP, main, setOutput } from '../src/cli.mjs';
-import { CONTRACT_VERSION, TRANSACTIONAL_COMMANDS, buildContract, parseHelp } from '../src/contract.mjs';
+import {
+  CONTRACT_VERSION, TOOL_OPTIONS, TOOL_SCRIPTS, TRANSACTIONAL_COMMANDS, buildContract, parseHelp,
+} from '../src/contract.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = file => fs.readFileSync(path.join(ROOT, file), 'utf8');
@@ -45,13 +47,16 @@ test('the contract covers exactly the commands the CLI dispatches', () => {
     'the help text advertises commands the CLI does not dispatch');
 });
 
-test('every option the contract claims is one the help text actually prints', () => {
-  // The contract is derived from HELP, so this guards the derivation rather than the data:
-  // a parser bug that invented or dropped options would otherwise ship silently.
+test('every option the contract claims comes from the help text or from argparse', () => {
+  // The contract has exactly two sources: the help text this CLI prints, and the declared
+  // argparse surface of the tools cut/qa/find pass through to. A parser bug that invented
+  // an option would otherwise ship silently.
   const contract = buildContract();
   for (const [name, entry] of Object.entries(contract.commands)) {
+    const fromTool = new Set(TOOL_OPTIONS[name] || []);
     for (const option of entry.options) {
-      assert.ok(HELP.includes(option), `contract claims ${name} ${option}, absent from help`);
+      assert.ok(HELP.includes(option) || fromTool.has(option),
+        `contract claims ${name} ${option}, which is in neither the help text nor argparse`);
     }
   }
   // Spot-check the surface the skills were missing, so a regression in parseHelp that
@@ -153,6 +158,32 @@ test('a dry-run of a transactional edit changes nothing on disk', async () => {
     }
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test('the declared Python option surface matches what argparse actually accepts', async t => {
+  // TOOL_OPTIONS is hand-declared so that building the contract needs no Python. That is a
+  // thing that can rot, so ask argparse itself. Skipped, with a reason, when the runtime
+  // dependencies are absent — frame_qa.py cannot even print --help without NumPy.
+  const { execFileSync } = await import('node:child_process');
+  const { resolvePython, missingImports, TOOL_IMPORTS } = await import('../src/python.mjs');
+  let python;
+  try { python = resolvePython({ refresh: true }); }
+  catch (error) { return t.skip(`no supported Python interpreter: ${error.message}`); }
+
+  for (const [command, options] of Object.entries(TOOL_OPTIONS)) {
+    const script = TOOL_SCRIPTS[command];
+    const missing = missingImports(python.executable, TOOL_IMPORTS[script] || []);
+    if (missing.length) {
+      t.diagnostic(`skipping ${command}: ${script} cannot import ${missing.join(', ')}`);
+      continue;
+    }
+    const help = execFileSync(python.executable, [path.join(ROOT, 'tools', script), '--help'],
+      { encoding: 'utf8', timeout: 60_000 });
+    const actual = [...new Set((help.match(/--[a-z][a-z0-9-]*/g) || []))]
+      .filter(option => option !== '--help').sort();
+    assert.deepEqual([...options].sort(), actual,
+      `tools/${script} argparse and TOOL_OPTIONS.${command} disagree`);
   }
 });
 

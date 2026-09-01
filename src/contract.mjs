@@ -45,6 +45,39 @@ export const TRANSACTIONAL_COMMANDS = Object.freeze([
 const OPTION = /--[a-z][a-z0-9-]*/g;
 
 /**
+ * Options that belong to the Python argparse behind `cut`, `qa`, `find` and `preview`,
+ * not to the Node help text.
+ *
+ * The help text is a summary — it shows the flags a reader needs to get started, not the
+ * complete surface. `find --strip`, `qa --ocr` and `qa --out` are real, documented in the
+ * skills, and were absent from the contract because they are declared in argparse rather
+ * than in HELP. A contract missing them would fail a skill for naming a flag that works.
+ *
+ * Declared rather than shelled out for, so building the contract stays pure and does not
+ * need NumPy installed. test/cli-contract.test.mjs runs each tool's `--help` and fails if
+ * this list and argparse disagree, so it cannot rot quietly.
+ */
+export const TOOL_OPTIONS = Object.freeze({
+  cut: Object.freeze([
+    '--drop', '--dry-run', '--force', '--fps', '--in-place', '--into', '--keep', '--lang',
+    '--model', '--no-repair', '--order', '--project', '--recover-beat', '--reindex',
+    '--review', '--selftest', '--trim-beat',
+  ]),
+  qa: Object.freeze([
+    '--allow-missing', '--at-broll', '--at-cuts', '--at-scenes', '--cut-window', '--expect',
+    '--fps', '--from', '--guide', '--label', '--languages', '--native', '--no-cache',
+    '--ocr', '--out', '--preview', '--project', '--rects-only', '--resolution', '--selftest',
+    '--sheet', '--times', '--to', '--width', '--z',
+  ]),
+  find: Object.freeze(['--context', '--media', '--says', '--settle', '--shows', '--strip']),
+});
+
+/** Which tools/*.py each of those commands is a front end for. */
+export const TOOL_SCRIPTS = Object.freeze({
+  cut: 'aroll.py', qa: 'frame_qa.py', find: 'find.py', preview: 'frame_qa.py',
+});
+
+/**
  * Read the help text into structure.
  *
  * Every command entry starts at column 2 with `capcutctl NAME`; its continuation lines are
@@ -90,8 +123,11 @@ export function buildContract({ help = HELP, version } = {}) {
   const parsed = parseHelp(help);
   const commands = {};
   for (const [name, entry] of [...parsed].sort(([a], [b]) => a.localeCompare(b))) {
+    // `preview` is a Node command that forwards to frame_qa, so it keeps its own help-text
+    // surface; cut/qa/find are pass-throughs and take argparse's.
+    const fromTool = TOOL_OPTIONS[name] || [];
     commands[name] = {
-      options: [...entry.options].sort(),
+      options: [...new Set([...entry.options, ...fromTool])].sort(),
       ...(entry.subcommands.size ? { subcommands: [...entry.subcommands].sort() } : {}),
       transactional: TRANSACTIONAL_COMMANDS.includes(name),
     };
