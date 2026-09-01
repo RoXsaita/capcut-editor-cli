@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 import { CapcutError, allSegments, loadProject, stableJson } from './core.mjs';
+import { pythonForTool } from './python.mjs';
 import { contentEndUs } from './add.mjs';
 import { principalTrack } from './polish.mjs';
 
@@ -265,7 +266,8 @@ function publishReviewDirectory(stagedDir, destination) {
 export function reviewProject(projectDir, {
   outputRoot = path.resolve('outputs'),
   id = null,
-  python = 'python3',
+  // null means "resolve the declared runtime"; tests inject a stub compositor instead.
+  python = null,
   ffmpeg = 'ffmpeg',
   fps = 6,
   width = 240,
@@ -276,6 +278,7 @@ export function reviewProject(projectDir, {
   if (!Number.isFinite(Number(width)) || Number(width) <= 0) {
     throw new CapcutError('review requires --width greater than zero.', { code: 'BAD_WIDTH', exitCode: 2 });
   }
+  const interpreter = python || pythonForTool('frame_qa.py').executable;
   const doc = activeDocument(projectDir);
   if (!doc) throw new CapcutError(`review: no active timeline in ${projectDir}.`, { code: 'PROJECT_EMPTY', exitCode: 2 });
   const edl = buildReviewEdl(doc, { projectDir });
@@ -291,7 +294,7 @@ export function reviewProject(projectDir, {
     fs.mkdirSync(staged.frames, { recursive: true });
     fs.writeFileSync(staged.edl, stableJson(edl));
     const fullProxy = path.join(tmp, 'full-proxy.mp4');
-    runTool(python, [FRAME_QA, '--project', projectDir, '--preview', fullProxy,
+    runTool(interpreter, [FRAME_QA, '--project', projectDir, '--preview', fullProxy,
       '--from', String(edl.contentRange.start), '--to', String(edl.contentRange.end),
       '--fps', String(fps)], 'review proxy compositor');
 
@@ -302,7 +305,7 @@ export function reviewProject(projectDir, {
       '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-movflags', '+faststart', staged.proxy);
     runTool(ffmpeg, trimArgs, 'review content-range trim');
 
-    runTool(python, [FRAME_QA, '--project', projectDir, '--times', times.join(','),
+    runTool(interpreter, [FRAME_QA, '--project', projectDir, '--times', times.join(','),
       '--out', staged.frames, '--sheet', staged.contactSheet, '--width', String(width)],
     'review contact sheet');
     assertReviewArtifacts(staged);

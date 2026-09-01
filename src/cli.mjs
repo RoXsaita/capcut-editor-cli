@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadEnv } from './env.mjs';
+import { pythonForTool } from './python.mjs';
 import {
   CapcutError,
   DEFAULT_ROOT,
@@ -452,9 +453,9 @@ export function buildArrollArgs(args, media) {
   return forwarded;
 }
 
-function runPython(script, args) {
+function runPython(interpreter, script, args) {
   return new Promise((resolve, reject) => {
-    const child = spawn('python3', [script, ...args], { stdio: 'inherit' });
+    const child = spawn(interpreter, [script, ...args], { stdio: 'inherit' });
     const forward = signal => { if (child.exitCode == null && child.signalCode == null) child.kill(signal); };
     const onInt = () => forward('SIGINT');
     const onTerm = () => forward('SIGTERM');
@@ -484,7 +485,8 @@ async function runInPlaceCut(args, root, apply = applySpec) {
   const projectDir = resolveProject(args.into, root);
   const script = path.join(HERE, '..', 'tools', 'aroll.py');
   const forwarded = buildArrollArgs(args, media);
-  const run = spawnSync('python3', [script, ...forwarded], { stdio: 'inherit' });
+  const python = pythonForTool('aroll.py');
+  const run = spawnSync(python.executable, [script, ...forwarded], { stdio: 'inherit' });
   if (run.error) throw new CapcutError(`could not run ${script}: ${run.error.message}`, { exitCode: 2 });
   if ((run.status ?? 1) !== 0) { process.exitCode = run.status ?? 1; return null; }
 
@@ -523,8 +525,11 @@ export async function main(argv, dependencies = {}) {
   if (command === 'cut' || command === 'qa' || command === 'find') {
     const tool = { cut: 'aroll.py', qa: 'frame_qa.py', find: 'find.py' }[command];
     const script = path.join(HERE, '..', 'tools', tool);
+    // Resolve and verify the interpreter first. A missing runtime is a named CapcutError
+    // with an install line, never a ModuleNotFoundError traceback from a child process.
+    const python = pythonForTool(tool);
     let status;
-    try { status = await runPython(script, argv.slice(1)); }
+    try { status = await runPython(python.executable, script, argv.slice(1)); }
     catch (error) { throw new CapcutError(`could not run ${script}: ${error.message}`, { exitCode: 2 }); }
     process.exitCode = status;
     return;
@@ -1070,8 +1075,9 @@ export async function main(argv, dependencies = {}) {
     if (args.resolution != null) previewArgs.push('--resolution', String(args.resolution));
     if (args.native) previewArgs.push('--native');
     if (args.noCache) previewArgs.push('--no-cache');
+    const python = pythonForTool('frame_qa.py');
     let status;
-    try { status = await runPython(script, previewArgs); }
+    try { status = await runPython(python.executable, script, previewArgs); }
     catch (error) { throw new CapcutError(`could not run ${script}: ${error.message}`, { exitCode: 2 }); }
     process.exitCode = status;
     return;

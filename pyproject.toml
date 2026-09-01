@@ -1,3 +1,46 @@
+# The Python half of capcutctl. `cut`, `qa`, `find`, `preview` and `review` are Node front
+# ends over tools/*.py, so this is a real runtime contract, not just linter configuration.
+#
+#   python3 -m pip install -e .      from a clone
+#   python3 -m pip install numpy pillow   the same dependencies, without the project
+#
+# `capcutctl preflight` reports the interpreter it resolved and whether it can import these.
+# The floor is 3.11: tools/aroll.py uses itertools.pairwise (3.10+), and 3.11 is what CI runs
+# and what ruff targets, so there is one number to keep true instead of three.
+[project]
+name = "capcut-editor-cli-tools"
+version = "0.1.1"
+description = "Python analysis and QA helpers for the capcutctl CapCut editor."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Suheil Abu Aittah" }]
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.24",
+    "pillow>=10.0",
+]
+
+[project.optional-dependencies]
+# Transcription for `cut`. mlx-whisper is the fast path on Apple silicon and is what the
+# default --model expects; openai-whisper is the portable fallback for plain --model names.
+# Neither is installed by default: they pull large wheels and download model weights on
+# first use, which must stay an explicit choice rather than a side effect of `pip install`.
+whisper = ["openai-whisper>=20231117"]
+
+[project.urls]
+Homepage = "https://github.com/RoXsaita/capcut-editor-cli"
+Issues = "https://github.com/RoXsaita/capcut-editor-cli/issues"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# The helpers are plain scripts invoked by path, not an importable package. Ship them as a
+# flat module list so `pip install -e .` gives the dependencies without inventing a package
+# layout that the Node side would then have to know about.
+py-modules = []
+
 [tool.ruff]
 line-length = 110
 target-version = "py311"

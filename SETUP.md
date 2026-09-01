@@ -7,18 +7,21 @@ Two repositories make the toolkit. Start here; each repo's own README goes deepe
 | `capcut-editor-cli` (this one) | `capcutctl` — reads and writes CapCut's `draft_info.json` transactionally |
 | `capcut-skills` | the four agent skills that teach an agent how to use `capcutctl` |
 
-Requirements: **macOS**, **Node.js 20+**, **ffmpeg** (`brew install ffmpeg`),
-**Xcode command line tools** (for Swift), and **CapCut** installed and launched at
-least once.
+Requirements: **macOS**, **Node.js 20+**, **Python 3.11+**, **ffmpeg**
+(`brew install ffmpeg`), **Xcode command line tools** (for Swift), and **CapCut**
+installed and launched at least once.
 
 After installing, `capcutctl preflight` checks every one of those and tells you what
-is missing — run it before anything else.
+is missing — run it before anything else. It reports the exact Python interpreter
+`cut`, `qa` and `find` will use, so a green preflight and a `ModuleNotFoundError`
+cannot happen in the same session.
 
 ---
 
 ## 1. Clone both
 
-These repositories are private. Authenticate first (`gh auth login`, or an SSH key).
+Both repositories are public, so no authentication is needed to clone them. (You will
+need a GitHub account to open issues or pull requests.)
 
 ```bash
 mkdir -p ~/src && cd ~/src
@@ -34,13 +37,57 @@ like, as long as you use the same paths consistently. The rest of this file uses
 
 ## 2. `capcutctl`
 
-No npm runtime dependencies. Node 20+ and ffmpeg are the requirements.
+No npm runtime dependencies. Node 20+, Python 3.11+ and ffmpeg are the requirements.
 
 ```bash
 brew install ffmpeg           # cut, qa, find, preview, music and review need it
+brew install python@3.11      # or newer; 3.11 is the floor
 cd ~/src/capcut-editor-cli
 npm link                      # puts capcutctl on your PATH
-capcutctl preflight           # deps, bundled artwork, SFX palette, drafts folder
+python3 -m pip install -e .   # NumPy and Pillow, which qa/preview/review need
+capcutctl preflight           # deps, Python runtime, artwork, SFX palette, drafts folder
+```
+
+### The Python runtime
+
+`cut`, `qa`, `find`, `preview` and `review` are thin Node front ends over the scripts
+in `tools/`. Those scripts are **not** stdlib-only and **not** version-agnostic —
+`tools/aroll.py` uses `itertools.pairwise` (3.10+) and `tools/frame_qa.py` imports
+NumPy and Pillow — so `capcutctl` does not spawn whatever `python3` happens to be
+first on your PATH. Stock macOS still ships 3.9.6, which cannot run them.
+
+`pyproject.toml` is the contract: `requires-python = ">=3.11"`, with NumPy and Pillow
+as declared dependencies. The interpreter is chosen in this order, most explicit first:
+
+| | |
+|---|---|
+| `$CAPCUTCTL_PYTHON` | You said so. If it is unusable that is an error — never a quiet fallback to something else. |
+| `<repo>/.venv` | A project-managed environment, if you made one. |
+| `$VIRTUAL_ENV` | An environment you have already activated. |
+| `python3.14` … `python3.11` on PATH | A named interpreter that is new enough. |
+| `python3`, `python` on PATH | Ambient, and only if it clears 3.11. |
+
+Among the last two (the guesses, not the choices) an interpreter that can already
+import NumPy and Pillow wins over a newer one that cannot — otherwise
+`pip install -e .` under the `python3` you actually use would lose to a bare
+`python3.13` that merely sorts first.
+
+If you would rather keep the dependencies out of your system Python:
+
+```bash
+python3.11 -m venv .venv && .venv/bin/python -m pip install -e .
+capcutctl preflight            # now reports ".venv" as the source
+```
+
+A missing or too-old Python is a named error (`PYTHON_NOT_FOUND`, `PYTHON_TOO_OLD`,
+`PYTHON_MISSING_DEPENDENCY`) carrying the install command — not an import traceback.
+
+Transcription for `cut` is deliberately **not** installed by default, because both
+options pull large wheels and download model weights on first use:
+
+```bash
+uv tool install mlx-whisper          # the fast path on Apple silicon, and the default --model
+python3 -m pip install -e '.[whisper]'   # the portable fallback, for plain --model names
 ```
 
 `preflight` exits 1 if the install cannot work, and names the fix for each problem.
@@ -65,6 +112,10 @@ capcutctl projects        # lists your CapCut drafts
 capcutctl layout list     # the four locked layouts
 npm test                  # no network, no CapCut required
 ```
+
+`npm test` needs ffmpeg on PATH: the `cut.recut` suite builds genuine media to
+validate against, and skips itself with a stated reason when ffmpeg is absent. No
+test downloads a transcription model.
 
 `capcutctl` never writes while CapCut is running, always snapshots before a write,
 and validates the whole document before committing. See **Safety model** in the README.

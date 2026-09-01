@@ -16,6 +16,7 @@ import {
 } from './add.mjs';
 import { opMusic } from './music.mjs';
 import { isPreframed } from './origin.mjs';
+import { preflightPython } from './python.mjs';
 
 export const DEFAULT_ROOT = path.join(
   process.env.HOME || '',
@@ -325,15 +326,16 @@ function preflightAssetPath(layouts, basename) {
   return roots.map(root => path.join(root, basename)).find(file => fs.existsSync(file)) || null;
 }
 
-function preflightWhisper({ binaryCheck, commandRunner }) {
+function preflightWhisper({ binaryCheck, commandRunner, interpreter = null }) {
   const mlxOnPath = binaryCheck('mlx_whisper');
   const mlx = mlxOnPath
     ? commandRunner('mlx_whisper', ['--help'])
     : { ok: false, detail: 'mlx_whisper is not on PATH' };
-  const pythonOnPath = binaryCheck('python3');
-  const whisper = pythonOnPath
-    ? commandRunner('python3', ['-c', 'import whisper'])
-    : { ok: false, detail: 'python3 is not on PATH' };
+  // Ask the interpreter `cut` will actually spawn. Importing whisper under a different
+  // python3 is how "transcription is ready" and "No module named 'whisper'" coexist.
+  const whisper = interpreter
+    ? commandRunner(interpreter, ['-c', 'import whisper'])
+    : { ok: false, detail: 'no supported Python interpreter was resolved' };
   const mlxReady = Boolean(mlx.ok);
   const whisperReady = Boolean(whisper.ok);
   let detail;
@@ -1330,6 +1332,7 @@ export function preflight({
   commandRunner = (command, args) => runPreflightCommand(command, args),
   statfs = fs.statfsSync,
   writeProbe = null,
+  pythonCheck = preflightPython,
   minimumFreeBytes = process.env.CAPCUTCTL_MIN_FREE_BYTES || PREFLIGHT_MIN_FREE_BYTES,
 } = {}) {
   const checks = [];
@@ -1396,7 +1399,19 @@ export function preflight({
   add('ffprobe probe', ffprobeOk, ffprobeDetail,
       ffprobeOk ? null : 'repair or reinstall ffprobe, then retry `capcutctl preflight`');
 
-  const whisper = preflightWhisper({ binaryCheck: available, commandRunner: command });
+  // The interpreter cut/qa/find will actually spawn, and the imports they will actually make.
+  // Probing `python3` here while the commands resolve something else is how a green preflight
+  // and a ModuleNotFoundError end up in the same session.
+  const pythonRows = pythonCheck();
+  for (const row of pythonRows) {
+    const { name, ok, detail, fix, ...extra } = row;
+    add(name, ok, detail, fix, extra);
+  }
+
+  const resolvedInterpreter = pythonRows.find(row => row.interpreter)?.interpreter || null;
+  const whisper = preflightWhisper({
+    binaryCheck: available, commandRunner: command, interpreter: resolvedInterpreter,
+  });
   add('Whisper/MLX transcription', whisper.ok, whisper.detail, whisper.fix,
       { mlxReady: whisper.mlxReady, whisperReady: whisper.whisperReady });
 
