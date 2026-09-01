@@ -9,6 +9,7 @@
       "endcard",
       "fade",
       "finish",
+      "grade",
       "keyframe",
       "layout",
       "localize",
@@ -38,6 +39,7 @@
         "--derived-from",
         "--derived-offset",
         "--desc",
+        "--dry-run",
         "--dur",
         "--generated",
         "--media",
@@ -114,6 +116,7 @@
     "endcard": {
       "options": [
         "--at",
+        "--dry-run",
         "--project",
         "--text"
       ],
@@ -122,6 +125,7 @@
     "fade": {
       "options": [
         "--at",
+        "--dry-run",
         "--in",
         "--out",
         "--project",
@@ -142,11 +146,25 @@
     },
     "finish": {
       "options": [
+        "--dry-run",
         "--music",
         "--plan",
         "--polish",
         "--project",
         "--regen"
+      ],
+      "transactional": true
+    },
+    "grade": {
+      "options": [
+        "--apply",
+        "--dry-run",
+        "--measure",
+        "--plan",
+        "--project",
+        "--samples",
+        "--set",
+        "--strength"
       ],
       "transactional": true
     },
@@ -182,6 +200,7 @@
     "keyframe": {
       "options": [
         "--at",
+        "--dry-run",
         "--hold",
         "--plan",
         "--project",
@@ -221,6 +240,7 @@
     },
     "localize": {
       "options": [
+        "--dry-run",
         "--project"
       ],
       "transactional": true
@@ -229,6 +249,7 @@
       "options": [
         "--at",
         "--brand",
+        "--dry-run",
         "--hold",
         "--pos",
         "--project",
@@ -238,6 +259,7 @@
     },
     "music": {
       "options": [
+        "--dry-run",
         "--music",
         "--plan",
         "--project",
@@ -264,6 +286,7 @@
         "--at",
         "--auto",
         "--cover",
+        "--dry-run",
         "--max",
         "--min-gap",
         "--project",
@@ -298,6 +321,7 @@
         "--from",
         "--native",
         "--no-cache",
+        "--no-grade",
         "--out",
         "--project",
         "--resolution",
@@ -327,6 +351,7 @@
         "--languages",
         "--native",
         "--no-cache",
+        "--no-grade",
         "--ocr",
         "--out",
         "--preview",
@@ -345,6 +370,7 @@
     "remove": {
       "options": [
         "--at",
+        "--dry-run",
         "--project",
         "--track"
       ],
@@ -353,6 +379,7 @@
     "replace-media": {
       "options": [
         "--at",
+        "--dry-run",
         "--file",
         "--no-localize",
         "--project",
@@ -363,6 +390,7 @@
     },
     "restore": {
       "options": [
+        "--dry-run",
         "--force-running",
         "--no-backup",
         "--project",
@@ -396,6 +424,7 @@
       "options": [
         "--at",
         "--by",
+        "--dry-run",
         "--project",
         "--track"
       ],
@@ -411,6 +440,7 @@
     "status": {
       "options": [
         "--json",
+        "--timeout",
         "--wait-for-close"
       ],
       "transactional": false
@@ -434,6 +464,7 @@
     "trim": {
       "options": [
         "--at",
+        "--dry-run",
         "--dur",
         "--project",
         "--src",
@@ -442,9 +473,14 @@
       ],
       "transactional": true
     },
+    "version": {
+      "options": [],
+      "transactional": false
+    },
     "volume": {
       "options": [
         "--at",
+        "--dry-run",
         "--level",
         "--project",
         "--track"
@@ -453,6 +489,7 @@
     },
     "wrap": {
       "options": [
+        "--dry-run",
         "--plan",
         "--project",
         "--text",
@@ -464,6 +501,7 @@
       "options": [
         "--at",
         "--auto",
+        "--dry-run",
         "--hold",
         "--project",
         "--to"

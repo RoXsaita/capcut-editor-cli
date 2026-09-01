@@ -46,6 +46,22 @@ test('the bundle is searched before any home directory, and after an explicit ov
   }
 });
 
+test('binary discovery uses PATH directly instead of requiring an external which command', () => {
+  const previous = process.env.PATH;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-path-'));
+  const binary = path.join(dir, 'fixture-tool');
+  try {
+    fs.writeFileSync(binary, '#!/bin/sh\nexit 0\n');
+    fs.chmodSync(binary, 0o755);
+    process.env.PATH = dir;
+    assert.equal(hasBinary('fixture-tool', { refresh: true }), true);
+    assert.equal(hasBinary('missing-tool', { refresh: true }), false);
+  } finally {
+    process.env.PATH = previous;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('CAPCUTCTL_PRESET_DIR overrides one preset and falls back for the rest', () => {
   const previous = process.env.CAPCUTCTL_PRESET_DIR;
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-presets-'));
@@ -64,7 +80,7 @@ test('CAPCUTCTL_PRESET_DIR overrides one preset and falls back for the rest', ()
 });
 
 test('no preset points at a literal home directory — every path is ~/ or bundled', () => {
-  for (const name of ['layouts', 'sfx', 'brands', 'signature']) {
+  for (const name of ['layouts', 'sfx', 'brands', 'signature', 'adjust']) {
     const raw = fs.readFileSync(presetFile(name), 'utf8');
     const leaked = [...raw.matchAll(/\/Users\/[A-Za-z0-9._-]+/g)].map(m => m[0]);
     assert.deepEqual([...new Set(leaked)], [], `${name}.json hardcodes a user's home directory`);
@@ -126,6 +142,7 @@ test('preflight exercises the toolchain and reports writable disk capacity', () 
   assert.equal(byName.get('ffmpeg probe')?.ok, true);
   assert.equal(byName.get('ffprobe probe')?.ok, true);
   assert.equal(byName.get('Whisper/MLX transcription')?.ok, true);
+  assert.equal(byName.get('Python runtime dependencies')?.ok, true);
   assert.equal(byName.get('CapCut drafts folder write permission')?.ok, true);
   assert.equal(byName.get('free disk space')?.ok, true);
   assert.ok(calls.some(c => c.command === 'ffmpeg' && c.args.includes('lavfi')),
@@ -162,6 +179,52 @@ test('preflight fails closed when a probe hangs or the drafts volume is full', (
   assert.equal(byName.get('CapCut drafts folder write permission')?.ok, false);
   for (const name of ['ffmpeg probe', 'free disk space', 'CapCut drafts folder write permission']) {
     assert.ok(byName.get(name)?.fix, `${name} must include a repair instruction`);
+  }
+});
+
+test('preflight requires the declared Python runtime even when mlx_whisper itself is runnable', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-preflight-python-'));
+  const report = preflight({
+    root,
+    binaryCheck: name => name !== 'python3',
+    pythonCheck: () => ([
+      { name: 'Python runtime', ok: false, detail: 'no supported interpreter', fix: 'install Python 3.11+' },
+      { name: 'Python runtime dependencies', ok: false, detail: 'skipped', fix: 'install Python 3.11+' },
+    ]),
+    commandRunner: command => command === 'ffprobe'
+      ? { ok: true, stdout: '2,2\n' }
+      : { ok: true, stdout: '' },
+    statfs: () => ({ bsize: 4096, bavail: 1024 * 1024 }),
+  });
+  assert.equal(report.ok, false);
+  assert.equal(report.checks.find(c => c.name === 'Python runtime')?.ok, false);
+  assert.equal(report.checks.find(c => c.name === 'Whisper/MLX transcription')?.ok, false);
+});
+
+test('preflight reports malformed presets instead of aborting the diagnostic', () => {
+  const previous = process.env.CAPCUTCTL_PRESET_DIR;
+  const presets = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-broken-presets-'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-preflight-root-'));
+  try {
+    fs.writeFileSync(path.join(presets, 'layouts.json'), '{broken');
+    fs.writeFileSync(path.join(presets, 'sfx.json'), '{broken');
+    process.env.CAPCUTCTL_PRESET_DIR = presets;
+    const report = preflight({
+      root,
+      binaryCheck: () => true,
+      commandRunner: command => command === 'ffprobe'
+        ? { ok: true, stdout: '2,2\n' }
+        : { ok: true, stdout: '' },
+      statfs: () => ({ bsize: 4096, bavail: 1024 * 1024 }),
+    });
+    assert.equal(report.ok, false);
+    assert.equal(report.checks.find(c => c.name === 'layouts preset')?.ok, false);
+    assert.equal(report.checks.find(c => c.name === 'sfx palette')?.ok, false);
+  } finally {
+    if (previous == null) delete process.env.CAPCUTCTL_PRESET_DIR;
+    else process.env.CAPCUTCTL_PRESET_DIR = previous;
+    fs.rmSync(presets, { recursive: true, force: true });
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 

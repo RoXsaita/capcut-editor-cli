@@ -96,6 +96,7 @@ if [ -n "$py" ]; then
         printf '%s\n' "$aroll_out" | tail -10
         fail "aroll selftest"
     fi
+    if "$py" tools/frame_qa.py --selftest; then ok "frame qa"; else fail "frame qa selftest"; fi
 else
     skip "python selftests" "no interpreter"
 fi

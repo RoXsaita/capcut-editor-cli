@@ -17,7 +17,8 @@
     "chat gpt",
     "شات جي بي تي",
     "شات جيبيتي",
-    "تشات جي بي تي"
+    "تشات جي بي تي",
+    "شات جي بيتي"
    ],
    "logo": "~/Downloads/Media/Images/2026/ChatGPT-Logo.png"
   },
@@ -26,7 +27,8 @@
     "openai",
     "open ai",
     "اوبن ايه اي",
-    "أوبن ايه اي"
+    "أوبن ايه اي",
+    "شات جي بيتي"
    ],
    "logo": "~/Downloads/Media/Images/2026/ChatGPT-Logo.png"
   },
@@ -162,6 +164,17 @@
     "ريموشن"
    ],
    "logo": "~/Downloads/Logos/Remotion-logo.png"
+  },
+  "hermes": {
+   "aliases": [
+    "hermes",
+    "hermes agent",
+    "هيرمس",
+    "وهيرمس",
+    "هرمس",
+    "هيرميس"
+   ],
+   "logo": "~/Downloads/Logos/hermes-agent-wordmark.png"
   }
  }
 }

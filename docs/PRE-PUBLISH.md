@@ -24,9 +24,9 @@ git log --all -- presets/harvest.json      # must be empty
 git grep -aI 'GEMINI_API_KEY=.\+'          # must match nothing but this file
 ```
 
-Older commits may still contain `/Users/roxsa/…` in files that were later rewritten to
-`~/…`. That is machine-local, not a credential, and it is not worth a second history
-rewrite. Nothing in the current tree ships an absolute user path —
+The repository is public. Older commits may still contain `/Users/<name>/…` in
+files that were later rewritten to `~/…`; that is machine-local, not a credential.
+Nothing in the current tree ships an absolute user path —
 `test/clean-install.test.mjs` scans the packed tarball and fails if one appears.
 
 ## Working tree (not in git, still do not zip)

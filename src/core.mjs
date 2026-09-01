@@ -8,6 +8,7 @@ import {
   opLayoutApply, opLayoutBackground, opLayoutBroll, opLayoutScreen, SCREEN_LAYOUT_OPERATION, renumberTracks
 } from './layouts.mjs';
 import { opPolish, opCalloutSfx, opInteractions, principalTrack } from './polish.mjs';
+import { opGradeApply } from './grade.mjs';
 import { opPace } from './pace.mjs';
 import { opSignature } from './signature.mjs';
 import {
@@ -156,8 +157,20 @@ export function loadPreset(name) {
 const BINARY_CACHE = new Map();
 export function hasBinary(name, { refresh = false } = {}) {
   if (refresh || !BINARY_CACHE.has(name)) {
-    const probe = spawnSync(process.platform === 'win32' ? 'where' : 'which', [name], { stdio: 'ignore' });
-    BINARY_CACHE.set(name, probe.status === 0);
+    const suffixes = process.platform === 'win32'
+      ? ['', ...String(process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';')]
+      : [''];
+    const direct = String(name).includes('/') || String(name).includes('\\');
+    const candidates = direct
+      ? [String(name)]
+      : String(process.env.PATH || '').split(path.delimiter).filter(Boolean)
+        .flatMap(directory => suffixes.map(suffix => path.join(directory, `${name}${suffix}`)));
+    BINARY_CACHE.set(name, candidates.some(file => {
+      try {
+        fs.accessSync(file, fs.constants.X_OK);
+        return fs.statSync(file).isFile();
+      } catch { return false; }
+    }));
   }
   return BINARY_CACHE.get(name);
 }
@@ -180,7 +193,7 @@ const PREFLIGHT_MIN_FREE_BYTES = 1 * 1024 ** 3;
 const DEFAULT_WHISPER_MODEL = 'mlx-community/whisper-large-v3-turbo';
 
 /**
- * Run a small, bounded command for preflight.  A binary being discoverable with `which` does
+ * Run a small, bounded command for preflight.  A binary being discoverable on PATH does
  * not mean it can start (a broken interpreter, a bad dylib, and a stuck wrapper all look fine
  * in PATH), so preflight always executes the tools it says are ready.  Keep this helper free of
  * a shell: PATH entries and error text are environment data, never command syntax.
@@ -339,7 +352,9 @@ function preflightWhisper({ binaryCheck, commandRunner, interpreter = null }) {
   const mlxReady = Boolean(mlx.ok);
   const whisperReady = Boolean(whisper.ok);
   let detail;
-  if (mlxReady) {
+  if (!interpreter) {
+    detail = 'no supported Python interpreter was resolved';
+  } else if (mlxReady) {
     detail = `mlx_whisper is runnable (default ${DEFAULT_WHISPER_MODEL} model path)`;
     if (whisperReady) detail += '; openai-whisper fallback is also importable';
   } else if (whisperReady) {
@@ -351,9 +366,10 @@ function preflightWhisper({ binaryCheck, commandRunner, interpreter = null }) {
     // tools/aroll.py's default is the Hugging Face `mlx-community/...` id.  The Python
     // fallback accepts official plain model names (for example `base`), but cannot load that
     // MLX repository id, so an importable fallback alone must not make the default cut look ready.
-    ok: mlxReady,
+    ok: Boolean(interpreter) && mlxReady,
     detail,
-    fix: mlxReady ? null
+    fix: !interpreter ? 'install Python 3.11 or newer, or set CAPCUTCTL_PYTHON to one'
+      : mlxReady ? null
       : whisperReady
         ? 'install mlx-whisper (`uv tool install mlx-whisper`) for the default model, or pass an official plain --model such as `base`'
         : 'install mlx-whisper (`uv tool install mlx-whisper`) or openai-whisper, then retry',
@@ -1043,6 +1059,18 @@ export function materialIndex(doc) {
   return index;
 }
 
+/** CapCut stores in-draft media as `##_draftpath_placeholder_<uuid>_##/Resources/...`. */
+export function resolveMediaPath(raw, projectDir) {
+  const p = typeof raw === 'string' ? raw : '';
+  if (!p) return null;
+  const marker = '##/';
+  const at = p.indexOf(marker);
+  if (p.startsWith('##_draftpath_placeholder') && at >= 0) {
+    return path.join(projectDir, p.slice(at + marker.length));
+  }
+  return p.startsWith('/') ? p : path.join(projectDir, p);
+}
+
 export function allSegments(doc) {
   return (doc.tracks || []).flatMap((track, trackIndex) =>
     (track.segments || []).map((segment, segmentIndex) => ({ track, trackIndex, segment, segmentIndex }))
@@ -1121,6 +1149,8 @@ export function validateDocument(doc, {
   if (!doc.materials || typeof doc.materials !== 'object') issues.push(issue('error', 'MATERIALS_TYPE', 'materials must be an object.', { file }));
   const materials = materialIndex(doc);
   const parkedWindow = parked || preservedRange(projectDir);
+  // one line per distinct path; 48 materials for one file is CapCut's shape, not 48 faults
+  const reportedOutsideMedia = new Set();
   const declaredDraftEndUs = Number.isFinite(doc.duration) ? doc.duration : null;
   const durationGuard = {
     declaredDraftEndUs,
@@ -1157,6 +1187,23 @@ export function validateDocument(doc, {
             + 'look will not render until it does. `capcutctl harvest` re-captures your machine\'s ids.',
             { file, id: value.id, path: mediaPath })
           : issue('error', 'MISSING_MEDIA', `Missing media file: ${mediaPath}`, { file, id: value.id, path: mediaPath }));
+      }
+      // A path can exist on disk and still be unopenable: CapCut is sandboxed and refuses
+      // files it did not pick itself, which surfaces as the "Link media" dialog on open.
+      // `doctor` only stat'd the path, so it passed a project CapCut could not open —
+      // structurally perfect, practically broken, and invisible to `qa` too because qa
+      // reads media with its own ffmpeg. Anything not inside the draft is a real risk.
+      if (checkFiles && projectDir && (kind === 'videos' || kind === 'audios')
+          && typeof mediaPath === 'string' && mediaPath.startsWith('/')
+          && fs.existsSync(mediaPath) && !isCapCutCachePath(mediaPath)
+          && !isLocalMedia(projectDir, mediaPath)) {
+        if (!reportedOutsideMedia.has(mediaPath)) {
+        reportedOutsideMedia.add(mediaPath);
+        issues.push(issue('warning', 'MEDIA_NOT_LOCALIZED',
+          `Media lives outside the draft: ${mediaPath}. CapCut is sandboxed and may refuse to `
+          + 'open it ("Link media"). Run `capcutctl localize --project NAME` to copy it in.',
+          { file, id: value.id, kind, path: mediaPath }));
+        }
       }
       if (kind === 'videos' && typeof mediaPath === 'string' && mediaPath.startsWith('/')) {
         const name = path.basename(mediaPath);
@@ -1365,6 +1412,10 @@ export function preflight({
     }
   };
 
+  const nodeMajor = Number(process.versions.node.split('.')[0]);
+  add('Node.js', nodeMajor >= 20, `v${process.versions.node}`,
+    nodeMajor >= 20 ? null : 'install Node.js 20 or newer');
+
   for (const binary of ['ffmpeg', 'ffprobe']) {
     const ok = available(binary);
     add(binary, ok, ok ? 'on PATH' : 'not on PATH',
@@ -1380,7 +1431,15 @@ export function preflight({
   add('ffmpeg probe', ffmpegProbe.ok, ffmpegProbe.ok ? 'executed a synthetic frame probe' : ffmpegProbe.detail,
       ffmpegProbe.ok ? null : 'repair or reinstall ffmpeg, then retry `capcutctl preflight`');
 
-  const layouts = loadPreset('layouts');
+  let layouts = { assetSearchPaths: [] };
+  try {
+    layouts = loadPreset('layouts');
+    if (!layouts?.layouts || typeof layouts.layouts !== 'object') throw new Error('missing layouts object');
+    add('layouts preset', true, presetFile('layouts'));
+  } catch (error) {
+    add('layouts preset', false, `could not load ${presetFile('layouts')}: ${error.message}`,
+      'restore a valid layouts.json or remove the broken CAPCUTCTL_PRESET_DIR override');
+  }
   const probeAsset = preflightAssetPath(layouts, 'suheilai-rect-indigo-1080x1920 (2).png');
   const ffprobeArgs = probeAsset
     ? ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', '--', probeAsset]
@@ -1437,19 +1496,26 @@ export function preflight({
   // The SFX palette is CapCut's own effect/music cache. Those paths are minted on the machine
   // where the sound was downloaded, so a fresh install has none of them: polish still runs, it
   // just places nothing. Report the ratio rather than pretending it is pass/fail.
-  const sfx = loadPreset('sfx');
-  const entries = [
-    ...Object.entries(sfx.audioTemplates || {}),
-    ...Object.entries(sfx.transitionTemplates || {}),
-  ].filter(([, tpl]) => tpl?.path);
-  const present = entries.filter(([, tpl]) => fs.existsSync(tpl.path));
-  add('sfx palette', present.length > 0,
-    `${present.length}/${entries.length} sounds and transitions available` +
-    (present.length ? '' : ' — polish will place none'),
-    present.length === entries.length ? null
-      : 'download the sounds you want in CapCut, then run `capcutctl harvest`, or point '
-        + '$CAPCUTCTL_PRESET_DIR at a directory with your own sfx.json',
-    { blocking: false });
+  try {
+    const sfx = loadPreset('sfx');
+    if (!sfx || typeof sfx !== 'object') throw new Error('expected an object');
+    const entries = [
+      ...Object.entries(sfx.audioTemplates || {}),
+      ...Object.entries(sfx.transitionTemplates || {}),
+    ].filter(([, tpl]) => tpl?.path);
+    const present = entries.filter(([, tpl]) => fs.existsSync(tpl.path));
+    add('sfx palette', present.length > 0,
+      `${present.length}/${entries.length} sounds and transitions available` +
+      (present.length ? '' : ' — polish will place none'),
+      present.length === entries.length ? null
+        : 'download the sounds you want in CapCut, then run `capcutctl harvest`, or point '
+          + '$CAPCUTCTL_PRESET_DIR at a directory with your own sfx.json',
+      { blocking: false });
+  } catch (error) {
+    add('sfx palette', false, `could not load ${presetFile('sfx')}: ${error.message}`,
+      'restore a valid sfx.json or remove the broken CAPCUTCTL_PRESET_DIR override',
+      { blocking: false });
+  }
 
   const draftsFolder = fs.existsSync(root) && (() => {
     try { return fs.statSync(root).isDirectory(); } catch { return false; }
@@ -2790,6 +2856,7 @@ export function applyOperations(doc, operations, context) {
     else if (op.op === 'clip.trim') result = opClipTrim(doc, op, context);
     else if (op.op === 'clip.fade') result = opClipFade(doc, op, context);
     else if (op.op === 'music') result = opMusic(doc, op, context);
+    else if (op.op === 'grade.apply') result = opGradeApply(doc, op, context);
     else throw new CapcutError(`Unsupported operation: ${op.op}`, { code: 'UNSUPPORTED_OPERATION' });
     results.push({ index, op: op.op, ...result });
   }

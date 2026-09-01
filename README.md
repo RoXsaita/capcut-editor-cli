@@ -244,6 +244,37 @@ capcutctl sync --project grok-build-gpt --dry-run
 capcutctl sync --project grok-build-gpt
 ```
 
+## Colour — `grade`
+
+`doctor` validates structure and `qa` validates geometry. Neither can tell you that the face
+reaches white at 212 while the B-roll sitting above it in the same split screen reaches 245 —
+that the video is three unrelated-looking sources stacked on one canvas. `grade` measures that
+and fixes it.
+
+```bash
+capcutctl grade --project NAME --measure     # scopes as numbers, per source file
+capcutctl grade --project NAME               # the solved plan (read-only, the default)
+capcutctl grade --project NAME --apply
+capcutctl grade --project NAME --apply --set 'face.mp4:temperature=-0.2,white=0.28'
+capcutctl qa    --project NAME --times 8 --no-grade      # the before half of a before/after
+```
+
+`--measure` reports, per source: black point (1st percentile luma), white point (99th),
+contrast, mean saturation, and `warmth` = R−B over the lit 40% of the frame, which is the
+white-balance tell. Two roles get two targets — the principal (talking-head) track is a *face*
+and has a correct answer; everything else is a *screen*, which gets the range half of the
+treatment plus a saturation ceiling and a white balance pulled toward the other screen sources
+rather than toward skin. The solver carries an L2 penalty on slider magnitude so it prefers
+doing nothing to a source that is already right.
+
+The JSON is harvested: `presets/adjust.json` is a real `effects` material written by CapCut's
+own Adjust panel — one material per slider, `value` in −1..+1, referenced from
+`extra_material_refs`. The forward model is CapCut's own `colorAdjust.frag`, transcribed into
+`src/grade.mjs` and `tools/frame_qa.py` so `qa` renders what CapCut will render. Contrast, the
+black/white affine and the temperature matrix are computed CPU-side inside CapCut, so their
+*scale* is a calibrated constant here — direction and identity are exact, magnitude is a
+good-faith fit, and the first look in CapCut is a calibration pass (`--strength 0.6` to scale).
+
 ## Agent-reviewed A-roll decisions
 
 `cut` separates editorial judgement from timing mechanics. The first pass writes a numbered

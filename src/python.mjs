@@ -79,10 +79,10 @@ export const RUNTIME_IMPORTS = Object.freeze(['numpy', 'PIL']);
 export const DISTRIBUTION = Object.freeze({ numpy: 'numpy', PIL: 'pillow' });
 
 /** Install line for a set of missing import names. */
-export function installHint(missing) {
+export function installHint(missing, executable = 'python3') {
   const names = [...new Set(missing.map(name => DISTRIBUTION[name] || name))].sort();
   if (!names.length) return null;
-  return `install the Python runtime dependencies: python3 -m pip install ${names.join(' ')}`
+  return `install the Python runtime dependencies: ${JSON.stringify(String(executable))} -m pip install ${names.join(' ')}`
     + `  (or, from a clone: python3 -m pip install -e .)`;
 }
 
@@ -290,7 +290,7 @@ export function pythonForTool(toolBasename, options = {}) {
       {
         code: 'PYTHON_MISSING_DEPENDENCY',
         exitCode: 2,
-        details: { interpreter: resolved.executable, missing, fix: installHint(missing) },
+        details: { interpreter: resolved.executable, missing, fix: installHint(missing, resolved.executable) },
       },
     );
   }
@@ -336,7 +336,7 @@ export function preflightPython(options = {}) {
     detail: missing.length
       ? `${resolved.executable} cannot import ${missing.join(', ')} — qa, preview, review and \`find --strip\` need them`
       : `${RUNTIME_IMPORTS.join(', ')} importable`,
-    fix: missing.length ? installHint(missing) : null,
+    fix: missing.length ? installHint(missing, resolved.executable) : null,
     missing,
   }];
 }

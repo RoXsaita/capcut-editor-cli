@@ -92,11 +92,17 @@ jobs:
       - name: Install pinned quality tools
         run: python -m pip install --require-hashes -r .github/requirements/ci.txt
 
+      - name: Install Python runtime dependencies
+        run: python -m pip install -e .
+
       - name: Compile Python helpers
         run: python -m compileall -q tools
 
       - name: Run A-roll self-tests
         run: python tools/aroll.py --selftest
+
+      - name: Run frame QA self-tests
+        run: python tools/frame_qa.py --selftest
 
       - name: Run Ruff
         run: ruff check tools/

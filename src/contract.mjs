@@ -37,7 +37,7 @@ const SUBCOMMAND_PARENTS = new Set(['layout']);
  * not more. See test/cli-contract.test.mjs.
  */
 export const TRANSACTIONAL_COMMANDS = Object.freeze([
-  'add', 'apply', 'endcard', 'fade', 'keyframe', 'layout', 'localize', 'logo', 'music',
+  'add', 'apply', 'endcard', 'fade', 'grade', 'keyframe', 'layout', 'localize', 'logo', 'music',
   'new', 'pace', 'polish', 'remove', 'replace-media', 'restore', 'rm', 'shift', 'sync',
   'trim', 'volume', 'wrap', 'zoom', 'finish',
 ]);
@@ -65,7 +65,7 @@ export const TOOL_OPTIONS = Object.freeze({
   ]),
   qa: Object.freeze([
     '--allow-missing', '--at-broll', '--at-cuts', '--at-scenes', '--cut-window', '--expect',
-    '--fps', '--from', '--guide', '--label', '--languages', '--native', '--no-cache',
+    '--fps', '--from', '--guide', '--label', '--languages', '--native', '--no-cache', '--no-grade',
     '--ocr', '--out', '--preview', '--project', '--rects-only', '--resolution', '--selftest',
     '--sheet', '--times', '--to', '--width', '--z',
   ]),
@@ -126,10 +126,11 @@ export function buildContract({ help = HELP, version } = {}) {
     // `preview` is a Node command that forwards to frame_qa, so it keeps its own help-text
     // surface; cut/qa/find are pass-throughs and take argparse's.
     const fromTool = TOOL_OPTIONS[name] || [];
+    const transactional = TRANSACTIONAL_COMMANDS.includes(name);
     commands[name] = {
-      options: [...new Set([...entry.options, ...fromTool])].sort(),
+      options: [...new Set([...entry.options, ...fromTool, ...(transactional ? ['--dry-run'] : [])])].sort(),
       ...(entry.subcommands.size ? { subcommands: [...entry.subcommands].sort() } : {}),
-      transactional: TRANSACTIONAL_COMMANDS.includes(name),
+      transactional,
     };
   }
   // `help` is dispatched but never listed as an entry in its own help text.

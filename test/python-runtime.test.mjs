@@ -204,6 +204,8 @@ test('a missing dependency is a named error carrying the fix, never a traceback'
       assert.equal(error.exitCode, 2);
       assert.deepEqual(error.details.missing, ['PIL']);
       assert.match(error.details.fix, /pip install pillow/);
+      assert.match(error.details.fix, /"python3" -m pip/,
+        'the repair must install into the interpreter that failed');
       // The old failure mode, in full: "ModuleNotFoundError: No module named 'numpy'".
       assert.doesNotMatch(error.message, /Traceback|ModuleNotFoundError/);
       return true;

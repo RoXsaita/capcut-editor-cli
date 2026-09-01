@@ -20,8 +20,7 @@ cannot happen in the same session.
 
 ## 1. Clone both
 
-Both repositories are public, so no authentication is needed to clone them. (You will
-need a GitHub account to open issues or pull requests.)
+These repositories are public; authentication is only needed for pushing changes.
 
 ```bash
 mkdir -p ~/src && cd ~/src
