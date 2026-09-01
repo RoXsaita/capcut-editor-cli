@@ -22,6 +22,7 @@ Usage:
     python3 frame_qa.py --project NAME --times 6 --rects-only
 """
 import argparse
+import copy
 import hashlib
 import json
 import math
@@ -37,6 +38,7 @@ import time
 from collections import OrderedDict
 from contextlib import suppress
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 
 import numpy as np
@@ -500,6 +502,188 @@ def grab(path, t, return_info=False, fps=None, size=None):
     return sample.image.copy()
 
 
+# --- CapCut's Adjust panel, as the compositor sees it -------------------------------------
+# `doctor` cannot see the picture and `qa` is the check that can, so `qa` has to render the
+# colour too — otherwise a graded project would QA as its ungraded self and the one pass
+# whose whole output IS the picture would be the one pass nobody could look at.
+#
+# This is CapCut's own fragment shader (Cache/effect/7501974767453474064/<hash>/
+# AmazingFeature_adjustColor/xshader/colorAdjust.frag), in the shader's own order. It is the
+# same model as src/grade.mjs; keep the two in step. Preview only — nothing here is ever
+# written back into the project's media.
+ADJUST_TYPES = ("brightness", "contrast", "saturation", "highlight", "shadow",
+                "white", "black", "temperature", "tone")
+_SAT_LUMA = np.array([0.208540, 0.702086, 0.089374], dtype=np.float32)
+_REC709 = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+_CONTRAST_GAIN, _BLACK_REACH, _WHITE_REACH = 2.0, 0.20, 0.30
+_TEMP_REACH, _TINT_REACH = 0.22, 0.18
+
+
+def apply_adjust(rgb, g):
+    """rgb: float32 HxWx3 in 0..1. g: {slider: value in -1..1}. Returns a new array."""
+    c = np.clip(rgb.astype(np.float32), 0.0, 1.0)
+
+    v = g.get("brightness", 0.0)
+    if v:
+        if v > 0:
+            p = 1.0 + v * 5.0
+        else:
+            p = 1.0 / (1.0 - v * 2.5)
+            c = c - (-v * 0.01)
+        c = np.clip(1.0 - np.power(np.clip(1.0 - c, 0.0, 1.0), p), 0.0, 1.0)
+
+    v = g.get("contrast", 0.0)
+    if v:
+        pivot = 0.5
+        if v <= 0:
+            c = np.clip((1.0 + v) * (c - pivot) + pivot, 0.0, 1.0)
+        else:
+            k = 4.0 + v * _CONTRAST_GAIN * 4.0
+            def sig(x):
+                return 1.0 / (1.0 + np.exp(-k * (x - pivot))) + pivot - 0.5
+            lo, hi = sig(np.float32(0.0)), sig(np.float32(1.0))
+            c = np.clip((sig(c) - lo) / (hi - lo), 0.0, 1.0)
+
+    v = g.get("saturation", 0.0)
+    if v:
+        u = 1.0 + v                                   # u=1 identity, u=0 monochrome
+        base = _SAT_LUMA * (1.0 - u)
+        m = np.tile(base, (3, 1)) + np.eye(3, dtype=np.float32) * u
+        c = np.clip(c @ m.T, 0.0, 1.0)
+
+    v = g.get("highlight", 0.0)
+    if v:
+        p = 1.0 - v * 0.5                             # p=1 identity
+        t = 1.0 - c
+        c = np.clip(1.0 - np.power(t, p) - (p - 1.0) * (t ** 2 - t ** 3), 0.0, 1.0)
+
+    v = g.get("shadow", 0.0)
+    if v:
+        p = 1.0 - v * 0.5                             # p=1 identity
+        c = np.clip(np.power(c, p) + (p - 1.0) * (c ** 2 - c ** 3), 0.0, 1.0)
+
+    if g.get("black") or g.get("white"):
+        lo = -g.get("black", 0.0) * _BLACK_REACH
+        hi = 1.0 - g.get("white", 0.0) * _WHITE_REACH
+        slope = 1.0 / max(1e-3, hi - lo)
+        c = np.clip(slope * c - lo * slope, 0.0, 1.0)
+
+    if g.get("temperature") or g.get("tone"):
+        t = g.get("temperature", 0.0) * _TEMP_REACH
+        n = g.get("tone", 0.0) * _TINT_REACH
+        y0 = c @ _REC709
+        out = c * np.array([(1 + t) * (1 + n * 0.5), (1 - n), (1 - t) * (1 + n * 0.5)],
+                           dtype=np.float32)
+        y1 = out @ _REC709
+        k = np.where(y1 > 1e-4, y0 / np.maximum(y1, 1e-4), 1.0)[..., None]
+        c = np.clip(out * k, 0.0, 1.0)
+
+    return c
+
+
+def segment_grade(segment, idx):
+    """The Adjust sliders CapCut would apply to this segment, or {} if it carries none."""
+    if segment.get("enable_adjust") is False:
+        return {}
+    g = {}
+    for ref in segment.get("extra_material_refs", []) or []:
+        kind, m = idx.get(ref, (None, None))
+        if kind == "effects" and m and m.get("type") in ADJUST_TYPES:
+            value = m.get("value")
+            if isinstance(value, (int, float)) and abs(value) > 1e-4:
+                g[m["type"]] = float(value)
+    return g
+
+
+def grade_image(im, g):
+    """Apply `g` to an RGBA PIL image, leaving alpha untouched."""
+    if not g:
+        return im
+    a = np.asarray(im.convert("RGBA"), dtype=np.uint8)
+    rgb = apply_adjust(a[..., :3].astype(np.float32) / 255.0, g)
+    a = np.dstack([np.round(rgb * 255.0).astype(np.uint8), a[..., 3:4]])
+    return Image.fromarray(a, "RGBA")
+
+
+# ---------------------------------------------------------------------------
+# Keyframes. `place` was always handed segment["clip"] verbatim, so every
+# animated property rendered at its BASE value — a logo whose pop keyframes
+# take it from 0.15 to 1.0 drew at 0.15, and one that fades in from alpha 0
+# drew as nothing at all. The frame was then reported as if it were the
+# picture. Anything keyframed (logo pops, face push-ins, `zoom`) was outside
+# what qa could see, which is exactly the class of defect it exists to catch.
+# ---------------------------------------------------------------------------
+
+_KF_PROPERTIES = {
+    "KFTypeScaleX": ("scale", "x"),
+    "KFTypeScaleY": ("scale", "y"),
+    "KFTypePositionX": ("transform", "x"),
+    "KFTypePositionY": ("transform", "y"),
+    "KFTypeAlpha": ("alpha", None),
+    "KFTypeRotation": ("rotation", None),
+}
+
+
+def _keyframe_value(points, source_us):
+    """Interpolate one keyframe_list at an absolute SOURCE position."""
+    if not points:
+        return None
+    if source_us <= points[0]["time_offset"]:
+        return points[0]["values"][0]
+    if source_us >= points[-1]["time_offset"]:
+        return points[-1]["values"][0]
+    for a, b in pairwise(points):
+        if not (a["time_offset"] <= source_us <= b["time_offset"]):
+            continue
+        ax, ay = float(a["time_offset"]), float(a["values"][0])
+        bx, by = float(b["time_offset"]), float(b["values"][0])
+        # Straight line between keys, for BOTH curve types.
+        #
+        # A FreeCurveInOut key carries left_control/right_control handles, but the convention
+        # for their y component is not something this codebase has established — read as an
+        # offset from the key's own value, the one real harvested block (Higgsfield Refund)
+        # describes a curve that overshoots its endpoint, which may be that shot's actual
+        # easing or may be a misreading. CapCut reads its own format correctly either way, so
+        # the PROJECT is unaffected; only this preview is. Interpolating straight is honest:
+        # it is exact at every key, and it can never invent motion that is not in the file.
+        # What qa is for is geometry and placement, not easing character.
+        span = bx - ax
+        return ay if span <= 0 else ay + (by - ay) * (source_us - ax) / span
+    return points[-1]["values"][0]
+
+
+def effective_clip(segment, source_seconds):
+    """segment["clip"] with its keyframed properties resolved at this instant."""
+    clip = copy.deepcopy(segment.get("clip") or {})
+    blocks = segment.get("common_keyframes") or []
+    if not blocks:
+        return clip
+    source_us = float(source_seconds) * 1e6
+    saw_scale_y = False
+    for block in blocks:
+        target = _KF_PROPERTIES.get(block.get("property_type"))
+        if not target:
+            continue
+        value = _keyframe_value(block.get("keyframe_list") or [], source_us)
+        if value is None:
+            continue
+        group, member = target
+        if member is None:
+            clip[group] = value
+        else:
+            clip.setdefault(group, {})[member] = value
+            if block.get("property_type") == "KFTypeScaleY":
+                saw_scale_y = True
+    # CapCut aspect-locks scale by default and writes ScaleX alone (472 blocks
+    # against 77 for ScaleY across the drafts here). Mirroring X onto Y is what
+    # the app does; not mirroring it renders a logo squashed to its base height.
+    if not saw_scale_y and any(b.get("property_type") == "KFTypeScaleX" for b in blocks):
+        scale = clip.get("scale")
+        if isinstance(scale, dict) and "x" in scale:
+            scale["y"] = scale["x"]
+    return clip
+
+
 def place(canvas, im, clip, W, H, blur=False, mask=None):
     sw, sh = im.size
     k0 = min(W / sw, H / sh)
@@ -606,7 +790,7 @@ def _missing_media_error(context, issues):
     )
 
 
-def render(proj, tl, t, z="track", frame_reports=None, allow_missing=False,
+def render(proj, tl, t, z="track", frame_reports=None, allow_missing=False, no_grade=False,
            output_size=None, frame_provider=None):
     cc = tl.get("canvas_config", {})
     native_w, native_h = cc.get("width", 1080), cc.get("height", 1920)
@@ -656,8 +840,13 @@ def render(proj, tl, t, z="track", frame_reports=None, allow_missing=False,
         image = sample.image if isinstance(sample, FrameSample) else sample
         if frame_reports is not None and isinstance(sample, FrameSample):
             frame_reports.append((p, sample))
-        rc = place(canvas, image, s.get("clip") or {}, W, H, blur, mask)
+        adjust = {} if no_grade else segment_grade(s, idx)
+        if adjust:
+            image = grade_image(image, adjust)
+        rc = place(canvas, image, effective_clip(s, st), W, H, blur, mask)
         label = os.path.basename(p)[:34]
+        if adjust:
+            label += " +grade(" + ",".join(sorted(adjust)) + ")"
         rows.append((ti, s["id"][:8], label, rc))
     return canvas, rows, W, H
 
@@ -712,7 +901,7 @@ def write_simple_targeted(proj, tl, times, out_dir, sheet=None, labels=None,
         period = 1.0 / float(info.get("fps") or tl.get("fps") or 30)
     except (TypeError, ValueError, ZeroDivisionError):
         period = _DEFAULT_FRAME_PERIOD
-    unique = sorted(set(round(value, 6) for value in source_times))
+    unique = sorted({round(value, 6) for value in source_times})
     half = max(period, 1e-4) * 0.49
     seek_start = max(0.0, unique[0] - _SEEK_PREROLL)
     selector = "+".join(
@@ -864,6 +1053,8 @@ def main():
     ap.add_argument("--guide", type=float, action="append", default=[],
                     help="draw a horizontal guide at this y (repeatable); 960 = the half line")
     ap.add_argument("--rects-only", action="store_true")
+    ap.add_argument("--no-grade", action="store_true",
+                    help="render each clip ungraded — the before half of a before/after")
     ap.add_argument("--sheet", nargs="?", const="sheet.png", default=None,
                     help="also write a labelled contact sheet of every rendered frame")
     ap.add_argument("--label", action="append", default=[],
@@ -932,7 +1123,8 @@ def main():
             )
             estimate = preview_estimate(
                 proj, tl, fps=a.fps, start=render_start, end=render_end,
-                resolution=a.resolution, native=a.native, allow_missing=a.allow_missing,
+                resolution=a.resolution, native=a.native, no_grade=a.no_grade,
+                allow_missing=a.allow_missing,
             )
         except (TypeError, ValueError) as exc:
             ap.error(str(exc))
@@ -942,7 +1134,8 @@ def main():
             out = write_preview(proj, tl, a.preview, fps=a.fps, z=a.z,
                                 start=render_start, end=render_end,
                                 allow_missing=a.allow_missing, resolution=a.resolution,
-                                native=a.native, cache=not a.no_cache, announce=False)
+                                native=a.native, cache=not a.no_cache, no_grade=a.no_grade,
+                                announce=False)
         except PreviewCancelled:
             print("preview cancelled", file=sys.stderr)
             raise SystemExit(130) from None
@@ -1013,7 +1206,8 @@ def main():
                     t, simple_target, provider, native_size)
                 frame_reports.extend(reports)
             else:
-                kwargs = {"frame_reports": frame_reports, "frame_provider": provider}
+                kwargs = {"frame_reports": frame_reports, "frame_provider": provider,
+                          "no_grade": a.no_grade}
                 if a.allow_missing:
                     kwargs["allow_missing"] = True
                 img, rows, W, H = render(proj, tl, t, a.z, **kwargs)
@@ -1431,7 +1625,7 @@ def content_fingerprint(project_dir, tl):
 
 
 def preview_cache_key(project_dir, tl, start, end, fps, resolution, native=False, z="track",
-                      allow_missing=False, mode=None):
+                      no_grade=False, allow_missing=False, mode=None):
     """Stable cache key for one rendered preview request."""
     width, height = preview_dimensions(tl, resolution, native)
     return _json_fingerprint({
@@ -1441,6 +1635,7 @@ def preview_cache_key(project_dir, tl, start, end, fps, resolution, native=False
         "fps": round(float(fps), 6),
         "resolution": [width, height],
         "z": z,
+        "no_grade": bool(no_grade),
         "allow_missing": bool(allow_missing),
         "mode": mode,
     })
@@ -1474,7 +1669,7 @@ def _identity_clip(segment, materials=None, typed_materials=None):
                         }:
                 continue
             if (kind in {"video_effects", "masks", "common_mask", "effects"}
-                    or material.get("name") == "Blur"):
+                    or material.get("name") == "Blur" or material_type in ADJUST_TYPES):
                 visual_refs.append(ref)
         return (close(scale.get("x", 1), 1) and close(scale.get("y", 1), 1)
                 and close(transform.get("x", 0), 0) and close(transform.get("y", 0), 0)
@@ -1548,7 +1743,7 @@ def preview_mode(project_dir, tl, start, end):
 
 
 def preview_estimate(project_dir, tl, fps=6, start=None, end=None, resolution=None, native=False,
-                     z="track", allow_missing=False):
+                     z="track", no_grade=False, allow_missing=False):
     """Describe the bounded work before any decoder or encoder starts."""
     try:
         fps = float(fps)
@@ -1571,6 +1766,7 @@ def preview_estimate(project_dir, tl, fps=6, start=None, end=None, resolution=No
         "temporary": "streamed rawvideo; no per-frame PNGs; bounded audio workspace",
         "cache": "fingerprinted project preview cache" if not allow_missing else "disabled for degraded media",
         "z": z,
+        "graded": not no_grade,
     }
 
 
@@ -1900,7 +2096,6 @@ def _write_simple_preview(project_dir, tl, segments, output, fps, duration, outp
     video_labels = []
     audio_labels = []
     for index, row in enumerate(segments):
-        source_start = max(0.0, row["source_start"])
         source_duration = max(0.001, row["source_duration"])
         speed = max(1e-6, row["speed"])
         video_label = f"v{index}"
@@ -1954,7 +2149,7 @@ def _write_simple_preview(project_dir, tl, segments, output, fps, duration, outp
 
 
 def _encode_compositor_stream(project_dir, tl, times, output, fps, z, output_size, provider,
-                              allow_missing, audio, duration, started, callback):
+                              allow_missing, no_grade, audio, duration, started, callback):
     """Render compositor frames into one long-lived ffmpeg rawvideo encoder."""
     command = [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
@@ -1981,6 +2176,8 @@ def _encode_compositor_stream(project_dir, tl, times, output, fps, z, output_siz
             kwargs = {}
             if allow_missing:
                 kwargs["allow_missing"] = True
+            if no_grade:
+                kwargs["no_grade"] = True
             if rendered_at_low_resolution:
                 kwargs.update({"output_size": output_size, "frame_provider": provider})
             image, _rows, _width, _height = render(project_dir, tl, timeline_time, z, **kwargs)
@@ -2007,12 +2204,12 @@ def _encode_compositor_stream(project_dir, tl, times, output, fps, z, output_siz
 
 def write_preview(proj, tl, out_path, fps=6, z="track", start=None, end=None,
                   allow_missing=False, resolution=None, native=False, cache=True,
-                  progress=None, announce=True):
+                  no_grade=False, progress=None, announce=True):
     """Write a bounded preview without materialising full-resolution frame files."""
     try:
         estimate = preview_estimate(
             proj, tl, fps=fps, start=start, end=end, resolution=resolution, native=native,
-            z=z, allow_missing=allow_missing,
+            z=z, no_grade=no_grade, allow_missing=allow_missing,
         )
     except (TypeError, ValueError) as exc:
         raise FrameExtractionError(str(exc)) from exc
@@ -2036,7 +2233,7 @@ def write_preview(proj, tl, out_path, fps=6, z="track", start=None, end=None,
     cache_enabled = bool(cache and not allow_missing)
     key = preview_cache_key(
         proj, tl, render_start, render_end, fps, resolution, native=native, z=z,
-        allow_missing=allow_missing, mode=mode,
+        no_grade=no_grade, allow_missing=allow_missing, mode=mode,
     )
     cached = preview_cache_path(proj, key)
     if cache_enabled and os.path.isfile(cached) and os.path.getsize(cached) > 0:
@@ -2062,7 +2259,7 @@ def write_preview(proj, tl, out_path, fps=6, z="track", start=None, end=None,
                 audio = _timeline_audio(proj, tl, tmp, duration_s, render_start)
                 _encode_compositor_stream(
                     proj, tl, times, encoded, fps, z, output_size, provider,
-                    allow_missing, audio, duration_s, started, progress,
+                    allow_missing, no_grade, audio, duration_s, started, progress,
                 )
             if not os.path.isfile(encoded) or os.path.getsize(encoded) <= 0:
                 raise FrameExtractionError("preview encoder produced no output")

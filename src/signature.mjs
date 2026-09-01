@@ -2,7 +2,8 @@ import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { CapcutError, clone, uuid, allSegments, loadPreset } from './core.mjs';
+import os from 'node:os';
+import { CapcutError, clone, uuid, allSegments, loadPreset, localizeMedia } from './core.mjs';
 import { principalTrack, sfxPresets } from './polish.mjs';
 import { contentEndUs, parkPresetLeftover } from './add.mjs';
 
@@ -169,7 +170,17 @@ export function detectBrands(transcript, mapper, { only = null, brands = null } 
     if (at == null) continue;
     hits.push({ brand: name, sourceAt: r3(found), at, logo: info.logo || null });
   }
-  return hits.sort((a, b) => a.at - b.at);
+  hits.sort((a, b) => a.at - b.at);
+  // Several brands can share one mark — chatgpt and openai point at the same file, and both
+  // fire on the same sentence, so `wrap` put the identical glyph on screen twice on one beat.
+  // One artwork is one logo; the earliest mention wins.
+  const seenArtwork = new Set();
+  return hits.filter(h => {
+    const key = h.logo || `brand:${h.brand}`;
+    if (seenArtwork.has(key)) return false;
+    seenArtwork.add(key);
+    return true;
+  });
 }
 
 /**
@@ -178,6 +189,53 @@ export function detectBrands(transcript, mapper, { only = null, brands = null } 
  * whole picture, and that is where the push-in belongs. Verified against grok-build-final:
  * exactly the two full-face beats come back, and none of the eight split-screen ones.
  */
+/**
+ * Lay out marks whose holds overlap.
+ *
+ * A single logo sits at his measured house position. Two that are on screen together would
+ * sit exactly on top of each other there — which is what happens in a versus video, because
+ * he names both contenders in one breath. Spread the group across x at a shared y, widest
+ * mark getting the most room, and keep the whole row inside the frame.
+ *
+ * Transform is in half-canvas units, x positive RIGHT. Marks are measured by their real
+ * aspect so a square glyph and a long wordmark get proportional slots rather than equal ones.
+ */
+export function spreadOverlapping(logos, rules, canvas = { width: 1080, height: 1920 }) {
+  const hold = l => l.hold ?? rules.logoHoldSeconds;
+  const groups = [];
+  for (const l of [...logos].sort((a, b) => a.at - b.at)) {
+    const last = groups[groups.length - 1];
+    if (last && l.at < Math.max(...last.map(x => x.at + hold(x)))) last.push(l);
+    else groups.push([l]);
+  }
+  for (const group of groups) {
+    if (group.length < 2) continue;
+    const widths = group.map(l => {
+      const px = imageSize(l.logo);
+      const requested = l.scale ?? rules.logoDefaultScale;
+      if (!px) return 2 * requested;
+      // CapCut fits the image to the canvas, THEN multiplies by clip.scale. logoScaleFor
+      // already returns that effective scale, so the on-canvas width is fitted × effective —
+      // multiplying by `requested` again here made every row half its true width.
+      const fitted = px.width * Math.min(canvas.width / px.width, canvas.height / px.height);
+      const effective = logoScaleFor(px.width, px.height, requested, canvas);
+      return (fitted * effective) / (canvas.width / 2);   // half-canvas units
+    });
+    const gap = 0.12;
+    const total = widths.reduce((a, b) => a + b, 0) + gap * (group.length - 1);
+    // never wider than the frame; shrink the row as one so relative sizes are preserved
+    const fit = total > 1.94 ? 1.94 / total : 1;
+    let x = -(total * fit) / 2;
+    group.forEach((l, i) => {
+      const w = widths[i] * fit;
+      if (fit < 1) l.scale = (l.scale ?? rules.logoDefaultScale) * fit;
+      l.pos = [r3(x + w / 2), rules.logoRowY ?? 0.167];
+      x += w + gap * fit;
+    });
+  }
+  return logos;
+}
+
 export function talkingHeadScenes(doc, trackIndex = null, minSeconds = 2.5) {
   const { track } = principalTrack(doc, trackIndex);
   const masks = new Set((doc.materials.common_mask || []).map(m => m.id));
@@ -202,6 +260,60 @@ function popKeyframes(from, to, rampSeconds, key) {
         right_control: { x: 0, y: 0 }, values: [to], string_value: '', graphID: '' },
     ],
   }];
+}
+
+/**
+ * A multi-point eased keyframe block.
+ *
+ * `popKeyframes` above is the measured two-key linear pop and stays the default. This is the
+ * overshoot reveal: the SHAPE of every handle is read off the one real `FreeCurveInOut` block
+ * in his projects (Higgsfield Refund, `presets/harvest.json` -> positionScaleEased), where the
+ * out-handle runs +17% of the leg in time and +89% of its value change, and the in-handle
+ * -68% / +27%. Nothing here is invented; only the point list differs.
+ *
+ * `points` is [[tSeconds | null, value], ...]; a null t means "the end of the hold".
+ */
+function easedBlock(property, points, key, holdSeconds, h) {
+  const pts = points
+    .map(([t, v]) => [t == null ? holdSeconds : t, v])
+    .filter(([t]) => t <= holdSeconds + 1e-9)
+    .sort((a, b) => a[0] - b[0]);
+  if (pts.length < 2) return null;
+  const list = pts.map(([t, v], i) => {
+    const prev = pts[i - 1], next = pts[i + 1];
+    const outSpan = next ? US(next[0] - t) : 0;
+    const inSpan = prev ? US(t - prev[0]) : 0;
+    const outDv = next ? next[1] - v : 0;
+    const inDv = prev ? v - prev[1] : 0;
+    return {
+      id: mint(`kf:${key}:${property}:${i}`),
+      curveType: 'FreeCurveInOut',
+      time_offset: Math.round(US(t)),
+      left_control: { x: Math.round(h.inX * inSpan), y: h.inY * inDv },
+      right_control: { x: Math.round(h.outX * outSpan), y: h.outY * outDv },
+      values: [v],
+      string_value: '',
+      graphID: i === 0 ? '' : mint(`graph:${key}:${property}:${i}`),
+    };
+  });
+  return { id: mint(`kfb:${key}:${property}`), material_id: '', property_type: property, keyframe_list: list };
+}
+
+/** Clip-attached video effect, written the way `layout background` writes its Blur plate. */
+function attachEffect(doc, template, segmentId, key, adjust = null) {
+  const effect = clone(template);
+  delete effect._source;
+  effect.id = mint(`fx:${key}`);
+  if ('bind_segment_id' in effect) effect.bind_segment_id = segmentId;
+  if (typeof effect.path === 'string' && effect.path.startsWith('~')) {
+    effect.path = path.join(os.homedir(), effect.path.slice(1));
+  }
+  if (adjust) {
+    effect.adjust_params = (effect.adjust_params || []).map(a =>
+      a.name in adjust ? { ...a, value: adjust[a.name] } : a);
+  }
+  arr(doc, 'video_effects').push(effect);
+  return effect.id;
 }
 
 function instantiateExtras(doc, templates, key) {
@@ -256,8 +368,34 @@ export function opSignature(doc, op, context = {}) {
   // (i.e. `wrap`) can safely claim them.
   if (writesLogos && writesEndcard) TAGS.push('sig:sfx');
   if (TAGS.length) {
+    // Everything the outgoing segments own, so the sweep can take the materials with them.
+    const orphaned = new Set();
+    for (const t of doc.tracks) {
+      for (const s of t.segments || []) {
+        if (!TAGS.includes(s.desc || '')) continue;
+        if (s.material_id) orphaned.add(s.material_id);
+        for (const r of s.extra_material_refs || []) orphaned.add(r);
+      }
+    }
     for (const t of doc.tracks) t.segments = (t.segments || []).filter(s => !TAGS.includes(s.desc || ''));
     doc.tracks = doc.tracks.filter(t => !(t.name || '').startsWith('sig-') || (t.segments || []).length);
+
+    // Dropping the segments alone is not enough. A stale logo VIDEO material left behind
+    // still carries a path, and CapCut scans materials — not tracks — when it decides
+    // whether media is missing, so a re-run that relocated the artwork greeted the next
+    // open with the "Link media" dialog even though every surviving segment was fine.
+    // video_effects have the matching problem: they bind to a segment id that is gone.
+    const live = new Set();
+    for (const t of doc.tracks) {
+      for (const s of t.segments || []) {
+        if (s.material_id) live.add(s.material_id);
+        for (const r of s.extra_material_refs || []) live.add(r);
+      }
+    }
+    for (const kind of ['videos', 'video_effects', 'effects']) {
+      if (!doc.materials?.[kind]) continue;
+      doc.materials[kind] = doc.materials[kind].filter(m => !orphaned.has(m.id) || live.has(m.id));
+    }
   }
 
   // Preset 3 leftover is a parts bin. Park it after a gap, then place Follow on the talking head.
@@ -276,10 +414,17 @@ export function opSignature(doc, op, context = {}) {
     const key = `logo:${i}:${l.brand}`;
     const mat = clone(p.logoMaterialTemplate);
     mat.id = mint(`mat:${key}`);
-    mat.path = l.logo;
-    mat.material_name = path.basename(l.logo);
+    // CapCut is sandboxed: it cannot open a file it did not pick itself, and a logo left
+    // pointing outside the draft raises the "Link media" dialog on the next open — the
+    // project is correct on disk and unusable in the app. `add` has always copied its media
+    // in; this did not, so every brand pop from a folder CapCut lacks access to was broken.
+    const logoPath = (l.localize === false || !context.projectDir)
+      ? l.logo
+      : localizeMedia(context.projectDir, path.resolve(l.logo), undefined, { dryRun: context.dryRun });
+    mat.path = logoPath;
+    mat.material_name = path.basename(logoPath);
     mat.local_material_id = mint(`lm:${key}`);
-    const px = imageSize(l.logo);
+    const px = imageSize(l.logo) || imageSize(logoPath);
     const tplW = p.logoMaterialTemplate.width || 1280;
     const tplH = p.logoMaterialTemplate.height || 276;
     // Falling back to the template's 1280x276 is the exact bug this probe exists to fix, and
@@ -313,16 +458,71 @@ export function opSignature(doc, op, context = {}) {
     seg.clip = clone(seg.clip);
     seg.clip.scale = { x: rules.logoPop.from, y: rules.logoPop.from };
     if (l.pos) seg.clip.transform = { ...seg.clip.transform, x: l.pos[0], y: l.pos[1] };
-    seg.common_keyframes = popKeyframes(rules.logoPop.from, scale, l.ramp ?? rules.logoPop.rampSeconds, key);
     seg.desc = 'sig:logo';
 
-    const track = addTrack(doc, p.logoTrackTemplate, `sig-logo-${i}`);
-    track.segments.push(seg);
+    // Two reveals. The default is the measured two-key linear pop. `glow` is the overshoot
+    // reveal: the same mark on two stacked tracks, the lower one blown up, blurred and lit,
+    // its alpha bursting on the overshoot frame and decaying to an ambient halo.
+    const glow = l.glow ?? op.glow ?? false;
+    if (!glow) {
+      seg.common_keyframes = popKeyframes(rules.logoPop.from, scale, l.ramp ?? rules.logoPop.rampSeconds, key);
+      const track = addTrack(doc, p.logoTrackTemplate, `sig-logo-${i}`);
+      track.segments.push(seg);
+      result.logos.push({ brand: l.brand, at: l.at, scale, hold, logo: logoPath, reveal: 'pop' });
+    } else {
+      const g = rules.logoGlow;
+      const h = g.handles;
+      const baseY = seg.clip.transform?.y ?? 0;
+
+      // --- glow underlay: cloned first so its track sits BELOW the core mark ---
+      const uKey = `${key}:glow`;
+      const under = clone(seg);
+      under.id = mint(`seg:${uKey}`);
+      under.extra_material_refs = instantiateExtras(doc, p.logoExtraTemplates, uKey);
+      under.clip = clone(seg.clip);
+      // Base clip values are the RESTING state, not the first keyframe. CapCut animates from
+      // the keyframes and ignores these, but everything that does not read keyframes — the
+      // `qa` compositor, thumbnailers — falls back to them, and a base of alpha 0 / scale 0.15
+      // makes the mark invisible in every one of those. Resting values fail visible.
+      under.clip.scale = { x: scale * g.underlay.scale[2][1], y: scale * g.underlay.scale[2][1] };
+      under.clip.alpha = g.underlay.alpha.at(-1)[1];
+      under.common_keyframes = [
+        easedBlock('KFTypeScaleX', g.underlay.scale.map(([t, v]) => [t, scale * v]), uKey, hold, h),
+        easedBlock('KFTypeAlpha', g.underlay.alpha, uKey, hold, h),
+      ].filter(Boolean);
+      under.extra_material_refs.push(
+        attachEffect(doc, p.glowEffect, under.id, `${uKey}:glow`),
+        attachEffect(doc, p.blurEffect, under.id, `${uKey}:blur`,
+          { effects_adjust_blur: g.underlay.blur }));
+      // Screen, so the halo ADDS light instead of laying a pale copy over the picture.
+      // CapCut writes a blend mode as a materials.effects record of type "mix_mode" — this
+      // one was set by hand in CapCut and harvested, never invented.
+      if (g.underlay.blend !== false && p.mixModeScreen) {
+        const blend = clone(p.mixModeScreen);
+        delete blend._source; delete blend._note;
+        blend.id = mint(`mix:${uKey}`);
+        arr(doc, 'effects').push(blend);
+        under.extra_material_refs.push(blend.id);
+      }
+      under.desc = 'sig:logo';
+      addTrack(doc, p.logoTrackTemplate, `sig-logo-glow-${i}`).segments.push(under);
+
+      // --- core mark: overshoot, settle, ambient drift ---
+      seg.clip.scale = { x: scale * g.core.scale[2][1], y: scale * g.core.scale[2][1] };
+      seg.clip.alpha = 1;
+      seg.common_keyframes = [
+        easedBlock('KFTypeScaleX', g.core.scale.map(([t, v]) => [t, scale * v]), key, hold, h),
+        easedBlock('KFTypeAlpha', g.core.alpha, key, hold, h),
+        easedBlock('KFTypePositionY', g.core.riseY.map(([t, v]) => [t, baseY + v]), key, hold, h),
+      ].filter(Boolean);
+      addTrack(doc, p.logoTrackTemplate, `sig-logo-${i}`).segments.push(seg);
+      result.logos.push({ brand: l.brand, at: l.at, scale, hold, logo: logoPath, reveal: 'glow',
+                          overshoot: g.core.scale[1][1], underlayAlpha: g.underlay.alpha.at(-1)[1] });
+    }
     if (!op.noSfx) {
       const cue = ensureSfx(doc, rules.logoSfx, l.at - rules.logoSfxLeadSeconds, key);
       if (cue) { cue.owner = 'logo'; cue.duration = Math.min(cue.duration, S(editUs) - cue.at); pending.push(cue); }
     }
-    result.logos.push({ brand: l.brand, at: l.at, scale, hold, logo: l.logo });
   }
 
   /* ---- endcard ---- */

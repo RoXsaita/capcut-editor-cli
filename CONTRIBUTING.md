@@ -27,6 +27,8 @@ npm run check
 Node 20+. No runtime npm dependencies. Tests build synthetic drafts in a temp
 dir and **do not** touch your CapCut library.
 
+`qa` and `review` require NumPy and Pillow: `python3 -m pip install -r requirements.txt`.
+
 Optional, macOS only:
 
 ```bash

@@ -8,8 +8,8 @@ Two repositories make the toolkit. Start here; each repo's own README goes deepe
 | `capcut-skills` | the four agent skills that teach an agent how to use `capcutctl` |
 
 Requirements: **macOS**, **Node.js 20+**, **ffmpeg** (`brew install ffmpeg`),
-**Xcode command line tools** (for Swift), and **CapCut** installed and launched at
-least once.
+**Python 3 with NumPy and Pillow**, **Xcode command line tools** (for Swift), and
+**CapCut** installed and launched at least once.
 
 After installing, `capcutctl preflight` checks every one of those and tells you what
 is missing — run it before anything else.
@@ -18,7 +18,7 @@ is missing — run it before anything else.
 
 ## 1. Clone both
 
-These repositories are private. Authenticate first (`gh auth login`, or an SSH key).
+These repositories are public; authentication is only needed for pushing changes.
 
 ```bash
 mkdir -p ~/src && cd ~/src
@@ -34,11 +34,12 @@ like, as long as you use the same paths consistently. The rest of this file uses
 
 ## 2. `capcutctl`
 
-No npm runtime dependencies. Node 20+ and ffmpeg are the requirements.
+No npm runtime dependencies. Node 20+, ffmpeg, Python 3, NumPy, and Pillow are the requirements.
 
 ```bash
 brew install ffmpeg           # cut, qa, find, preview, music and review need it
 cd ~/src/capcut-editor-cli
+python3 -m pip install -r requirements.txt  # qa and review
 npm link                      # puts capcutctl on your PATH
 capcutctl preflight           # deps, bundled artwork, SFX palette, drafts folder
 ```

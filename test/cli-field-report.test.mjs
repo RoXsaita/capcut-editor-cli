@@ -163,6 +163,15 @@ test('status payload is branchable and close failures retain the Builder D error
   assert.deepEqual(payload.pids, ['42']);
   assert.equal(payload.waitForClose, true);
 
+  const unknown = statusPayload({
+    state: 'unknown', running: false, closed: false, unknown: true,
+    pids: [], probeError: { code: 'ENOENT', message: 'pgrep missing' },
+  });
+  assert.equal(unknown.state, 'unknown');
+  assert.equal(unknown.closed, false);
+  assert.equal(unknown.unknown, true);
+  assert.equal(unknown.probeError.code, 'ENOENT');
+
   const failure = serializeCloseFailure({
     code: 'CAPCUT_RUNNING', exitCode: 2, message: 'save dialog refused quit',
     details: { pids: ['42'] },
@@ -356,7 +365,7 @@ test('preview forwards bounded proxy controls to the streamed QA worker', async 
     const run = spawnSync(process.execPath, [
       path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'bin', 'capcutctl.mjs'),
       'preview', '--project', project, '--out', path.join(temp, 'review.mp4'), '--fps', '6',
-      '--from', '2', '--to', '5', '--resolution', '540x960', '--native', '--no-cache',
+      '--from', '2', '--to', '5', '--resolution', '540x960', '--native', '--no-cache', '--no-grade',
     ], {
       encoding: 'utf8',
       env: {
@@ -370,6 +379,7 @@ test('preview forwards bounded proxy controls to the streamed QA worker', async 
     assert.ok(args.includes('--resolution') && args.includes('540x960'));
     assert.ok(args.includes('--native'));
     assert.ok(args.includes('--no-cache'));
+    assert.ok(args.includes('--no-grade'));
     assert.deepEqual(args.slice(args.indexOf('--from'), args.indexOf('--from') + 2), ['--from', '2']);
     assert.deepEqual(args.slice(args.indexOf('--to'), args.indexOf('--to') + 2), ['--to', '5']);
   } finally {
@@ -402,4 +412,46 @@ test('help and layout list expose the supported screen and automatic QA surface'
 test('the check script syntax-checks the shipped review module', () => {
   const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   assert.match(pkg.scripts.check, /node --check src\/review\.mjs/);
+});
+
+test('bootstrap version works and failed JSON preflight remains branchable by exit code', () => {
+  const cli = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'bin', 'capcutctl.mjs');
+  const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  const version = spawnSync(process.execPath, [cli, '--version'], { encoding: 'utf8' });
+  assert.equal(version.status, 0, version.stderr);
+  assert.equal(version.stdout.trim(), pkg.version);
+
+  const missing = path.join(os.tmpdir(), `capcutctl-missing-${process.pid}`);
+  const preflight = spawnSync(process.execPath, [cli, 'preflight', '--root', missing, '--json'], {
+    encoding: 'utf8',
+  });
+  assert.equal(preflight.status, 1, preflight.stderr || preflight.stdout);
+  assert.equal(JSON.parse(preflight.stdout).ok, false);
+
+  for (const argv of [['preflight', '--jsoon', 'yes'], ['preflight', 'extra']]) {
+    const invalid = spawnSync(process.execPath, [cli, ...argv], { encoding: 'utf8' });
+    assert.equal(invalid.status, 2, invalid.stderr || invalid.stdout);
+  }
+});
+
+test('status preserves unknown process state and rejects ignored arguments', () => {
+  const cli = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'bin', 'capcutctl.mjs');
+  const unknown = spawnSync(process.execPath, [cli, 'status', '--json'], {
+    encoding: 'utf8', env: { ...process.env, PATH: '' },
+  });
+  assert.equal(unknown.status, 3, unknown.stderr || unknown.stdout);
+  const payload = JSON.parse(unknown.stdout);
+  assert.equal(payload.state, 'unknown');
+  assert.equal(payload.closed, false);
+  assert.equal(payload.ok, false);
+
+  for (const argv of [
+    ['status', 'extra'],
+    ['status', '--jsoon', 'yes'],
+    ['status', '--timeout', '1'],
+    ['status', '--wait-for-close', '--timeout', 'nope'],
+  ]) {
+    const invalid = spawnSync(process.execPath, [cli, ...argv], { encoding: 'utf8' });
+    assert.equal(invalid.status, 2, invalid.stderr || invalid.stdout);
+  }
 });

@@ -1,8 +1,7 @@
-# Pre-publish checklist
+# Public-release checklist
 
-Things that must be true **before** this GitHub repository is flipped from
-private to public. Do not skip the history step: deleting a file in a new
-commit does not remove it from GitHub.
+Things that must remain true for this public GitHub repository. Deleting a file
+in a new commit does not remove it from Git history.
 
 ## Secrets
 
@@ -20,9 +19,8 @@ commit does not remove it from GitHub.
 git log --all -- presets/harvest.json   # must be empty
 ```
 
-The repository stays **private**. Do not flip visibility until you decide to
-open-source. Older commits may still contain `/Users/roxsa/…` in files that
-were later rewritten to `~/…`; that is machine-local, not a credential.
+The repository is public. Older commits may still contain `/Users/<name>/…` in
+files that were later rewritten to `~/…`; that is machine-local, not a credential.
 
 ## Working tree (not in git, still do not zip)
 

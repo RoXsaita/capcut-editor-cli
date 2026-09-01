@@ -1,5 +1,5 @@
 {
- "_source": "captured verbatim from Hermes-agent and Applies for Job — not invented",
+ "_source": "captured from real CapCut projects — not invented",
  "rules": {
   "logoPop": {
    "from": 0.01,
@@ -30,7 +30,106 @@
    "rampSeconds": 0.23,
    "note": "1.15 in 25/43 measured face push-ins, 1.2 in 11 more; median ramp 0.23s"
   },
-  "faceZoomHoldSeconds": 1.6
+  "faceZoomHoldSeconds": 1.6,
+  "logoGlow": {
+   "_note": "Overshoot + glow-underlay reveal. Ramp uses the measured pop timing (logoPop.rampSeconds 0.13, range 0.07-0.17 across 11 projects). Bezier handles are a harvested FreeCurveInOut block.",
+   "core": {
+    "scale": [
+     [
+      0.0,
+      0.15
+     ],
+     [
+      0.13,
+      1.15
+     ],
+     [
+      0.217,
+      1.0
+     ],
+     [
+      null,
+      1.04
+     ]
+    ],
+    "alpha": [
+     [
+      0.0,
+      0.0
+     ],
+     [
+      0.087,
+      1.0
+     ]
+    ],
+    "riseY": [
+     [
+      0.0,
+      -0.05
+     ],
+     [
+      0.13,
+      0.006
+     ],
+     [
+      0.217,
+      0.0
+     ],
+     [
+      null,
+      0.012
+     ]
+    ]
+   },
+   "underlay": {
+    "scale": [
+     [
+      0.0,
+      0.2
+     ],
+     [
+      0.13,
+      1.25
+     ],
+     [
+      0.217,
+      1.08
+     ],
+     [
+      null,
+      1.12
+     ]
+    ],
+    "alpha": [
+     [
+      0.0,
+      0.0
+     ],
+     [
+      0.13,
+      1.0
+     ],
+     [
+      0.26,
+      0.45
+     ],
+     [
+      null,
+      0.35
+     ]
+    ],
+    "blur": 0.45,
+    "blend": true
+   },
+   "handles": {
+    "outX": 0.17,
+    "outY": 0.89,
+    "inX": -0.68,
+    "inY": 0.27
+   }
+  },
+  "logoRowY": 0.167,
+  "_logoRowYNote": "Shared y for a row of marks that are on screen together. 0.167 half-canvas units = canvas y 800, which on a split-screen beat is inside the screen recording and clear of the seam at y=960. A single logo keeps the house position in logoSegmentTemplate.clip.transform instead."
  },
  "audioTemplates": {
   "pop": {
@@ -875,5 +974,136 @@
    "final_algorithm": "",
    "enter_from": ""
   }
+ },
+ "blurEffect": {
+  "adjust_params": [
+   {
+    "name": "effects_adjust_blur",
+    "value": 1.0,
+    "default_value": 0.5
+   }
+  ],
+  "algorithm_artifact_path": "",
+  "apply_target_type": 0,
+  "apply_time_range": null,
+  "bind_segment_id": "",
+  "category_id": "1111",
+  "category_name": "Video effects",
+  "common_keyframes": [],
+  "covering_relation_change": 0,
+  "disable_effect_faces": [],
+  "effect_id": "7399464929830423813",
+  "effect_mask": [],
+  "enable_mask": true,
+  "enable_video_mask_shadow": true,
+  "enable_video_mask_stroke": true,
+  "formula_id": "",
+  "id": "2B0C9474-BE30-4BAC-B113-06FABAA8A7F9",
+  "item_effect_type": 0,
+  "name": "Blur",
+  "path": "~/Library/Containers/com.lemon.lvoverseas/Data/Movies/CapCut/User Data/Cache/effect/7399464929830423813/2db7bf49d9349e308ef0f46c39b14abf",
+  "platform": "all",
+  "render_index": 11000,
+  "request_id": "202605242150110000000000005813A88",
+  "resource_id": "7399464929830423813",
+  "source_platform": 1,
+  "sub_type": 0,
+  "time_range": null,
+  "track_render_index": 0,
+  "transparent_params": "",
+  "type": "video_effect",
+  "value": 1.0,
+  "version": "",
+  "_source": "captured from a CapCut video-effect material"
+ },
+ "glowEffect": {
+  "adjust_params": [],
+  "algorithm_artifact_path": "",
+  "apply_target_type": 0,
+  "apply_time_range": null,
+  "bind_segment_id": "",
+  "category_id": "1111",
+  "category_name": "Video effects",
+  "common_keyframes": [],
+  "covering_relation_change": 0,
+  "disable_effect_faces": [],
+  "effect_id": "7399465490659249413",
+  "effect_mask": [],
+  "enable_mask": true,
+  "enable_video_mask_shadow": true,
+  "enable_video_mask_stroke": true,
+  "formula_id": "",
+  "id": "825D6B5F-37EF-47AB-A844-7D0E99ADFC80",
+  "item_effect_type": 0,
+  "name": "Insane Glow",
+  "path": "~/Library/Containers/com.lemon.lvoverseas/Data/Movies/CapCut/User Data/Cache/effect/7399465490659249413/7eeab42db5ca9a73186fe4f445b7613c",
+  "platform": "all",
+  "render_index": 11000,
+  "request_id": "20260430163653000000000000754B9C2",
+  "resource_id": "7399465490659249413",
+  "source_platform": 1,
+  "sub_type": 0,
+  "time_range": {
+   "start": 0,
+   "duration": 1466667
+  },
+  "track_render_index": 0,
+  "transparent_params": "",
+  "type": "video_effect",
+  "value": 1.0,
+  "version": "",
+  "_source": "captured from a CapCut video-effect material"
+ },
+ "mixModeScreen": {
+  "adjust_params": [],
+  "algorithm_artifact_path": "",
+  "apply_target_type": 0,
+  "beauty_body_auto_preset_id": "",
+  "beauty_face_auto_preset_id": "",
+  "beauty_face_auto_retouch_info": {
+   "face_id": [],
+   "beauty_face_auto_retouch_id": ""
+  },
+  "bloom_params": null,
+  "category_id": "",
+  "category_key": "",
+  "category_name": "",
+  "color_match_info": {
+   "target_feature_path": "",
+   "source_feature_path": "",
+   "target_image_path": ""
+  },
+  "covering_relation_change": 0,
+  "effect_id": "871339",
+  "enable_skin_tone_correction": false,
+  "exclusion_group": [],
+  "face_adjust_params": [],
+  "formula_id": "",
+  "id": "",
+  "intensity_key": "",
+  "is_from_intelligent_quality": false,
+  "item_effect_type": 0,
+  "lumi_hub_path": "",
+  "multi_language_current": "",
+  "name": "Screen",
+  "panel_id": "",
+  "path": "/Applications/CapCut.app/Contents/MacOS/../Resources/MixMode/d9c1d4ca7ab91df4f48d12b339f2da88",
+  "platform": "all",
+  "report_name": "",
+  "request_id": "",
+  "resource_id": "6758325170760323597",
+  "smart_color_mode": 0,
+  "source_platform": 0,
+  "sub_category_id": "",
+  "sub_category_name": "",
+  "sub_type": "manual_stretch",
+  "third_resource_id": "",
+  "time_range": null,
+  "type": "mix_mode",
+  "value": 1.0,
+  "version": "",
+  "visible": true,
+  "_source": "captured from a CapCut mix-mode material",
+  "_note": "CapCut writes a blend mode as a materials.effects record of type \"mix_mode\", referenced from segment.extra_material_refs. Swap effect_id/resource_id/name/path for another mode from /Applications/CapCut.app/Contents/Resources/MixMode/MixMode.json (labels in Resources/po/en.po): color_filter=Screen, color_dodge=Color dodge, bright_en=Brighten, over_lay=Overlay, multiply_blend_mode=Multiply."
  }
 }

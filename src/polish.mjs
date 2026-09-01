@@ -3,8 +3,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  CapcutError, clone, uuid, allSegments, loadPreset, contentEndUs as sharedContentEndUs
+  CapcutError, clone, uuid, allSegments, loadPreset, resolveMediaPath, contentEndUs as sharedContentEndUs
 } from './core.mjs';
+
 
 export function sfxPresets() {
   return loadPreset('sfx');
@@ -673,9 +674,10 @@ export function findRl2Sessions(projectDir, doc) {
   for (const m of doc.materials?.videos || []) {
     const p = typeof m.path === 'string' ? m.path : '';
     if (!p) continue;
-    const resolved = p.includes('##_draftpath_placeholder') && projectDir
-      ? path.join(projectDir, p.split('##/', 1)[1] || '')
-      : p;
+    // `split('##/', 1)` returns only the FIRST piece, so `[1]` was always undefined and this
+    // resolved to the project dir itself — the rl2 trace lookup never saw Resources/.
+    const resolved = projectDir ? resolveMediaPath(p, projectDir) : p;
+    if (!resolved) continue;
     add(path.dirname(resolved));
     const base = path.basename(p);
     const take = /^(.*)__screen\.mp4$/i.exec(base);
