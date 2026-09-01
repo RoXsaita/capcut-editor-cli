@@ -16,8 +16,37 @@ import {
   statusPayload,
   setOutput,
 } from '../src/cli.mjs';
+import { resetPythonCache } from '../src/python.mjs';
 
 const stableJson = value => `${JSON.stringify(value, null, 2)}\n`;
+
+/**
+ * A stand-in interpreter for the Python handoff tests.
+ *
+ * Since the runtime contract landed, the CLI no longer spawns whatever `python3` PATH
+ * offers — it resolves a declared interpreter and proves it can import what the tool needs.
+ * So a shim has to answer the two probes src/python.mjs makes before it is handed a script:
+ * a version query (`-c SCRIPT`) and an import query (`-c SCRIPT mod...`). Tests then point
+ * CAPCUTCTL_PYTHON at the shim, which is the documented override rather than a PATH trick.
+ */
+function writeFakePython(file, bodyLines = []) {
+  fs.writeFileSync(file, [
+    '#!/usr/bin/env node',
+    "const fs = require('node:fs');",
+    "const path = require('node:path');",
+    'const args = process.argv.slice(2);',
+    "if (args[0] === '-c') {",
+    // Two arguments is the version probe; anything more is the import probe, and this
+    // interpreter claims to import everything so the tool under test is actually reached.
+    "  if (args.length === 2) process.stdout.write(JSON.stringify({ v: [3, 12, 0], x: process.argv[1] }));",
+    "  else process.stdout.write('[]');",
+    '  process.exit(0);',
+    '}',
+    ...bodyLines,
+  ].join('\n'));
+  fs.chmodSync(file, 0o755);
+}
+
 
 function writeCliProject(root, media) {
   const project = path.join(root, 'project');
@@ -190,11 +219,7 @@ test('main cut --into builds the recut spec and allowlists Python arroll flags',
   fs.writeFileSync(review, '{}');
   const project = writeCliProject(temp, media);
   const fakePython = path.join(temp, 'python3');
-  fs.writeFileSync(fakePython, [
-    '#!/usr/bin/env node',
-    "const fs = require('node:fs');",
-    "const path = require('node:path');",
-    "const args = process.argv.slice(2);",
+  writeFakePython(fakePython, [
     "fs.writeFileSync(process.env.CAPCUT_TEST_ARG_LOG, JSON.stringify(args));",
     "const media = path.resolve(args[1]);",
     "const stem = path.basename(media).replace(/\\.[^.]+$/, '');",
@@ -203,17 +228,17 @@ test('main cut --into builds the recut spec and allowlists Python arroll flags',
     "  timeline: [{ beat: 0, tl_in: 0, tl_out: 2, src_in: 0, dur: 2 }],",
     "  handoff: { operations: [{ op: 'clip.fade', at: 0, in: 0.067, out: 0.067 }] }",
     "}));",
-  ].join('\n'));
-  fs.chmodSync(fakePython, 0o755);
+  ]);
 
-  const previousPath = process.env.PATH;
+  const previousPython = process.env.CAPCUTCTL_PYTHON;
   const previousLog = process.env.CAPCUT_TEST_ARG_LOG;
   const previousCwd = process.cwd();
   let stdout = '';
   const results = [];
   const pythonArgs = [];
   const applied = [];
-  process.env.PATH = `${temp}${path.delimiter}${previousPath || ''}`;
+  process.env.CAPCUTCTL_PYTHON = fakePython;
+  resetPythonCache();
   process.env.CAPCUT_TEST_ARG_LOG = log;
   const restoreOutput = setOutput(chunk => { stdout += String(chunk); return true; });
   try {
@@ -258,8 +283,9 @@ test('main cut --into builds the recut spec and allowlists Python arroll flags',
   } finally {
     process.chdir(previousCwd);
     restoreOutput();
-    if (previousPath == null) delete process.env.PATH;
-    else process.env.PATH = previousPath;
+    if (previousPython == null) delete process.env.CAPCUTCTL_PYTHON;
+    else process.env.CAPCUTCTL_PYTHON = previousPython;
+    resetPythonCache();
     if (previousLog == null) delete process.env.CAPCUT_TEST_ARG_LOG;
     else process.env.CAPCUT_TEST_ARG_LOG = previousLog;
     fs.rmSync(temp, { recursive: true, force: true });
@@ -295,12 +321,9 @@ test('direct cut --project forwards review and dry-run flags to the Python edito
   const fakePython = path.join(temp, 'python3');
   fs.writeFileSync(media, 'fixture media');
   fs.writeFileSync(review, '{}');
-  fs.writeFileSync(fakePython, [
-    '#!/usr/bin/env node',
-    "const fs = require('node:fs');",
-    "fs.writeFileSync(process.env.CAPCUT_TEST_ARG_LOG, JSON.stringify(process.argv.slice(2)));",
-  ].join('\n'));
-  fs.chmodSync(fakePython, 0o755);
+  writeFakePython(fakePython, [
+    "fs.writeFileSync(process.env.CAPCUT_TEST_ARG_LOG, JSON.stringify(args));",
+  ]);
 
   const run = spawnSync(process.execPath, [
     path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'bin', 'capcutctl.mjs'),
@@ -309,7 +332,7 @@ test('direct cut --project forwards review and dry-run flags to the Python edito
     encoding: 'utf8',
     env: {
       ...process.env,
-      PATH: `${temp}${path.delimiter}${process.env.PATH || ''}`,
+      CAPCUTCTL_PYTHON: fakePython,
       CAPCUT_TEST_ARG_LOG: log,
     },
   });
@@ -355,12 +378,9 @@ test('preview forwards bounded proxy controls to the streamed QA worker', async 
   fs.writeFileSync(path.join(project, 'draft_info.json'), '{}');
   const log = path.join(temp, 'args.json');
   const fakePython = path.join(temp, 'python3');
-  fs.writeFileSync(fakePython, [
-    '#!/usr/bin/env node',
-    "const fs = require('node:fs');",
-    "fs.writeFileSync(process.env.CAPCUT_TEST_ARG_LOG, JSON.stringify(process.argv.slice(2)));",
-  ].join('\n'));
-  fs.chmodSync(fakePython, 0o755);
+  writeFakePython(fakePython, [
+    "fs.writeFileSync(process.env.CAPCUT_TEST_ARG_LOG, JSON.stringify(args));",
+  ]);
   try {
     const run = spawnSync(process.execPath, [
       path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'bin', 'capcutctl.mjs'),
@@ -370,7 +390,7 @@ test('preview forwards bounded proxy controls to the streamed QA worker', async 
       encoding: 'utf8',
       env: {
         ...process.env,
-        PATH: `${temp}${path.delimiter}${process.env.PATH || ''}`,
+        CAPCUTCTL_PYTHON: fakePython,
         CAPCUT_TEST_ARG_LOG: log,
       },
     });

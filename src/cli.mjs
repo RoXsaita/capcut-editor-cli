@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadEnv } from './env.mjs';
+import { pythonForTool } from './python.mjs';
 import {
   CapcutError,
   DEFAULT_ROOT,
@@ -26,6 +27,7 @@ export const HELP = `capcutctl — transactional CapCut timeline control
 
 Usage:
   capcutctl --version
+  capcutctl version
   capcutctl cut VIDEO [--keep 0,2-9] [--order 0,2,3] [--trim-beat ID:out=-1.16]
                       [--recover-beat ID:out=0.8]
                       [--review decisions.json] [--project NAME] [--into PROJECT] [--lang ar]
@@ -70,12 +72,14 @@ Usage:
   capcutctl fade --project NAME --at S --track NAME|N [--in 0.08] [--out 0.12]
   capcutctl keyframe --project NAME --at S --track NAME|N [--to 2.4] [--hold 1.6] [--plan]
   capcutctl preview --project NAME --out preview.mp4 [--fps 6] [--from S] [--to S]
-                    [--resolution 360x640|--native] [--no-cache]
+                    [--resolution 360x640|--native] [--no-cache] [--no-grade]
                       — lightweight streamed proxy; defaults to 360x640 and never writes
                         one PNG per frame. Use qa for bounded seam/pixel evidence.
   capcutctl diff --project NAME --against NAME|--snapshot NAME
-  capcutctl harvest [--root PATH] [--projects A,B] [--out FILE]
+  capcutctl harvest [--root PATH] [--projects A,B] [--out FILE] [--plan]
   capcutctl init-spec [--output FILE]
+  capcutctl contract [--json]                  — the machine-readable command/option surface
+                                                 the skills repo validates its docs against
 
   capcutctl scenes --project NAME_OR_PATH [--track N] [--transcript] [--name SUBSTR]
   capcutctl layout split-screen --project NAME_OR_PATH --segments IDS|--at SECONDS [--track N] [--dry-run]
@@ -91,17 +95,19 @@ Usage:
   capcutctl zoom                --project NAME_OR_PATH --at S[,S...] | --auto  [--to 1.15] [--hold 1.6]
   capcutctl wrap                --project NAME_OR_PATH --words TRANSCRIPT.json [--text Follow] [--plan]
                                 brand logos from what he says + the endcard, in one pass
-  capcutctl pace                --project NAME_OR_PATH [--track N] [--max 100]
+  capcutctl pace                --project NAME_OR_PATH [--track N] [--max 100] [--min-gap 5.0]
                                 no flags = print the plan; --auto applies it
                                 --at T --speed X | --at T --cover IN-OUT for one clip
   capcutctl polish              --project NAME_OR_PATH [--lead 0.14] [--track N] [--motivated] [--dry-run]
+                                [--no-transitions] [--no-sfx] [--no-interactions]
                                 transitions ride the principal (talking-head) track; it is sliced to fit
                       — his transitions + matching SFX. --motivated: only on picture
                         changes (B-roll shot or layout class), not every A-roll splice.
                         Also clicks every rectangle/arrow/circle callout (Enter / click / select).
                         rl2 click/typing events on the chopped B-roll (Mouse click / Typing).
                         --no-interactions skips that pass.
-  capcutctl grade               --project NAME [--measure] [--plan] [--strength 1] [--apply]
+  capcutctl grade               --project NAME [--measure] [--plan] [--strength 1] [--samples 3]
+                                [--apply] [--dry-run]
                                 colour. --measure prints each source's scope as numbers
                                 (black point, white point, saturation, R-B white balance);
                                 --plan solves sliders against one house target so every
@@ -503,9 +509,9 @@ export function buildArrollArgs(args, media) {
   return forwarded;
 }
 
-function runPython(script, args) {
+function runPython(interpreter, script, args) {
   return new Promise((resolve, reject) => {
-    const child = spawn('python3', [script, ...args], { stdio: 'inherit' });
+    const child = spawn(interpreter, [script, ...args], { stdio: 'inherit' });
     const forward = signal => { if (child.exitCode == null && child.signalCode == null) child.kill(signal); };
     const onInt = () => forward('SIGINT');
     const onTerm = () => forward('SIGTERM');
@@ -535,7 +541,8 @@ async function runInPlaceCut(args, root, apply = applySpec) {
   const projectDir = resolveProject(args.into, root);
   const script = path.join(HERE, '..', 'tools', 'aroll.py');
   const forwarded = buildArrollArgs(args, media);
-  const run = spawnSync('python3', [script, ...forwarded], { stdio: 'inherit' });
+  const python = pythonForTool('aroll.py');
+  const run = spawnSync(python.executable, [script, ...forwarded], { stdio: 'inherit' });
   if (run.error) throw new CapcutError(`could not run ${script}: ${run.error.message}`, { exitCode: 2 });
   if ((run.status ?? 1) !== 0) { process.exitCode = run.status ?? 1; return null; }
 
@@ -577,8 +584,13 @@ export async function main(argv, dependencies = {}) {
   if (command === 'cut' || command === 'qa' || command === 'find') {
     const tool = { cut: 'aroll.py', qa: 'frame_qa.py', find: 'find.py' }[command];
     const script = path.join(HERE, '..', 'tools', tool);
+    // Resolve and verify the interpreter first. A missing runtime is a named CapcutError
+    // with an install line, never a ModuleNotFoundError traceback from a child process.
+    // The argv goes in because some requirements are flag-triggered: find.py only imports
+    // frame_qa, and so only needs NumPy and Pillow, when --strip asks for a contact sheet.
+    const python = pythonForTool(tool, { argv: argv.slice(1) });
     let status;
-    try { status = await runPython(script, argv.slice(1)); }
+    try { status = await runPython(python.executable, script, argv.slice(1)); }
     catch (error) { throw new CapcutError(`could not run ${script}: ${error.message}`, { exitCode: 2 }); }
     process.exitCode = status;
     return;
@@ -594,6 +606,13 @@ export async function main(argv, dependencies = {}) {
       .concat([{ name: 'background', description: p.background.description }]);
     if (p.screenRecording) rows.push({ name: 'screenRecording', description: p.screenRecording.description });
     return print(rows, true);
+  }
+  if (command === 'contract') {
+    // The machine-readable command/option surface, for the skills repository and anything
+    // else that documents this CLI. Always JSON: it exists to be parsed, not read.
+    const { buildContract } = await import('./contract.mjs');
+    const pkg = readJson(path.join(HERE, '..', 'package.json'));
+    return print(buildContract({ version: pkg.version }), true);
   }
   if (command === 'harvest') {
     const { harvestDrafts, writeHarvest, DEFAULT_HARVEST } = await import('./harvest.mjs');
@@ -1289,8 +1308,9 @@ export async function main(argv, dependencies = {}) {
     if (args.native) previewArgs.push('--native');
     if (args.noCache) previewArgs.push('--no-cache');
     if (args.noGrade) previewArgs.push('--no-grade');
+    const python = pythonForTool('frame_qa.py', { argv: previewArgs });
     let status;
-    try { status = await runPython(script, previewArgs); }
+    try { status = await runPython(python.executable, script, previewArgs); }
     catch (error) { throw new CapcutError(`could not run ${script}: ${error.message}`, { exitCode: 2 }); }
     process.exitCode = status;
     return;

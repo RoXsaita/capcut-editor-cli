@@ -2095,7 +2095,12 @@ def _write_simple_preview(project_dir, tl, segments, output, fps, duration, outp
     filters = []
     video_labels = []
     audio_labels = []
+    # Seek offsets, in segment order, so the input list below reads the value the filter
+    # graph was built from rather than recomputing the same expression.
+    source_starts = []
     for index, row in enumerate(segments):
+        source_start = max(0.0, row["source_start"])
+        source_starts.append(source_start)
         source_duration = max(0.001, row["source_duration"])
         speed = max(1e-6, row["speed"])
         video_label = f"v{index}"
@@ -2136,8 +2141,8 @@ def _write_simple_preview(project_dir, tl, segments, output, fps, duration, outp
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
     # Open one bounded input per edit. A single full-source input makes every atrim branch
     # wait while ffmpeg decodes the entire 225s take, even though the EDL keeps only 67.8s.
-    for row in segments:
-        command += ["-ss", f"{max(0.0, row['source_start']):.9f}",
+    for index, row in enumerate(segments):
+        command += ["-ss", f"{source_starts[index]:.9f}",
                     "-t", f"{max(0.001, row['source_duration']):.9f}", "-i", row["path"]]
     command += [
         "-filter_complex", ";".join(filters), "-map", "[vout]", "-map", "[acat]",

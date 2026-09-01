@@ -30,6 +30,7 @@ it covers this CLI, the skills repo, and what will not resolve on a new Mac.
 ```bash
 cd /path/to/capcut-editor-cli
 npm link
+python3 -m pip install -e .    # NumPy and Pillow, for qa / preview / review
 capcutctl help
 ```
 
@@ -39,21 +40,66 @@ Or run without installation:
 node bin/capcutctl.mjs help
 ```
 
-Node.js 20 or newer is required, plus **ffmpeg / ffprobe** on PATH
-(`brew install ffmpeg`). `qa` and `review` also need NumPy and Pillow
-(`python3 -m pip install -r requirements.txt`). There are no npm runtime dependencies.
+Node.js 20 or newer is required, plus **Python 3.11+** and **ffmpeg / ffprobe** on PATH
+(`brew install ffmpeg python@3.11`). There are no npm runtime dependencies; the Python
+ones are declared in `pyproject.toml`.
+
+`cut`, `qa`, `find`, `preview` and `review` are Node front ends over `tools/*.py`, so the
+interpreter matters: `capcutctl` resolves a declared one (`$CAPCUTCTL_PYTHON`, then a
+project `.venv`, then `$VIRTUAL_ENV`, then a named `python3.N` ≥ 3.11, then ambient
+`python3`) rather than spawning whatever PATH offers first. Stock macOS still ships 3.9.6,
+which cannot run them. A missing or too-old interpreter is a named error with the install
+command, not an import traceback. See [SETUP.md](SETUP.md#the-python-runtime).
 
 ```bash
-capcutctl preflight     # checks deps, bundled artwork, SFX palette, drafts folder
+capcutctl preflight     # checks deps, the Python runtime, artwork, SFX palette, drafts folder
 ```
+
+## The CLI contract
+
+`capcutctl contract` emits the command and option surface as JSON, and
+[`docs/cli-contract.json`](docs/cli-contract.json) is the checked-in copy that
+[`capcut-skills`](https://github.com/RoXsaita/capcut-skills) validates its documentation
+against. It carries `contractVersion` (the shape of the document, bumped only when the
+schema changes) and `cliVersion` (this release).
+
+```bash
+capcutctl contract | jq '.commands.status'
+node bin/capcutctl.mjs contract > docs/cli-contract.json   # after changing the help text
+```
+
+`npm test` fails if that file is stale, if the help text advertises a command the CLI does
+not dispatch, or if a dispatched command is missing from the help text.
+
+**`--dry-run` is a guarantee about transactional edit commands** — the ones that go through
+the snapshot-and-validate machinery. It is not a claim about everything that writes a file:
+`snapshot`, `init-spec --output`, `harvest --out` and `review` all produce output and none
+of them take it, because a no-op flag added for symmetry would make the guarantee mean
+less. The contract's `dryRun.commands` is the exact list, and the test suite both checks
+that list against the source and drives a real transaction to prove the flag holds the
+write back.
 
 ## Development checks
 
 ```bash
-npm run check
-npm test
-python3 tools/aroll.py --selftest
+scripts/check.sh            # every gate CI runs; names any it could not run on this machine
+scripts/check.sh --strict   # and treats a gate it could not run as a failure
 ```
+
+Or individually:
+
+```bash
+npm run check                       # JavaScript syntax
+npm test                            # needs ffmpeg; the cut.recut suite builds real media
+python3 tools/aroll.py --selftest
+ruff check tools/
+vulture tools/ --min-confidence 80
+shellcheck scripts/check.sh
+```
+
+`scripts/check.sh` is the local mirror of CI. A gate it could not run is reported as
+**skipped**, never folded into "all checks passed" — a green local run missing three
+linters is not the same answer as a green CI run.
 
 Pull requests run the Node, Python, and shell quality suite. A separate read-only
 reviewer comments on PRs. See [`.github/AUTOMATION.md`](.github/AUTOMATION.md).
@@ -97,9 +143,13 @@ capcutctl preflight
 It reports the dependencies, the overlay artwork, the SFX palette and your CapCut drafts
 folder, and names the fix for anything missing. Exit code 1 if the install cannot work.
 
-**Required:** Node.js 20+, **ffmpeg / ffprobe** on PATH (`brew install ffmpeg`), and
-NumPy + Pillow (`python3 -m pip install -r requirements.txt`) for `qa` and `review`.
-`cut`, `qa`, `find`, `preview`, `music` and `review` shell out to ffmpeg/ffprobe.
+**Required:** Node.js 20+, **Python 3.11+** with NumPy and Pillow (`python3 -m pip install -e .`),
+and **ffmpeg / ffprobe** on PATH (`brew install ffmpeg`) — `cut`, `qa`, `find`, `preview`,
+`music` and `review` all shell out to them.
+
+**Optional:** transcription for `cut` (`uv tool install mlx-whisper`, or
+`python3 -m pip install -e '.[whisper]'`). Deliberately not installed by default: both pull
+large wheels and download model weights on first use.
 
 | What | Where it comes from | On a new machine |
 |---|---|---|

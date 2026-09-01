@@ -118,9 +118,16 @@ test('preflight exercises the toolchain and reports writable disk capacity', () 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-preflight-'));
   const calls = [];
   const binaries = new Set(['ffmpeg', 'ffprobe', 'mlx_whisper', 'python3', 'swiftc']);
+  // The declared runtime, stubbed: preflight must probe whatever this resolves to, and the
+  // whisper fallback import must go to that same interpreter rather than a bare `python3`.
+  const interpreter = '/opt/declared/python3.12';
   const report = preflight({
     root,
     binaryCheck: name => binaries.has(name),
+    pythonCheck: () => ([
+      { name: 'Python runtime', ok: true, detail: 'stub', interpreter, version: '3.12.0', source: 'stub' },
+      { name: 'Python runtime dependencies', ok: true, detail: 'stub', missing: [] },
+    ]),
     commandRunner: (command, args) => {
       calls.push({ command, args });
       return command === 'ffprobe' ? { ok: true, stdout: '2,2\n' } : { ok: true, stdout: '' };
@@ -135,7 +142,7 @@ test('preflight exercises the toolchain and reports writable disk capacity', () 
   assert.equal(byName.get('ffmpeg probe')?.ok, true);
   assert.equal(byName.get('ffprobe probe')?.ok, true);
   assert.equal(byName.get('Whisper/MLX transcription')?.ok, true);
-  assert.equal(byName.get('Python image QA dependencies')?.ok, true);
+  assert.equal(byName.get('Python runtime dependencies')?.ok, true);
   assert.equal(byName.get('CapCut drafts folder write permission')?.ok, true);
   assert.equal(byName.get('free disk space')?.ok, true);
   assert.ok(calls.some(c => c.command === 'ffmpeg' && c.args.includes('lavfi')),
@@ -144,10 +151,12 @@ test('preflight exercises the toolchain and reports writable disk capacity', () 
     'ffprobe preflight must inspect a real input');
   assert.ok(calls.some(c => c.command === 'mlx_whisper' && c.args.includes('--help')),
     'MLX preflight must start the executable');
-  assert.ok(calls.some(c => c.command === 'python3' && c.args.includes('import whisper')),
-    'fallback Whisper preflight must import the module');
-  assert.ok(calls.some(c => c.command === 'python3' && c.args.includes('import numpy; from PIL import Image')),
-    'preflight must import the Python packages used by qa and review');
+  assert.equal(byName.get('Python runtime')?.interpreter, interpreter,
+    'preflight must name the interpreter cut/qa/find will spawn');
+  assert.ok(calls.some(c => c.command === interpreter && c.args.includes('import whisper')),
+    'fallback Whisper preflight must import the module under the resolved interpreter');
+  assert.ok(!calls.some(c => c.command === 'python3'),
+    'nothing may probe an ambient python3 behind the resolved interpreter');
 });
 
 test('preflight fails closed when a probe hangs or the drafts volume is full', () => {
@@ -173,18 +182,22 @@ test('preflight fails closed when a probe hangs or the drafts volume is full', (
   }
 });
 
-test('preflight requires the python3 launcher even when mlx_whisper itself is runnable', () => {
+test('preflight requires the declared Python runtime even when mlx_whisper itself is runnable', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-preflight-python-'));
   const report = preflight({
     root,
     binaryCheck: name => name !== 'python3',
+    pythonCheck: () => ([
+      { name: 'Python runtime', ok: false, detail: 'no supported interpreter', fix: 'install Python 3.11+' },
+      { name: 'Python runtime dependencies', ok: false, detail: 'skipped', fix: 'install Python 3.11+' },
+    ]),
     commandRunner: command => command === 'ffprobe'
       ? { ok: true, stdout: '2,2\n' }
       : { ok: true, stdout: '' },
     statfs: () => ({ bsize: 4096, bavail: 1024 * 1024 }),
   });
   assert.equal(report.ok, false);
-  assert.equal(report.checks.find(c => c.name === 'python3')?.ok, false);
+  assert.equal(report.checks.find(c => c.name === 'Python runtime')?.ok, false);
   assert.equal(report.checks.find(c => c.name === 'Whisper/MLX transcription')?.ok, false);
 });
 

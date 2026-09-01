@@ -1,0 +1,516 @@
+{
+  "contractVersion": 1,
+  "cliVersion": "0.1.1",
+  "dryRun": {
+    "guarantee": "Every transactional edit command takes --dry-run.",
+    "commands": [
+      "add",
+      "apply",
+      "endcard",
+      "fade",
+      "finish",
+      "grade",
+      "keyframe",
+      "layout",
+      "localize",
+      "logo",
+      "music",
+      "new",
+      "pace",
+      "polish",
+      "remove",
+      "replace-media",
+      "restore",
+      "rm",
+      "shift",
+      "sync",
+      "trim",
+      "volume",
+      "wrap",
+      "zoom"
+    ]
+  },
+  "commands": {
+    "add": {
+      "options": [
+        "--allow-ephemeral",
+        "--at",
+        "--cover",
+        "--derived-from",
+        "--derived-offset",
+        "--desc",
+        "--dry-run",
+        "--dur",
+        "--generated",
+        "--media",
+        "--no-localize",
+        "--project",
+        "--src",
+        "--track",
+        "--volume"
+      ],
+      "transactional": true
+    },
+    "apply": {
+      "options": [
+        "--dry-run",
+        "--force-running",
+        "--no-backup",
+        "--project",
+        "--spec"
+      ],
+      "transactional": true
+    },
+    "brands": {
+      "options": [],
+      "transactional": false
+    },
+    "close": {
+      "options": [],
+      "transactional": false
+    },
+    "contract": {
+      "options": [
+        "--json"
+      ],
+      "transactional": false
+    },
+    "cut": {
+      "options": [
+        "--drop",
+        "--dry-run",
+        "--force",
+        "--fps",
+        "--in-place",
+        "--into",
+        "--keep",
+        "--lang",
+        "--model",
+        "--no-repair",
+        "--order",
+        "--project",
+        "--recover-beat",
+        "--reindex",
+        "--review",
+        "--selftest",
+        "--trim-beat"
+      ],
+      "transactional": false
+    },
+    "diff": {
+      "options": [
+        "--against",
+        "--project",
+        "--snapshot"
+      ],
+      "transactional": false
+    },
+    "doctor": {
+      "options": [
+        "--json",
+        "--project",
+        "--root"
+      ],
+      "transactional": false
+    },
+    "endcard": {
+      "options": [
+        "--at",
+        "--dry-run",
+        "--project",
+        "--text"
+      ],
+      "transactional": true
+    },
+    "fade": {
+      "options": [
+        "--at",
+        "--dry-run",
+        "--in",
+        "--out",
+        "--project",
+        "--track"
+      ],
+      "transactional": true
+    },
+    "find": {
+      "options": [
+        "--context",
+        "--media",
+        "--says",
+        "--settle",
+        "--shows",
+        "--strip"
+      ],
+      "transactional": false
+    },
+    "finish": {
+      "options": [
+        "--dry-run",
+        "--music",
+        "--plan",
+        "--polish",
+        "--project",
+        "--regen"
+      ],
+      "transactional": true
+    },
+    "grade": {
+      "options": [
+        "--apply",
+        "--dry-run",
+        "--measure",
+        "--plan",
+        "--project",
+        "--samples",
+        "--set",
+        "--strength"
+      ],
+      "transactional": true
+    },
+    "harvest": {
+      "options": [
+        "--out",
+        "--plan",
+        "--projects",
+        "--root"
+      ],
+      "transactional": false
+    },
+    "history": {
+      "options": [
+        "--project"
+      ],
+      "transactional": false
+    },
+    "init-spec": {
+      "options": [
+        "--output"
+      ],
+      "transactional": false
+    },
+    "inspect": {
+      "options": [
+        "--json",
+        "--project",
+        "--root"
+      ],
+      "transactional": false
+    },
+    "keyframe": {
+      "options": [
+        "--at",
+        "--dry-run",
+        "--hold",
+        "--plan",
+        "--project",
+        "--to",
+        "--track"
+      ],
+      "transactional": true
+    },
+    "layout": {
+      "options": [
+        "--at",
+        "--dry-run",
+        "--dur",
+        "--include-template",
+        "--media",
+        "--no-localize",
+        "--plan",
+        "--project",
+        "--row",
+        "--scale",
+        "--segments",
+        "--src",
+        "--src-dur",
+        "--track"
+      ],
+      "subcommands": [
+        "audit",
+        "auto",
+        "background",
+        "broll",
+        "circle",
+        "list",
+        "screen",
+        "split-screen"
+      ],
+      "transactional": true
+    },
+    "localize": {
+      "options": [
+        "--dry-run",
+        "--project"
+      ],
+      "transactional": true
+    },
+    "logo": {
+      "options": [
+        "--at",
+        "--brand",
+        "--dry-run",
+        "--hold",
+        "--pos",
+        "--project",
+        "--scale"
+      ],
+      "transactional": true
+    },
+    "music": {
+      "options": [
+        "--dry-run",
+        "--music",
+        "--plan",
+        "--project",
+        "--regen",
+        "--volume"
+      ],
+      "transactional": true
+    },
+    "new": {
+      "options": [
+        "--blank",
+        "--canvas",
+        "--dry-run",
+        "--fps",
+        "--from",
+        "--media",
+        "--project",
+        "--scenes"
+      ],
+      "transactional": true
+    },
+    "pace": {
+      "options": [
+        "--at",
+        "--auto",
+        "--cover",
+        "--dry-run",
+        "--max",
+        "--min-gap",
+        "--project",
+        "--speed",
+        "--track"
+      ],
+      "transactional": true
+    },
+    "polish": {
+      "options": [
+        "--dry-run",
+        "--lead",
+        "--motivated",
+        "--no-interactions",
+        "--no-sfx",
+        "--no-transitions",
+        "--project",
+        "--track"
+      ],
+      "transactional": true
+    },
+    "preflight": {
+      "options": [
+        "--json",
+        "--root"
+      ],
+      "transactional": false
+    },
+    "preview": {
+      "options": [
+        "--fps",
+        "--from",
+        "--native",
+        "--no-cache",
+        "--no-grade",
+        "--out",
+        "--project",
+        "--resolution",
+        "--to"
+      ],
+      "transactional": false
+    },
+    "projects": {
+      "options": [
+        "--json",
+        "--root"
+      ],
+      "transactional": false
+    },
+    "qa": {
+      "options": [
+        "--allow-missing",
+        "--at-broll",
+        "--at-cuts",
+        "--at-scenes",
+        "--cut-window",
+        "--expect",
+        "--fps",
+        "--from",
+        "--guide",
+        "--label",
+        "--languages",
+        "--native",
+        "--no-cache",
+        "--no-grade",
+        "--ocr",
+        "--out",
+        "--preview",
+        "--project",
+        "--rects-only",
+        "--resolution",
+        "--selftest",
+        "--sheet",
+        "--times",
+        "--to",
+        "--width",
+        "--z"
+      ],
+      "transactional": false
+    },
+    "remove": {
+      "options": [
+        "--at",
+        "--dry-run",
+        "--project",
+        "--track"
+      ],
+      "transactional": true
+    },
+    "replace-media": {
+      "options": [
+        "--at",
+        "--dry-run",
+        "--file",
+        "--no-localize",
+        "--project",
+        "--retime",
+        "--track"
+      ],
+      "transactional": true
+    },
+    "restore": {
+      "options": [
+        "--dry-run",
+        "--force-running",
+        "--no-backup",
+        "--project",
+        "--snapshot"
+      ],
+      "transactional": true
+    },
+    "review": {
+      "options": [
+        "--project"
+      ],
+      "transactional": false
+    },
+    "rm": {
+      "options": [
+        "--dry-run",
+        "--project"
+      ],
+      "transactional": true
+    },
+    "scenes": {
+      "options": [
+        "--name",
+        "--project",
+        "--track",
+        "--transcript"
+      ],
+      "transactional": false
+    },
+    "shift": {
+      "options": [
+        "--at",
+        "--by",
+        "--dry-run",
+        "--project",
+        "--track"
+      ],
+      "transactional": true
+    },
+    "snapshot": {
+      "options": [
+        "--label",
+        "--project"
+      ],
+      "transactional": false
+    },
+    "status": {
+      "options": [
+        "--json",
+        "--timeout",
+        "--wait-for-close"
+      ],
+      "transactional": false
+    },
+    "sync": {
+      "options": [
+        "--dry-run",
+        "--force-running",
+        "--no-backup",
+        "--project"
+      ],
+      "transactional": true
+    },
+    "timeline": {
+      "options": [
+        "--project",
+        "--width"
+      ],
+      "transactional": false
+    },
+    "trim": {
+      "options": [
+        "--at",
+        "--dry-run",
+        "--dur",
+        "--project",
+        "--src",
+        "--start",
+        "--track"
+      ],
+      "transactional": true
+    },
+    "version": {
+      "options": [],
+      "transactional": false
+    },
+    "volume": {
+      "options": [
+        "--at",
+        "--dry-run",
+        "--level",
+        "--project",
+        "--track"
+      ],
+      "transactional": true
+    },
+    "wrap": {
+      "options": [
+        "--dry-run",
+        "--plan",
+        "--project",
+        "--text",
+        "--words"
+      ],
+      "transactional": true
+    },
+    "zoom": {
+      "options": [
+        "--at",
+        "--auto",
+        "--dry-run",
+        "--hold",
+        "--project",
+        "--to"
+      ],
+      "transactional": true
+    },
+    "help": {
+      "options": [],
+      "transactional": false
+    }
+  }
+}

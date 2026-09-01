@@ -17,6 +17,7 @@ import {
 } from './add.mjs';
 import { opMusic } from './music.mjs';
 import { isPreframed } from './origin.mjs';
+import { preflightPython } from './python.mjs';
 
 export const DEFAULT_ROOT = path.join(
   process.env.HOME || '',
@@ -338,20 +339,21 @@ function preflightAssetPath(layouts, basename) {
   return roots.map(root => path.join(root, basename)).find(file => fs.existsSync(file)) || null;
 }
 
-function preflightWhisper({ binaryCheck, commandRunner }) {
+function preflightWhisper({ binaryCheck, commandRunner, interpreter = null }) {
   const mlxOnPath = binaryCheck('mlx_whisper');
   const mlx = mlxOnPath
     ? commandRunner('mlx_whisper', ['--help'])
     : { ok: false, detail: 'mlx_whisper is not on PATH' };
-  const pythonOnPath = binaryCheck('python3');
-  const whisper = pythonOnPath
-    ? commandRunner('python3', ['-c', 'import whisper'])
-    : { ok: false, detail: 'python3 is not on PATH' };
+  // Ask the interpreter `cut` will actually spawn. Importing whisper under a different
+  // python3 is how "transcription is ready" and "No module named 'whisper'" coexist.
+  const whisper = interpreter
+    ? commandRunner(interpreter, ['-c', 'import whisper'])
+    : { ok: false, detail: 'no supported Python interpreter was resolved' };
   const mlxReady = Boolean(mlx.ok);
   const whisperReady = Boolean(whisper.ok);
   let detail;
-  if (!pythonOnPath) {
-    detail = `python3 is not on PATH; mlx_whisper cannot be reached by capcutctl`;
+  if (!interpreter) {
+    detail = 'no supported Python interpreter was resolved';
   } else if (mlxReady) {
     detail = `mlx_whisper is runnable (default ${DEFAULT_WHISPER_MODEL} model path)`;
     if (whisperReady) detail += '; openai-whisper fallback is also importable';
@@ -364,9 +366,9 @@ function preflightWhisper({ binaryCheck, commandRunner }) {
     // tools/aroll.py's default is the Hugging Face `mlx-community/...` id.  The Python
     // fallback accepts official plain model names (for example `base`), but cannot load that
     // MLX repository id, so an importable fallback alone must not make the default cut look ready.
-    ok: pythonOnPath && mlxReady,
+    ok: Boolean(interpreter) && mlxReady,
     detail,
-    fix: !pythonOnPath ? 'install Python 3 and put python3 on PATH'
+    fix: !interpreter ? 'install Python 3.11 or newer, or set CAPCUTCTL_PYTHON to one'
       : mlxReady ? null
       : whisperReady
         ? 'install mlx-whisper (`uv tool install mlx-whisper`) for the default model, or pass an official plain --model such as `base`'
@@ -1377,6 +1379,7 @@ export function preflight({
   commandRunner = (command, args) => runPreflightCommand(command, args),
   statfs = fs.statfsSync,
   writeProbe = null,
+  pythonCheck = preflightPython,
   minimumFreeBytes = process.env.CAPCUTCTL_MIN_FREE_BYTES || PREFLIGHT_MIN_FREE_BYTES,
 } = {}) {
   const checks = [];
@@ -1412,23 +1415,6 @@ export function preflight({
   const nodeMajor = Number(process.versions.node.split('.')[0]);
   add('Node.js', nodeMajor >= 20, `v${process.versions.node}`,
     nodeMajor >= 20 ? null : 'install Node.js 20 or newer');
-
-  const pythonOnPath = available('python3');
-  add('python3', pythonOnPath, pythonOnPath ? 'on PATH' : 'not on PATH',
-    pythonOnPath ? null : 'install Python 3 and put python3 on PATH');
-  const pythonProbe = pythonOnPath
-    ? command('python3', ['--version'])
-    : { ok: false, detail: 'skipped because python3 is not on PATH' };
-  add('python3 probe', pythonProbe.ok,
-    pythonProbe.ok ? 'executed python3 --version' : pythonProbe.detail,
-    pythonProbe.ok ? null : 'repair or reinstall Python 3, then retry `capcutctl preflight`');
-
-  const imageQaProbe = pythonOnPath
-    ? command('python3', ['-c', 'import numpy; from PIL import Image'])
-    : { ok: false, detail: 'skipped because python3 is not on PATH' };
-  add('Python image QA dependencies', imageQaProbe.ok,
-    imageQaProbe.ok ? 'NumPy and Pillow import successfully' : imageQaProbe.detail,
-    imageQaProbe.ok ? null : 'run `python3 -m pip install -r requirements.txt`, then retry `capcutctl preflight`');
 
   for (const binary of ['ffmpeg', 'ffprobe']) {
     const ok = available(binary);
@@ -1472,7 +1458,19 @@ export function preflight({
   add('ffprobe probe', ffprobeOk, ffprobeDetail,
       ffprobeOk ? null : 'repair or reinstall ffprobe, then retry `capcutctl preflight`');
 
-  const whisper = preflightWhisper({ binaryCheck: available, commandRunner: command });
+  // The interpreter cut/qa/find will actually spawn, and the imports they will actually make.
+  // Probing `python3` here while the commands resolve something else is how a green preflight
+  // and a ModuleNotFoundError end up in the same session.
+  const pythonRows = pythonCheck();
+  for (const row of pythonRows) {
+    const { name, ok, detail, fix, ...extra } = row;
+    add(name, ok, detail, fix, extra);
+  }
+
+  const resolvedInterpreter = pythonRows.find(row => row.interpreter)?.interpreter || null;
+  const whisper = preflightWhisper({
+    binaryCheck: available, commandRunner: command, interpreter: resolvedInterpreter,
+  });
   add('Whisper/MLX transcription', whisper.ok, whisper.detail, whisper.fix,
       { mlxReady: whisper.mlxReady, whisperReady: whisper.whisperReady });
 

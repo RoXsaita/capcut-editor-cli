@@ -1593,7 +1593,7 @@ def cmd_cut(args):
     except ValueError as error:
         print(f"A-roll boundary decision rejected: {error}", file=sys.stderr)
         return 2
-    repairs = repair(idx, clips, fps=fps) if not getattr(args, "no_repair", False) else []
+    repairs = [] if getattr(args, "no_repair", False) else repair(idx, clips, fps=fps)
 
     spans = [(f"b{clip['id']}", clip["src_in"], clip["src_out"]) for clip in clips]
     first_words = [
@@ -1854,8 +1854,8 @@ def main():
     args.media = media
 
     def editorial_requested():
-        return any((args.keep, args.drop, args.order, args.trim_beat, args.recover_beat,
-                    args.review, args.project, args.into))
+        return any((args.keep, args.drop, args.order, args.trim_beat,
+                    args.recover_beat, args.review, args.project, args.into))
 
     # index once, reuse thereafter — the expensive half never runs twice
     if args.reindex or not os.path.exists(args.index) or not index_is_current(args.index, media):

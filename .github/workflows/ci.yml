@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # One place for the declared Python floor. src/python.mjs, pyproject.toml and this must
+  # agree; test/python-runtime.test.mjs fails if they drift.
+  PYTHON_FLOOR: "3.11"
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -32,6 +37,19 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
 
+      # Pin the declared floor rather than whatever the runner ships, so a break that only
+      # appears on 3.11 is caught here instead of on the first user's Mac.
+      - name: Use Python ${{ env.PYTHON_FLOOR }}
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_FLOOR }}
+
+      # The runtime contract from pyproject.toml. `qa`, `preview`, `review` and
+      # `find --strip` need NumPy and Pillow; installing them the documented way is also
+      # the test that the documented way works.
+      - name: Install the declared Python runtime dependencies
+        run: python -m pip install -e .
+
       # ffmpeg/ffprobe are a real dependency — cut, qa, find, preview, music and review all
       # shell out, and the cut.recut suite builds genuine media to validate against. Without
       # this the suite skips itself rather than failing, so install it and actually run it.
@@ -41,8 +59,18 @@ jobs:
       - name: Check JavaScript syntax
         run: npm run check
 
+      # ffmpeg and the declared Python runtime are both installed above, so there is
+      # nothing this job is allowed to skip. A suite that quietly skips its ffmpeg-gated
+      # transaction tests and reports green is worse than one that fails.
       - name: Run Node.js tests
-        run: npm test
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee test-output.txt
+          skipped=$(grep -oE '^# skipped [0-9]+' test-output.txt | grep -oE '[0-9]+$' || echo 0)
+          if [ "${skipped:-0}" != 0 ]; then
+            echo "::error::${skipped} test(s) skipped; every dependency is installed in this job"
+            exit 1
+          fi
 
   quality:
     name: Python and shell quality
@@ -54,10 +82,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Use Python 3.11
+      - name: Use Python ${{ env.PYTHON_FLOOR }}
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.11"
+          python-version: ${{ env.PYTHON_FLOOR }}
           cache: pip
           cache-dependency-path: .github/requirements/ci.txt
 
@@ -65,7 +93,7 @@ jobs:
         run: python -m pip install --require-hashes -r .github/requirements/ci.txt
 
       - name: Install Python runtime dependencies
-        run: python -m pip install -r requirements.txt
+        run: python -m pip install -e .
 
       - name: Compile Python helpers
         run: python -m compileall -q tools
@@ -83,4 +111,7 @@ jobs:
         run: vulture tools/ --min-confidence 80
 
       - name: Check shell scripts
-        run: shellcheck --version && shellcheck scripts/check.sh
+        run: |
+          set -euo pipefail
+          shellcheck --version
+          find . -name '*.sh' -not -path './node_modules/*' -print -exec shellcheck {} +
