@@ -517,31 +517,3 @@ export function removeProject(name, options = {}) {
   return { removed: projectDir, recycled: dest, registryEntriesRemoved: removedEntries,
            dryRun: Boolean(options.dryRun), restore: `mv "${dest}" "${projectDir}"` };
 }
-
-/** Quit CapCut and wait for it to actually exit. */
-export function closeCapcut({ timeoutMs = 25000 } = {}) {
-  const running = () => {
-    try { return execFileSync('pgrep', ['-x', 'CapCut'], { encoding: 'utf8' }).trim().split('\n').filter(Boolean); }
-    catch { return []; }
-  };
-  const before = running();
-  if (!before.length) return { wasRunning: false, closed: true };
-  try {
-    execFileSync('osascript', ['-e', 'tell application "CapCut" to quit'], { encoding: 'utf8', timeout: timeoutMs });
-  } catch (error) {
-    // -128 is the user cancelling CapCut's own "save?" dialog
-    if (running().length) {
-      throw new CapcutError(
-        `CapCut is still running (${running().join(', ')}) — the quit was refused or cancelled. `
-        + 'Quit it yourself, then re-run.', { code: 'CAPCUT_RUNNING', exitCode: 2, details: { error: error.message } }
-      );
-    }
-  }
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (!running().length) return { wasRunning: true, closed: true, pids: before };
-    execFileSync('sleep', ['0.4']);
-  }
-  throw new CapcutError(`CapCut did not exit within ${timeoutMs / 1000}s (pids ${running().join(', ')}).`,
-                        { code: 'CAPCUT_RUNNING', exitCode: 2 });
-}

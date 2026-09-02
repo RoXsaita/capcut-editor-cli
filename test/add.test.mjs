@@ -602,17 +602,26 @@ test('two different takes with the same name and the same size get different fil
   assert.equal(fs.readdirSync(path.join(project, 'Resources', 'CapcutctlMedia')).length, 2);
 });
 
-test('localize copies an rl2 trace sidecar next to the draft', () => {
+test('adding a localized rl2 take copies its trace sidecar next to the draft, once', () => {
   const f = fixture();
   const take = path.join(f.temp, 'windows-2-20260829-195938');
   fs.mkdirSync(take);
   fs.writeFileSync(path.join(take, 'screen.mp4'), 'pixels');
   fs.writeFileSync(path.join(take, 'trace.ndjson'), '{"type":"click"}\n');
   fs.writeFileSync(path.join(take, 'session.json'), '{"schema":1}\n');
-  localizeMedia(f.project, path.join(take, 'screen.mp4'));
-  const dest = path.join(f.project, '.capcutctl', 'rl2', 'windows-2-20260829-195938');
+  const doc = readJson(path.join(f.project, 'draft_info.json'));
+  opClipAdd(doc, { ...addOp(f, { media: path.join(take, 'screen.mp4'), id: 'TAKE', track: 'take', at: 1, duration: 1, src: 0 }), localize: true },
+    { projectDir: f.project });
+  const rl2Root = path.join(f.project, '.capcutctl', 'rl2');
+  const sidecars = fs.readdirSync(rl2Root);
+  // One identity-keyed folder; no basename-only duplicate written first and retired after.
+  assert.equal(sidecars.length, 1, JSON.stringify(sidecars));
+  assert.match(sidecars[0], /^windows-2-20260829-195938__rl2-/);
+  const dest = path.join(rl2Root, sidecars[0]);
   assert.equal(fs.existsSync(path.join(dest, 'trace.ndjson')), true);
-  assert.equal(fs.existsSync(path.join(dest, 'session.json')), true);
+  assert.equal(readJson(path.join(dest, 'session.json')).schema, 1);
+  assert.equal(readJson(path.join(dest, 'take.json')).material_id,
+    doc.tracks.flatMap(t => t.segments).find(s => s.id === 'TAKE').material_id);
 });
 
 test('localization and relink persist an atomic material-to-original map', () => {

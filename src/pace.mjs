@@ -55,7 +55,7 @@ function isPlate(doc, seg) {
  * from the window start by the same factor as the window keeps every zoom's ON-SCREEN
  * duration identical, which is the thing the eye actually measures.
  */
-function rescaleKeyframes(seg, oldStart, oldDur, newStart, newDur) {
+export function rescaleKeyframes(seg, oldStart, oldDur, newStart, newDur) {
   const factor = oldDur > 0 ? newDur / oldDur : 1;
   for (const k of seg.common_keyframes || []) {
     for (const kf of k.keyframe_list || []) {

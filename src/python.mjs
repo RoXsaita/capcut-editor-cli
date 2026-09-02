@@ -25,10 +25,13 @@ export const MIN_PYTHON = Object.freeze([3, 11]);
 export const MIN_PYTHON_TEXT = MIN_PYTHON.join('.');
 
 /**
- * Third-party modules each shipped tool imports at module scope, keyed by import name.
+ * Third-party modules each shipped tool cannot run without, keyed by import name.
  * Standard-library modules are deliberately absent — the version floor already covers them.
- * A module listed here is a hard requirement: the command cannot start without it, so we
- * check it before spawning rather than letting Python raise ModuleNotFoundError.
+ * A module listed here is a hard requirement: the command cannot do its job without it, so
+ * we check it before spawning rather than letting Python raise ModuleNotFoundError.
+ *
+ * Module-scope imports are the obvious case; rasterize.py imports Pillow inside its one
+ * function, but every invocation reaches that line, so it is a hard requirement all the same.
  *
  * find.py imports frame_qa lazily, and only for --strip, so it is not a hard requirement.
  * That flag-triggered need lives in CONDITIONAL_TOOL_IMPORTS below rather than being
@@ -40,7 +43,7 @@ export const TOOL_IMPORTS = Object.freeze({
   'audio_index.py': Object.freeze([]),
   'find.py': Object.freeze([]),
   'frame_qa.py': Object.freeze(['numpy', 'PIL']),
-  'rasterize.py': Object.freeze([]),
+  'rasterize.py': Object.freeze(['PIL']),
 });
 
 /**

@@ -1,11 +1,9 @@
-import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
-import { CapcutError, clone, uuid, allSegments, loadPreset, localizeMedia } from './core.mjs';
+import { CapcutError, clone, seededId, loadPreset, localizeMedia, contentEndUs } from './core.mjs';
 import { principalTrack, sfxPresets } from './polish.mjs';
-import { contentEndUs, parkPresetLeftover } from './add.mjs';
+import { parkPresetLeftover } from './add.mjs';
 
 const US = s => Math.round(s * 1e6);
 const S = us => us / 1e6;
@@ -89,11 +87,7 @@ export function brandPresets() {
 }
 
 let SEED = null;
-function mint(key) {
-  if (!SEED) return uuid();
-  const h = crypto.createHash('sha256').update(`${SEED}|${key}`).digest('hex').toUpperCase();
-  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
-}
+const mint = key => seededId(SEED, key);
 const arr = (doc, kind) => (doc.materials[kind] ||= []);
 
 /* ------------------------------------------------------------------ *
@@ -184,12 +178,6 @@ export function detectBrands(transcript, mapper, { only = null, brands = null } 
 }
 
 /**
- * "A scene with me only talking" — a principal-track clip carrying NO mask. A Split or
- * Circle mask means he is sharing the frame with a screen recording; without one he is the
- * whole picture, and that is where the push-in belongs. Verified against grok-build-final:
- * exactly the two full-face beats come back, and none of the eight split-screen ones.
- */
-/**
  * Lay out marks whose holds overlap.
  *
  * A single logo sits at his measured house position. Two that are on screen together would
@@ -236,6 +224,12 @@ export function spreadOverlapping(logos, rules, canvas = { width: 1080, height: 
   return logos;
 }
 
+/**
+ * "A scene with me only talking" — a principal-track clip carrying NO mask. A Split or
+ * Circle mask means he is sharing the frame with a screen recording; without one he is the
+ * whole picture, and that is where the push-in belongs. Verified against grok-build-final:
+ * exactly the two full-face beats come back, and none of the eight split-screen ones.
+ */
 export function talkingHeadScenes(doc, trackIndex = null, minSeconds = 2.5) {
   const { track } = principalTrack(doc, trackIndex);
   const masks = new Set((doc.materials.common_mask || []).map(m => m.id));
@@ -305,9 +299,6 @@ function attachEffect(doc, template, segmentId, key, adjust = null) {
   delete effect._source;
   effect.id = mint(`fx:${key}`);
   if ('bind_segment_id' in effect) effect.bind_segment_id = segmentId;
-  if (typeof effect.path === 'string' && effect.path.startsWith('~')) {
-    effect.path = path.join(os.homedir(), effect.path.slice(1));
-  }
   if (adjust) {
     effect.adjust_params = (effect.adjust_params || []).map(a =>
       a.name in adjust ? { ...a, value: adjust[a.name] } : a);
@@ -646,7 +637,7 @@ function sigAudio() {
       return t;
     },
     audioSegmentFor(doc, cue, mintFn) {
-      const p = loadPreset('sfx');
+      const p = sfxPresets();
       const seg = clone(p.audioSegmentTemplate);
       const refs = [];
       for (const [kind, tpl] of Object.entries(p.audioExtraTemplates)) {

@@ -1,7 +1,5 @@
 {
  "_note": "brand -> spoken aliases (Latin + Arabic transliterations, as Whisper actually writes them) and a TRANSPARENT raster logo. SVG is not usable: CapCut needs a raster and qlmanage renders SVG on white.",
- "svgFallbackDir": "~/Downloads/Logos",
- "rasterCacheDir": "~/Downloads/Logos/.raster",
  "brands": {
   "claude": {
    "aliases": [

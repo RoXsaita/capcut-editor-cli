@@ -1,6 +1,5 @@
 import fs from 'node:fs';
-import { CapcutError } from './core.mjs';
-import { contentEndUs } from './add.mjs';
+import { CapcutError, contentEndUs } from './core.mjs';
 import { pictureChanges, planPolish, cutPoints, seamVariety, principalTrack, coldOpen } from './polish.mjs';
 import { renderTimeline } from './timeline.mjs';
 import { musicPrompt, musicCachePaths } from './music.mjs';
@@ -88,9 +87,6 @@ export function assertFirstPictureProof(doc, options = {}) {
   }
   return proof;
 }
-
-// Alias kept intentionally descriptive for callers integrating the finish boundary.
-export const requireFirstPictureProof = assertFirstPictureProof;
 
 /**
  * Read-only scorecard for the finish pass. Does not write.

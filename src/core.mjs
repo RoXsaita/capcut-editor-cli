@@ -63,10 +63,6 @@ export const PRESET3_DUPLICATE_BASELINE = Object.freeze([
   }),
 ]);
 
-// Names kept explicit for consumers that want to describe the baseline in their own output.
-export const KNOWN_PRESET3_DUPLICATES = PRESET3_DUPLICATE_BASELINE;
-export const PRESET3_DUPLICATE_MATERIALS = PRESET3_DUPLICATE_BASELINE;
-
 const PACKAGE_ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PRESET_DIR = path.join(PACKAGE_ROOT, 'presets');
 
@@ -506,9 +502,6 @@ export function preservedRange(projectDir) {
   return { start, end };
 }
 
-export const getPreservedRange = preservedRange;
-export const parkedRange = preservedRange;
-
 function parseProcessLines(stdout) {
   return String(stdout || '').split(/\r?\n/).flatMap(line => {
     const match = line.match(/^\s*(\d+)\s+(.*)$/);
@@ -636,8 +629,6 @@ export function capcutStatus({ root = DEFAULT_ROOT, processState = null, process
   };
 }
 
-export const getCapcutStatus = capcutStatus;
-
 export function capcutProcess({ spawn = spawnSync } = {}) {
   if (process.env.CAPCUTCTL_ASSUME_RUNNING === '1') {
     return { running: true, verified: true, pids: ['test'], processes: [{ pid: 'test', command: 'CapCut' }] };
@@ -696,9 +687,6 @@ const closeReason = Object.freeze({
   commandFailed: 'quit_command_failed',
 });
 
-/** Stable reason strings for callers that need to branch without parsing messages. */
-export const CAPCUT_CLOSE_FAILURE_REASONS = closeReason;
-
 /**
  * Poll CapCut until it is gone. The probe and clock/sleep hooks make this deterministic in
  * tests and let a host adapter use its own process backend without changing the contract.
@@ -706,13 +694,12 @@ export const CAPCUT_CLOSE_FAILURE_REASONS = closeReason;
 export function waitForCapcutClosed({
   timeoutMs = 25_000,
   intervalMs = 400,
-  probe = capcutProcess,
-  processProbe = null,
+  processProbe = capcutProcess,
   sleep = defaultSleep,
   now = Date.now,
   throwOnTimeout = false,
 } = {}) {
-  const check = processProbe || probe;
+  const check = processProbe;
   const startedAt = now();
   const initial = normalizedProcessState(check());
   if (initial.running === null) {
@@ -799,8 +786,6 @@ export function waitForCapcutClosed({
   throw error;
 }
 
-export const waitForClose = waitForCapcutClosed;
-
 function closeFailureCause(error) {
   return {
     name: error?.name,
@@ -817,15 +802,13 @@ function closeFailureCause(error) {
 export function closeCapcut({
   timeoutMs = 25_000,
   intervalMs = 400,
-  probe = capcutProcess,
-  processProbe = null,
+  processProbe = capcutProcess,
   requestQuit = null,
-  quit = null,
   executeQuit = null,
   sleep = defaultSleep,
   now = Date.now,
 } = {}) {
-  const check = processProbe || probe;
+  const check = processProbe;
   const before = normalizedProcessState(check());
   if (before.running === null) {
     throw new CapcutError('CapCut process state could not be verified; refusing to request quit.', {
@@ -838,10 +821,9 @@ export function closeCapcut({
     return { wasRunning: false, closed: true, reason: closeReason.alreadyClosed, pids: [], elapsedMs: 0 };
   }
 
-  const quitFn = requestQuit || quit;
   try {
-    if (quitFn) {
-      if (quitFn(before) === false) {
+    if (requestQuit) {
+      if (requestQuit(before) === false) {
         const refused = new Error('CapCut refused the quit request.');
         refused.reason = closeReason.refused;
         throw refused;
@@ -950,30 +932,20 @@ export function draftEndUs(doc, projectDir = null, { includeSegments = true } = 
   return Math.max(declared, parked?.end || 0, segments);
 }
 
-export const draftDurationUs = draftEndUs;
-
-/** Shared edit-vs-draft duration contract for readers, validators, and CLI adapters. */
+/**
+ * Shared content-vs-draft duration contract for readers, validators, and CLI adapters.
+ * `contentEndUs` is where the edit ends (the gapless principal track); `draftEndUs` is how far
+ * the draft/parts-bin reaches, which CapCut may keep well past the edit.
+ */
 export function durationInfo(doc, projectDir = null) {
-  const editEnd = contentEndUs(doc, projectDir);
-  const draftEnd = draftEndUs(doc, projectDir);
-  const declared = Number.isFinite(doc?.duration) ? doc.duration : null;
   return {
     unit: CAPCUT_TIME_UNIT,
-    // `content` names the timeline concept; `edit` names the same value for callers that
-    // think in terms of an editing workflow. Keep both so adapters need no guesswork.
-    contentEndUs: editEnd,
-    contentDurationUs: editEnd,
-    editEndUs: editEnd,
-    editDurationUs: editEnd,
-    draftEndUs: draftEnd,
-    draftDurationUs: draftEnd,
-    declaredDraftDurationUs: declared,
+    contentEndUs: contentEndUs(doc, projectDir),
+    draftEndUs: draftEndUs(doc, projectDir),
+    declaredDraftDurationUs: Number.isFinite(doc?.duration) ? doc.duration : null,
     parkedRange: preservedRange(projectDir),
   };
 }
-
-export const projectDurations = durationInfo;
-export const durationSemantics = durationInfo;
 
 export function listProjects(root = DEFAULT_ROOT) {
   if (!fs.existsSync(root)) return [];
@@ -991,9 +963,8 @@ export function listProjects(root = DEFAULT_ROOT) {
       name: dirent.name,
       path: projectDir,
       duration: info?.duration ?? null,
-      contentDuration: durations?.contentDurationUs ?? null,
-      editDuration: durations?.editDurationUs ?? null,
-      draftDuration: durations?.draftDurationUs ?? null,
+      contentDuration: durations?.contentEndUs ?? null,
+      draftDuration: durations?.draftEndUs ?? null,
       durations,
       fps: info?.fps ?? null,
       tracks: info?.tracks?.length ?? null,
@@ -1667,9 +1638,8 @@ export function doctor(projectDir, { checkFiles = true, duplicateBaseline = null
       name: group.name,
       file: group.canonical,
       duration: group.doc.duration ?? null,
-      contentDuration: group.durations.contentDurationUs,
-      editDuration: group.durations.editDurationUs,
-      draftDuration: group.durations.draftDurationUs,
+      contentDuration: group.durations.contentEndUs,
+      draftDuration: group.durations.draftEndUs,
       durations: group.durations,
     })),
     durations: state.groups.map(group => ({ name: group.name, ...group.durations })),
@@ -1941,29 +1911,11 @@ export function localizeMedia(projectDir, source, fileName, { dryRun = false } =
   if (!dryRun) {
     fs.mkdirSync(mediaDir, { recursive: true });
     if (path.resolve(source) !== path.resolve(destination)) fs.copyFileSync(source, destination);
-    persistRl2Sidecar(projectDir, source);
   }
+  // The rl2 trace sidecar is not copied here: the material-level operations (clip.add,
+  // replace.media, layout.screen) record it through layouts.recordMediaProvenance, keyed by
+  // the take's identity, so two takes both named screen.mp4 never share one folder.
   return destination;
-}
-
-const RL2_SIDECARS = ['trace.ndjson', 'session.json', 'frames.ndjson', 'change.ndjson'];
-
-/**
- * Keep the rl2 take's event trace next to the draft. Localized screen.mp4 lives in
- * Resources/ and polish.interactions maps clicks/typing through chopped B-roll from
- * this sidecar — without it the trace stays on Desktop and the edit has no events.
- */
-export function persistRl2Sidecar(projectDir, source) {
-  const takeDir = path.dirname(path.resolve(source));
-  if (!fs.existsSync(path.join(takeDir, 'trace.ndjson'))) return null;
-  const dest = path.join(projectDir, '.capcutctl', 'rl2', path.basename(takeDir));
-  fs.mkdirSync(dest, { recursive: true });
-  for (const name of RL2_SIDECARS) {
-    const from = path.join(takeDir, name);
-    if (!fs.existsSync(from)) continue;
-    fs.copyFileSync(from, path.join(dest, name));
-  }
-  return dest;
 }
 
 function opMaterialRelink(doc, op, context) {
@@ -3034,9 +2986,6 @@ export function projectLockStatus(projectDir, { pidProbe = pidAlive } = {}) {
   };
 }
 
-export const getProjectLockStatus = projectLockStatus;
-export const lockStatus = projectLockStatus;
-
 function lockOwner(token = uuid()) {
   return { pid: process.pid, ownerToken: token, startedAt: new Date().toISOString() };
 }
@@ -3488,9 +3437,8 @@ export function inspectProject(projectDir) {
       name: group.name,
       file: group.canonical,
       duration: group.doc.duration,
-      contentDuration: group.durations.contentDurationUs,
-      editDuration: group.durations.editDurationUs,
-      draftDuration: group.durations.draftDurationUs,
+      contentDuration: group.durations.contentEndUs,
+      draftDuration: group.durations.draftEndUs,
       durations: group.durations,
       fps: group.doc.fps,
       canvas: group.doc.canvas_config,

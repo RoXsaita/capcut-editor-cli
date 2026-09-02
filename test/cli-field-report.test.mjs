@@ -423,7 +423,9 @@ test('help and layout list expose the supported screen and automatic QA surface'
     output = '';
     await main(['layout', 'list']);
     const rows = JSON.parse(output);
-    assert.ok(rows.some(row => row.name === 'screenRecording'));
+    // Named as `layout <name>` accepts it, so a reader can copy the row straight into a command.
+    assert.ok(rows.some(row => row.name === 'screen' && row.preset === 'screenRecording'));
+    assert.ok(rows.some(row => row.name === 'full-face'));
   } finally {
     restoreOutput();
   }

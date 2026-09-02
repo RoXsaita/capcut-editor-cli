@@ -108,7 +108,7 @@ Verify:
 
 ```bash
 capcutctl projects        # lists your CapCut drafts
-capcutctl layout list     # the four locked layouts
+capcutctl layout list     # the locked layouts (split-screen, circle, full-face, background, screen)
 npm test                  # no network, no CapCut required
 ```
 
@@ -117,7 +117,7 @@ validate against, and skips itself with a stated reason when ffmpeg is absent. N
 test downloads a transcription model.
 
 `capcutctl` never writes while CapCut is running, always snapshots before a write,
-and validates the whole document before committing. See **Safety model** in the README.
+and validates the whole document before committing. See **Editing model** in the README.
 
 ## 3. The agent skills
 
@@ -136,7 +136,7 @@ done
 Read `capcut-editing/SKILL.md` first — it is the hub and links to the other three.
 
 **Agents: before the first write, ask which style to use** (bundled house style,
-harvest their CapCut library, or start blank). See README → *Style — ask once*.
+harvest their CapCut library, or start blank). See README → *Presets and machine-local resources*.
 
 ## 4. What will not work on your machine
 
@@ -172,9 +172,9 @@ are local *by nature*.
 * **Logo and media folders.** `presets/brands.json` points at `~/Downloads/Logos` and
   `~/Downloads/Media/Images/2026`. Those are third-party marks and are not
   redistributable. `capcutctl brands` lists which have a usable PNG and which do not;
-  only `logo` / `wrap` need them. Repoint `svgFallbackDir`, `rasterCacheDir` and each
-  brand's `logo` at your own files, or override the whole preset with
-  `CAPCUTCTL_PRESET_DIR`.
+  only `logo` / `wrap` need them. Repoint each brand's `logo` at your own files, or
+  override the whole preset with `CAPCUTCTL_PRESET_DIR`. A `Logos/` folder inside the
+  clone is gitignored if you want to keep a local copy there.
 
 * **Overlay artwork is bundled, not local.** The indigo bar and white ring the
   layouts need ship in `assets/`, so `layout split-screen` / `circle` / `screen`

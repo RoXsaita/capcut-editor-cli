@@ -38,19 +38,14 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { CapcutError, clone, uuid, allSegments, loadPreset, resolveMediaPath } from './core.mjs';
+import { CapcutError, clone, seededId, allSegments, loadPreset, resolveMediaPath } from './core.mjs';
 import { principalTrack } from './polish.mjs';
 
 export { resolveMediaPath };
 
 let SEED = null;
-function mint(key) {
-  if (!SEED) return uuid();
-  const h = crypto.createHash('sha256').update(`${SEED}|${key}`).digest('hex').toUpperCase();
-  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
-}
+const mint = key => seededId(SEED, key);
 
 /* ------------------------------------------------------------------ *
  * 1. The shader, transcribed.  All channels in 0..1.

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CapcutError, DEFAULT_ROOT, readJson, stableJson } from './core.mjs';
+import { DEFAULT_ROOT, readJson, stableJson } from './core.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_HARVEST = path.join(HERE, '..', 'presets', 'harvest.json');
@@ -156,9 +156,4 @@ export function writeHarvest(catalogue, dest = DEFAULT_HARVEST) {
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.writeFileSync(dest, stableJson(catalogue));
   return dest;
-}
-
-export function loadHarvest(file = DEFAULT_HARVEST) {
-  if (!fs.existsSync(file)) throw new CapcutError(`harvest file missing: ${file}`, { code: 'NO_HARVEST', exitCode: 2 });
-  return readJson(file);
 }

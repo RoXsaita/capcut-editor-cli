@@ -5,8 +5,8 @@ import path from 'node:path';
 import { principalTrack } from './polish.mjs';
 import { assertOrigin } from './origin.mjs';
 import {
-  CapcutError, clone, uuid, allSegments, selectSegments, loadProject, loadPreset,
-  expandHome, localizeMedia, stableJson, assetSearchRoots
+  CapcutError, clone, seededId, allSegments, selectSegments, loadProject, loadPreset,
+  expandHome, localizeMedia, stableJson, assetSearchRoots, preservedRange
 } from './core.mjs';
 
 /**
@@ -16,11 +16,7 @@ import {
  * which makes them safe keys.
  */
 let SEED = null;
-function mint(key) {
-  if (!SEED) return uuid();
-  const h = crypto.createHash('sha256').update(`${SEED}|${key}`).digest('hex').toUpperCase();
-  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
-}
+const mint = key => seededId(SEED, key);
 
 export function presets() {
   return loadPreset('layouts');
@@ -146,7 +142,12 @@ export function persistMaterialSourceMapping(projectDir, {
   return file;
 }
 
-/** Queue provenance until the shared draft transaction has committed. */
+/**
+ * Record where a localized material came from: the media map and, for rl2 takes, the trace
+ * sidecar. Written as soon as the media is copied rather than after the draft commits — the
+ * copy itself survives a rollback, so provenance for it is never wrong, and both writes are
+ * atomic and idempotent so a retried operation cannot leave a half record.
+ */
 export function recordMediaProvenance(context, record = {}) {
   if (!context?.projectDir || context.dryRun) return null;
   const source = record.originalPath || record.sourcePath;
@@ -162,29 +163,9 @@ export function recordMediaProvenance(context, record = {}) {
     derivedFromPath: record.derivedFromPath || null,
     derivedFromOffset: record.derivedFromOffset ?? null,
   };
-  if (context.shared) {
-    const queued = context.shared.mediaProvenance || (context.shared.mediaProvenance = new Map());
-    queued.set(`${context.projectDir}:${record.materialId}`, normalized);
-    // `core.applySpec` versions in the wild do not all invoke the optional post-commit hook.
-    // Write the durable provenance now as well as queueing it: the write itself is atomic and
-    // idempotent, while the queue lets newer transaction hosts repeat the commit safely.
-    persistMaterialSourceMapping(context.projectDir, normalized);
-    persistRl2TakeSidecar(context.projectDir, normalized);
-    return normalized;
-  }
   persistMaterialSourceMapping(context.projectDir, normalized);
   persistRl2TakeSidecar(context.projectDir, normalized);
   return normalized;
-}
-
-/** Commit all queued material maps and RL2 sidecars after the draft mirrors are committed. */
-export function commitMediaProvenance(shared) {
-  const queued = shared?.mediaProvenance;
-  if (!queued) return;
-  for (const record of queued.values()) {
-    persistMaterialSourceMapping(record.projectDir || '', record);
-    persistRl2TakeSidecar(record.projectDir || '', record);
-  }
 }
 
 /**
@@ -539,14 +520,6 @@ export function findCircleScenes(doc) {
   return allSegments(doc)
     .filter(({ segment }) => hasLayoutMask(doc, segment, 'circle') && ringCovers(doc, segment))
     .map(({ segment, trackIndex }) => ({ id: segment.id, trackIndex, range: segment.target_timerange }));
-}
-
-/** Time range carried over from the cloned preset (the endcard), if recorded. */
-function preservedRange(projectDir) {
-  try {
-    const file = path.join(projectDir || '.', '.capcutctl', 'created.json');
-    return JSON.parse(fs.readFileSync(file, 'utf8')).preserved || null;
-  } catch { return null; }
 }
 
 export function opLayoutBackground(doc, op, context = {}) {
@@ -1244,8 +1217,7 @@ function screenTrack(doc, name, recordingTrack, before = false, span = null, own
 }
 
 function screenPipSelector(op) {
-  return selectorValue(op.pipSelector || op.pip || op.subjectSelector || op.subject
-    || op.pipSegmentId || op.subjectSegmentId);
+  return selectorValue(op.pipSelector || op.pipSegmentId);
 }
 
 function resolveScreenPip(doc, recording, op) {
@@ -1586,7 +1558,7 @@ export function opLayoutScreen(doc, op = {}, context = {}) {
   const circle = config.layouts.circle;
   const background = config.background;
   const projectDir = context.projectDir || '.';
-  const recordingSelector = selectorValue(op.recordingSelector || op.selector || op.recordingId);
+  const recordingSelector = selectorValue(op.recordingSelector || op.selector);
   // The CLI contract supplies media/at/duration and asks this operation to create the
   // recording. Direct callers may instead point at a recording already present in the draft;
   // both paths feed the same layer-building transaction below.
@@ -1732,29 +1704,10 @@ export function opLayoutScreen(doc, op = {}, context = {}) {
   };
 }
 
-// Descriptive alias for callers that expose the preset name rather than the CLI layout name.
-export const opLayoutScreenRecording = opLayoutScreen;
-
-let _core = null;
-function require_core() {
-  if (!_core) throw new CapcutError('layout auto needs the core loader; call setCoreLoader first.', { exitCode: 1 });
-  return _core;
-}
-export function setCoreLoader(mod) { _core = mod; }
-
 export function buildLayoutSpec(projectDir, name, opts = {}) {
-  if (name === 'screen' || name === 'screen-recording' || name === 'screenRecording') {
-    const recordingOpts = {
-      ...opts,
-      segments: opts.recordingSegments || opts.segments,
-      at: opts.recordingAt || opts.at,
-      track: opts.recordingTrack == null ? opts.track : opts.recordingTrack
-    };
-    const ids = resolveIds(projectDir, recordingOpts, true);
-    const pipId = opts.pipSegmentId || opts.subjectSegmentId
-      || (Array.isArray(opts.pipSegments) && opts.pipSegments.length === 1 ? opts.pipSegments[0] : null)
-      || (Array.isArray(opts.subjectSegments) && opts.subjectSegments.length === 1 ? opts.subjectSegments[0] : null);
-    const pipSelector = selectorValue(opts.pipSelector || opts.subjectSelector || pipId);
+  if (name === 'screen') {
+    const ids = resolveIds(projectDir, opts, true);
+    const pipSelector = selectorValue(opts.pipSelector || opts.pipSegmentId);
     return {
       version: 1,
       name: 'layout-screen',
@@ -1789,7 +1742,8 @@ export function buildLayoutSpec(projectDir, name, opts = {}) {
   }
   const config = presets();
   if (!config.layouts[name]) {
-    throw new CapcutError(`Unknown layout "${name}". Known: ${Object.keys(config.layouts).join(', ')}, auto, audit, broll, background, circle, screen`, { code: 'UNKNOWN_LAYOUT', exitCode: 2 });
+    const known = [...new Set([...Object.keys(config.layouts), 'background', 'broll', 'screen', 'auto', 'audit'])];
+    throw new CapcutError(`Unknown layout "${name}". Known: ${known.join(', ')}`, { code: 'UNKNOWN_LAYOUT', exitCode: 2 });
   }
   const ids = resolveIds(projectDir, opts, true);
   return {

@@ -2,10 +2,9 @@ import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { CapcutError, clone, uuid, requireBinary } from './core.mjs';
+import { CapcutError, clone, seededId, requireBinary, contentEndUs } from './core.mjs';
 import { geminiApiKey, loadEnv } from './env.mjs';
-import { pictureChanges, sfxPresets } from './polish.mjs';
-import { contentEndUs } from './add.mjs';
+import { audioSegment, ensureAudioTrack, pictureChanges, sfxPresets } from './polish.mjs';
 
 const US = s => Math.round(s * 1e6);
 const S = us => us / 1e6;
@@ -13,11 +12,7 @@ const r3 = n => Math.round(n * 1000) / 1000;
 export const DEFAULT_MUSIC_VOLUME = 0.08;
 
 let SEED = null;
-function mint(key) {
-  if (!SEED) return uuid();
-  const h = crypto.createHash('sha256').update(`${SEED}|${key}`).digest('hex').toUpperCase();
-  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
-}
+const mint = key => seededId(SEED, key);
 const arr = (doc, kind) => (doc.materials[kind] ||= []);
 
 function mmss(t) {
@@ -224,41 +219,6 @@ function readMusicMeta(file) {
   }
 }
 
-function ensureAudioTrack(doc, name) {
-  let track = doc.tracks.find(t => t.type === 'audio' && t.name === name);
-  if (track) return track;
-  const tpl = doc.tracks.find(t => t.type === 'audio');
-  track = clone(tpl || sfxPresets().audioTrackTemplate);
-  track.id = mint(`track:${name}`);
-  track.name = name;
-  track.segments = [];
-  track.is_default_name = false;
-  doc.tracks.push(track);
-  return track;
-}
-
-function audioSegment(doc, materialId, startS, durationS, key, volume, desc) {
-  const p = sfxPresets();
-  const seg = clone(p.audioSegmentTemplate);
-  const refs = [];
-  for (const [kind, tpl] of Object.entries(p.audioExtraTemplates)) {
-    const m = clone(tpl);
-    m.id = mint(`${kind}:${key}`);
-    if ('bind_segment_id' in m) m.bind_segment_id = '';
-    arr(doc, kind).push(m);
-    refs.push(m.id);
-  }
-  seg.id = mint(`seg:${key}`);
-  seg.material_id = materialId;
-  seg.extra_material_refs = refs;
-  seg.target_timerange = { start: US(Math.max(0, startS)), duration: US(durationS) };
-  seg.source_timerange = { start: 0, duration: US(durationS) };
-  seg.volume = volume;
-  seg.last_nonzero_volume = volume;
-  seg.desc = desc;
-  return seg;
-}
-
 /** Earliest Follow/CTA start on the talking head, not the parked leftover. */
 export function ctaBoundary(doc, projectDir = null) {
   const starts = [];
@@ -297,7 +257,7 @@ export function opMusic(doc, op, context = {}) {
     if (track.type !== 'audio') continue;
     track.segments = (track.segments || []).filter(s => (s.desc || '') !== 'finish:music');
   }
-  const lane = ensureAudioTrack(doc, 'finish-music');
+  const lane = ensureAudioTrack(doc, 'finish-music', mint);
   lane.segments = (lane.segments || []).filter(s => (s.desc || '') !== 'finish:music');
 
   const templates = Object.values(sfxPresets().audioTemplates);
@@ -313,7 +273,7 @@ export function opMusic(doc, op, context = {}) {
   material.resource_id = '';
   arr(doc, 'audios').push(material);
 
-  const seg = audioSegment(doc, material.id, at, play, 'music:0', volume, 'finish:music');
+  const seg = audioSegment(doc, material.id, at, play, 'music:0', volume, 'finish:music', mint);
   if (srcOffset) {
     seg.source_timerange = { start: US(srcOffset), duration: US(play) };
   }

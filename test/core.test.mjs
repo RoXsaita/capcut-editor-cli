@@ -17,11 +17,10 @@ import {
   contentEndUs,
   createSnapshot,
   discoverOpenDraft,
-  draftDurationUs,
+  draftEndUs,
   doctor,
   durationInfo,
   executeTransaction,
-  getProjectLockStatus,
   inspectProject,
   LIVE_FILE_NAMES,
   PRESET3_DUPLICATE_BASELINE,
@@ -33,10 +32,8 @@ import {
   stableJson,
   syncMirrors,
   validateDocument,
-  waitForCapcutClosed,
-  waitForClose
+  waitForCapcutClosed
 } from '../src/core.mjs';
-import { contentEndUs as addContentEndUs } from '../src/add.mjs';
 
 function fixture({ missingMedia = false, drift = true } = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-test-'));
@@ -491,24 +488,19 @@ test('shared duration helpers distinguish edit end from the full parked draft en
 
   const doc = readJson(path.join(fx.project, 'draft_info.json'));
   assert.equal(contentEndUs(doc, fx.project), 5_000_000);
-  assert.equal(addContentEndUs(doc, fx.project), 5_000_000, 'add keeps the shared compatibility export');
-  assert.equal(draftDurationUs(doc, fx.project), 12_000_000);
+  assert.equal(draftEndUs(doc, fx.project), 12_000_000);
   assert.deepEqual(durationInfo(doc, fx.project), {
     unit: 'microseconds',
     contentEndUs: 5_000_000,
-    contentDurationUs: 5_000_000,
-    editEndUs: 5_000_000,
-    editDurationUs: 5_000_000,
     draftEndUs: 12_000_000,
-    draftDurationUs: 12_000_000,
     declaredDraftDurationUs: 5_000_000,
     parkedRange: { start: 8_000_000, end: 12_000_000 },
   });
 
   const report = doctor(fx.project, { checkFiles: false });
   assert.equal(report.errors, 0, JSON.stringify(report.issues));
-  assert.equal(report.durations[0].editDurationUs, 5_000_000);
-  assert.equal(report.durations[0].draftDurationUs, 12_000_000);
+  assert.equal(report.durations[0].contentEndUs, 5_000_000);
+  assert.equal(report.durations[0].draftEndUs, 12_000_000);
   const inspected = inspectProject(fx.project);
   assert.equal(inspected.groups[0].contentDuration, 5_000_000);
   assert.equal(inspected.groups[0].draftDuration, 12_000_000);
@@ -569,7 +561,7 @@ test('status backend discovers an open draft, reports lock ownership, and waits 
   const lock = path.join(fx.project, '.capcutctl', 'write.lock');
   fs.mkdirSync(path.dirname(lock), { recursive: true });
   fs.writeFileSync(lock, stableJson({ pid: process.pid, startedAt: '2026-08-29T00:00:00.000Z' }));
-  const owned = getProjectLockStatus(fx.project);
+  const owned = projectLockStatus(fx.project);
   assert.equal(owned.status, 'owned');
   assert.equal(owned.locked, true);
   assert.equal(owned.ownedByCurrentProcess, true);
@@ -591,12 +583,12 @@ test('status backend discovers an open draft, reports lock ownership, and waits 
   assert.equal(waited.reason, 'closed');
   assert.equal(waited.wasRunning, true);
 
-  const timedOut = waitForClose({ timeoutMs: 0, processProbe: () => ({ running: true, pids: ['7'] }) });
+  const timedOut = waitForCapcutClosed({ timeoutMs: 0, processProbe: () => ({ running: true, pids: ['7'] }) });
   assert.equal(timedOut.closed, false);
   assert.equal(timedOut.reason, 'timeout');
   assert.equal(timedOut.errorCode, 'CLOSE_TIMEOUT');
   assert.throws(
-    () => waitForClose({ timeoutMs: 0, throwOnTimeout: true, processProbe: () => ({ running: true, pids: ['7'] }) }),
+    () => waitForCapcutClosed({ timeoutMs: 0, throwOnTimeout: true, processProbe: () => ({ running: true, pids: ['7'] }) }),
     error => error instanceof CapcutError && error.code === 'CLOSE_TIMEOUT' && error.details.reason === 'timeout'
   );
 });

@@ -122,9 +122,10 @@ the mirrors, and rolls back if the post-write doctor fails.
 | Show the full command surface | `capcutctl help` |
 
 The checked-in [CLI contract](docs/cli-contract.json) is generated from
-`capcutctl contract`. The companion
-[`capcut-skills`](https://github.com/RoXsaita/capcut-skills) repository validates its
-agent instructions against that contract.
+`capcutctl contract`; `test/cli-contract.test.mjs` fails when it is stale. The companion
+[`capcut-skills`](https://github.com/RoXsaita/capcut-skills) repository validates every
+`capcutctl` invocation in its agent instructions against that contract in CI
+(`scripts/validate-skills.mjs`).
 
 ## Editing model
 

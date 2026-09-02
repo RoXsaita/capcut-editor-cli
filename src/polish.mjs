@@ -1,22 +1,16 @@
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  CapcutError, clone, uuid, allSegments, loadPreset, resolveMediaPath, contentEndUs as sharedContentEndUs
+  CapcutError, clone, seededId, allSegments, loadPreset, resolveMediaPath, contentEndUs
 } from './core.mjs';
-
 
 export function sfxPresets() {
   return loadPreset('sfx');
 }
 
 let SEED = null;
-function mint(key) {
-  if (!SEED) return uuid();
-  const h = crypto.createHash('sha256').update(`${SEED}|${key}`).digest('hex').toUpperCase();
-  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
-}
+const mint = key => seededId(SEED, key);
 
 const US = s => Math.round(s * 1e6);
 const arr = (doc, kind) => (doc.materials[kind] ||= []);
@@ -30,7 +24,7 @@ function isScreenHelper(segment) {
 }
 
 function contentBoundaryUs(doc, projectDir = null) {
-  let end = Number(sharedContentEndUs(doc, projectDir));
+  let end = Number(contentEndUs(doc, projectDir));
   const declared = Number(doc?.contentEnd);
   if (Number.isFinite(declared) && declared > 0) {
     const declaredUs = declared > 100_000 ? Math.round(declared) : US(declared);
@@ -253,19 +247,22 @@ function makeTransition(doc, name, durationS, key) {
  * clip references speeds / placeholder_infos / beats / sound_channel_mappings /
  * vocal_separations — there is no audio_fades key, and guessing one produces a segment
  * CapCut will not play.
+ *
+ * `mintFn` lets another module (music) mint ids from ITS transaction seed; ids must be a
+ * pure function of (seed, key) or the root and timeline mirrors drift apart.
  */
-function audioSegment(doc, materialId, startS, durationS, key, volume, desc = 'polish:sfx') {
+export function audioSegment(doc, materialId, startS, durationS, key, volume, desc = 'polish:sfx', mintFn = mint) {
   const p = sfxPresets();
   const seg = clone(p.audioSegmentTemplate);
   const refs = [];
   for (const [kind, tpl] of Object.entries(p.audioExtraTemplates)) {
     const m = clone(tpl);
-    m.id = mint(`${kind}:${key}`);
+    m.id = mintFn(`${kind}:${key}`);
     if ('bind_segment_id' in m) m.bind_segment_id = '';
     arr(doc, kind).push(m);
     refs.push(m.id);
   }
-  seg.id = mint(`seg:${key}`);
+  seg.id = mintFn(`seg:${key}`);
   seg.material_id = materialId;
   seg.extra_material_refs = refs;
   seg.target_timerange = { start: US(Math.max(0, startS)), duration: US(durationS) };
@@ -276,14 +273,15 @@ function audioSegment(doc, materialId, startS, durationS, key, volume, desc = 'p
   return seg;
 }
 
-function ensureAudioTrack(doc, name) {
+export function ensureAudioTrack(doc, name, mintFn = mint) {
   let track = doc.tracks.find(t => t.type === 'audio' && t.name === name);
   if (track) return track;
   const tpl = doc.tracks.find(t => t.type === 'audio');
   track = clone(tpl || sfxPresets().audioTrackTemplate);
-  track.id = mint(`track:${name}`);
+  track.id = mintFn(`track:${name}`);
   track.name = name;
   track.segments = [];
+  track.is_default_name = false;
   doc.tracks.push(track);
   return track;
 }

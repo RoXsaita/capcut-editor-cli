@@ -4,10 +4,12 @@ JSON the CLI clones from instead of inventing CapCut objects.
 
 | File | Role |
 |---|---|
-| `layouts.json` | split-screen / circle / full-face / background geometry + native mask templates |
+| `layouts.json` | split-screen / circle / full-face / background / screenRecording geometry + native mask templates |
 | `sfx.json` | transition ↔ sound pairing for `polish` |
 | `signature.json` | logo pop, endcard, talking-head push-in |
 | `brands.json` | spoken aliases → path to a **local** transparent raster |
+| `adjust.json` | CapCut's Adjust-panel effect template that `grade` fills in (harvested, not invented) |
+| `blank-draft.json` | the empty 1080×1920 draft `new --blank` starts from |
 | `suheil-vertical.json` | 1080×1920 house-style contract (documentation; not a renderer) |
 
 Paths are written `~/…` and expanded at load. CapCut still needs a real

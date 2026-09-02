@@ -28,5 +28,6 @@ qa/
 *.tgz
 
 # Third-party brand logos (trademarked artwork, not ours to redistribute).
-# brands.json points at these by absolute path; keep them local.
+# presets/brands.json names each logo by an absolute ~/ path; a local copy kept
+# inside the clone under Logos/ must stay out of the repository.
 Logos/

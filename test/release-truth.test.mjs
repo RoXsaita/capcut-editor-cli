@@ -87,6 +87,38 @@ test('"private": true is npm publish protection, and is documented as such', () 
   }
 });
 
+test('every README section another document points at still exists', () => {
+  // SETUP.md said "See README → *Style — ask once*" for two releases after that heading was
+  // renamed. A pointer to a section that is not there costs a stranger a search and tells
+  // them the docs are not maintained. Bold or italic "See <Heading> in the README" /
+  // "README → *Heading*" must name a real heading.
+  const headings = new Set(read('README.md').split('\n')
+    .filter(line => /^#{2,3} /.test(line))
+    .map(line => line.replace(/^#+\s*/, '').trim()));
+  for (const file of ['SETUP.md', 'CONTRIBUTING.md', 'docs/PRE-PUBLISH.md']) {
+    const text = read(file);
+    const pointers = [
+      ...text.matchAll(/README(?:\.md)?\s*→\s*[*_]([^*_]+)[*_]/g),
+      ...text.matchAll(/See\s+\*\*([^*]+)\*\*\s+in the README/g),
+    ].map(match => match[1].trim());
+    for (const pointer of pointers) {
+      assert.ok(headings.has(pointer), `${file} points at README → "${pointer}", which is not a README heading`);
+    }
+  }
+});
+
+test('the layouts the help text lists are the ones presets/layouts.json defines', () => {
+  // SETUP.md said "the four locked layouts" while layouts.json defined five and the help
+  // text listed three. The preset file is the record; the help and the layout list output
+  // must name exactly its layouts.
+  const layouts = JSON.parse(read('presets/layouts.json'));
+  const names = [...Object.keys(layouts.layouts), 'background', 'screen'];
+  const help = read('src/cli.mjs');
+  for (const name of names) {
+    assert.match(help, new RegExp(`capcutctl layout ${name}\\b`), `HELP has no entry for layout ${name}`);
+  }
+});
+
 test('the packaged file list still excludes the private draft catalogue', () => {
   // The one exclusion that matters: presets/harvest.json names every project on the
   // machine that produced it. test/clean-install.test.mjs proves it stays out of the

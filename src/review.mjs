@@ -5,9 +5,8 @@ import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
-import { CapcutError, allSegments, loadProject, stableJson } from './core.mjs';
+import { CapcutError, allSegments, contentEndUs, loadProject, stableJson } from './core.mjs';
 import { pythonForTool } from './python.mjs';
-import { contentEndUs } from './add.mjs';
 import { principalTrack } from './polish.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -327,5 +326,3 @@ export function reviewProject(projectDir, {
     frames: outputs.frames,
   };
 }
-
-export const writeReview = reviewProject;

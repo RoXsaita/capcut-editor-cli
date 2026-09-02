@@ -42,11 +42,13 @@ python3 tools/aroll.py --selftest
 
 ## What CI runs
 
-Every PR, on Ubuntu, Node 20 and 24:
+Every PR, on Ubuntu, Node 20 and 24 — exactly the stages of `scripts/check.sh --strict`:
 
 - `npm run check` and `npm test`
-- `python3 tools/aroll.py --selftest`
+- a supported Python resolves (the `pyproject.toml` floor), `tools/` compiles
+- `python tools/aroll.py --selftest` and `python tools/frame_qa.py --selftest`
 - Ruff, Vulture, ShellCheck
+- the Vision OCR helper is a macOS-only stage and is a no-op on the Ubuntu runner
 
 That is the merge gate. The Codex review on PRs is advisory. See
 [`.github/AUTOMATION.md`](.github/AUTOMATION.md).

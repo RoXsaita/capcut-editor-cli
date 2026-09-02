@@ -1,18 +1,14 @@
 import { execFileSync } from 'node:child_process';
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
 import {
-  CapcutError, clone, uuid, allSegments, selectSegments, stableJson, localizeMedia,
-  isLocalMedia, isCapCutCachePath, PRESET_PARK_GAP_US, contentEndUs as sharedContentEndUs,
-  maxSegmentEndUs as sharedMaxSegmentEndUs,
+  CapcutError, clone, seededId, allSegments, selectSegments, localizeMedia,
+  isLocalMedia, isCapCutCachePath, PRESET_PARK_GAP_US, contentEndUs, maxSegmentEndUs,
 } from './core.mjs';
-import {
-  insertOverlayTrack, renumberTracks, recordMediaProvenance, commitMediaProvenance,
-  sourceTakeId
-} from './layouts.mjs';
+import { insertOverlayTrack, renumberTracks, recordMediaProvenance, sourceTakeId } from './layouts.mjs';
 import { assertOrigin, stampOrigin } from './origin.mjs';
+import { rescaleKeyframes } from './pace.mjs';
 import { principalTrack } from './polish.mjs';
 
 const US = s => Math.round(s * 1e6);
@@ -31,11 +27,7 @@ const LOOK_KINDS = new Set([
 ]);
 
 let SEED = null;
-function mint(key) {
-  if (!SEED) return uuid();
-  const h = crypto.createHash('sha256').update(`${SEED}|${key}`).digest('hex').toUpperCase();
-  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
-}
+const mint = key => seededId(SEED, key);
 
 function pickSegmentTemplate(doc) {
   const all = (doc.tracks || []).filter(t => t.type === 'video').flatMap(t => t.segments || []);
@@ -200,24 +192,6 @@ function slidePreserved(doc, context, clipEndUs, op = {}, { wasAtUs = null } = {
   return { extended: true, preserved: state.next, slid: delta };
 }
 
-/** Persist the slid endcard window once, after both documents committed. */
-export function commitPreservedSlides(shared) {
-  commitMediaProvenance(shared);
-  const state = shared?.preserved;
-  if (!state?.file || !state.created) return;
-  if (!state.next && state.contentEnd == null) return;
-  const created = clone(state.created);
-  if (state.next) created.preserved = state.next;
-  if (state.contentEnd != null) created.contentEnd = state.contentEnd;
-  fs.mkdirSync(path.dirname(state.file), { recursive: true });
-  fs.writeFileSync(state.file, stableJson(created));
-}
-
-/** Backward-compatible add-module export; the implementation lives in core's shared contract. */
-export function contentEndUs(...args) {
-  return sharedContentEndUs(...args);
-}
-
 /**
  * Push the cloned Preset 3 leftover past a gap after the talking head.
  * Do not delete it — it is a parts bin (copy attributes). It is not the video's ending.
@@ -229,7 +203,7 @@ export function parkPresetLeftover(doc, context = {}, op = {}) {
   const state = slideState(projectDir, context.shared || (context.shared = {}));
   if (!state.window?.start) return { slid: 0 };
   if (op.__park === undefined) {
-    const contentEnd = sharedContentEndUs(doc, projectDir);
+    const contentEnd = contentEndUs(doc, projectDir);
     const desired = contentEnd + PRESET_PARK_GAP_US;
     const from = state.window.start + (state.total || 0);
     op.__park = from >= desired - 1000 ? 0 : desired - from;
@@ -256,20 +230,9 @@ export function parkPresetLeftover(doc, context = {}, op = {}) {
   // recorded window — and shifting it by `delta` then put it beyond doc.duration, which
   // post-write validation rejects as SEGMENT_AFTER_END and rolls the whole wrap/zoom
   // transaction back. Measure what is actually on the timeline instead.
-  const end = Math.max(state.next.end, sharedMaxSegmentEndUs(doc));
+  const end = Math.max(state.next.end, maxSegmentEndUs(doc));
   doc.duration = Math.max(doc.duration || 0, end);
   return { slid: delta, preserved: state.next };
-}
-
-function rescaleKeyframes(seg, oldStart, oldDur, newStart, newDur) {
-  const factor = oldDur > 0 ? newDur / oldDur : 1;
-  for (const k of seg.common_keyframes || []) {
-    for (const kf of k.keyframe_list || []) {
-      const rel = kf.time_offset - oldStart;
-      const next = newStart + Math.round(rel * factor);
-      kf.time_offset = Math.max(newStart, Math.min(newStart + newDur, next));
-    }
-  }
 }
 
 /** Verified extra from Higgsfield Refund (video overlay) / IKEA Refund (audio). Not invented. */

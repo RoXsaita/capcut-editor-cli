@@ -42,12 +42,16 @@
         "--dry-run",
         "--dur",
         "--generated",
+        "--height",
         "--media",
+        "--media-duration",
         "--no-localize",
         "--project",
         "--src",
+        "--src-dur",
         "--track",
-        "--volume"
+        "--volume",
+        "--width"
       ],
       "transactional": true
     },
@@ -66,7 +70,10 @@
       "transactional": false
     },
     "close": {
-      "options": [],
+      "options": [
+        "--json",
+        "--timeout"
+      ],
       "transactional": false
     },
     "contract": {
@@ -117,7 +124,10 @@
       "options": [
         "--at",
         "--dry-run",
+        "--hold",
+        "--no-sfx",
         "--project",
+        "--scale",
         "--text"
       ],
       "transactional": true
@@ -128,7 +138,9 @@
         "--dry-run",
         "--in",
         "--out",
+        "--plan",
         "--project",
+        "--segments",
         "--track"
       ],
       "transactional": true
@@ -147,11 +159,16 @@
     "finish": {
       "options": [
         "--dry-run",
+        "--json",
         "--music",
         "--plan",
         "--polish",
         "--project",
-        "--regen"
+        "--prompt",
+        "--regen",
+        "--track",
+        "--volume",
+        "--width"
       ],
       "transactional": true
     },
@@ -204,6 +221,8 @@
         "--hold",
         "--plan",
         "--project",
+        "--ramp",
+        "--segments",
         "--to",
         "--track"
       ],
@@ -214,9 +233,13 @@
         "--at",
         "--dry-run",
         "--dur",
+        "--height",
         "--include-template",
         "--media",
+        "--media-duration",
         "--no-localize",
+        "--no-overlay",
+        "--no-seam",
         "--plan",
         "--project",
         "--row",
@@ -224,7 +247,8 @@
         "--segments",
         "--src",
         "--src-dur",
-        "--track"
+        "--track",
+        "--width"
       ],
       "subcommands": [
         "audit",
@@ -232,6 +256,7 @@
         "background",
         "broll",
         "circle",
+        "full-face",
         "list",
         "screen",
         "split-screen"
@@ -248,21 +273,31 @@
     "logo": {
       "options": [
         "--at",
+        "--auto",
         "--brand",
         "--dry-run",
         "--hold",
+        "--logo",
+        "--name",
+        "--no-sfx",
+        "--plain",
+        "--plan",
         "--pos",
         "--project",
-        "--scale"
+        "--scale",
+        "--track",
+        "--words"
       ],
       "transactional": true
     },
     "music": {
       "options": [
         "--dry-run",
+        "--json",
         "--music",
         "--plan",
         "--project",
+        "--prompt",
         "--regen",
         "--volume"
       ],
@@ -270,14 +305,24 @@
     },
     "new": {
       "options": [
+        "--allow-ephemeral",
         "--blank",
         "--canvas",
+        "--derived-from",
+        "--derived-offset",
         "--dry-run",
+        "--duration",
+        "--force-running",
         "--fps",
         "--from",
+        "--generated",
+        "--height",
         "--media",
+        "--new-timeline-id",
+        "--no-localize",
         "--project",
-        "--scenes"
+        "--scenes",
+        "--width"
       ],
       "transactional": true
     },
@@ -372,19 +417,27 @@
         "--at",
         "--dry-run",
         "--project",
+        "--segments",
         "--track"
       ],
       "transactional": true
     },
     "replace-media": {
       "options": [
+        "--allow-ephemeral",
         "--at",
+        "--derived-from",
         "--dry-run",
         "--file",
+        "--generated",
+        "--height",
+        "--media-duration",
         "--no-localize",
         "--project",
         "--retime",
-        "--track"
+        "--segments",
+        "--track",
+        "--width"
       ],
       "transactional": true
     },
@@ -400,13 +453,18 @@
     },
     "review": {
       "options": [
-        "--project"
+        "--fps",
+        "--id",
+        "--out",
+        "--project",
+        "--width"
       ],
       "transactional": false
     },
     "rm": {
       "options": [
         "--dry-run",
+        "--force-running",
         "--project"
       ],
       "transactional": true
@@ -426,6 +484,7 @@
         "--by",
         "--dry-run",
         "--project",
+        "--segments",
         "--track"
       ],
       "transactional": true
@@ -456,6 +515,7 @@
     },
     "timeline": {
       "options": [
+        "--json",
         "--project",
         "--width"
       ],
@@ -467,6 +527,7 @@
         "--dry-run",
         "--dur",
         "--project",
+        "--segments",
         "--src",
         "--start",
         "--track"
@@ -483,6 +544,7 @@
         "--dry-run",
         "--level",
         "--project",
+        "--segments",
         "--track"
       ],
       "transactional": true
@@ -490,10 +552,16 @@
     "wrap": {
       "options": [
         "--dry-run",
+        "--glow",
+        "--no-sfx",
+        "--no-zoom",
+        "--only",
         "--plan",
         "--project",
         "--text",
-        "--words"
+        "--track",
+        "--words",
+        "--zoom-at"
       ],
       "transactional": true
     },
@@ -503,8 +571,11 @@
         "--auto",
         "--dry-run",
         "--hold",
+        "--min-length",
+        "--plan",
         "--project",
-        "--to"
+        "--to",
+        "--track"
       ],
       "transactional": true
     },

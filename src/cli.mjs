@@ -28,9 +28,9 @@ export const HELP = `capcutctl — transactional CapCut timeline control
 Usage:
   capcutctl --version
   capcutctl version
-  capcutctl cut VIDEO [--keep 0,2-9] [--order 0,2,3] [--trim-beat ID:out=-1.16]
+  capcutctl cut VIDEO [--keep 0,2-9|--drop 1,7] [--order 0,2,3] [--trim-beat ID:out=-1.16]
                       [--recover-beat ID:out=0.8]
-                      [--review decisions.json] [--project NAME] [--into PROJECT] [--lang ar]
+                      [--review decisions.json] [--project NAME] [--into PROJECT|--in-place] [--lang ar]
                       — talking-head cleanup and reviewed A-roll assembly. Use --order
                         for an exact kept-beat permutation, --trim-beat for safe inward
                         acoustic trims, opt-in word/acoustic outward recovery, or --review
@@ -46,13 +46,16 @@ Usage:
 
   capcutctl preflight [--root PATH] [--json]   — will this work on this machine? deps, assets, tools, disk
   capcutctl projects [--root PATH] [--json]
-  capcutctl rm --project NAME [--dry-run]      — to .recycle_bin, registry entry dropped
-  capcutctl close                              — quit CapCut and wait for it to exit
+  capcutctl rm --project NAME [--dry-run] [--force-running]   — to .recycle_bin, registry entry dropped
+  capcutctl close [--timeout MS] [--json]      — quit CapCut and wait for it to exit
   capcutctl status [--json] [--wait-for-close [--timeout MS]]
                                 report CapCut state; optionally request quit and return a branchable close result
-  capcutctl review --project NAME              — write outputs/<id>/proxy.mp4, edl.json, and contact-sheet.png (never CapCut export)
+  capcutctl review --project NAME [--out DIR] [--id NAME] [--fps 6] [--width 240]
+                      — write outputs/<id>/proxy.mp4, edl.json, and contact-sheet.png (never CapCut export)
   capcutctl new --project NAME [--media FILE] [--scenes 0:6,6:12,12:18]
-                [--from TEMPLATE] [--blank] [--canvas 1080x1920] [--fps 30] [--dry-run]
+                [--from TEMPLATE] [--blank] [--canvas 1080x1920] [--fps 30] [--dry-run] [--force-running]
+                [--no-localize] [--generated] [--derived-from ORIGINAL [--derived-offset S]] [--allow-ephemeral]
+                [--new-timeline-id] [--width W --height H --duration S]   (probe override when ffprobe is missing)
   capcutctl inspect --project NAME_OR_PATH [--root PATH] [--json]
   capcutctl doctor --project NAME_OR_PATH [--root PATH] [--json]
   capcutctl snapshot --project NAME_OR_PATH [--label NAME]
@@ -61,16 +64,19 @@ Usage:
   capcutctl sync --project NAME_OR_PATH [--dry-run] [--force-running] [--no-backup]
   capcutctl apply --project NAME_OR_PATH --spec FILE [--dry-run] [--force-running] [--no-backup]
   capcutctl add --project NAME --media FILE --at S --dur S --track NAME|N
-                [--src S] [--cover IN-OUT] [--volume 0] [--desc TEXT] [--no-localize]
+                [--src S] [--src-dur S | --cover IN-OUT] [--volume 0] [--desc TEXT] [--no-localize]
                 [--generated] [--derived-from ORIGINAL [--derived-offset S]] [--allow-ephemeral]
-  capcutctl replace-media --project NAME --file FILE --at S --track NAME|N [--retime] [--no-localize]
+                [--width W --height H --media-duration S]   (probe override when ffprobe is missing)
+  capcutctl replace-media --project NAME --file FILE --at S --track NAME|N | --segments ID
+                [--retime] [--no-localize] [--generated] [--derived-from ORIGINAL] [--allow-ephemeral]
+                [--width W --height H --media-duration S]
   capcutctl localize --project NAME   — copy outside videos into the project (fixes Link media)
-  capcutctl trim --project NAME --at S --track NAME|N --src IN-OUT | --start S --dur S
-  capcutctl shift --project NAME --at S --track NAME|N --by SECONDS
-  capcutctl remove --project NAME --at S --track NAME|N
-  capcutctl volume --project NAME --at S --track NAME|N --level 0
-  capcutctl fade --project NAME --at S --track NAME|N [--in 0.08] [--out 0.12]
-  capcutctl keyframe --project NAME --at S --track NAME|N [--to 2.4] [--hold 1.6] [--plan]
+  capcutctl trim --project NAME --at S --track NAME|N | --segments ID  --src IN-OUT | --start S --dur S
+  capcutctl shift --project NAME --at S --track NAME|N | --segments ID  --by SECONDS
+  capcutctl remove --project NAME --at S --track NAME|N | --segments ID
+  capcutctl volume --project NAME --at S --track NAME|N | --segments ID  --level 0
+  capcutctl fade --project NAME --at S --track NAME|N | --segments ID  [--in 0.08] [--out 0.12] [--plan]
+  capcutctl keyframe --project NAME --at S --track NAME|N | --segments ID  [--to 2.4] [--hold 1.6] [--ramp 0.3] [--plan]
   capcutctl preview --project NAME --out preview.mp4 [--fps 6] [--from S] [--to S]
                     [--resolution 360x640|--native] [--no-cache] [--no-grade]
                       — lightweight streamed proxy; defaults to 360x640 and never writes
@@ -82,19 +88,27 @@ Usage:
                                                  the skills repo validates its docs against
 
   capcutctl scenes --project NAME_OR_PATH [--track N] [--transcript] [--name SUBSTR]
-  capcutctl layout split-screen --project NAME_OR_PATH --segments IDS|--at SECONDS [--track N] [--dry-run]
-  capcutctl layout circle       --project NAME_OR_PATH --segments IDS|--at SECONDS [--track N] [--dry-run]
+  capcutctl layout split-screen --project NAME_OR_PATH --segments IDS|--at SECONDS [--track N] [--no-overlay] [--dry-run]
+  capcutctl layout circle       --project NAME_OR_PATH --segments IDS|--at SECONDS [--track N] [--no-overlay] [--dry-run]
+  capcutctl layout full-face    --project NAME_OR_PATH --segments IDS|--at SECONDS [--track N] [--dry-run]
   capcutctl layout background   --project NAME_OR_PATH [--at SECONDS] [--include-template] [--dry-run]
-  capcutctl layout broll        --project NAME_OR_PATH --at SECONDS --track N --row ROW [--scale S]
+  capcutctl layout broll        --project NAME_OR_PATH --at SECONDS --track N --row ROW [--scale S] [--no-seam]
   capcutctl layout screen       --project NAME_OR_PATH --at SECONDS --media FILE
-                                [--dur S] [--src S] [--src-dur S] [--track NAME] [--no-localize] [--dry-run]
+                                [--dur S] [--src S] [--src-dur S] [--track NAME] [--no-localize] [--plan] [--dry-run]
+                                [--width W --height H --media-duration S]
                                 — add a centred rl2 screen recording through the layout.screen contract
   capcutctl brands              list known brands, their spoken aliases, and which have a logo
-  capcutctl logo                --project NAME_OR_PATH --at S --brand NAME [--scale] [--hold] [--pos x,y]
-  capcutctl endcard             --project NAME_OR_PATH [--text Follow] [--at S]
-  capcutctl zoom                --project NAME_OR_PATH --at S[,S...] | --auto  [--to 1.15] [--hold 1.6]
-  capcutctl wrap                --project NAME_OR_PATH --words TRANSCRIPT.json [--text Follow] [--plan]
-                                brand logos from what he says + the endcard, in one pass
+  capcutctl logo                --project NAME_OR_PATH --logo FILE[,FILE…]|DIR | --brand NAME[,NAME…] | --auto
+                                [--at S[,S…]] [--name N[,N…]] [--scale] [--hold] [--pos x,y] [--words FILE]
+                                [--track N] [--plain] [--no-sfx] [--plan]
+                                the artwork is the primitive: any image pops; --brand/--auto time
+                                themselves off the transcript. Glow reveal by default, --plain for the pop.
+  capcutctl endcard             --project NAME_OR_PATH [--text Follow] [--at S] [--hold S] [--scale S] [--no-sfx]
+  capcutctl zoom                --project NAME_OR_PATH --at S[,S...] | --auto [--min-length 2.5] [--to 1.15] [--hold 1.6]
+                                [--track N] [--plan]
+  capcutctl wrap                --project NAME_OR_PATH [--words TRANSCRIPT.json] [--text Follow] [--only BRANDS]
+                                [--zoom-at S[,S…]|--no-zoom] [--track N] [--glow] [--no-sfx] [--plan]
+                                brand logos from what he says + the endcard + face push-ins, in one pass
   capcutctl pace                --project NAME_OR_PATH [--track N] [--max 100] [--min-gap 5.0]
                                 no flags = print the plan; --auto applies it
                                 --at T --speed X | --at T --cover IN-OUT for one clip
@@ -113,13 +127,14 @@ Usage:
                                 --plan solves sliders against one house target so every
                                 source matches; --apply writes CapCut's own Adjust materials.
                                 --set 'FILE:brightness=0.05,white=0.2' overrides one source.
-  capcutctl timeline            --project NAME [--width 64]   — ASCII dump of the stacked timeline
+  capcutctl timeline            --project NAME [--width 64] [--json]   — ASCII dump of the stacked timeline
   capcutctl finish              --project NAME [--plan] [--music] [--polish] [--regen]
+                                [--volume 0.08] [--prompt TEXT] [--track N] [--width 64] [--json]
                                 scorecard + ASCII. --plan is read-only. --music generates
                                 a Lyria bed timed to picture changes and beat-aligned.
                                 --polish runs motivated polish. Voice is never recut.
-  capcutctl music               --project NAME [--plan] [--regen] [--volume 0.08]
-                                generate / place the instrumental bed (used by finish --music)
+  capcutctl music               --project NAME [--plan] [--regen] [--volume 0.08] [--prompt TEXT] [--json]
+                                generate / place the instrumental bed (what finish --music runs)
   capcutctl layout auto         --project NAME_OR_PATH [--plan]   — split-screen where B-roll covers, full face where it does not
   capcutctl layout audit        --project NAME_OR_PATH            — what each clip is vs what it should be
   capcutctl layout list
@@ -127,7 +142,9 @@ Usage:
 Layouts are exact, measured geometry (presets/layouts.json) — not judgement:
   split-screen  subject fills the BOTTOM half from y=960, indigo bar on the seam
   circle        subject as the upper-left circular avatar, inside the white ring
+  full-face     subject at scale 1, no mask — the whole picture
   background    finds every circle scene and builds the blurred backdrop under it
+  screen        a centred rl2 window recording inside the indigo frame (layout screen)
 
 New projects clone "Preset 3" by default: leftover preset clips are parked 30s after
 the talking head (a parts bin — do not delete them). Follow/CTA is written on the
@@ -604,7 +621,8 @@ export async function main(argv, dependencies = {}) {
     const p = presets();
     const rows = Object.entries(p.layouts).map(([name, l]) => ({ name, description: l.description }))
       .concat([{ name: 'background', description: p.background.description }]);
-    if (p.screenRecording) rows.push({ name: 'screenRecording', description: p.screenRecording.description });
+    // The row is named as `capcutctl layout <name>` accepts it; the preset key is screenRecording.
+    if (p.screenRecording) rows.push({ name: 'screen', preset: 'screenRecording', description: p.screenRecording.description });
     return print(rows, true);
   }
   if (command === 'contract') {
@@ -685,7 +703,7 @@ export async function main(argv, dependencies = {}) {
     const projectDir = resolveProject(args.project, root);
     const { reviewProject } = await import('./review.mjs');
     return print(reviewProject(projectDir, {
-      outputRoot: path.resolve(args.outputRoot || args.out || 'outputs'),
+      outputRoot: path.resolve(args.out || 'outputs'),
       id: args.id,
       fps: args.fps != null ? Number(args.fps) : 6,
       width: args.width != null ? Number(args.width) : 240,
@@ -1037,7 +1055,7 @@ export async function main(argv, dependencies = {}) {
     const { assertFirstPictureProof, finishScorecard, finishText } = await import('./finish.mjs');
     const doc = await loadWorking(projectDir);
     const score = finishScorecard(doc, { projectDir, width: args.width ? Number(args.width) : 64 });
-    const wantMusic = command === 'music' || (command === 'finish' && args.music && !args.noMusic);
+    const wantMusic = command === 'music' || (command === 'finish' && Boolean(args.music));
     const wantPolish = command === 'finish' && args.polish;
     if ((wantMusic || wantPolish) && !args.plan) assertFirstPictureProof(doc);
     if (args.plan || (!wantMusic && !wantPolish && command === 'finish')) {
@@ -1090,10 +1108,9 @@ export async function main(argv, dependencies = {}) {
   }
   if (command === 'layout') {
     const name = args._[1];
-    if (!name) throw new CapcutError('layout requires a name: split-screen | circle | background | broll | screen | auto | audit | list', { exitCode: 2 });
+    if (!name) throw new CapcutError('layout requires a name: split-screen | circle | full-face | background | broll | screen | auto | audit | list', { exitCode: 2 });
     const layoutsMod = await import('./layouts.mjs');
     const { buildLayoutSpec } = layoutsMod;
-    layoutsMod.setCoreLoader(await import('./core.mjs'));
     if (name === 'audit' || (name === 'auto' && args.plan)) {
       const doc = await loadWorking(projectDir);
       return print(layoutsMod.layoutAudit(doc, await trackIndex(projectDir, args.track)), true);
@@ -1249,7 +1266,7 @@ export async function main(argv, dependencies = {}) {
     const doc = loadProject(projectDir).groups.find(g => g.name === 'root').doc;
     const selector = args.segments
       ? { id: String(args.segments).split(',')[0].trim() }
-      : { id: resolveClip(doc, { at: args.at != null ? Number(args.at) : undefined, track: args.track, id: args.id }).segment.id };
+      : { id: resolveClip(doc, { at: args.at != null ? Number(args.at) : undefined, track: args.track }).segment.id };
     if (command === 'remove') {
       return print(applySpec(projectDir, { version: 1, name: 'remove', operations: [{ op: 'segment.remove', selector }] }, options), true);
     }
