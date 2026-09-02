@@ -125,7 +125,7 @@ The checked-in [CLI contract](docs/cli-contract.json) is generated from
 `capcutctl contract`; `test/cli-contract.test.mjs` fails when it is stale. The companion
 [`capcut-skills`](https://github.com/RoXsaita/capcut-skills) repository validates every
 `capcutctl` invocation in its agent instructions against that contract in CI
-(`scripts/validate-skills.mjs`).
+(`scripts/validate.py`, against a vendored copy of the contract it refreshes deliberately).
 
 ## Editing model
 
