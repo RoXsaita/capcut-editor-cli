@@ -124,7 +124,8 @@ test('a dry-run of a transactional edit changes nothing on disk', async () => {
     let stdout = '';
     const restore = setOutput(chunk => { stdout += String(chunk); return true; });
     try {
-      await main(['new', '--blank', '--project', 'Dry Run', '--root', root]);
+      // This fixture lives outside CapCut's registry, even if the user's editor is open.
+      await main(['new', '--blank', '--project', 'Dry Run', '--root', root, '--force-running']);
     } finally { restore(); }
     const project = JSON.parse(stdout).project;
 

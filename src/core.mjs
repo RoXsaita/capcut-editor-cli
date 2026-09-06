@@ -8,7 +8,7 @@ import {
   opLayoutApply, opLayoutBackground, opLayoutBroll, opLayoutScreen, SCREEN_LAYOUT_OPERATION, renumberTracks
 } from './layouts.mjs';
 import { opPolish, opCalloutSfx, opInteractions, principalTrack } from './polish.mjs';
-import { opGradeApply } from './grade.mjs';
+import { opGradeApply, opGradeReset } from './grade.mjs';
 import { opPace } from './pace.mjs';
 import { opSignature } from './signature.mjs';
 import {
@@ -2809,6 +2809,7 @@ export function applyOperations(doc, operations, context) {
     else if (op.op === 'clip.fade') result = opClipFade(doc, op, context);
     else if (op.op === 'music') result = opMusic(doc, op, context);
     else if (op.op === 'grade.apply') result = opGradeApply(doc, op, context);
+    else if (op.op === 'grade.reset') result = opGradeReset(doc, op, context);
     else throw new CapcutError(`Unsupported operation: ${op.op}`, { code: 'UNSUPPORTED_OPERATION' });
     results.push({ index, op: op.op, ...result });
   }

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { CapcutError, clone, seededId, loadPreset, localizeMedia, contentEndUs } from './core.mjs';
 import { principalTrack, sfxPresets } from './polish.mjs';
-import { parkPresetLeftover } from './add.mjs';
+import { parkPresetLeftover, opScaleKeyframe } from './add.mjs';
 
 const US = s => Math.round(s * 1e6);
 const S = us => us / 1e6;
@@ -234,7 +234,8 @@ export function talkingHeadScenes(doc, trackIndex = null, minSeconds = 2.5) {
   const { track } = principalTrack(doc, trackIndex);
   const masks = new Set((doc.materials.common_mask || []).map(m => m.id));
   return [...track.segments]
-    .filter(s => !(s.extra_material_refs || []).some(r => masks.has(r)))
+    .filter(s => (s.clip?.alpha ?? 1) > 0)
+    .filter(s => s.enable_video_mask === false || !(s.extra_material_refs || []).some(r => masks.has(r)))
     .filter(s => S(s.target_timerange.duration) >= minSeconds)
     .sort((a, b) => a.target_timerange.start - b.target_timerange.start)
     .map(s => ({ start: r3(S(s.target_timerange.start)),
@@ -557,39 +558,36 @@ export function opSignature(doc, op, context = {}) {
   /* ---- face push-ins ---- */
   if ((op.zooms || []).length) {
     const { track } = principalTrack(doc, op.track ?? null);
-    for (const [i, z] of op.zooms.entries()) {
+    for (const z of op.zooms) {
       const seg = track.segments.find(s =>
-        S(s.target_timerange.start) <= z.at + 0.02
-        && S(s.target_timerange.start + s.target_timerange.duration) > z.at + 0.02);
+        S(s.target_timerange.start) <= z.at
+        && S(s.target_timerange.start + s.target_timerange.duration) > z.at);
       if (!seg) throw new CapcutError(`no clip on the principal track covers ${z.at}s`, { code: 'NO_CLIP_AT', exitCode: 2 });
-      if ((seg.common_keyframes || []).some(k => (k.keyframe_list || []).length)) {
+      if ((seg.common_keyframes || []).some(k => /KFType(Scale|Position|Rotation)/.test(k.property_type) && (k.keyframe_list || []).length)) {
         result.zooms.push({ at: z.at, skipped: 'already keyframed' });
         continue;
       }
-      const srcStart = seg.source_timerange ? seg.source_timerange.start : 0;
-      const speed = seg.source_timerange
-        ? seg.source_timerange.duration / seg.target_timerange.duration : 1;
-      // keyframe offsets on a video segment are absolute SOURCE positions
-      const into = (z.at - S(seg.target_timerange.start)) * speed;
-      const ramp = (z.ramp ?? rules.faceZoom.rampSeconds) * speed;
-      const to = z.to ?? rules.faceZoom.to;
-      const kf = popKeyframes(rules.faceZoom.from, to, 0, `zoom:${i}`)[0];
-      kf.keyframe_list[0].time_offset = Math.round(srcStart + US(into));
-      kf.keyframe_list[1].time_offset = Math.round(srcStart + US(into + ramp));
-      if (z.hold !== 0) {
-        const holdS = (z.hold ?? rules.faceZoomHoldSeconds) * speed;
-        const endSrc = srcStart + seg.source_timerange?.duration;
-        const outAt = Math.round(srcStart + US(into + ramp + holdS));
-        const backAt = Math.round(outAt + US(ramp));
-        if (!endSrc || backAt <= endSrc) {
-          kf.keyframe_list.push(
-            { ...clone(kf.keyframe_list[1]), id: mint(`kfc:${i}`), time_offset: outAt, values: [to] },
-            { ...clone(kf.keyframe_list[0]), id: mint(`kfd:${i}`), time_offset: backAt, values: [rules.faceZoom.from] });
-        }
+      if ((seg.clip?.alpha ?? 1) <= 0) {
+        result.zooms.push({ at: z.at, skipped: 'hidden face' });
+        continue;
       }
-      seg.common_keyframes = [kf];
-      result.zooms.push({ at: z.at, to, hold: z.hold ?? rules.faceZoomHoldSeconds,
-                          shape: kf.keyframe_list.length === 4 ? 'push-hold-release' : 'push' });
+      const masks = new Set((doc.materials.common_mask || []).map(m => m.id));
+      if (seg.enable_video_mask !== false && (seg.extra_material_refs || []).some(r => masks.has(r))) {
+        result.zooms.push({ at: z.at, skipped: 'masked face; choose a full-face scene' });
+        continue;
+      }
+      const ramp = z.ramp ?? rules.faceZoom.rampSeconds;
+      const remaining = S(seg.target_timerange.start + seg.target_timerange.duration) - z.at;
+      if (z.hold == null && remaining < 2 * ramp) {
+        result.zooms.push({ at: z.at, skipped: 'too short for a push and return' });
+        continue;
+      }
+      const move = opScaleKeyframe(doc, { selector: { id: seg.id }, at: z.at, ramp,
+        to: z.to ?? (seg.clip?.scale?.x ?? 1) * rules.faceZoom.to,
+        hold: z.hold ?? Math.min(rules.faceZoomHoldSeconds, Math.max(0, remaining - 2 * ramp)),
+        __seed: op.__seed });
+      result.zooms.push({ at: z.at, to: move.to, hold: move.hold, shape: move.shape,
+        shortenedHold: z.hold == null && move.hold < rules.faceZoomHoldSeconds });
     }
   }
 

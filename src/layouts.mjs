@@ -396,6 +396,7 @@ export function opLayoutApply(doc, op, context = {}) {
   const overlays = [];
   for (const entry of targets) {
     const subject = entry.segment;
+    restoreScreenHiddenPrincipal(subject);
     subject.clip = clone(layout.subject.clip);
     subject.uniform_scale = { on: true, value: 1.0 };
     subject.desc = subject.desc && subject.desc.startsWith('layout:') ? LAYOUT_DESC(op.layout) : (subject.desc || LAYOUT_DESC(op.layout));
@@ -422,6 +423,7 @@ export function opLayoutApply(doc, op, context = {}) {
       overlays.push({ id: overlay.id, track: slot.index, created: slot.created });
     }
   }
+  pruneEmptyScreenHelperTracks(doc);
   renumberTracks(doc);
   return { changed: targets.length, layout: op.layout, overlays };
 }
@@ -440,12 +442,16 @@ function removeMask(doc, segment) {
 
 /** Drop layout plates on ANY track covering this span (blur sits BELOW the subject). */
 function removeOverlaysOver(doc, _trackIndex, span) {
+  const wholeScreenOwners = new Set(allSegments(doc)
+    .filter(({ segment }) => isScreenRecordingSegment(doc, segment)
+      && sameRange(segment.target_timerange, span))
+    .map(({ segment }) => String(segment.id)));
   for (const track of doc.tracks) {
     if (track.type !== 'video') continue;
     track.segments = (track.segments || []).filter(s =>
       !((s.desc || '').startsWith('layout:')
-        && s.target_timerange.start === span.start
-        && s.target_timerange.duration === span.duration));
+        && (sameRange(s.target_timerange, span)
+          || (SCREEN_LAYOUT_ROLES.has(s.desc) && wholeScreenOwners.has(String(screenLayerOwner(s)))))));
   }
 }
 
@@ -1071,9 +1077,23 @@ const SCREEN_LAYOUT_ROLES = new Set([
   'layout:screen-frame', 'layout:screen-pip', 'layout:screen-pip-ring', 'layout:screen-blur'
 ]);
 const SCREEN_RECORDING_DESC = 'layout:screen-recording';
+const SCREEN_HELPER_TRACK_RE = /^layout-screen-(background|frame|pip|pip-ring)(?:--[A-Za-z0-9._-]+)?$/;
+const SCREEN_HIDDEN = 'screen_layout_hidden';
+const SCREEN_PARENT = 'screen_layout_parent_id';
+const SCREEN_ORIGINAL_ALPHA = 'screen_layout_original_alpha';
+const SCREEN_ORIGINAL_KEYFRAMES = 'screen_layout_original_common_keyframes';
+const SCREEN_ORIGINAL_KEYFRAME_REFS = 'screen_layout_original_keyframe_refs';
 
 function screenLayerOwner(segment) {
   return segment?.screen_recording_id || segment?.screenRecordingId || segment?.layout_owner_id || null;
+}
+
+function screenRoleFromTrack(track) {
+  return String(track?.name || '').match(SCREEN_HELPER_TRACK_RE)?.[1] || null;
+}
+
+function isScreenHelperTrack(track) {
+  return track?.type === 'video' && track?.flag === 2 && screenRoleFromTrack(track) != null;
 }
 
 /** Recognise an existing RL2/window capture without trusting an arbitrary video selector. */
@@ -1126,6 +1146,119 @@ function rangesOverlap(a, b) {
   return Boolean(a && b && a.start < b.start + b.duration && b.start < a.start + a.duration);
 }
 
+function rangeIntersection(a, b) {
+  if (!rangesOverlap(a, b)) return null;
+  const start = Math.max(a.start, b.start);
+  const end = Math.min(a.start + a.duration, b.start + b.duration);
+  return end > start ? { start, duration: end - start } : null;
+}
+
+function sliceSegment(segment, targetRange, id) {
+  const oldTarget = segment.target_timerange;
+  const piece = clone(segment);
+  piece.id = id;
+  piece.target_timerange = clone(targetRange);
+  if (segment.source_timerange && oldTarget?.duration > 0) {
+    const speed = segment.source_timerange.duration / oldTarget.duration;
+    const offset = targetRange.start - oldTarget.start;
+    piece.source_timerange = {
+      start: segment.source_timerange.start + Math.round(offset * speed),
+      duration: Math.round(targetRange.duration * speed)
+    };
+  }
+  if (piece.render_timerange) {
+    piece.render_timerange = {
+      ...piece.render_timerange,
+      start: targetRange.start,
+      duration: targetRange.duration
+    };
+  }
+  return piece;
+}
+
+function restoreScreenHiddenPrincipal(subject) {
+  if (!subject) return;
+  const hasAlphaBackup = Object.prototype.hasOwnProperty.call(subject, SCREEN_ORIGINAL_ALPHA);
+  const hasKeyframeBackup = Object.prototype.hasOwnProperty.call(subject, SCREEN_ORIGINAL_KEYFRAMES);
+  const alphaGroups = (subject.common_keyframes || []).filter(group => group.property_type === 'KFTypeAlpha');
+  const strippedHiddenAlpha = Number(subject.clip?.alpha) === 0
+    && alphaGroups.length > 0
+    && alphaGroups.every(group => (group.keyframe_list || []).length > 0
+      && group.keyframe_list.every(keyframe => Array.isArray(keyframe.values)
+        && keyframe.values.length > 0 && keyframe.values.every(value => Number(value) === 0)));
+  if (subject[SCREEN_HIDDEN] || hasAlphaBackup || hasKeyframeBackup || strippedHiddenAlpha) {
+    subject.clip ||= {};
+    subject.clip.alpha = hasAlphaBackup && Number.isFinite(Number(subject[SCREEN_ORIGINAL_ALPHA]))
+      ? Number(subject[SCREEN_ORIGINAL_ALPHA]) : 1;
+    if (hasKeyframeBackup) subject.common_keyframes = clone(subject[SCREEN_ORIGINAL_KEYFRAMES]);
+    if (Object.prototype.hasOwnProperty.call(subject, SCREEN_ORIGINAL_KEYFRAME_REFS)) {
+      subject.keyframe_refs = clone(subject[SCREEN_ORIGINAL_KEYFRAME_REFS]);
+    }
+    if (strippedHiddenAlpha && !hasKeyframeBackup) {
+      subject.common_keyframes = (subject.common_keyframes || [])
+        .filter(group => group.property_type !== 'KFTypeAlpha');
+    }
+  }
+  delete subject[SCREEN_HIDDEN];
+  delete subject[SCREEN_PARENT];
+  delete subject[SCREEN_ORIGINAL_ALPHA];
+  delete subject[SCREEN_ORIGINAL_KEYFRAMES];
+  delete subject[SCREEN_ORIGINAL_KEYFRAME_REFS];
+}
+
+function hidePrincipalVisual(doc, span) {
+  let principal;
+  try { principal = principalTrack(doc); } catch { return 0; }
+  const source = principal.track;
+  const next = [];
+  let changed = 0;
+  for (const segment of source.segments || []) {
+    const target = segment.target_timerange;
+    const covered = rangeIntersection(target, span);
+    if (!covered || segment[SCREEN_HIDDEN]) {
+      next.push(segment);
+      continue;
+    }
+    const start = target.start;
+    const end = target.start + target.duration;
+    const coveredEnd = covered.start + covered.duration;
+    const parentId = segment[SCREEN_PARENT] || segment.id;
+    const pieces = [];
+    if (start < covered.start) pieces.push({ range: { start, duration: covered.start - start }, hidden: false });
+    pieces.push({ range: covered, hidden: true });
+    if (coveredEnd < end) pieces.push({ range: { start: coveredEnd, duration: end - coveredEnd }, hidden: false });
+    for (const [index, pieceSpec] of pieces.entries()) {
+      const id = index === 0 ? segment.id
+        : mint(`screen:hidden:${parentId}:${pieceSpec.range.start}:${pieceSpec.range.duration}`);
+      const piece = sliceSegment(segment, pieceSpec.range, id);
+      piece[SCREEN_PARENT] = parentId;
+      if (pieceSpec.hidden) {
+        piece.clip ||= {};
+        piece[SCREEN_ORIGINAL_ALPHA] = Number.isFinite(Number(piece.clip.alpha)) ? Number(piece.clip.alpha) : 1;
+        piece[SCREEN_ORIGINAL_KEYFRAMES] = clone(piece.common_keyframes || []);
+        piece[SCREEN_ORIGINAL_KEYFRAME_REFS] = clone(piece.keyframe_refs || []);
+        piece.clip.alpha = 0;
+        piece.common_keyframes = (piece.common_keyframes || []).map(group => {
+          if (group.property_type !== 'KFTypeAlpha') return group;
+          return {
+            ...group,
+            keyframe_list: (group.keyframe_list || []).map(keyframe => ({
+              ...keyframe,
+              values: Array.isArray(keyframe.values) ? [0, ...keyframe.values.slice(1)] : [0]
+            }))
+          };
+        });
+        piece[SCREEN_HIDDEN] = true;
+        changed++;
+      }
+      next.push(piece);
+    }
+  }
+  source.segments = next;
+  renumberTracks(doc);
+  return changed;
+}
+
 function removeScreenLayersAt(doc, span, recordingId) {
   const removed = [];
   const competing = new Set(allSegments(doc)
@@ -1161,59 +1294,119 @@ function removeScreenLayersAt(doc, span, recordingId) {
   return removed;
 }
 
+function screenLaneMoveIndexes(doc, moving, anchor, before) {
+  const tracks = doc.tracks.filter(track => track !== moving);
+  const anchorIndex = tracks.indexOf(anchor);
+  const at = Math.max(1, Math.min(tracks.length, anchorIndex + (before ? 0 : 1)));
+  tracks.splice(at, 0, moving);
+  return { tracks, indexes: new Map(tracks.map((track, index) => [track, index])), at };
+}
+
+function screenLaneCompatible(doc, track, expectedDesc, recordingTrack, span, ownerId, before) {
+  if (!isScreenHelperTrack(track) || track === recordingTrack) return false;
+  const segments = track.segments || [];
+  if (segments.some(segment => segment.desc !== expectedDesc)) return false;
+  if (span && segments.some(segment => rangesOverlap(segment.target_timerange, span)
+      && String(screenLayerOwner(segment) || '') !== String(ownerId || ''))) return false;
+
+  const moved = screenLaneMoveIndexes(doc, track, recordingTrack, before);
+  if (!moved.indexes.has(recordingTrack) || moved.indexes.get(recordingTrack) < 1) return false;
+  const recordings = new Map(allSegments(doc)
+    .filter(({ segment }) => isScreenRecordingSegment(doc, segment))
+    .map(({ segment, track: sourceTrack }) => [String(segment.id), sourceTrack]));
+  const laneIndex = moved.indexes.get(track);
+  for (const segment of segments) {
+    const owner = screenLayerOwner(segment);
+    const sourceTrack = owner == null ? null : recordings.get(String(owner));
+    if (!sourceTrack) continue;
+    const sourceIndex = moved.indexes.get(sourceTrack);
+    if (sourceIndex == null) continue;
+    const wantsBefore = expectedDesc === 'layout:screen-blur';
+    if (wantsBefore ? laneIndex >= sourceIndex : laneIndex <= sourceIndex) return false;
+  }
+  return true;
+}
+
+function validateNamedScreenLane(track, name, recordingTrack, expectedDesc) {
+  if (track.type !== 'video') {
+    throw new CapcutError(`layout.screen: generated lane "${name}" is not a video track.`,
+      { code: 'UNSAFE_SCREEN_LANE', exitCode: 2 });
+  }
+  if (track.flag === 0) {
+    throw new CapcutError(`layout.screen: generated lane "${name}" is the main/cover track.`,
+      { code: 'MAIN_TRACK', exitCode: 2 });
+  }
+  if (track.flag !== 2) {
+    throw new CapcutError(`layout.screen: generated lane "${name}" is not an overlay track (flag=${track.flag}).`,
+      { code: 'UNSAFE_SCREEN_LANE', exitCode: 2 });
+  }
+  if (track === recordingTrack) {
+    throw new CapcutError(`layout.screen: generated lane "${name}" aliases the recording track.`,
+      { code: 'UNSAFE_SCREEN_LANE', exitCode: 2 });
+  }
+  if ((track.segments || []).some(segment => segment.desc !== expectedDesc)) {
+    throw new CapcutError(`layout.screen: generated lane "${track.name}" contains foreign footage.`,
+      { code: 'UNSAFE_SCREEN_LANE', exitCode: 2 });
+  }
+}
+
 /** Find or create a dedicated screen-layout lane and repair its z-order before reuse. */
 function screenTrack(doc, name, recordingTrack, before = false, span = null, ownerId = null) {
-  const role = name.match(/^layout-screen-(background|frame|pip|pip-ring)(?:--.*)?$/)?.[1] || null;
+  const role = String(name).match(/^layout-screen-(background|frame|pip|pip-ring)$/)?.[1] || null;
   const expectedDesc = role ? `layout:screen-${role === 'background' ? 'blur' : role}` : null;
   const safeName = ownerId ? `${name}--${safeArtifactName(ownerId)}` : name;
-  const hasForeignSameRange = track => span && (track.segments || []).some(segment =>
-    expectedDesc && segment.desc === expectedDesc && sameRange(segment.target_timerange, span)
-    && String(screenLayerOwner(segment) || '') !== String(ownerId || ''));
-  let named = (doc.tracks || []).find(track => track.name === name);
-  if (named && hasForeignSameRange(named)) named = null;
-  if (!named && safeName !== name) named = (doc.tracks || []).find(track => track.name === safeName);
+  const exact = (doc.tracks || []).find(track => track.name === name);
+  if (exact) {
+    const sameRangeForeign = span && (exact.segments || []).some(segment => expectedDesc
+      && segment.desc === expectedDesc && sameRange(segment.target_timerange, span)
+      && String(screenLayerOwner(segment) || '') !== String(ownerId || ''));
+    if (!sameRangeForeign) validateNamedScreenLane(exact, name, recordingTrack, expectedDesc);
+  }
+
+  const candidates = (doc.tracks || []).filter(track => {
+    if (!expectedDesc || !screenRoleFromTrack(track) || screenRoleFromTrack(track) !== role) return false;
+    if (track === exact && exact && span && (exact.segments || []).some(segment => expectedDesc
+        && sameRange(segment.target_timerange, span)
+        && String(screenLayerOwner(segment) || '') !== String(ownerId || ''))) return false;
+    if (track !== exact && (track.segments || []).some(segment => segment.desc !== expectedDesc)) return false;
+    return screenLaneCompatible(doc, track, expectedDesc, recordingTrack, span, ownerId, before);
+  });
+  const named = candidates.find(track => track === exact)
+    || candidates.find(track => track.name === safeName)
+    || candidates[0];
   if (named) {
-    if (named.type !== 'video') {
-      throw new CapcutError(`layout.screen: generated lane "${name}" is not a video track.`,
-        { code: 'UNSAFE_SCREEN_LANE', exitCode: 2 });
-    }
-    if (named.flag === 0) {
-      throw new CapcutError(`layout.screen: generated lane "${name}" is the main/cover track.`,
-        { code: 'MAIN_TRACK', exitCode: 2 });
-    }
-    if (named.flag !== 2) {
-      throw new CapcutError(`layout.screen: generated lane "${name}" is not an overlay track (flag=${named.flag}).`,
-        { code: 'UNSAFE_SCREEN_LANE', exitCode: 2 });
-    }
-    if (named === recordingTrack) {
-      throw new CapcutError(`layout.screen: generated lane "${name}" aliases the recording track.`,
-        { code: 'UNSAFE_SCREEN_LANE', exitCode: 2 });
-    }
-    if (expectedDesc && (named.segments || []).some(segment => segment.desc !== expectedDesc)) {
-      throw new CapcutError(`layout.screen: generated lane "${named.name}" contains foreign footage.`,
-        { code: 'UNSAFE_SCREEN_LANE', exitCode: 2 });
-    }
     const current = doc.tracks.indexOf(named);
-    const anchor = doc.tracks.indexOf(recordingTrack);
-    if (anchor < 1 || current < 0) {
+    const moved = screenLaneMoveIndexes(doc, named, recordingTrack, before);
+    if (!moved.indexes.has(recordingTrack) || moved.indexes.get(recordingTrack) < 1) {
       throw new CapcutError('layout.screen: recording/lane order is invalid.', { code: 'UNSAFE_SCREEN_LANE', exitCode: 2 });
     }
     doc.tracks.splice(current, 1);
-    const anchorAfter = doc.tracks.indexOf(recordingTrack);
-    const desired = Math.max(1, Math.min(doc.tracks.length, anchorAfter + (before ? 0 : 1)));
-    doc.tracks.splice(desired, 0, named);
+    doc.tracks.splice(moved.at, 0, named);
     renumberTracks(doc);
-    return { track: named, index: doc.tracks.indexOf(named), created: false, repaired: current !== desired };
+    return { track: named, index: doc.tracks.indexOf(named), created: false, repaired: current !== moved.at };
   }
-  const recordingIndex = doc.tracks.indexOf(recordingTrack);
-  if (recordingIndex < 1 || recordingTrack.flag === 0) {
+
+  if (recordingTrack.flag === 0 || doc.tracks.indexOf(recordingTrack) < 1) {
     throw new CapcutError('layout.screen: the recording must be on an overlay track; the main/cover track stays empty.',
       { code: 'MAIN_TRACK', exitCode: 2 });
   }
+  const createName = exact ? safeName : name;
+  if ((doc.tracks || []).some(track => track.name === createName && track !== exact)) {
+    throw new CapcutError(`layout.screen: generated lane "${createName}" cannot be reused safely.`,
+      { code: 'UNSAFE_SCREEN_LANE', exitCode: 2 });
+  }
+  const recordingIndex = doc.tracks.indexOf(recordingTrack);
   const at = Math.max(1, recordingIndex + (before ? 0 : 1));
-  const track = insertOverlayTrack(doc, at, mint(`screen:track:${safeName}`));
-  track.name = safeName;
+  const track = insertOverlayTrack(doc, at, mint(`screen:track:${createName}`));
+  track.name = createName;
   return { track, index: doc.tracks.indexOf(track), created: true, repaired: false };
+}
+
+function pruneEmptyScreenHelperTracks(doc) {
+  const before = doc.tracks.length;
+  doc.tracks = doc.tracks.filter(track => !(isScreenHelperTrack(track) && !(track.segments || []).length));
+  if (doc.tracks.length !== before) renumberTracks(doc);
+  return before - doc.tracks.length;
 }
 
 function screenPipSelector(op) {
@@ -1222,6 +1415,7 @@ function screenPipSelector(op) {
 
 function resolveScreenPip(doc, recording, op) {
   const selector = screenPipSelector(op);
+  let sourceTrack;
   if (selector) {
     const found = selectSegments(doc, selector).filter(entry => entry.segment.id !== recording.id);
     if (!found.length) {
@@ -1232,35 +1426,32 @@ function resolveScreenPip(doc, recording, op) {
       throw new CapcutError(`layout.screen: pip selector matched ${found.length} segments; use a unique id or "allPips": true.`,
         { code: 'PIP_SELECTOR_AMBIGUOUS', exitCode: 2 });
     }
-    return found[0];
+    sourceTrack = found[0].track;
+  } else {
+    let principal;
+    try {
+      principal = principalTrack(doc, op.pipTrack == null ? null : Number(op.pipTrack));
+    } catch (error) {
+      throw new CapcutError(
+        `layout.screen: provide pipSelector for the talking-head source (${error.message})`,
+        { code: 'PIP_SELECTOR_REQUIRED', exitCode: 2 }
+      );
+    }
+    sourceTrack = principal.track;
   }
 
-  let principal;
-  try {
-    principal = principalTrack(doc, op.pipTrack == null ? null : Number(op.pipTrack));
-  } catch (error) {
-    throw new CapcutError(
-      `layout.screen: provide pipSelector for the talking-head source (${error.message})`,
-      { code: 'PIP_SELECTOR_REQUIRED', exitCode: 2 }
-    );
-  }
-  const candidates = (principal.track.segments || [])
+  const candidates = (sourceTrack.segments || [])
     .filter(segment => segment.id !== recording.id && !SCREEN_LAYOUT_ROLES.has(segment.desc)
       && rangesOverlap(segment.target_timerange, recording.target_timerange))
-    .map(segment => ({ segment, track: principal.track, trackIndex: principal.index }))
-    .sort((a, b) => {
-      const overlap = entry => Math.min(entry.segment.target_timerange.start + entry.segment.target_timerange.duration,
-        recording.target_timerange.start + recording.target_timerange.duration)
-        - Math.max(entry.segment.target_timerange.start, recording.target_timerange.start);
-      return overlap(b) - overlap(a);
-    });
+    .map(segment => ({ segment, track: sourceTrack, trackIndex: doc.tracks.indexOf(sourceTrack) }))
+    .sort((a, b) => a.segment.target_timerange.start - b.segment.target_timerange.start);
   if (!candidates.length) {
     throw new CapcutError(
       'layout.screen: no talking-head segment overlaps the recording; pass pipSelector explicitly.',
       { code: 'PIP_SELECTOR_REQUIRED', exitCode: 2 }
     );
   }
-  return candidates[0];
+  return candidates;
 }
 
 function screenTime(value, field, { allowZero = false } = {}) {
@@ -1272,8 +1463,8 @@ function screenTime(value, field, { allowZero = false } = {}) {
   return Math.round(seconds * 1e6);
 }
 
-function screenMaterialDuration(value, fallback) {
-  if (value == null) return fallback;
+function screenMaterialDuration(value) {
+  if (value == null) return null;
   const duration = Number(value);
   if (!Number.isFinite(duration) || duration <= 0) {
     throw new CapcutError('layout.screen: mediaDuration must be finite and positive.', { code: 'BAD_TIME', exitCode: 2 });
@@ -1382,7 +1573,17 @@ function ensureScreenMaterial(doc, op, context, screen, sourceStartUs, sourceDur
     throw new CapcutError('layout.screen: media width and height must be finite and positive.',
       { code: 'BAD_DIMENSIONS', exitCode: 2 });
   }
-  const requestedDuration = screenMaterialDuration(op.mediaDuration, sourceStartUs + sourceDurationUs);
+  const probedDuration = screenMaterialDuration(op.mediaDuration);
+  const storedDuration = Number(material?.duration);
+  const knownDuration = Number.isFinite(storedDuration) && storedDuration > 0 ? storedDuration : probedDuration;
+  if (!(knownDuration > 0)) {
+    throw new CapcutError('layout.screen: media has no known duration; provide mediaDuration.',
+      { code: 'BAD_MEDIA_DURATION', exitCode: 2 });
+  }
+  if (sourceStartUs + sourceDurationUs > knownDuration + 1) {
+    throw new CapcutError(`layout.screen: source window ends at ${(sourceStartUs + sourceDurationUs) / 1e6}s, `
+      + `beyond media duration ${knownDuration / 1e6}s.`, { code: 'SOURCE_AFTER_END', exitCode: 2 });
+  }
   if (material) {
     if (path.resolve(expand(material.path)) !== path.resolve(destination)) material.path = destination;
     material.source_take_id = sourceTakeId(source);
@@ -1396,13 +1597,9 @@ function ensureScreenMaterial(doc, op, context, screen, sourceStartUs, sourceDur
         sourceTakeId: material.source_take_id,
       });
     }
-    if (!Number.isFinite(material.duration) || material.duration < requestedDuration) material.duration = requestedDuration;
     if (!material.width) material.width = width;
     if (!material.height) material.height = height;
-    if (sourceStartUs + sourceDurationUs > material.duration + 1) {
-      throw new CapcutError(`layout.screen: source window ends at ${(sourceStartUs + sourceDurationUs) / 1e6}s, `
-        + `beyond media duration ${material.duration / 1e6}s.`, { code: 'SOURCE_AFTER_END', exitCode: 2 });
-    }
+    material.duration = knownDuration;
     return material;
   }
 
@@ -1419,7 +1616,7 @@ function ensureScreenMaterial(doc, op, context, screen, sourceStartUs, sourceDur
   material.local_material_id = '';
   material.width = width;
   material.height = height;
-  material.duration = requestedDuration;
+  material.duration = probedDuration;
   material.source_take_id = sourceTakeId(source);
   material.source_path = source;
   if (path.resolve(destination) !== source) {
@@ -1443,10 +1640,6 @@ function upsertScreenRecording(doc, op, context, screen) {
   const sourceStartUs = screenTime(op.src == null ? 0 : op.src, '--src', { allowZero: true });
   const sourceDurationUs = screenTime(op.srcDur == null ? op.duration : op.srcDur, '--src-dur');
   const material = ensureScreenMaterial(doc, op, context, screen, sourceStartUs, sourceDurationUs);
-  if (sourceStartUs + sourceDurationUs > material.duration + 1) {
-    throw new CapcutError(`layout.screen: source window ends at ${(sourceStartUs + sourceDurationUs) / 1e6}s, `
-      + `beyond media duration ${(material.duration || 0) / 1e6}s.`, { code: 'SOURCE_AFTER_END', exitCode: 2 });
-  }
   const destination = screenTrackForRecording(doc, op.track);
   const existing = (destination.track.segments || []).find(segment =>
     (op.id && segment.id === op.id)
@@ -1484,48 +1677,78 @@ function upsertScreenRecording(doc, op, context, screen) {
   return { segment: recording, track: destination.track, index: doc.tracks.indexOf(destination.track), created: destination.created };
 }
 
-function pipSourceRange(source, target) {
+function sourceSlice(source, target) {
+  const targetRange = rangeIntersection(source.target_timerange, target);
+  if (!targetRange) return null;
   const sourceRange = source.source_timerange;
-  const targetRange = source.target_timerange;
-  if (!sourceRange || !targetRange || !(targetRange.duration > 0)) {
-    return { start: 0, duration: target.duration };
+  if (!sourceRange || !(source.target_timerange?.duration > 0)) {
+    return { target: targetRange, source: { start: 0, duration: targetRange.duration } };
   }
-  const speed = sourceRange.duration / targetRange.duration || 1;
-  const offset = Math.max(0, target.start - targetRange.start);
+  const speed = sourceRange.duration / source.target_timerange.duration || 1;
+  const offset = targetRange.start - source.target_timerange.start;
   return {
-    start: sourceRange.start + Math.round(offset * speed),
-    duration: Math.round(target.duration * speed)
+    target: targetRange,
+    source: {
+      start: sourceRange.start + Math.round(offset * speed),
+      duration: Math.round(targetRange.duration * speed)
+    }
   };
 }
 
-function buildScreenPip(doc, recording, source, circle) {
+function applyFreshMask(doc, segment, maskTemplate, config) {
+  const index = materialById(doc);
+  const refs = (segment.extra_material_refs || []).filter(id => {
+    const item = index.get(id);
+    return !(item?.kind === 'common_mask' || item?.value?.type === 'mask');
+  });
+  const mask = clone(maskTemplate);
+  mask.id = mint(`${segment.id}:mask`);
+  mask.config = clone(config);
+  ensureMaterialArray(doc, 'common_mask').push(mask);
+  segment.extra_material_refs = [...refs, mask.id];
+  segment.enable_video_mask = true;
+}
+
+function buildScreenPip(doc, recording, source, circle, piece) {
   const pip = clone(source.segment);
-  pip.id = mint(`${recording.id}:screen-pip`);
+  pip.id = mint(`${recording.id}:screen-pip:${source.segment.id}:${piece.target.start}:${piece.target.duration}`);
   pip.material_id = source.segment.material_id;
-  pip.target_timerange = clone(recording.target_timerange);
-  pip.source_timerange = pipSourceRange(source.segment, recording.target_timerange);
+  pip.target_timerange = clone(piece.target);
+  pip.source_timerange = clone(piece.source);
   pip.clip = clone(circle.subject.clip);
   pip.uniform_scale = { on: true, value: 1.0 };
-  pip.extra_material_refs = [];
-  pip.enable_video_mask = false;
-  pip.keyframe_refs = [];
-  pip.common_keyframes = [];
+  pip.extra_material_refs = (source.segment.extra_material_refs || []).slice();
+  delete pip.keyframe_refs;
+  delete pip.common_keyframes;
+  if (Object.prototype.hasOwnProperty.call(source.segment, SCREEN_ORIGINAL_KEYFRAME_REFS)) {
+    pip.keyframe_refs = clone(source.segment[SCREEN_ORIGINAL_KEYFRAME_REFS]);
+  } else {
+    pip.keyframe_refs = clone(source.segment.keyframe_refs || []);
+  }
+  if (Object.prototype.hasOwnProperty.call(source.segment, SCREEN_ORIGINAL_KEYFRAMES)) {
+    pip.common_keyframes = clone(source.segment[SCREEN_ORIGINAL_KEYFRAMES]);
+  } else {
+    pip.common_keyframes = clone(source.segment.common_keyframes || []);
+  }
+  // Source camera values are absolute and would override the inset's new framing.
+  pip.common_keyframes = pip.common_keyframes.filter(group => !/KFType(Scale|Position|Rotation)/.test(group.property_type));
+  for (const key of [SCREEN_HIDDEN, SCREEN_PARENT, SCREEN_ORIGINAL_ALPHA,
+    SCREEN_ORIGINAL_KEYFRAMES, SCREEN_ORIGINAL_KEYFRAME_REFS]) delete pip[key];
   pip.volume = 0;
   pip.desc = 'layout:screen-pip';
   pip.screen_recording_id = recording.id;
   pip.render_index = (recording.render_index || 0) + 3;
-  applyMask(doc, pip, circle.subject.maskTemplate, circle.subject.mask);
+  applyFreshMask(doc, pip, circle.subject.maskTemplate, circle.subject.mask);
   return pip;
 }
 
-function buildScreenBlur(doc, recording, background) {
+function buildScreenBlur(doc, recording, source, background, piece, index) {
   const plate = clone(background.segmentTemplate);
-  plate.id = mint(`${recording.id}:screen-blur`);
-  plate.material_id = recording.material_id;
-  plate.target_timerange = clone(recording.target_timerange);
-  plate.source_timerange = clone(recording.source_timerange || {
-    start: 0, duration: recording.target_timerange.duration
-  });
+  const suffix = index ? `:${source.segment.id}:${piece.target.start}` : '';
+  plate.id = mint(`${recording.id}:screen-blur${suffix}`);
+  plate.material_id = source.segment.material_id;
+  plate.target_timerange = clone(piece.target);
+  plate.source_timerange = clone(piece.source);
   plate.clip = clone(background.clip);
   plate.render_index = Math.max(0, (recording.render_index || 0) - 1);
   plate.desc = 'layout:screen-blur';
@@ -1533,7 +1756,7 @@ function buildScreenBlur(doc, recording, background) {
   plate.volume = 0;
   plate.enable_video_mask = false;
   const effect = clone(background.effect);
-  effect.id = mint(`${recording.id}:screen-blur-effect`);
+  effect.id = mint(`${recording.id}:screen-blur-effect${suffix}`);
   if ('bind_segment_id' in effect) effect.bind_segment_id = plate.id;
   ensureMaterialArray(doc, 'video_effects').push(effect);
   plate.extra_material_refs = [effect.id];
@@ -1607,11 +1830,11 @@ export function opLayoutScreen(doc, op = {}, context = {}) {
       throw new CapcutError(`layout.screen: recording ${entry.segment.id} has no video material.`,
         { code: 'MISSING_MATERIAL_SOURCE', exitCode: 2 });
     }
-    return { recordingEntry: entry, pipSource: resolveScreenPip(doc, entry.segment, op) };
+    return { recordingEntry: entry, pipSources: resolveScreenPip(doc, entry.segment, op) };
   });
 
   const output = [];
-  for (const { recordingEntry, pipSource } of plans) {
+  for (const { recordingEntry, pipSources } of plans) {
     const recording = recordingEntry.segment;
     const recordingTrack = recordingEntry.track;
     removeScreenLayersAt(doc, recording.target_timerange, recording.id);
@@ -1650,11 +1873,18 @@ export function opLayoutScreen(doc, op = {}, context = {}) {
         && String(screenLayerOwner(segment) || '') === String(recording.id)));
     frameTrack.track.segments.push(frame);
 
-    const pip = buildScreenPip(doc, recording, pipSource, circle);
-    pipTrack.track.segments = (pipTrack.track.segments || []).filter(segment => segment.desc !== 'layout:screen-pip'
-      || !sameRange(segment.target_timerange, recording.target_timerange)
-      || String(screenLayerOwner(segment) || '') !== String(recording.id));
-    pipTrack.track.segments.push(pip);
+    const pips = pipSources.flatMap(source => {
+      const piece = sourceSlice(source.segment, recording.target_timerange);
+      return piece ? [buildScreenPip(doc, recording, source, circle, piece)] : [];
+    });
+    if (!pips.length) {
+      throw new CapcutError('layout.screen: no talking-head segment overlaps the recording; pass pipSelector explicitly.',
+        { code: 'PIP_SELECTOR_REQUIRED', exitCode: 2 });
+    }
+    pipTrack.track.segments = (pipTrack.track.segments || []).filter(segment =>
+      !(segment.desc === 'layout:screen-pip'
+        && String(screenLayerOwner(segment) || '') === String(recording.id)));
+    pipTrack.track.segments.push(...pips);
 
     const ring = buildOverlaySegment(doc, recording, {
       asset: circle.overlay.asset,
@@ -1671,31 +1901,39 @@ export function opLayoutScreen(doc, op = {}, context = {}) {
       || String(screenLayerOwner(segment) || '') !== String(recording.id));
     ringTrack.track.segments.push(ring);
 
-    const blur = buildScreenBlur(doc, recording, background);
-    backgroundTrack.track.segments = (backgroundTrack.track.segments || []).filter(segment => segment.desc !== 'layout:screen-blur'
-      || !sameRange(segment.target_timerange, recording.target_timerange)
-      || String(screenLayerOwner(segment) || '') !== String(recording.id));
-    backgroundTrack.track.segments.push(blur.plate);
+    const blurs = pipSources.flatMap((source, index) => {
+      const piece = sourceSlice(source.segment, recording.target_timerange);
+      return piece ? [buildScreenBlur(doc, recording, source, background, piece, index)] : [];
+    });
+    backgroundTrack.track.segments = (backgroundTrack.track.segments || []).filter(segment =>
+      !(segment.desc === 'layout:screen-blur'
+        && String(screenLayerOwner(segment) || '') === String(recording.id)));
+    backgroundTrack.track.segments.push(...blurs.map(({ plate }) => plate));
 
     for (const lane of [backgroundTrack, frameTrack, pipTrack, ringTrack]) {
       lane.track.segments.sort((a, b) => (a.target_timerange?.start || 0) - (b.target_timerange?.start || 0));
     }
     output.push({
       recording: recording.id,
-      pip: pip.id,
+      pip: pips[0].id,
       frame: frame.id,
       ring: ring.id,
-      blur: blur.plate.id,
+      blur: blurs[0].plate.id,
       tracks: {
-        recording: doc.tracks.indexOf(recordingTrack),
-        background: doc.tracks.indexOf(backgroundTrack.track),
-        frame: doc.tracks.indexOf(frameTrack.track),
-        pip: doc.tracks.indexOf(pipTrack.track),
-        ring: doc.tracks.indexOf(ringTrack.track)
+        recording: recordingTrack,
+        background: backgroundTrack.track,
+        frame: frameTrack.track,
+        pip: pipTrack.track,
+        ring: ringTrack.track
       }
     });
   }
+  for (const { recordingEntry } of plans) hidePrincipalVisual(doc, recordingEntry.segment.target_timerange);
+  pruneEmptyScreenHelperTracks(doc);
   renumberTracks(doc);
+  for (const layer of output) {
+    for (const [role, track] of Object.entries(layer.tracks)) layer.tracks[role] = doc.tracks.indexOf(track);
+  }
   return {
     changed: output.length,
     layout: 'screen',

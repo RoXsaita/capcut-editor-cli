@@ -27,11 +27,12 @@ function musicState(doc, projectDir) {
   const track = (doc.tracks || []).find(t => t.type === 'audio' && t.name === 'finish-music');
   const seg = track?.segments?.find(s => (s.desc || '') === 'finish:music');
   const cache = projectDir ? musicCachePaths(projectDir) : null;
+  const material = (doc.materials?.audios || []).find(m => m.id === seg?.material_id);
   return {
     present: Boolean(seg),
     volume: seg?.volume ?? null,
     cached: Boolean(cache && fs.existsSync(cache.file)),
-    file: cache?.file || null,
+    file: material?.path || null,
   };
 }
 
@@ -58,8 +59,9 @@ function countFaceZooms(doc) {
   try {
     const { track } = principalTrack(doc);
     for (const s of track.segments || []) {
+      if ((s.clip?.alpha ?? 1) <= 0) continue;
       const k = (s.common_keyframes || []).find(x => x.property_type === 'KFTypeScaleX');
-      if (k && (k.keyframe_list || []).length >= 2) n++;
+      if (new Set((k?.keyframe_list || []).map(p => p.values?.[0])).size >= 2) n++;
     }
   } catch { /* no principal */ }
   return n;
@@ -130,6 +132,7 @@ export function finishScorecard(doc, { projectDir = null, width = 64 } = {}) {
     logos,
     endcard,
     faceZooms: countFaceZooms(doc),
+    validationScope: 'Structural/edit-plan diagnostics only. Check picture and sound in CapCut before delivery.',
     brollHot: volumeOutliers(doc),
     coldOpen: coldOpen(doc),
     firstPictureProof: proof,
@@ -165,6 +168,10 @@ export function finishText(score) {
   if (score.firstPictureProof && !score.firstPictureProof.ok) {
     lines.push('first-picture: FAIL — finalization is blocked until proof B-roll covers the opening');
   }
-  lines.push('', 'music prompt:', score.musicPrompt);
+  if (score.musicPrepared) {
+    lines.push(`music plan: ${score.musicPrepared.needsBrief ? 'brief required' : score.musicPrepared.wouldGenerate ? 'would generate' : 'reuse selected/cached track'}`);
+    lines.push(`music file: ${score.musicPrepared.file}`);
+  }
+  if (score.musicPrepared?.mode !== 'local') lines.push('', 'music prompt:', score.musicPrompt);
   return lines.join('\n');
 }

@@ -35,6 +35,24 @@ function doc() {
   };
 }
 
+test('automatic face punches skip hidden carriers but keep visible full-face scenes', () => {
+  const d = doc();
+  d.tracks[1].segments[1].clip.alpha = 0;
+  assert.deepEqual(talkingHeadScenes(d).map(s => s.start), [10]);
+  d.tracks[1].segments[0].enable_video_mask = false;
+  assert.deepEqual(talkingHeadScenes(d).map(s => s.start), [0,10]);
+});
+
+test('a zoom preserves alpha-only animation and does not select across a nearby cut', () => {
+  const d = doc(), face = d.tracks[1].segments[2];
+  const alpha = {property_type:'KFTypeAlpha',keyframe_list:[{time_offset:US(300),values:[1],curveType:'Line'}]};
+  face.common_keyframes = [alpha];
+  opSignature(d,{zooms:[{at:10.4}]});
+  assert.deepEqual(face.common_keyframes.find(k=>k.property_type==='KFTypeAlpha'),alpha);
+  const r = opSignature(doc(),{zooms:[{at:9.99}]});
+  assert.match(r.zooms[0].skipped,/too short/);
+});
+
 test('sourceToTimeline maps a raw-take moment onto the recut timeline', () => {
   const m = sourceToTimeline(doc());
   assert.equal(m(100), 0);           // start of the first clip

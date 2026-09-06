@@ -1,9 +1,43 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyAdjust, gradeBuffer, scope, solveGrade, opGradeApply, resolveMediaPath, ROLE_TARGETS } from '../src/grade.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import {
+  applyAdjust, gradeBuffer, scope, solveGrade, planGrade, measureSources, opGradeApply, opGradeReset,
+  resolveGradeSource, resolveMediaPath, ROLE_TARGETS
+} from '../src/grade.mjs';
 
 const US = s => Math.round(s * 1e6);
 const SLIDERS = ['brightness', 'contrast', 'saturation', 'highlight', 'shadow', 'white', 'black', 'temperature', 'tone'];
+
+function solidVideo(dir, name, color) {
+  const file = path.join(dir, name);
+  execFileSync('ffmpeg', [
+    '-v', 'error', '-f', 'lavfi', '-i', `color=c=${color}:s=32x32:r=2:d=1`,
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-y', file,
+  ], { stdio: 'ignore' });
+  return file;
+}
+
+function clip(id, materialId, start = 0) {
+  return {
+    id, material_id: materialId,
+    target_timerange: { start: US(start), duration: US(1) },
+    source_timerange: { start: 0, duration: US(1) },
+    extra_material_refs: [],
+  };
+}
+
+function sourceDoc(materials) {
+  return {
+    duration: US(1), materials: { videos: materials, effects: [] },
+    tracks: materials.map((material, i) => ({
+      type: 'video', flag: 2, name: `source-${i}`, segments: [clip(`clip-${i}`, material.id)],
+    })),
+  };
+}
 
 /* ---- the forward model ---------------------------------------------------- */
 
@@ -88,6 +122,45 @@ test('the solver never desaturates a face when told not to', () => {
   assert.ok(sliders.saturation >= 0, `face was desaturated: ${sliders.saturation}`);
 });
 
+test('automatic grading leaves light and dark screen sources unchanged', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcut-grade-'));
+  const d = sourceDoc([
+    { id: 'LIGHT', type: 'video', path: solidVideo(dir, 'light.mp4', 'white') },
+    { id: 'DARK', type: 'video', path: solidVideo(dir, 'dark.mp4', 'black') },
+  ]);
+  const plan = planGrade(d, dir);
+  assert.equal(plan.automatic, false);
+  assert.match(plan.reason, /No explicit target or reference/);
+  assert.equal(plan.sources.length, 2);
+  for (const row of plan.sources) {
+    assert.deepEqual(row.sliders, {});
+    assert.deepEqual(row.after, row.before);
+    assert.match(row.reason, /preserving source appearance/);
+  }
+});
+
+test('an explicit in-project reference uses its measured scope and leaves an acceptable face alone', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcut-grade-'));
+  fs.mkdirSync(path.join(dir, 'refs'));
+  const face = solidVideo(dir, 'face.mp4', 'sienna');
+  fs.copyFileSync(face, path.join(dir, 'refs/reference.mp4'));
+  const d = sourceDoc([{ id: 'FACE', type: 'video', path: face }]);
+  const plan = planGrade(d, dir, { reference: 'face.mp4' });
+  const row = resolveGradeSource(plan, 'face.mp4');
+  assert.equal(plan.automatic, true);
+  assert.equal(row.role, 'face');
+  assert.equal(row.target.black, row.before.black);
+  assert.equal(row.target.white, row.before.white);
+  assert.deepEqual(row.sliders, {});
+  assert.deepEqual(row.after, row.before);
+  const filePlan = planGrade(d, dir, { reference: 'refs/reference.mp4', referenceAt: 0 });
+  assert.equal(filePlan.sources[0].target.black, row.before.black);
+  assert.throws(() => planGrade(d, dir, { reference: 'face.mp4', referenceAt: -1 }),
+    { code: 'BAD_REFERENCE_TIME' });
+  const atFrame = planGrade(d, dir, { reference: 'face.mp4', referenceAt: 0 });
+  assert.equal(atFrame.sources[0].target.black, filePlan.sources[0].target.black);
+});
+
 /* ---- the write ------------------------------------------------------------ */
 
 function doc() {
@@ -149,9 +222,54 @@ test('re-running replaces its own materials instead of stacking them', () => {
   assert.equal(new Set(refs).size, refs.length, 'stale refs left behind');
 });
 
+test('same-basename sources stay separate and basename selection is explicitly ambiguous', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcut-grade-'));
+  const aDir = path.join(dir, 'a'), bDir = path.join(dir, 'b');
+  fs.mkdirSync(aDir); fs.mkdirSync(bDir);
+  const a = solidVideo(aDir, 'screen.mp4', 'red');
+  const b = solidVideo(bDir, 'screen.mp4', 'blue');
+  const d = sourceDoc([
+    { id: 'A', type: 'video', path: a, source_take_id: 'take-a' },
+    { id: 'B', type: 'video', path: b, source_take_id: 'take-b' },
+  ]);
+  const rows = measureSources(d, dir);
+  assert.deepEqual(rows.map(row => row.source).sort(), ['take-a', 'take-b']);
+  assert.throws(() => resolveGradeSource({ sources: rows }, 'screen.mp4'), error => error.code === 'SOURCE_AMBIGUOUS');
+  const before = structuredClone(d);
+  assert.throws(() => opGradeApply(d, { sources: { 'screen.mp4': { white: 0.2 } } }),
+    error => error.code === 'SOURCE_AMBIGUOUS');
+  assert.deepEqual(d, before, 'ambiguous selection mutated the draft');
+  opGradeApply(d, { __seed: 'identity', sources: { 'take-a': { white: 0.2 } } });
+  assert.equal(d.tracks[0].segments[0].extra_material_refs.length, 1);
+  assert.equal(d.tracks[1].segments[0].extra_material_refs.length, 0);
+});
+
+test('reset removes durable grade effects while retaining foreign corrections', () => {
+  const d = doc();
+  const foreign = { id: 'foreign-adjust', type: 'brightness', name: 'Manual adjustment', value: 0.1 };
+  d.materials.effects.push(foreign);
+  d.tracks[0].segments[0].extra_material_refs.splice(1, 0, foreign.id);
+  opGradeApply(d, { __seed: 'owned', sources: { 'face.mp4': { white: 0.2 } } });
+  const owned = d.materials.effects.find(effect => effect.name?.startsWith('capcutctl:grade:'));
+  assert.ok(owned, 'grade effect has no durable native name marker');
+  delete owned.capcutctl_owner;
+
+  const result = opGradeReset(d, { sources: ['face.mp4'] });
+  assert.equal(result.removed, 1);
+  assert.equal(result.materials, 1);
+  assert.deepEqual(d.materials.effects, [foreign]);
+  const refs = d.tracks[0].segments[0].extra_material_refs;
+  assert.ok(refs.includes(foreign.id));
+  assert.ok(!refs.includes(owned.id));
+  assert.equal(d.tracks[0].segments[0].enable_adjust, true);
+});
+
 test('an unknown slider name is refused rather than written as dead JSON', () => {
-  assert.throws(() => opGradeApply(doc(), { op: 'grade.apply', sources: { 'face.mp4': { gamma: 0.4 } } }),
+  const d = doc();
+  const before = structuredClone(d);
+  assert.throws(() => opGradeApply(d, { op: 'grade.apply', sources: { 'face.mp4': { gamma: 0.4 } } }),
     /Unknown adjust slider "gamma"/);
+  assert.deepEqual(d, before, 'invalid input mutated the draft');
 });
 
 test('the same seed produces the same ids, so the mirrors cannot drift', () => {

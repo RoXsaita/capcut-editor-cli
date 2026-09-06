@@ -259,8 +259,30 @@ test('opMusic places a local file on finish-music and is idempotent', () => {
   assert.ok(lane);
   assert.equal(lane.segments.length, 1);
   assert.equal(lane.segments[0].volume, 0.16);
+  const mat = d.materials.audios.find(a => a.name === 'finish-music');
+  assert.equal(mat.music_id, '');
+  assert.equal(mat.music_source, '');
+  assert.equal(mat.path, mp3);
   opMusic(d, { file: mp3, duration: 8, volume: 0.16, __seed: 'SEED' });
   assert.equal(lane.segments.length, 1, 're-run replaces rather than stacks');
+  assert.equal(d.materials.audios.filter(a => a.name === 'finish-music').length, 1);
+});
+
+test('opMusic localizes the bed and drops Hyperpop library identity', () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'music-proj-'));
+  const mp3 = path.join(projectDir, '.capcutctl', 'music.mp3');
+  fs.mkdirSync(path.dirname(mp3), { recursive: true });
+  fs.writeFileSync(mp3, Buffer.alloc(64));
+  const d = grokLike();
+  d.materials.audios = [{ id: 'OLD', name: 'finish-music', music_id: '7397496663592372260', path: '/cache/old.mp3' }];
+  opMusic(d, { file: mp3, duration: 8, volume: 0.08, __seed: 'SEED' }, { projectDir });
+  const mats = d.materials.audios.filter(a => a.name === 'finish-music');
+  assert.equal(mats.length, 1);
+  assert.equal(mats[0].music_id, '');
+  assert.equal(mats[0].music_source, '');
+  assert.match(mats[0].path, /Resources[\\/]CapcutctlMedia[\\/]finish-music-[0-9a-f]{12}\.mp3$/);
+  assert.equal(fs.existsSync(mats[0].path), true);
+  assert.notEqual(mats[0].path, mp3);
 });
 
 test('opMusic ends the bed at the endcard, not the draft tail', () => {
@@ -276,6 +298,22 @@ test('opMusic ends the bed at the endcard, not the draft tail', () => {
   assert.equal(r.until, 20);
   const lane = d.tracks.find(t => t.name === 'finish-music');
   assert.equal(lane.segments[0].target_timerange.duration, US(20));
+});
+
+test('opMusic ignores a mid-timeline sig:endcard and uses the CTA near contentEnd', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'music-'));
+  const mp3 = path.join(dir, 'bed.mp3');
+  fs.writeFileSync(mp3, Buffer.alloc(64));
+  const d = grokLike();
+  d.duration = US(56.6);
+  d.tracks[2].segments.push(seg(30, 26.6, { id: 'f5' }));
+  d.tracks.push(track('text', [
+    seg(37.6, 2.3, { desc: 'sig:endcard', id: 'url' }),
+    seg(54.3, 2.3, { desc: 'sig:endcard', id: 'cta' }),
+  ]));
+  const r = opMusic(d, { file: mp3, duration: 58, volume: 0.08, __seed: 'SEED' });
+  assert.equal(r.until, 54.3);
+  assert.ok(r.duration > 50, r.duration);
 });
 
 test('cutPoints still sees every splice so the all-cuts plan remains available', () => {

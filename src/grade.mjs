@@ -232,33 +232,139 @@ function mergeScopes(list) {
   return out;
 }
 
-/**
- * Group the timeline by *source file* and measure each one where it is actually used.
- * A source is graded as a unit: two clips off the same recording must not drift apart.
- */
-export function measureSources(doc, projectDir, { samples = 4 } = {}) {
-  const videos = Object.fromEntries((doc.materials?.videos || []).map(m => [m.id, m]));
-  const bySource = new Map();
+const SOURCE_ID_FIELDS = ['source_take_id', 'sourceTakeId', 'rl2_take_id', 'rl2TakeId'];
+const SOURCE_PATH_FIELDS = ['original_path', 'originalPath', 'source_path', 'sourcePath', 'path',
+  'media_path', 'mediaPath'];
+
+function canonicalSourcePath(raw, projectDir = '.') {
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  let resolved;
+  try { resolved = resolveMediaPath(raw, projectDir || '.'); } catch { return null; }
+  if (!resolved) return null;
+  resolved = path.resolve(resolved);
+  try { return fs.realpathSync.native(resolved); } catch { return resolved; }
+}
+
+function sourceInfo(material, segment, projectDir) {
+  const takeId = SOURCE_ID_FIELDS.map(k => segment?.[k] || material?.[k]).find(Boolean);
+  const rawPaths = SOURCE_PATH_FIELDS.map(k => material?.[k]).filter(Boolean);
+  const paths = [...new Set(rawPaths.map(raw => canonicalSourcePath(raw, projectDir)).filter(Boolean))];
+  const file = paths.find(candidate => fs.existsSync(candidate)) || paths[0] || null;
+  const key = takeId ? `take:${takeId}` : file
+    ? `path:${file}` : `material:${material?.id || segment?.material_id || 'unknown'}`;
+  const aliases = new Set([key, takeId, material?.id, ...rawPaths, ...paths]
+    .filter(Boolean).flatMap(value => [String(value), path.basename(String(value))]));
+  return { key, takeId: takeId ? String(takeId) : null, file, aliases };
+}
+
+function sourceEntries(doc, projectDir, { videosOnly = false } = {}) {
+  const videos = new Map((doc.materials?.videos || []).map(m => [m.id, m]));
+  const byIdentity = new Map();
   for (const { segment, track, trackIndex } of allSegments(doc)) {
-    const mat = videos[segment.material_id];
-    if (!mat || mat.type !== 'video') continue;                 // photos/plates carry no grade
-    const file = resolveMediaPath(mat.path, projectDir);
-    if (!file || !fs.existsSync(file)) continue;
-    const key = path.basename(file);
-    if (!bySource.has(key)) bySource.set(key, { source: key, file, clips: [], tracks: new Set() });
-    const e = bySource.get(key);
-    e.tracks.add(track.name || `track ${trackIndex}`);
-    e.clips.push({
+    const material = videos.get(segment.material_id);
+    if (!material || (videosOnly && material.type !== 'video')) continue;
+    const info = sourceInfo(material, segment, projectDir);
+    let entry = byIdentity.get(info.key);
+    if (!entry) {
+      entry = {
+        identity: info.key, takeId: info.takeId, file: info.file, aliases: new Set(info.aliases),
+        clips: [], videoSegments: [], tracks: new Set(),
+      };
+      byIdentity.set(info.key, entry);
+    }
+    if (!entry.file || (!fs.existsSync(entry.file) && info.file)) entry.file = info.file;
+    for (const alias of info.aliases) entry.aliases.add(alias);
+    entry.tracks.add(track.name || `track ${trackIndex}`);
+    const clip = {
       id: segment.id,
       at: segment.target_timerange.start / 1e6,
       dur: segment.target_timerange.duration / 1e6,
       srcIn: segment.source_timerange.start / 1e6,
       srcDur: segment.source_timerange.duration / 1e6,
       desc: segment.desc || '',
-    });
+    };
+    if (material.type === 'video') {
+      entry.clips.push(clip);
+      entry.videoSegments.push({ segment, track, trackIndex });
+    }
   }
+  const entries = [...byIdentity.values()];
+  const counts = new Map();
+  for (const entry of entries) {
+    entry.basename = path.basename(entry.file || entry.identity);
+    counts.set(entry.basename, (counts.get(entry.basename) || 0) + 1);
+  }
+  for (const entry of entries) {
+    // Keep the old friendly basename while it is unique; collisions get a stable id/path.
+    entry.source = counts.get(entry.basename) > 1
+      ? (entry.takeId || entry.file || entry.identity) : entry.basename;
+    entry.aliases.add(entry.source);
+  }
+  return entries;
+}
+
+function sourceMatches(entry, selector, projectDir) {
+  const raw = String(selector ?? '').trim();
+  if (!raw) return false;
+  const aliases = entry.aliases ? [...entry.aliases]
+    : [entry.source, entry.identity, entry.file, path.basename(entry.file || '')].filter(Boolean);
+  if (aliases.includes(raw)) return true;
+  const canonical = canonicalSourcePath(raw, projectDir);
+  return Boolean(canonical && (aliases.includes(canonical) || canonical === entry.file));
+}
+
+function sourceAmbiguity(selector, matches) {
+  return new CapcutError(
+    `grade source selector "${selector}" is ambiguous; choose one of: ${matches.map(m => m.source).join(', ')}`,
+    { code: 'SOURCE_AMBIGUOUS', exitCode: 2, details: { selector, sources: matches.map(m => m.source) } });
+}
+
+/** Resolve a plan row for CLI overrides without reviving substring matching. */
+export function resolveGradeSource(plan, selector, projectDir = '.') {
+  const raw = String(selector ?? '').trim();
+  const rows = plan?.sources || [];
+  const matches = rows.filter(row => sourceMatches(row, raw, projectDir));
+  if (!matches.length) {
+    throw new CapcutError(`grade source selector "${selector}" did not match a source.`,
+      { code: 'SOURCE_EMPTY', exitCode: 2 });
+  }
+  if (matches.length > 1) throw sourceAmbiguity(selector, matches);
+  return matches[0];
+}
+
+function resolveSourceEntry(entries, selector, projectDir) {
+  const matches = entries.filter(entry => sourceMatches(entry, selector, projectDir));
+  if (!matches.length) {
+    throw new CapcutError(`grade source selector "${selector}" did not match a source.`,
+      { code: 'SOURCE_EMPTY', exitCode: 2 });
+  }
+  if (matches.length > 1) throw sourceAmbiguity(selector, matches);
+  return matches[0];
+}
+
+function selectSources(entries, selectors, projectDir) {
+  const selected = [], seen = new Set();
+  for (const selector of selectors) {
+    const entry = resolveSourceEntry(entries, selector, projectDir);
+    if (seen.has(entry.identity)) {
+      throw new CapcutError(`grade source selector "${selector}" selects the same source twice.`,
+        { code: 'SOURCE_DUPLICATE', exitCode: 2 });
+    }
+    seen.add(entry.identity);
+    selected.push(entry);
+  }
+  return selected;
+}
+
+/**
+ * Group the timeline by *source file* and measure each one where it is actually used.
+ * A source is graded as a unit: two clips off the same recording must not drift apart.
+ */
+export function measureSources(doc, projectDir, { samples = 4 } = {}) {
+  const bySource = sourceEntries(doc, projectDir, { videosOnly: true });
   const rows = [];
-  for (const e of bySource.values()) {
+  for (const e of bySource) {
+    if (!e.file || !fs.existsSync(e.file)) continue;
     e.clips.sort((a, b) => a.at - b.at);
     const picks = [];
     const total = e.clips.reduce((a, c) => a + c.srcDur, 0);
@@ -279,6 +385,7 @@ export function measureSources(doc, projectDir, { samples = 4 } = {}) {
     if (!scopes.length) continue;
     rows.push({
       source: e.source,
+      identity: e.identity,
       file: e.file,
       tracks: [...e.tracks],
       clips: e.clips.length,
@@ -341,6 +448,72 @@ export const ROLE_WEIGHTS = {
   screen: { black: 1.2, white: 1.6, saturation: 0.5, warmth: 0.25, clipped: 14.0 },
 };
 
+const TARGET_KEYS = new Set(['black', 'white', 'saturation', 'warmth', 'tint', 'maxClipped']);
+const TARGET_ROLES = new Set(['face', 'screen']);
+
+function targetPart(value, role, { strict = true } = {}) {
+  if (value == null) return {};
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new CapcutError('grade target/reference must be an object.', { code: 'BAD_GRADE_TARGET', exitCode: 2 });
+  }
+  const roleValue = value[role];
+  const hasRoleMap = roleValue && typeof roleValue === 'object' && !Array.isArray(roleValue);
+  const entries = Object.entries(value)
+    .filter(([key]) => !TARGET_ROLES.has(key))
+    .concat(hasRoleMap ? Object.entries(roleValue) : []);
+  const out = {};
+  for (const [key, raw] of entries) {
+    if (!TARGET_KEYS.has(key)) {
+      if (strict) throw new CapcutError(`Unknown grade target field "${key}".`, { code: 'UNKNOWN_GRADE_TARGET', exitCode: 2 });
+      continue;
+    }
+    if (raw == null) { out[key] = null; continue; }
+    const valueNumber = Number(raw);
+    if (!Number.isFinite(valueNumber)) {
+      throw new CapcutError(`Grade target field "${key}" must be finite.`, { code: 'BAD_GRADE_TARGET', exitCode: 2 });
+    }
+    out[key] = valueNumber;
+  }
+  return out;
+}
+
+function referenceValue(reference, rows, options) {
+  if (reference == null) return null;
+  if (typeof reference === 'string') {
+    let file;
+    try {
+      const row = resolveGradeSource({ sources: rows }, reference, options.projectDir);
+      if (options.referenceAt == null) return row.scope;
+      file = row.file;
+    } catch (error) {
+      if (error.code !== 'SOURCE_EMPTY') throw error;
+    }
+    file ||= canonicalSourcePath(reference, options.projectDir);
+    if (!file || !fs.existsSync(file)) {
+      throw new CapcutError(`grade reference "${reference}" did not match a source or existing file.`,
+        { code: 'REFERENCE_EMPTY', exitCode: 2 });
+    }
+    const at = options.referenceAt == null ? 0 : Number(options.referenceAt);
+    if (!Number.isFinite(at) || at < 0) {
+      throw new CapcutError('grade reference time must be finite and non-negative.',
+        { code: 'BAD_REFERENCE_TIME', exitCode: 2 });
+    }
+    const frame = grabFrame(file, at);
+    if (!frame) throw new CapcutError(`grade reference has no frame at ${at}s: ${file}.`,
+      { code: 'REFERENCE_EMPTY', exitCode: 2 });
+    return scope(frame.buf);
+  }
+  if (typeof reference !== 'object' || Array.isArray(reference)) {
+    throw new CapcutError('grade reference must be a source, file, or scope object.',
+      { code: 'BAD_GRADE_REFERENCE', exitCode: 2 });
+  }
+  const file = reference.file || reference.path || reference.media;
+  if (file) return referenceValue(String(file), rows, { ...options, referenceAt: reference.at ?? options.referenceAt });
+  return reference.scope || reference;
+}
+
+const NO_AUTO_GRADE_REASON = 'No explicit target or reference; preserving source appearance.';
+
 /** Re-measure a frame after a candidate grade, without touching disk. */
 function predict(buf, g) { return scope(gradeBuffer(buf, g)); }
 
@@ -352,18 +525,18 @@ export function solveGrade(buf, target = TARGET, opts = {}) {
   const bounds = {
     black: [-0.6, 0.3], white: [-0.3, 0.6], contrast: [-0.3, 0.5],
     saturation: [-0.5, 0.5], temperature: [-0.5, 0.5], brightness: [-0.3, 0.3],
-    shadow: [-0.4, 0.4], highlight: [-0.4, 0.4],
+    shadow: [-0.4, 0.4], highlight: [-0.4, 0.4], tone: [-0.4, 0.4],
     ...(opts.bounds || {}),
   };
   // Temperature is solved BEFORE saturation. Both move R-B, and with saturation first the
   // solver would happily fix a warm cast by draining the colour out of a face — cheaper by
   // the cost function, wrong by every other measure.
-  const order = opts.order || ['black', 'white', 'brightness', 'contrast', 'temperature', 'saturation', 'shadow', 'highlight'];
+  const order = opts.order || ['black', 'white', 'brightness', 'contrast', 'temperature', 'tone', 'saturation', 'shadow', 'highlight'];
   // Prefer doing nothing. Without this the solver spends a 0.4 slider to chase the last two
   // points of a target on a source that was already fine — most visible on short clips,
   // where a big correction buys almost no screen time and costs continuity.
   const lambda = opts.lambda ?? 0.5;
-  const w = { black: 1.4, white: 1.0, saturation: 0.7, warmth: 0.5, clipped: 6.0, ...(opts.weights || {}) };
+  const w = { black: 1.4, white: 1.0, saturation: 0.7, warmth: 0.5, tint: 0.5, clipped: 6.0, ...(opts.weights || {}) };
 
   // A null target means "this source has no correct value for that axis" — a screen
   // recording has no skin to white-balance against — so the axis drops out of the cost
@@ -383,7 +556,10 @@ export function solveGrade(buf, target = TARGET, opts = {}) {
       if (opts.saturationIsCeiling ? over > 0 : true) c += w.saturation * Math.pow(over / 12, 2);
     }
     term('warmth', 14, w.warmth);
-    if (s.clipped > target.maxClipped) c += w.clipped * Math.pow(s.clipped - target.maxClipped, 2);
+    term('tint', 14, w.tint);
+    if (target.maxClipped != null && s.clipped > target.maxClipped) {
+      c += w.clipped * Math.pow(s.clipped - target.maxClipped, 2);
+    }
     if (s.crushed > 0.5) c += w.clipped * Math.pow(s.crushed - 0.5, 2);
     return c;
   };
@@ -410,54 +586,71 @@ export function solveGrade(buf, target = TARGET, opts = {}) {
 
 export function planGrade(doc, projectDir, options = {}) {
   const rows = measureSources(doc, projectDir, { samples: options.samples || 3 });
-  if (!rows.length) return { target: ROLE_TARGETS, sources: [] };
+  const explicit = options.target != null || options.reference != null;
+  if (!rows.length) return {
+    roles: ROLE_TARGETS, target: explicit ? (options.target ?? 'reference') : null,
+    automatic: explicit, reason: explicit ? 'No measurable video sources.' : NO_AUTO_GRADE_REASON,
+    sources: [],
+  };
 
   // The face is whichever source carries the principal track — the one gapless video track
   // that spans the timeline. That is the same definition `polish` uses for where transitions
   // ride, so the two passes can never disagree about which clip is the talking head.
-  const principal = principalTrack(doc, options.track ?? null);
+  let principal = null;
+  try { principal = principalTrack(doc, options.track ?? null); }
+  catch (error) {
+    if (options.track != null || error.code !== 'NO_PRINCIPAL_TRACK') throw error;
+  }
   const faceSources = new Set();
   if (principal) {
     const videos = Object.fromEntries((doc.materials?.videos || []).map(m => [m.id, m]));
     for (const seg of principal.track.segments || []) {
       const mat = videos[seg.material_id];
-      if (mat?.type === 'video') faceSources.add(path.basename(resolveMediaPath(mat.path, projectDir) || ''));
+      if (mat?.type === 'video') faceSources.add(sourceInfo(mat, seg, projectDir).key);
     }
   }
-  for (const r of rows) r.role = faceSources.has(r.source) ? 'face' : 'screen';
+  for (const r of rows) r.role = faceSources.has(r.identity) ? 'face' : 'screen';
 
-  // Screens get their white balance pulled toward each other, not toward skin: the target is
-  // the screen-weighted median of what is already there, so nothing moves far and nothing
-  // is left fighting its neighbour.
-  const screens = rows.filter(r => r.role === 'screen');
-  let screenWarmth = null;
-  if (screens.length > 1) {
-    const w = screens.map(r => r.scope.warmth).sort((a, b) => a - b);
-    screenWarmth = +w[Math.floor(w.length / 2)].toFixed(1);
-  }
+  if (!explicit) return {
+    roles: ROLE_TARGETS, target: null, automatic: false, reason: NO_AUTO_GRADE_REASON,
+    screenWarmthTarget: null,
+    sources: rows.map(row => ({ ...row, target: null, before: row.scope, sliders: {}, after: row.scope, reason: NO_AUTO_GRADE_REASON })),
+  };
 
+  const reference = referenceValue(options.reference, rows, { ...options, projectDir });
   const strength = options.strength ?? 1;
+  if (!Number.isFinite(Number(strength))) {
+    throw new CapcutError('grade strength must be finite.', { code: 'BAD_GRADE_STRENGTH', exitCode: 2 });
+  }
   const out = [];
   for (const row of rows) {
-    const f = grabFrame(row.file, row.sampledAt[Math.floor(row.sampledAt.length / 2)]);
+    let f = null;
+    for (const at of row.sampledAt) {
+      f = grabFrame(row.file, at);
+      if (f) break;
+    }
     if (!f) continue;
     const target = {
-      ...ROLE_TARGETS[row.role],
-      ...(row.role === 'screen' && screenWarmth != null ? { warmth: screenWarmth } : {}),
-      ...(options.target || {}),
+      ...targetPart(reference, row.role, { strict: false }),
+      ...targetPart(options.target, row.role),
     };
-    const solved = solveGrade(f.buf, target, {
+    const hasTarget = Object.values(target).some(value => value != null);
+    const solved = hasTarget ? solveGrade(f.buf, target, {
       weights: ROLE_WEIGHTS[row.role],
-      saturationIsCeiling: row.role === 'screen',
+      // A caller that names screen saturation has opted into matching that appearance.
+      saturationIsCeiling: row.role === 'screen' && !Object.hasOwn(target, 'saturation'),
       // A face is never desaturated to fix a colour cast. Temperature is the tool for that;
       // draining skin is how footage starts looking like a corpse.
       ...(row.role === 'face' ? { bounds: { saturation: [0, 0.4] } } : {}),
-    });
+    }) : { sliders: {}, cost: 0 };
     const sliders = Object.fromEntries(Object.entries(solved.sliders)
       .map(([k, v]) => [k, +(v * strength).toFixed(3)])
       .filter(([, v]) => Math.abs(v) >= 0.01));
+    const reason = Object.keys(sliders).length ? null : 'No correction needed for the explicit target.';
     out.push({
       source: row.source,
+      identity: row.identity,
+      file: row.file,
       role: row.role,
       tracks: row.tracks,
       clips: row.clips,
@@ -465,10 +658,14 @@ export function planGrade(doc, projectDir, options = {}) {
       target,
       before: row.scope,
       sliders,
-      after: scope(gradeBuffer(f.buf, sliders)),
+      after: Object.keys(sliders).length ? scope(gradeBuffer(f.buf, sliders)) : row.scope,
+      ...(reason ? { reason } : {}),
     });
   }
-  return { roles: ROLE_TARGETS, screenWarmthTarget: screenWarmth, sources: out };
+  return {
+    roles: ROLE_TARGETS, target: options.target ?? 'reference', automatic: true,
+    screenWarmthTarget: null, sources: out,
+  };
 }
 
 /* ------------------------------------------------------------------ *
@@ -500,7 +697,95 @@ function makeAdjustMaterial(preset, type, value, key) {
   m.version = preset.versions[type] ?? '';
   m.path = base;
   m.lumi_hub_path = path.join(base, 'lumi_hub_path');
+  m.name = `capcutctl:grade:${key}:${type}`;
+  m.capcutctl_owner = 'grade';
   return m;
+}
+
+const isGradeOwned = material => (typeof material?.name === 'string' && material.name.startsWith('capcutctl:grade:'))
+  || material?.capcutctl_owner === 'grade';
+
+function normalizedSources(value, operation) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new CapcutError(`${operation} needs sources.`, { code: 'EMPTY_GRADE', exitCode: 2 });
+  }
+  const entries = Object.entries(value);
+  if (!entries.length) throw new CapcutError(`${operation} needs sources.`, { code: 'EMPTY_GRADE', exitCode: 2 });
+  return entries;
+}
+
+function normalizedSliders(sliders) {
+  if (!sliders || typeof sliders !== 'object' || Array.isArray(sliders)) {
+    throw new CapcutError('grade.apply source values must be slider maps.', { code: 'BAD_SLIDERS', exitCode: 2 });
+  }
+  const out = {};
+  for (const [key, raw] of Object.entries(sliders)) {
+    if (!ADJUST_TYPES.has(key)) {
+      throw new CapcutError(`Unknown adjust slider "${key}". Known: ${[...ADJUST_TYPES].join(', ')}`,
+        { code: 'UNKNOWN_SLIDER', exitCode: 2 });
+    }
+    if (raw == null) continue;
+    if (typeof raw === 'string' && !raw.trim()) {
+      throw new CapcutError(`Adjust slider "${key}" must be finite and between -1 and 1.`,
+        { code: 'BAD_SLIDER_VALUE', exitCode: 2 });
+    }
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < -1 || value > 1) {
+      throw new CapcutError(`Adjust slider "${key}" must be finite and between -1 and 1.`,
+        { code: 'BAD_SLIDER_VALUE', exitCode: 2 });
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+function clearOwnedEffects(doc, targets) {
+  const effects = Array.isArray(doc.materials?.effects) ? doc.materials.effects : [];
+  const byId = new Map(effects.map(material => [material.id, material]));
+  const ownedIds = new Set();
+  for (const { segment } of targets) {
+    for (const ref of segment.extra_material_refs || []) {
+      if (isGradeOwned(byId.get(ref))) ownedIds.add(ref);
+    }
+  }
+  if (!ownedIds.size) return { changedSegments: 0, removedRefs: 0, removedMaterials: 0 };
+  let changedSegments = 0, removedRefs = 0;
+  const selected = new Set(targets.map(item => item.segment));
+  for (const { segment } of allSegments(doc)) {
+    if (!selected.has(segment)) continue;
+    const refs = segment.extra_material_refs || [];
+    const next = refs.filter(ref => !ownedIds.has(ref));
+    if (next.length !== refs.length) {
+      segment.extra_material_refs = next;
+      changedSegments++;
+      removedRefs += refs.length - next.length;
+    }
+    if (segment.enable_adjust && !next.some(ref => ADJUST_TYPES.has(byId.get(ref)?.type))) {
+      segment.enable_adjust = false;
+    }
+  }
+  const referenced = new Set(allSegments(doc).flatMap(({ segment }) => segment.extra_material_refs || []));
+  const remaining = effects.filter(material => !ownedIds.has(material.id) || referenced.has(material.id));
+  const removedMaterials = effects.length - remaining.length;
+  if (removedMaterials) doc.materials.effects = remaining;
+  return { changedSegments, removedRefs, removedMaterials };
+}
+
+function gradeTargets(doc, op, context) {
+  const entries = sourceEntries(doc, context.projectDir);
+  const requested = normalizedSources(op.sources, 'grade.apply');
+  const selected = selectSources(entries, requested.map(([selector]) => selector), context.projectDir)
+    .map((entry, i) => ({ entry, sliders: normalizedSliders(requested[i][1]) }));
+  const targets = [];
+  const targetSet = new Set();
+  for (const { entry } of selected) {
+    for (const item of entry.videoSegments) {
+      if (targetSet.has(item.segment)) continue;
+      targetSet.add(item.segment);
+      targets.push({ ...item, entry });
+    }
+  }
+  return { selected, targets };
 }
 
 /**
@@ -510,78 +795,86 @@ function makeAdjustMaterial(preset, type, value, key) {
  * `brightness` materials on one segment is not something CapCut can show you.
  */
 export function opGradeApply(doc, op, context = {}) {
-  SEED = op.__seed || null;
+  SEED = op?.__seed || null;
   const preset = loadPreset('adjust');
   if (!preset?.effectTemplate) {
     throw new CapcutError('presets/adjust.json is missing its harvested effectTemplate.',
       { code: 'MISSING_PRESET' });
   }
-  const videos = Object.fromEntries((doc.materials?.videos || []).map(m => [m.id, m]));
-  const effects = (doc.materials.effects ||= []);
-  const bySource = new Map(Object.entries(op.sources || {}));
-  if (!bySource.size) throw new CapcutError('grade.apply needs `sources`.', { code: 'EMPTY_GRADE' });
-
-  for (const [, sliders] of bySource) {
-    for (const k of Object.keys(sliders)) {
-      if (!ADJUST_TYPES.has(k)) {
-        throw new CapcutError(`Unknown adjust slider "${k}". Known: ${[...ADJUST_TYPES].join(', ')}`,
-          { code: 'UNKNOWN_SLIDER' });
-      }
-    }
-  }
-
-  const targets = [];
-  for (const { segment } of allSegments(doc)) {
-    const mat = videos[segment.material_id];
-    if (!mat || mat.type !== 'video') continue;
-    const key = path.basename(mat.path || '');
-    if (bySource.has(key)) targets.push({ segment, key });
-  }
-
+  const { selected, targets } = gradeTargets(doc, op || {}, context);
   // Clear what this pass owns on the segments it is about to write.
-  const owned = new Set();
-  for (const { segment } of targets) {
-    for (const ref of segment.extra_material_refs || []) {
-      const m = effects.find(e => e.id === ref);
-      if (m && ADJUST_TYPES.has(m.type)) owned.add(ref);
-    }
-  }
-  if (owned.size) {
-    doc.materials.effects = effects.filter(e => !owned.has(e.id));
-    for (const { segment } of targets) {
-      segment.extra_material_refs = (segment.extra_material_refs || []).filter(r => !owned.has(r));
-    }
-  }
-  const list = doc.materials.effects;
+  const cleared = clearOwnedEffects(doc, targets);
+  const pending = [];
+  const canvasIds = new Set((doc.materials.canvases || []).map(c => c.id));
+  const selectedByIdentity = new Map(selected.map(item => [item.entry.identity, item.sliders]));
 
-  let written = 0;
-  for (const [i, { segment, key }] of targets.entries()) {
-    const sliders = bySource.get(key);
+  for (const [i, { segment, entry }] of targets.entries()) {
+    const sliders = selectedByIdentity.get(entry.identity);
     const ids = [];
+    const materials = [];
     for (const type of preset.order) {
       const v = sliders[type];
       if (v == null || Math.abs(v) < 1e-4) continue;
-      const m = makeAdjustMaterial(preset, type, Number(v), `${key}:${i}:${segment.id}`);
-      list.push(m);
+      const m = makeAdjustMaterial(preset, type, v, `${entry.identity}:${i}:${segment.id}`);
+      materials.push(m);
       ids.push(m.id);
-      written++;
     }
-    if (!ids.length) continue;
-    // Sit where CapCut puts them: after placeholder_info, before canvas_color. Order is
-    // cosmetic (CapCut resolves by id) but a familiar file is a debuggable file.
-    const refs = segment.extra_material_refs || [];
-    const canvasIds = new Set((doc.materials.canvases || []).map(c => c.id));
-    const at = refs.findIndex(r => canvasIds.has(r));
-    segment.extra_material_refs = at >= 0
-      ? [...refs.slice(0, at), ...ids, ...refs.slice(at)]
-      : [...refs, ...ids];
-    segment.enable_adjust = true;
+    pending.push({ segment, ids, materials });
+  }
+
+  let written = 0;
+  if (pending.some(item => item.materials.length)) {
+    if (!doc.materials || typeof doc.materials !== 'object') {
+      throw new CapcutError('grade.apply needs a document materials object.', { code: 'BAD_DOCUMENT', exitCode: 2 });
+    }
+    const list = Array.isArray(doc.materials.effects) ? doc.materials.effects : (doc.materials.effects = []);
+    for (const { segment, ids, materials } of pending) {
+      if (!ids.length) continue;
+      list.push(...materials);
+      written += materials.length;
+      // Sit where CapCut puts them: after placeholder_info, before canvas_color. Order is
+      // cosmetic (CapCut resolves by id) but a familiar file is a debuggable file.
+      const refs = segment.extra_material_refs || [];
+      const at = refs.findIndex(r => canvasIds.has(r));
+      segment.extra_material_refs = at >= 0
+        ? [...refs.slice(0, at), ...ids, ...refs.slice(at)]
+        : [...refs, ...ids];
+      segment.enable_adjust = true;
+    }
   }
 
   return {
     changed: targets.length,
     materials: written,
-    replaced: owned.size,
-    sources: Object.fromEntries([...bySource].map(([k, v]) => [k, v])),
+    replaced: cleared.removedRefs,
+    sources: Object.fromEntries(selected.map(({ entry, sliders }) => [entry.source, sliders])),
+  };
+}
+
+/** Remove only effects previously written by this module on the named sources. */
+export function opGradeReset(doc, op = {}, context = {}) {
+  const entries = sourceEntries(doc, context.projectDir);
+  const raw = op.sources ?? op.source;
+  let selected;
+  if (op.all === true && raw == null) {
+    selected = entries.filter(entry => entry.videoSegments.length);
+  } else {
+    const selectors = typeof raw === 'string' ? [raw]
+      : Array.isArray(raw) ? raw
+      : raw && typeof raw === 'object' ? Object.keys(raw) : [];
+    if (!selectors.length) {
+      throw new CapcutError('grade.reset needs `sources` or explicit `all: true`.',
+        { code: 'EMPTY_GRADE', exitCode: 2 });
+    }
+    selected = selectSources(entries, selectors, context.projectDir);
+  }
+  const targets = selected.flatMap(entry => entry.videoSegments.map(item => ({ ...item, entry })));
+  const cleared = clearOwnedEffects(doc, targets);
+  return {
+    changed: cleared.changedSegments,
+    matched: targets.length,
+    removed: cleared.removedRefs,
+    materials: cleared.removedMaterials,
+    sources: selected.map(entry => entry.source),
   };
 }

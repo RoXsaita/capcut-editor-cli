@@ -11,6 +11,7 @@ import {
   describeScenes,
   findCircleScenes,
   isScreenRecordingSegment,
+  opLayoutApply,
   opLayoutBroll,
   opLayoutScreen,
   presets
@@ -116,6 +117,34 @@ function addScreenRecording(f) {
   mutate(f.timelineDir);
   return { screen, recording };
 }
+
+function addSequentialScreenRecordings(f, count = 12) {
+  const doc = activeDoc(f);
+  const principal = subjectOf(doc);
+  const track = doc.tracks.find(item => item.name === 'screen-source');
+  const total = count * 5_000_000;
+  principal.target_timerange = { start: 0, duration: total };
+  principal.source_timerange = { start: 2_000_000, duration: total };
+  doc.materials.videos.find(item => item.id === 'VIDEO').duration = total;
+  doc.materials.videos.find(item => item.id === 'SCREEN').duration = total;
+  for (let index = 1; index < count; index++) {
+    const recording = structuredClone(track.segments[0]);
+    recording.id = `RECORDING-${index}`;
+    recording.target_timerange = { start: index * 5_000_000, duration: 5_000_000 };
+    recording.source_timerange = { start: index * 5_000_000, duration: 5_000_000 };
+    recording.screen_recording_id = undefined;
+    track.segments.push(recording);
+  }
+  track.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
+  doc.duration = total;
+  return doc;
+}
+
+const screenHelperTracks = doc => doc.tracks.filter(track =>
+  /^layout-screen-(background|frame|pip|pip-ring)(?:--.+)?$/.test(track.name || ''));
+const screenLayers = doc => doc.tracks.flatMap(track => track.segments || [])
+  .filter(segment => ['layout:screen-frame', 'layout:screen-pip', 'layout:screen-pip-ring', 'layout:screen-blur']
+    .includes(segment.desc));
 
 function addLandscapeBroll(doc) {
   const file = path.join(os.tmpdir(), `capcutctl-landscape-${process.pid}.mp4`);
@@ -422,7 +451,11 @@ test('layout screen applies recording, indigo frame, circle pip, ring and blur a
   assert.equal(pip.volume, 0);
   assert.deepEqual(ring.clip, circle.overlay.clip);
   assert.deepEqual(blur.clip, background.clip);
-  assert.equal(blur.material_id, 'SCREEN');
+  assert.equal(blur.material_id, 'VIDEO', 'blur plate reuses the talking-head source');
+  assert.deepEqual(blur.source_timerange, subjectOf(active).source_timerange,
+    'blur plate follows the talking-head source timing');
+  assert.equal(subjectOf(active).volume, 1, 'screen layout does not mute the talking head');
+  assert.equal(subjectOf(active).clip.alpha, 0, 'the covered principal visual is hidden');
   const pipMask = active.materials.common_mask.find(m => pip.extra_material_refs.includes(m.id));
   const ringMask = active.materials.common_mask.find(m => ring.extra_material_refs.includes(m.id));
   assert.equal(pipMask.resource_type, 'circle');
@@ -441,6 +474,200 @@ test('layout screen applies recording, indigo frame, circle pip, ring and blur a
     .concat(doc.materials.common_mask.map(m => m.id).sort())
     .concat(doc.materials.video_effects.map(m => m.id).sort());
   assert.deepEqual(ids(root), ids(active), 'root and active documents must receive identical layer ids');
+});
+
+test('layout screen source-times pip and blur across A-roll seams while preserving voice and native edits', () => {
+  const f = fixture();
+  addScreenRecording(f);
+  const doc = activeDoc(f);
+  const principal = subjectOf(doc);
+  doc.materials.common_mask.push({ id: 'NATIVE-MASK', resource_type: 'line', config: { centerY: 0.4 } });
+  principal.extra_material_refs = ['NATIVE-MASK'];
+  principal.keyframe_refs = ['NATIVE-REF'];
+  principal.common_keyframes = [
+    { property_type: 'KFTypePositionX', keyframe_list: [{ time_offset: 2_000_000, values: [0.1] }] },
+    { property_type: 'KFTypeAlpha', keyframe_list: [{ time_offset: 2_000_000, values: [1] }] }
+  ];
+  principal.target_timerange = { start: 0, duration: 2_500_000 };
+  principal.source_timerange = { start: 2_000_000, duration: 2_500_000 };
+  const second = structuredClone(principal);
+  second.id = 'SUBJECT-2';
+  second.target_timerange = { start: 2_500_000, duration: 2_500_000 };
+  second.source_timerange = { start: 4_500_000, duration: 2_500_000 };
+  doc.tracks.find(track => track.id === 'T1').segments.push(second);
+  const recording = doc.tracks.find(track => track.name === 'screen-source').segments[0];
+  recording.target_timerange = { start: 1_000_000, duration: 3_000_000 };
+  recording.source_timerange = { start: 0, duration: 3_000_000 };
+
+  opLayoutScreen(doc, {
+    selector: { id: recording.id }, pipSelector: { id: principal.id }, __seed: 'SEAM-SOURCE'
+  });
+
+  const pips = screenLayers(doc).filter(segment => segment.desc === 'layout:screen-pip');
+  for (const pip of pips) {
+    assert.equal(pip.common_keyframes.some(group => group.property_type === 'KFTypePositionX'), false,
+      'absolute source position must not override circle framing');
+    assert.ok(pip.common_keyframes.some(group => group.property_type === 'KFTypeAlpha'), 'retain non-camera animation');
+  }
+  const blurs = screenLayers(doc).filter(segment => segment.desc === 'layout:screen-blur');
+  assert.deepEqual(pips.map(segment => [segment.target_timerange.start, segment.target_timerange.duration]), [
+    [1_000_000, 1_500_000], [2_500_000, 1_500_000]
+  ]);
+  assert.deepEqual(pips.map(segment => [segment.source_timerange.start, segment.source_timerange.duration]), [
+    [3_000_000, 1_500_000], [4_500_000, 1_500_000]
+  ]);
+  assert.deepEqual(blurs.map(segment => [segment.material_id, segment.source_timerange.start, segment.source_timerange.duration]), [
+    ['VIDEO', 3_000_000, 1_500_000], ['VIDEO', 4_500_000, 1_500_000]
+  ]);
+
+  const principalPieces = doc.tracks.find(track => track.id === 'T1').segments;
+  assert.deepEqual(principalPieces.map(segment => [segment.target_timerange.start, segment.clip.alpha]), [
+    [0, 1], [1_000_000, 0], [2_500_000, 0], [4_000_000, 1]
+  ]);
+  for (const segment of principalPieces) {
+    assert.equal(segment.volume, 1);
+    assert.deepEqual(segment.extra_material_refs, ['NATIVE-MASK']);
+    assert.deepEqual(segment.keyframe_refs, ['NATIVE-REF']);
+    assert.ok(segment.common_keyframes.some(group => group.property_type === 'KFTypePositionX'));
+  }
+});
+
+test('twelve sequential screen shots reuse readable base lanes and layout switch restores one principal piece', () => {
+  const f = fixture();
+  addScreenRecording(f);
+  const doc = addSequentialScreenRecordings(f);
+  const result = opLayoutScreen(doc, {
+    selector: { desc: 'raw window capture' }, all: true,
+    pipSelector: { id: 'SUBJECT' }, __seed: 'TWELVE-SEQUENTIAL'
+  });
+  assert.equal(result.changed, 12);
+  assert.equal(doc.tracks.length, 7, 'cover, principal, recording and four helper lanes');
+  const helpers = screenHelperTracks(doc);
+  assert.equal(helpers.length, 4);
+  assert.deepEqual(helpers.map(track => track.name), [
+    'layout-screen-background', 'layout-screen-frame', 'layout-screen-pip', 'layout-screen-pip-ring'
+  ]);
+  assert.deepEqual(helpers.map(track => track.segments.length), [12, 12, 12, 12]);
+
+  const principalTrack = doc.tracks.find(track => track.segments.some(segment => segment.id === 'SUBJECT'));
+  const selected = principalTrack.segments.find(segment => segment.target_timerange.start === 15_000_000);
+  assert.equal(selected.clip.alpha, 0);
+  opLayoutApply(doc, { layout: 'full-face', selector: { id: selected.id }, __seed: 'ONE-SWITCH' });
+  const pieces = principalTrack.segments;
+  assert.equal(pieces.find(segment => segment.id === selected.id).clip.alpha, 1);
+  assert.equal(pieces.filter(segment => segment.clip.alpha === 0).length, 11);
+  assert.equal(pieces.filter(segment => segment.screen_layout_hidden === true).length, 11);
+  assert.equal(screenLayers(doc).filter(segment => segment.screen_recording_id === 'RECORDING-3').length, 0,
+    'switching one covered span cleans only that recording treatment');
+  assert.equal(screenHelperTracks(doc).length, 4, 'nonempty helper lanes remain reusable');
+});
+
+test('layout switch restores a native-saved hidden alpha carrier without sidecar metadata', () => {
+  const f = fixture();
+  const doc = activeDoc(f);
+  const subject = subjectOf(doc);
+  const position = { property_type: 'KFTypePositionX', keyframe_list: [{ time_offset: 2_000_000, values: [0.1] }] };
+  subject.clip.alpha = 0;
+  subject.keyframe_refs = ['NATIVE-REF'];
+  subject.common_keyframes = [position, {
+    property_type: 'KFTypeAlpha',
+    keyframe_list: [{ time_offset: 2_000_000, values: [0] }, { time_offset: 3_000_000, values: [0] }]
+  }];
+  opLayoutApply(doc, { layout: 'full-face', selector: { id: subject.id }, __seed: 'STRIPPED-HIDDEN' });
+  assert.equal(subject.clip.alpha, 1);
+  assert.deepEqual(subject.keyframe_refs, ['NATIVE-REF']);
+  assert.deepEqual(subject.common_keyframes, [position]);
+});
+
+test('switching a complete screen span removes its layers and prunes empty helper lanes', () => {
+  const f = fixture();
+  addScreenRecording(f);
+  const doc = activeDoc(f);
+  opLayoutScreen(doc, { selector: { id: 'RECORDING' }, pipSelector: { id: 'SUBJECT' }, __seed: 'CLEANUP' });
+  opLayoutApply(doc, { layout: 'full-face', selector: { id: 'SUBJECT' }, __seed: 'CLEANUP-SWITCH' });
+  assert.equal(screenLayers(doc).length, 0);
+  assert.equal(screenHelperTracks(doc).length, 0);
+});
+
+test('overlapping screen owners stay isolated and foreign tracks remain untouched', () => {
+  const f = fixture();
+  addScreenRecording(f);
+  const doc = activeDoc(f);
+  const principal = subjectOf(doc);
+  principal.target_timerange = { start: 0, duration: 7_000_000 };
+  principal.source_timerange = { start: 2_000_000, duration: 7_000_000 };
+  doc.materials.videos.find(item => item.id === 'VIDEO').duration = 7_000_000;
+  const firstTrack = doc.tracks.find(track => track.name === 'screen-source');
+  const second = structuredClone(firstTrack.segments[0]);
+  second.id = 'RECORDING-B';
+  second.target_timerange = { start: 2_000_000, duration: 5_000_000 };
+  second.source_timerange = { start: 2_000_000, duration: 5_000_000 };
+  firstTrack.segments[0].desc = 'raw window capture';
+  doc.tracks.push({ id: 'SCREEN-B-TRACK', type: 'video', flag: 2, name: 'screen-source-b', segments: [second] });
+  const foreign = {
+    id: 'FOREIGN-SEGMENT', material_id: 'VIDEO', desc: 'editor:foreign', volume: 1,
+    target_timerange: { start: 0, duration: 1_000_000 }, source_timerange: { start: 0, duration: 1_000_000 },
+    clip: { scale: { x: 1, y: 1 }, transform: { x: 0, y: 0 }, alpha: 1 }
+  };
+  doc.tracks.splice(1, 0, { id: 'FOREIGN-TRACK', type: 'video', flag: 2, name: 'editor-notes', segments: [foreign] });
+
+  opLayoutScreen(doc, {
+    selector: { desc: 'raw window capture' }, all: true,
+    pipSelector: { id: 'SUBJECT' }, __seed: 'OVERLAP-OWNERS'
+  });
+
+  const layers = screenLayers(doc);
+  assert.equal(layers.filter(segment => segment.screen_recording_id === 'RECORDING').length, 4);
+  assert.equal(layers.filter(segment => segment.screen_recording_id === 'RECORDING-B').length, 4);
+  assert.equal(screenHelperTracks(doc).length, 8);
+  assert.ok(doc.tracks.some(track => track.name === 'layout-screen-frame'));
+  assert.ok(doc.tracks.some(track => track.name === 'layout-screen-frame--RECORDING-B'));
+  const keptForeign = doc.tracks.find(track => track.id === 'FOREIGN-TRACK').segments[0];
+  assert.equal(keptForeign.id, 'FOREIGN-SEGMENT');
+  assert.equal(keptForeign.desc, 'editor:foreign');
+  assert.deepEqual(keptForeign.target_timerange, { start: 0, duration: 1_000_000 });
+  assert.equal(keptForeign.clip.alpha, 1);
+  for (const owner of ['RECORDING', 'RECORDING-B']) {
+    const recordingIndex = doc.tracks.findIndex(track => track.segments.some(segment => segment.id === owner));
+    const roleIndex = role => doc.tracks.findIndex(track => track.segments.some(segment =>
+      segment.desc === `layout:screen-${role}` && segment.screen_recording_id === owner));
+    assert.ok(roleIndex('blur') < recordingIndex);
+    assert.ok(recordingIndex < roleIndex('frame'));
+    assert.ok(roleIndex('frame') < roleIndex('pip'));
+    assert.ok(roleIndex('pip') < roleIndex('pip-ring'));
+  }
+});
+
+test('layout screen rejects an invalid source window without expanding shared media duration', () => {
+  const f = fixture();
+  const { screen } = addScreenRecording(f);
+  const doc = activeDoc(f);
+  const material = doc.materials.videos.find(item => item.id === 'SCREEN');
+  material.duration = 2_000_000;
+  assert.throws(
+    () => opLayoutScreen(doc, {
+      media: screen, at: 0, duration: 1, src: 1, srcDur: 2,
+      width: 720, height: 1050, __seed: 'BAD-SOURCE'
+    }, { projectDir: f.project }),
+    error => error.code === 'SOURCE_AFTER_END'
+  );
+  assert.equal(material.duration, 2_000_000);
+  assert.equal(doc.tracks.find(track => track.name === 'screen-source').segments.length, 1);
+});
+
+test('layout screen validates new media bounds and fills a missing stored duration', () => {
+  const f = fixture();
+  const media = path.join(f.temp, 'new-screen.mp4');
+  fs.writeFileSync(media, 'screen');
+  const doc = activeDoc(f);
+  const op = { media, at: 0, duration: 2, src: 1, srcDur: 2,
+    width: 720, height: 1050, mediaDuration: 2_000_000, localize: false };
+  const before = structuredClone(doc);
+  assert.throws(() => opLayoutScreen(doc, op, { projectDir: f.project }), { code: 'SOURCE_AFTER_END' });
+  assert.deepEqual(doc, before);
+  doc.materials.videos.push({ id: 'NEW', type: 'video', path: media });
+  opLayoutScreen(doc, { ...op, src: 0 }, { projectDir: f.project });
+  assert.equal(doc.materials.videos.find(m => m.id === 'NEW').duration, 2_000_000);
 });
 
 test('layout screen is idempotent and buildLayoutSpec exposes the wiring operation', () => {

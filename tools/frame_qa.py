@@ -318,6 +318,9 @@ def parse_expect(specs):
     marker = re.compile(r'(?:^|\|)\s*(\d+(?:\.\d+)?)=')
     for spec in specs:
         spec = (spec or "").strip()
+        if re.search(r',\s*\d+(?:\.\d+)?=', spec):
+            raise SystemExit("Separate timestamp checks with repeated --expect flags: "
+                             "--expect '9.2=Build' --expect '45.5=Publish' (not commas).")
         if "=" not in spec:
             raise SystemExit(f"--expect wants SECONDS=phrase, got {spec!r}")
         matches = list(marker.finditer(spec))
@@ -2404,6 +2407,7 @@ def _selftest():
     check("a marker mid-phrase is part of the phrase",
           parse_expect(["5=Claude 3.5=Sonnet"]) == {5.0: ["Claude 3.5=Sonnet"]})
     check("an expectation with no phrase is rejected", rejects("45.5=") and rejects("45.5=|"))
+    check("comma-joined timestamp checks explain repeated --expect", rejects("9.2=Build,45.5=Publish"))
     check("bad timestamps stay rejected",
           all(rejects(x) for x in ("-5=Build", "1e3=Build", "9.2 = Build", "Build")))
 

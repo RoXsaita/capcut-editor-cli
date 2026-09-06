@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 
 import {
   MIN_PYTHON,
@@ -20,6 +21,13 @@ import {
   toolImports,
   resolvePython,
 } from '../src/python.mjs';
+
+test('find cache identity, coverage and accurate-frame regressions', () => {
+  const python = resolvePython().executable;
+  for (const script of ['find-index.py', 'find-accurate-frames.py']) {
+    execFileSync(python, [fileURLToPath(new URL(script, import.meta.url))], { stdio: 'pipe' });
+  }
+});
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = path.join(HERE, '..');

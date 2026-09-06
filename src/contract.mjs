@@ -69,7 +69,7 @@ export const TOOL_OPTIONS = Object.freeze({
     '--ocr', '--out', '--preview', '--project', '--rects-only', '--resolution', '--selftest',
     '--sheet', '--times', '--to', '--width', '--z',
   ]),
-  find: Object.freeze(['--context', '--media', '--says', '--settle', '--shows', '--strip']),
+  find: Object.freeze(['--context', '--media', '--refresh', '--says', '--settle', '--shows', '--strip']),
 });
 
 /** Which tools/*.py each of those commands is a front end for. */

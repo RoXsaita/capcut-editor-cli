@@ -118,7 +118,8 @@ test('the packed tarball builds and reads a synthetic project with no CapCut ins
 
   const drafts = path.join(box.root, 'drafts');
   // --blank is the documented path that needs no local draft to clone from.
-  const made = runPacked(box, ['new', '--blank', '--project', 'Packed Check', '--root', drafts]);
+  // The sandbox has no CapCut installation; a host process may still be open.
+  const made = runPacked(box, ['new', '--blank', '--project', 'Packed Check', '--root', drafts, '--force-running']);
   assert.equal(made.status, 0, made.stderr);
   const created = JSON.parse(made.stdout);
   assert.equal(created.created, true);

@@ -612,49 +612,179 @@ export function resolveClip(doc, { at, track, id } = {}) {
   return hits[0];
 }
 
-/** Scale-only punch. Offsets are absolute source positions (not 0). */
+/** Evaluate a resting value without pretending to understand native Bezier handles. */
+export function cameraValue(segment, property, atUs, fallback) {
+  const keys = (segment.common_keyframes || []).find(k => k.property_type === property)?.keyframe_list || [];
+  const points = [...keys].sort((a, b) => a.time_offset - b.time_offset);
+  if (!points.length) return fallback;
+  if (atUs <= points[0].time_offset) return points[0].values[0];
+  if (atUs >= points.at(-1).time_offset) return points.at(-1).values[0];
+  const b = points.findIndex(p => p.time_offset >= atUs), a = points[b - 1], end = points[b];
+  if (end.time_offset === atUs) return end.values[0];
+  if ([a, end].some(p => p.curveType && p.curveType !== 'Line')) {
+    throw new CapcutError('Camera move starts inside an eased animation; choose an existing key or clear that camera move first.',
+      { code: 'MOTION_OVERLAP', exitCode: 2 });
+  }
+  return a.values[0] + (end.values[0] - a.values[0]) * (atUs - a.time_offset) / (end.time_offset - a.time_offset);
+}
+
+const CAMERA_PROPERTIES = new Set(['KFTypeScaleX', 'KFTypeScaleY', 'KFTypePositionX', 'KFTypePositionY']);
+const linkedScale = s => s.uniform_scale?.on ?? ((s.clip?.scale?.x ?? 1) === (s.clip?.scale?.y ?? 1));
+
+function cameraRect(value, name, width, height) {
+  const r = typeof value === 'string' ? value.split(',').map(Number) : value;
+  if (!Array.isArray(r) || r.length !== 4 || !r.every(Number.isFinite)
+      || r[0] < 0 || r[1] < 0 || r[2] <= 0 || r[3] <= 0
+      || r[0] + r[2] > width + 1e-6 || r[1] + r[3] > height + 1e-6) {
+    throw new CapcutError(`${name} needs x,y,width,height inside ${width}x${height}.`, { code: 'BAD_FOCUS', exitCode: 2 });
+  }
+  return r;
+}
+
+/** Native camera move; source-space focus and its linked frame share the same transform. */
 export function opScaleKeyframe(doc, op) {
   SEED = op.__seed || null;
   const entry = resolveOpClip(doc, op);
   const segment = entry?.segment;
   if (!segment) throw new CapcutError('keyframe: no segment matched.', { code: 'SELECTOR_EMPTY', exitCode: 2 });
+  if (entry.track.type !== 'video') throw new CapcutError('Camera keyframes require a video overlay.', { code: 'NOT_VIDEO', exitCode: 2 });
+  const owner = segment.screen_recording_id || segment.screenRecordingId || segment.id;
+  const frames = allSegments(doc).map(e => e.segment).filter(s => segment.desc === 'layout:screen-recording' && s.desc === 'layout:screen-frame'
+    && (s.screen_recording_id || s.screenRecordingId || s.layout_owner_id) === owner);
+  if (op.clear) {
+    for (const s of [segment, ...frames]) s.common_keyframes = (s.common_keyframes || []).filter(k => !CAMERA_PROPERTIES.has(k.property_type));
+    return { changed: 1 + frames.length, id: segment.id, cleared: [...CAMERA_PROPERTIES] };
+  }
+  if ([segment, ...frames].some(s => (doc.materials?.speeds || [])
+    .some(m => (s.extra_material_refs || []).includes(m.id) && m.curve_speed))) {
+    throw new CapcutError('Camera motion requires constant playback speed; remove the speed curve first.', { code: 'MOTION_SPEED_CURVE', exitCode: 2 });
+  }
   const st = segment.source_timerange || { start: 0, duration: segment.target_timerange.duration };
   const tt = segment.target_timerange;
-  const speed = tt.duration ? st.duration / tt.duration : 1;
+  const speed = st.duration / tt.duration;
   const at = op.at != null ? op.at : S(tt.start) + 0.4;
-  const into = Math.max(0, at - S(tt.start)) * speed;
-  const ramp = (op.ramp ?? 0.2) * speed;
-  const hold = (op.hold ?? 1.6) * speed;
-  const from = op.from ?? 1;
-  const to = op.to ?? 2.4;
-  const origin = st.start;
-  const clamp = t => Math.max(st.start, Math.min(st.start + st.duration, t));
-  const c0 = clamp(origin + US(into));
-  const c1 = clamp(origin + US(into + ramp));
-  if (c0 === c1) {
-    throw new CapcutError(
-      `keyframe: both keys clamp to source ${r3(S(c0))}s (window ${r3(S(st.start))}-${r3(S(st.start + st.duration))}s).`,
-      { code: 'KEYFRAME_CLAMPED', exitCode: 2 });
+  const ramp = op.ramp ?? 0.2;
+  const available = S(tt.start + tt.duration) - at;
+  if (![at, ramp, speed, st.start].every(Number.isFinite) || ramp <= 0 || speed <= 0
+      || at < S(tt.start) || available < ramp) {
+    throw new CapcutError('Camera ramp would clamp outside the clip; choose an earlier --at or a shorter --ramp.', { code: 'KEYFRAME_CLAMPED', exitCode: 2 });
   }
-  const list = [
-    { id: mint('kfa'), curveType: 'Line', time_offset: c0, left_control: { x: 0, y: 0 }, right_control: { x: 0, y: 0 }, values: [from], string_value: '', graphID: '' },
-    { id: mint('kfb'), curveType: 'Line', time_offset: c1, left_control: { x: 0, y: 0 }, right_control: { x: 0, y: 0 }, values: [to], string_value: '', graphID: '' }
-  ];
-  if (op.hold !== 0) {
-    const tHold = clamp(origin + US(into + ramp + hold));
-    const tBack = clamp(origin + US(into + ramp + hold + ramp));
-    if (tHold > c1 && tBack > tHold) {
-      list.push(
-        { ...clone(list[1]), id: mint('kfc'), time_offset: tHold, values: [to] },
-        { ...clone(list[0]), id: mint('kfd'), time_offset: tBack, values: [from] }
-      );
+  const hold = op.hold ?? Math.min(1.6, Math.max(0, available - 2 * ramp));
+  const release = op.hold !== 0;
+  if (!Number.isFinite(hold) || hold < 0 || (release && 2 * ramp + hold > available + 1e-6)) {
+    throw new CapcutError(`Camera hold and return need ${r3(2 * ramp + hold)}s; only ${r3(available)}s remain. Use a shorter --hold or --hold 0 for a push only.`,
+      { code: 'MOTION_TOO_SHORT', exitCode: 2 });
+  }
+  const c0 = st.start + US((at - S(tt.start)) * speed);
+  const offsets = [c0, c0 + US(ramp * speed), ...(release ? [c0 + US((ramp + hold) * speed), c0 + US((2 * ramp + hold) * speed)] : [])];
+  const base = {
+    x: cameraValue(segment, 'KFTypeScaleX', c0, segment.clip?.scale?.x ?? 1),
+    y: cameraValue(segment, 'KFTypeScaleY', c0, segment.clip?.scale?.y ?? segment.clip?.scale?.x ?? 1),
+    tx: cameraValue(segment, 'KFTypePositionX', c0, segment.clip?.transform?.x ?? 0),
+    ty: cameraValue(segment, 'KFTypePositionY', c0, segment.clip?.transform?.y ?? 0),
+  };
+  if (linkedScale(segment) && (segment.common_keyframes || []).some(k => k.property_type === 'KFTypeScaleX')
+      && !(segment.common_keyframes || []).some(k => k.property_type === 'KFTypeScaleY')) base.y = base.x;
+  if (cameraValue(segment, 'KFTypeAlpha', c0, segment.clip?.alpha ?? 1) <= 0) {
+    throw new CapcutError('Selected clip is invisible; select the visible face or recording.', { code: 'MOTION_HIDDEN', exitCode: 2 });
+  }
+  const from = op.from ?? base.x;
+  let to = op.to ?? from * 1.15, tx = base.tx, ty = base.ty;
+  const cc = doc.canvas_config || {}, W = cc.width || 1080, H = cc.height || 1920;
+  const mat = (doc.materials?.videos || []).find(m => m.id === segment.material_id);
+  const mask = segment.enable_video_mask !== false && (doc.materials?.common_mask || []).find(m => (segment.extra_material_refs || []).includes(m.id));
+  if (mask && (mask.resource_type !== 'line' || mask.config?.invert || ![0, 180].includes(Number(mask.config?.rotation || 0)))) {
+    throw new CapcutError('Camera motion on a circle or rotated mask moves its border. Use a full-face scene or select the screen recording.', { code: 'MOTION_MASK_UNSUPPORTED', exitCode: 2 });
+  }
+  if (op.viewport && !op.focus) throw new CapcutError('--viewport requires --focus.', { code: 'BAD_FOCUS', exitCode: 2 });
+  if (op.focus || mask) {
+    const sw = mat?.width, sh = mat?.height;
+    if (!(sw > 0 && sh > 0) || Math.abs(base.x - base.y) > 1e-6 || segment.clip?.rotation
+        || segment.clip?.flip?.horizontal || segment.clip?.flip?.vertical) {
+      throw new CapcutError('Focus requires known source dimensions and an unrotated, uniformly scaled recording.', { code: 'BAD_FOCUS', exitCode: 2 });
+    }
+    const fit = Math.min(W / sw, H / sh);
+    const row = mask ? sh * (1 - (mask.config?.centerY || 0)) / 2 : null;
+    const seam = mask ? H / 2 - base.ty * H / 2 + (row - sh / 2) * fit * from : null;
+    if (op.focus) {
+      if (op.to != null || op.from != null) throw new CapcutError('--focus computes scale; omit --from/--to.', { code: 'BAD_FOCUS', exitCode: 2 });
+      const [x, y, w, h] = cameraRect(op.focus, '--focus', sw, sh);
+      const lower = mask && Number(mask.config?.rotation || 0) === 180;
+      const defaults = mask ? [0, lower ? seam : 0, W, lower ? H - seam : seam] : [0, 0, W, H];
+      const [vx, vy, vw, vh] = cameraRect(op.viewport || defaults, '--viewport', W, H);
+      let pixels = Math.min(vw / w, vh / h) * 0.9;
+      if (mask) {
+        if ((!lower && (y + h > row || vy + vh > seam + 1e-6)) || (lower && (y < row || vy < seam - 1e-6))) {
+          throw new CapcutError('Focus rectangle or viewport crosses the split mask. Select a visible source region.', { code: 'FOCUS_MASKED', exitCode: 2 });
+        }
+        pixels = Math.min(pixels, lower ? (vy + vh - seam) / (y + h - row) : (seam - vy) / (row - y));
+      }
+      to = pixels / fit;
+      tx = (vx + vw / 2 - (x + w / 2 - sw / 2) * pixels - W / 2) / (W / 2);
+      ty = (H / 2 - (vy + vh / 2 - (y + h / 2 - sh / 2) * pixels)) / (H / 2);
+    }
+    if (mask) ty = (H / 2 - (seam - (row - sh / 2) * fit * to)) / (H / 2);
+  }
+  if (![from, to, tx, ty].every(Number.isFinite) || from <= 0 || to <= 0) {
+    throw new CapcutError('Camera scales must be finite and positive.', { code: 'BAD_SCALE', exitCode: 2 });
+  }
+  if (frames.length && mat?.width > 0 && mat?.height > 0) {
+    const fit = Math.min(W / mat.width, H / mat.height);
+    const halfW = mat.width * fit * to / 2, halfH = mat.height * fit * to * base.y / base.x / 2;
+    const cx = W / 2 + tx * W / 2, cy = H / 2 - ty * H / 2;
+    if (cx - halfW < 8 || cx + halfW > W - 8 || cy - halfH < 8 || cy + halfH > H - 8) {
+      throw new CapcutError('Camera move would push the framed recording off canvas. Use a smaller scale/larger focus rectangle, or a split-screen detail shot. The viewport is not a crop mask.',
+        { code: 'MOTION_FRAME_CLIPPED', exitCode: 2 });
     }
   }
-  if (list.length < 2) throw new CapcutError('keyframe: refused a single keyframe (dead hold).', { code: 'KEYFRAME_SINGLE', exitCode: 2 });
-  segment.common_keyframes = [{
-    id: mint('kf'), material_id: '', property_type: 'KFTypeScaleX', keyframe_list: list
-  }];
-  return { changed: 1, id: segment.id, offsets: list.map(k => r3(S(k.time_offset))), to, from };
+  const plans = [{ segment, base, target: { x: to, y: to * base.y / base.x, tx, ty } }];
+  for (const frame of frames) {
+    // A framed screen is one camera group: the border follows its recording exactly.
+    const ft = frame.target_timerange;
+    if (!ft || ft.start > tt.start || ft.start + ft.duration < tt.start + tt.duration) {
+      throw new CapcutError('The linked frame does not cover this recording. Reapply its screen layout before moving it.', { code: 'MOTION_FRAME_RANGE', exitCode: 2 });
+    }
+    const f = frame.clip || {}, ratio = to / from;
+    const frameUs = (frame.source_timerange?.start ?? 0) + US((at - S(ft.start)) * (frame.source_timerange?.duration ?? ft.duration) / ft.duration);
+    const fb = { x: cameraValue(frame, 'KFTypeScaleX', frameUs, f.scale?.x ?? 1),
+      y: cameraValue(frame, 'KFTypeScaleY', frameUs, f.scale?.y ?? 1),
+      tx: cameraValue(frame, 'KFTypePositionX', frameUs, f.transform?.x ?? 0),
+      ty: cameraValue(frame, 'KFTypePositionY', frameUs, f.transform?.y ?? 0) };
+    if (linkedScale(frame) && (frame.common_keyframes || []).some(k => k.property_type === 'KFTypeScaleX')
+        && !(frame.common_keyframes || []).some(k => k.property_type === 'KFTypeScaleY')) fb.y = fb.x;
+    const startRatio = from / base.x;
+    fb.x *= startRatio; fb.y *= startRatio;
+    fb.tx = base.tx + (fb.tx - base.tx) * startRatio;
+    fb.ty = base.ty + (fb.ty - base.ty) * startRatio;
+    plans.push({ segment: frame, base: fb,
+      target: { x: fb.x * ratio, y: fb.y * ratio,
+        tx: tx + (fb.tx - base.tx) * ratio, ty: ty + (fb.ty - base.ty) * ratio } });
+  }
+  for (const plan of plans) {
+    const s = plan.segment;
+    const props = [['KFTypeScaleX', 'x'],
+      ...(!linkedScale(s) || (s.common_keyframes || []).some(k => k.property_type === 'KFTypeScaleY') || Math.abs(plan.base.x - plan.base.y) > 1e-6 ? [['KFTypeScaleY', 'y']] : []),
+      ...(op.focus || mask || s !== segment ? [['KFTypePositionX', 'tx'], ['KFTypePositionY', 'ty']] : [])];
+    for (const [property, key] of props) {
+      const first = s === segment && (key === 'x' || key === 'y')
+        ? from * (key === 'y' ? base.y / base.x : 1) : plan.base[key];
+      const values = [first, plan.target[key], ...(release ? [plan.target[key], first] : [])];
+      const ss = s.source_timerange || { start: 0, duration: s.target_timerange.duration };
+      const sourceTime = time => ss.start + Math.round(((time - st.start) / speed + tt.start - s.target_timerange.start) * ss.duration / s.target_timerange.duration);
+      const list = offsets.map((time, i) => ({ id: mint(`${s.id}:${property}:${time}`), curveType: 'Line',
+        time_offset: sourceTime(time), left_control: { x: 0, y: 0 }, right_control: { x: 0, y: 0 },
+        values: [values[i]], string_value: '', graphID: '' }));
+      const previous = (s.common_keyframes || []).find(k => k.property_type === property);
+      const outside = (previous?.keyframe_list || []).filter(k => k.time_offset < list[0].time_offset || k.time_offset > list.at(-1).time_offset);
+      const merged = [...outside, ...list].sort((a, b) => a.time_offset - b.time_offset)
+        .filter((p, i, all) => i === all.length - 1 || p.time_offset !== all[i + 1].time_offset);
+      s.common_keyframes = [...(s.common_keyframes || []).filter(k => k.property_type !== property),
+        { id: previous?.id || mint(`${s.id}:${property}`), material_id: '', property_type: property, keyframe_list: merged }];
+    }
+  }
+  return { changed: plans.length, id: segment.id, offsets: offsets.map(k => r3(S(k))), from, to,
+    shape: release ? 'push-hold-release' : 'push', hold, shortenedHold: op.hold == null && hold < 1.6,
+    focus: op.focus || null, transform: { x: tx, y: ty }, frameIds: frames.map(s => s.id) };
 }
 
 function resolveOpClip(doc, op) {

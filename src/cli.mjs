@@ -41,7 +41,7 @@ Usage:
                       — targeted native-resolution pixel QA; --at-cuts samples both
                         sides of each cut. --preview is a separate streamed proxy job
                         and cannot be combined with selectors, --times, --sheet, or --expect.
-  capcutctl find "agent running" --media FILE [--shows|--says] [--context]
+  capcutctl find "agent running" --media FILE [--shows|--says] [--context] [--refresh]
                       — when is it on screen / when was it said.
 
   capcutctl preflight [--root PATH] [--json]   — will this work on this machine? deps, assets, tools, disk
@@ -76,7 +76,10 @@ Usage:
   capcutctl remove --project NAME --at S --track NAME|N | --segments ID
   capcutctl volume --project NAME --at S --track NAME|N | --segments ID  --level 0
   capcutctl fade --project NAME --at S --track NAME|N | --segments ID  [--in 0.08] [--out 0.12] [--plan]
-  capcutctl keyframe --project NAME --at S --track NAME|N | --segments ID  [--to 2.4] [--hold 1.6] [--ramp 0.3] [--plan]
+  capcutctl keyframe --project NAME --at S --track NAME|N | --segments ID
+                    [--from SCALE] [--to SCALE] [--hold 1.6] [--ramp 0.2] [--clear] [--plan]
+                    [--focus X,Y,W,H] [--viewport X,Y,W,H]
+                    focus uses source pixels; viewport uses canvas pixels. Default: current scale ×1.15.
   capcutctl preview --project NAME --out preview.mp4 [--fps 6] [--from S] [--to S]
                     [--resolution 360x640|--native] [--no-cache] [--no-grade]
                       — lightweight streamed proxy; defaults to 360x640 and never writes
@@ -121,20 +124,18 @@ Usage:
                         rl2 click/typing events on the chopped B-roll (Mouse click / Typing).
                         --no-interactions skips that pass.
   capcutctl grade               --project NAME [--measure] [--plan] [--strength 1] [--samples 3]
-                                [--apply] [--dry-run]
-                                colour. --measure prints each source's scope as numbers
-                                (black point, white point, saturation, R-B white balance);
-                                --plan solves sliders against one house target so every
-                                source matches; --apply writes CapCut's own Adjust materials.
-                                --set 'FILE:brightness=0.05,white=0.2' overrides one source.
+                                [--apply] [--dry-run] [--target JSON] [--reference FILE] [--reference-at S]
+                                [--set 'FILE:brightness=0.05,white=0.2'] [--reset [--source FILE]]
+                                preserve colour by default; an explicit target/reference enables the approximate solver.
+                                --reset removes CLI-owned grades (all sources unless --source is supplied).
   capcutctl timeline            --project NAME [--width 64] [--json]   — ASCII dump of the stacked timeline
   capcutctl finish              --project NAME [--plan] [--music] [--polish] [--regen]
-                                [--volume 0.08] [--prompt TEXT] [--track N] [--width 64] [--json]
+                                [--volume 0.08] [--prompt TEXT] [--file FILE] [--track N] [--width 64] [--json]
                                 scorecard + ASCII. --plan is read-only. --music generates
                                 a Lyria bed timed to picture changes and beat-aligned.
                                 --polish runs motivated polish. Voice is never recut.
-  capcutctl music               --project NAME [--plan] [--regen] [--volume 0.08] [--prompt TEXT] [--json]
-                                generate / place the instrumental bed (what finish --music runs)
+  capcutctl music               --project NAME [--plan] [--regen] [--volume 0.08] [--prompt TEXT] [--file FILE] [--json]
+                                supply a video-specific brief or local music; saved briefs survive later runs
   capcutctl layout auto         --project NAME_OR_PATH [--plan]   — split-screen where B-roll covers, full face where it does not
   capcutctl layout audit        --project NAME_OR_PATH            — what each clip is vs what it should be
   capcutctl layout list
@@ -196,7 +197,7 @@ export function parseArgs(argv) {
          'noLocalize', 'motivated', 'regen', 'music', 'noMusic', 'polish', 'noInteractions',
          'waitForClose', 'force', 'reindex', 'noRepair', 'inPlace',
          'generated', 'allowEphemeral', 'measure', 'apply', 'native', 'noCache', 'noGrade',
-         'glow', 'plain'].includes(key)) result[key] = true;
+         'glow', 'plain', 'clear', 'reset'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
       const value = argv[++i];
@@ -794,18 +795,33 @@ export async function main(argv, dependencies = {}) {
   if (command === 'grade') {
     const g = await import('./grade.mjs');
     const doc = await loadWorking(projectDir);
+    if (args.reset) {
+      if (args.set || args.target || args.reference || args.measure) throw new CapcutError('--reset cannot be combined with correction or measurement flags.', { exitCode: 2 });
+      const op = { op: 'grade.reset', ...(args.source ? { sources: [args.source] } : { all: true }) };
+      return print(applySpec(projectDir, { version: 1, name: 'grade-reset', operations: [op] },
+        { ...options, dryRun: Boolean(args.plan || args.dryRun) }), true);
+    }
     if (args.measure) {
-      return print({ target: g.TARGET, sources: g.measureSources(doc, projectDir, { samples: 4 }) }, true);
+      return print({ target: null, sources: g.measureSources(doc, projectDir, { samples: 4 }) }, true);
+    }
+    let target;
+    if (args.target) {
+      try { target = JSON.parse(args.target); }
+      catch { throw new CapcutError('--target requires a JSON object of scope targets.', { exitCode: 2 }); }
+      if (!target || typeof target !== 'object' || Array.isArray(target)) throw new CapcutError('--target requires a JSON object of scope targets.', { exitCode: 2 });
     }
     const plan = g.planGrade(doc, projectDir, {
       strength: args.strength != null ? Number(args.strength) : 1,
       samples: args.samples != null ? Number(args.samples) : 3,
+      target, reference: args.reference,
+      referenceAt: args.referenceAt != null ? Number(args.referenceAt) : undefined,
     });
     // --set FILE:slider=v,slider=v  (repeatable) overrides whatever the solver proposed
     for (const raw of [].concat(args.set || [])) {
-      const [file, list] = String(raw).split(':');
-      const row = plan.sources.find(r => r.source === file || r.source.includes(file));
-      if (!row) throw new CapcutError(`--set names "${file}", which is not a source in this project. Try \`capcutctl grade --project NAME --measure\`.`, { exitCode: 2 });
+      const separator = String(raw).lastIndexOf(':');
+      if (separator < 1) throw new CapcutError('--set expects SOURCE:slider=value.', { exitCode: 2 });
+      const file = String(raw).slice(0, separator), list = String(raw).slice(separator + 1);
+      const row = g.resolveGradeSource(plan, file);
       for (const pair of String(list || '').split(',').filter(Boolean)) {
         const [k, v] = pair.split('=');
         row.sliders[k.trim()] = Number(v);
@@ -815,6 +831,7 @@ export async function main(argv, dependencies = {}) {
     const sources = Object.fromEntries(plan.sources
       .filter(r => Object.keys(r.sliders).length)
       .map(r => [r.source, r.sliders]));
+    if (!Object.keys(sources).length) return print({ plan, applied: { changed: 0 } }, true);
     const spec = { version: 1, name: 'grade', operations: [{ op: 'grade.apply', sources }] };
     return print({ plan, applied: applySpec(projectDir, spec, options) }, true);
   }
@@ -1025,7 +1042,7 @@ export async function main(argv, dependencies = {}) {
       op.endcard = { ...(args.text ? { text: args.text } : {}) };
       if (args.noZoom) op.zooms = [];
       else if (args.zoomAt) op.zooms = String(args.zoomAt).split(',').map(Number).map(at => ({ at }));
-      else op.zooms = sig.talkingHeadScenes(doc).map(s => ({ at: r2(s.start + 0.4) }));
+      else op.zooms = sig.talkingHeadScenes(doc, await trackIndex(projectDir, args.track)).map(s => ({ at: r2(s.start + 0.4) }));
       if (args.plan) return print({ detected: hits, skippedNoLogo: missing.map(m => m.brand),
                                     endcard: op.endcard, zooms: op.zooms || [] }, true);
       if (missing.length) process.stderr.write(`note: no logo asset for ${missing.map(m => m.brand).join(', ')} — skipped\n`);
@@ -1059,6 +1076,14 @@ export async function main(argv, dependencies = {}) {
     const wantPolish = command === 'finish' && args.polish;
     if ((wantMusic || wantPolish) && !args.plan) assertFirstPictureProof(doc);
     if (args.plan || (!wantMusic && !wantPolish && command === 'finish')) {
+      if (wantMusic) {
+        const { prepareMusic } = await import('./music.mjs');
+        score.musicPrepared = await prepareMusic(projectDir, doc, {
+          dryRun: true, prompt: args.prompt, file: args.file, regen: Boolean(args.regen),
+          ...(args.volume != null ? { volume: Number(args.volume) } : {}),
+        });
+        score.musicPrompt = score.musicPrepared.prompt;
+      }
       if (args.json) return print(score, true);
       return print(finishText(score));
     }
@@ -1069,10 +1094,12 @@ export async function main(argv, dependencies = {}) {
         regen: Boolean(args.regen),
         volume: args.volume != null ? Number(args.volume) : DEFAULT_MUSIC_VOLUME,
         prompt: args.prompt || undefined,
+        file: args.file || undefined,
         dryRun: Boolean(args.dryRun),
       });
       const off = prepared.align?.offset || 0;
       score.musicPrepared = {
+        ...prepared,
         generated: prepared.generated,
         wouldGenerate: prepared.wouldGenerate,
         dryRun: Boolean(args.dryRun),
@@ -1080,6 +1107,7 @@ export async function main(argv, dependencies = {}) {
         beats: prepared.beats.length,
         align: prepared.align,
       };
+      score.musicPrompt = prepared.prompt;
       if (!args.dryRun) {
         ops.push({
           op: 'music',
@@ -1302,12 +1330,12 @@ export async function main(argv, dependencies = {}) {
     }
     if (command === 'keyframe') {
       const op = { op: 'keyframe.scale', selector, at: args.at != null ? Number(args.at) : undefined,
+        from: args.from != null ? Number(args.from) : undefined,
         to: args.to != null ? Number(args.to) : undefined, hold: args.hold != null ? Number(args.hold) : undefined,
-        ramp: args.ramp != null ? Number(args.ramp) : undefined, track: args.track };
-      if (args.plan) {
-        return print(op, true);
-      }
-      return print(applySpec(projectDir, { version: 1, name: 'keyframe', operations: [op] }, options), true);
+        ramp: args.ramp != null ? Number(args.ramp) : undefined, track: args.track,
+        focus: args.focus, viewport: args.viewport, clear: Boolean(args.clear) };
+      return print(applySpec(projectDir, { version: 1, name: 'keyframe', operations: [op] },
+        { ...options, dryRun: Boolean(args.plan || args.dryRun) }), true);
     }
   }
   if (command === 'preview') {

@@ -149,6 +149,7 @@
       "options": [
         "--context",
         "--media",
+        "--refresh",
         "--says",
         "--settle",
         "--shows",
@@ -159,6 +160,7 @@
     "finish": {
       "options": [
         "--dry-run",
+        "--file",
         "--json",
         "--music",
         "--plan",
@@ -179,9 +181,14 @@
         "--measure",
         "--plan",
         "--project",
+        "--reference",
+        "--reference-at",
+        "--reset",
         "--samples",
         "--set",
-        "--strength"
+        "--source",
+        "--strength",
+        "--target"
       ],
       "transactional": true
     },
@@ -217,14 +224,18 @@
     "keyframe": {
       "options": [
         "--at",
+        "--clear",
         "--dry-run",
+        "--focus",
+        "--from",
         "--hold",
         "--plan",
         "--project",
         "--ramp",
         "--segments",
         "--to",
-        "--track"
+        "--track",
+        "--viewport"
       ],
       "transactional": true
     },
@@ -293,8 +304,8 @@
     "music": {
       "options": [
         "--dry-run",
+        "--file",
         "--json",
-        "--music",
         "--plan",
         "--project",
         "--prompt",

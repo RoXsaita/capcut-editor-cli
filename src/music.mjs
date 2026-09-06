@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { CapcutError, clone, seededId, requireBinary, contentEndUs } from './core.mjs';
+import { CapcutError, clone, seededId, requireBinary, contentEndUs, LOCAL_MEDIA_DIR } from './core.mjs';
 import { geminiApiKey, loadEnv } from './env.mjs';
 import { audioSegment, ensureAudioTrack, pictureChanges, sfxPresets } from './polish.mjs';
 
@@ -10,6 +10,8 @@ const US = s => Math.round(s * 1e6);
 const S = us => us / 1e6;
 const r3 = n => Math.round(n * 1000) / 1000;
 export const DEFAULT_MUSIC_VOLUME = 0.08;
+const MUSIC_MODEL = 'lyria-3-pro-preview';
+const MUSIC_BRIEF_REQUIRED = 'music needs a video-specific creative brief: pass --prompt TEXT or choose a local track with --file FILE.';
 
 let SEED = null;
 const mint = key => seededId(SEED, key);
@@ -22,20 +24,87 @@ function mmss(t) {
   return `${m}:${r}`;
 }
 
-/** Timed instrumental prompt: picture-change hits in the score, quiet under speech, out at the CTA. */
-export function musicPrompt(doc, { duration = null, hits = null, projectDir = null } = {}) {
-  const dur = duration ?? S(contentEndUs(doc, projectDir));
+const cleanBrief = value => {
+  if (typeof value !== 'string') return null;
+  const brief = value.trim();
+  return brief || null;
+};
+
+/** The old prompt is safe to migrate only when it contains a real creative choice. */
+function isGenericMusicPrompt(value) {
+  const text = cleanBrief(value)?.toLowerCase() || '';
+  const markers = [
+    'vertical tech demo',
+    'quiet modern electronic / soft pulse',
+    'product-demo reel',
+  ].filter(marker => text.includes(marker));
+  return markers.length >= 2;
+}
+
+function timingContext(doc, { duration = null, hits = null, projectDir = null } = {}) {
+  const rawDuration = duration == null ? S(contentEndUs(doc, projectDir)) : Number(duration);
+  const dur = Number.isFinite(rawDuration) ? rawDuration : S(contentEndUs(doc, projectDir));
   const changes = (hits || pictureChanges(doc)).filter(hit => {
     const t = Number(hit?.t);
     return Number.isFinite(t) && t >= 0 && t < dur;
-  });
+  }).map(hit => ({
+    t: r3(Number(hit.t)),
+    kind: hit.kind,
+    from: hit.from,
+    to: hit.to,
+  }));
   const last = changes.at(-1)?.t ?? dur * 0.9;
-  const cta = Math.max(dur * 0.9, last);
+  return {
+    duration: r3(dur),
+    hits: changes,
+    cta: r3(Math.max(dur * 0.9, last)),
+  };
+}
+
+function savedBrief(meta) {
+  const explicit = meta.promptProvenance === 'explicit'
+    || meta.promptSource === 'explicit'
+    || meta.briefSource === 'explicit';
+  const candidates = [
+    ['saved', meta.brief],
+    ['saved', meta.creativeBrief],
+  ];
+  if (meta.mode !== 'local') candidates.push(['legacy', meta.prompt]);
+  for (const [source, value] of candidates) {
+    const brief = cleanBrief(value);
+    if (!brief) continue;
+    if (explicit || !isGenericMusicPrompt(brief)) return { brief, source, provenance: 'explicit' };
+  }
+  return { brief: null, source: 'missing', provenance: 'missing' };
+}
+
+function resolveBrief(override, meta) {
+  const explicit = cleanBrief(override);
+  if (explicit) return { brief: explicit, source: 'explicit', provenance: 'explicit' };
+  return savedBrief(meta);
+}
+
+/** Timed prompt: the caller supplies taste; this function supplies picture/voice constraints. */
+export function musicPrompt(doc, {
+  duration = null,
+  hits = null,
+  projectDir = null,
+  brief = null,
+  timing = null,
+} = {}) {
+  const context = timing || timingContext(doc, { duration, hits, projectDir });
+  const dur = context.duration;
+  const changes = context.hits;
+  const creative = cleanBrief(brief)
+    || (projectDir ? savedBrief(readMusicMeta(musicCachePaths(projectDir).meta)).brief : null);
   const lines = [
-    `Create a ${dur.toFixed(1)}-second instrumental-only background bed for a vertical tech demo.`,
+    creative
+      ? `Creative brief:\n${creative}`
+      : 'Creative brief required: pass --prompt TEXT or choose a local track with --file FILE.',
+    `Create a ${dur.toFixed(1)}-second instrumental-only background bed for this video.`,
+    `Use the creative brief for genre, instrumentation, energy, and emotional direction.`,
     `No vocals, no lyrics, no sung words, no drops, no riser that overpowers speech.`,
-    `Quiet modern electronic / soft pulse, 95–110 BPM, minor key, pads and muted perc.`,
-    `This sits UNDER a spoken voiceover. Percussion is light. Think product-demo Reel, not a trailer.`,
+    `Keep it quiet under the spoken voiceover and leave the CTA clear.`,
     `[0:00 - ${mmss(Math.min(changes[0]?.t || 4, 6))}] Hook: slightly brighter, still background.`,
   ];
   let cursor = changes[0]?.t || 4;
@@ -48,7 +117,7 @@ export function musicPrompt(doc, { duration = null, hits = null, projectDir = nu
     const names = changes.map(h => mmss(h.t)).join(', ');
     lines.push(`Soft accent hits exactly at: ${names}. Align downbeats to those times.`);
   }
-  lines.push(`[${mmss(cta)} - ${mmss(dur)}] Fade to silence for the CTA. No beat after ${mmss(cta)}.`);
+  lines.push(`[${mmss(context.cta)} - ${mmss(dur)}] Fade to silence for the CTA. No beat after ${mmss(context.cta)}.`);
   lines.push('Instrumental only.');
   return lines.join('\n');
 }
@@ -219,8 +288,13 @@ function readMusicMeta(file) {
   }
 }
 
-/** Earliest Follow/CTA start on the talking head, not the parked leftover. */
+/**
+ * Follow/CTA start on the talking head, not the parked leftover.
+ * wrap places the card at 93–98% of contentEnd. A mid-timeline overlay that
+ * reused `sig:endcard` (a URL, a wrap misfire) must not kill the bed.
+ */
 export function ctaBoundary(doc, projectDir = null) {
+  const end = S(contentEndUs(doc, projectDir));
   const starts = [];
   for (const t of doc.tracks || []) {
     for (const s of t.segments || []) {
@@ -229,8 +303,42 @@ export function ctaBoundary(doc, projectDir = null) {
       }
     }
   }
-  if (starts.length) return Math.min(...starts);
-  return S(contentEndUs(doc, projectDir));
+  if (!starts.length) return end;
+  const nearEnd = starts.filter(t => t >= end * 0.9);
+  return Math.min(...(nearEnd.length ? nearEnd : starts));
+}
+
+/** Copy the bed into the draft under a content-hash name CapCut cannot remap. */
+function placeMusicFile(projectDir, source, { dryRun = false } = {}) {
+  source = path.resolve(source);
+  if (!projectDir) return source;
+  const stamp = crypto.createHash('sha1').update(fs.readFileSync(source)).digest('hex').slice(0, 12);
+  const dest = path.join(projectDir, LOCAL_MEDIA_DIR, `finish-music-${stamp}${path.extname(source) || '.mp3'}`);
+  if (path.resolve(source) === path.resolve(dest)) return dest;
+  if (!dryRun) {
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.copyFileSync(source, dest);
+  }
+  return dest;
+}
+
+/** Library identity left on a cloned template makes CapCut swap our file for Hyperpop. */
+function detachLibraryIdentity(material) {
+  material.effect_id = '';
+  material.resource_id = '';
+  material.music_id = '';
+  material.pgc_id = '';
+  material.pgc_name = '';
+  material.unique_id = '';
+  material.local_material_id = '';
+  material.third_resource_id = '';
+  material.formula_id = '';
+  material.query = '';
+  material.search_id = '';
+  material.music_source = '';
+  material.category_name = 'local';
+  material.app_id = 0;
+  return material;
 }
 
 /**
@@ -259,18 +367,17 @@ export function opMusic(doc, op, context = {}) {
   }
   const lane = ensureAudioTrack(doc, 'finish-music', mint);
   lane.segments = (lane.segments || []).filter(s => (s.desc || '') !== 'finish:music');
+  doc.materials.audios = (doc.materials.audios || []).filter(a => a.name !== 'finish-music');
 
+  const placed = placeMusicFile(context.projectDir, file, { dryRun: context.dryRun });
   const templates = Object.values(sfxPresets().audioTemplates);
   const tpl = templates.find(m => m.type === 'music') || templates[0];
-  const material = clone(tpl);
+  const material = detachLibraryIdentity(clone(tpl));
   material.id = mint('audio:finish-music');
   material.type = 'music';
   material.name = 'finish-music';
-  material.path = file;
+  material.path = placed;
   material.duration = US(durFile);
-  material.category_name = 'local';
-  material.effect_id = '';
-  material.resource_id = '';
   arr(doc, 'audios').push(material);
 
   const seg = audioSegment(doc, material.id, at, play, 'music:0', volume, 'finish:music', mint);
@@ -306,54 +413,185 @@ export function opMusic(doc, op, context = {}) {
   };
 }
 
+function buildMusicState(projectDir, doc, {
+  regen = false,
+  volume = DEFAULT_MUSIC_VOLUME,
+  prompt: override,
+  file: selectedFile = null,
+} = {}) {
+  const paths = musicCachePaths(projectDir);
+  if (selectedFile && (cleanBrief(override) || regen)) {
+    throw new CapcutError('Choose --file or generation flags (--prompt/--regen), not both.', { code: 'MUSIC_OPTIONS', exitCode: 2 });
+  }
+  if (!Number.isFinite(volume) || volume < 0 || volume > 1) {
+    throw new CapcutError('Music volume must be between 0 and 1.', { code: 'BAD_VOLUME', exitCode: 2 });
+  }
+  const prev = readMusicMeta(paths.meta);
+  const timing = timingContext(doc, { projectDir });
+  const resolved = resolveBrief(override, prev);
+  const generationRequested = Boolean(cleanBrief(override) || regen);
+  const savedLocal = !generationRequested && prev.mode === 'local' ? cleanBrief(prev.file) : null;
+  const selectedValue = !generationRequested && (cleanBrief(selectedFile) || savedLocal);
+  const selected = selectedValue ? path.resolve(selectedValue) : null;
+  if (selected && !fs.existsSync(selected)) {
+    throw new CapcutError(`music file missing: ${selected}`, { code: 'MUSIC_MISSING', exitCode: 2 });
+  }
+  const prompt = musicPrompt(doc, { projectDir, timing, brief: resolved.brief });
+  const briefHash = resolved.brief ? promptHash(resolved.brief) : null;
+  const timingHash = promptHash(JSON.stringify(timing));
+  const hash = resolved.brief ? promptHash(`${briefHash}:${timingHash}`) : null;
+  const cached = fs.existsSync(paths.file);
+  const stale = !selected && Boolean(resolved.brief)
+    && (!cached || prev.mode !== 'generated' || prev.briefHash !== briefHash || prev.timingHash !== timingHash);
+  const needsBrief = !selected && !resolved.brief;
+  return {
+    paths,
+    prev,
+    selected,
+    file: selected || paths.file,
+    mode: selected ? 'local' : 'generated',
+    timing,
+    hits: timing.hits,
+    brief: resolved.brief,
+    briefHash,
+    briefSource: resolved.source,
+    promptSource: resolved.source,
+    promptProvenance: resolved.provenance,
+    prompt,
+    timingHash,
+    hash,
+    cached,
+    stale,
+    needsBrief,
+    wouldGenerate: !selected && Boolean(resolved.brief && (regen || stale)),
+    volume,
+  };
+}
+
 export async function prepareMusic(projectDir, doc, {
   regen = false,
   volume = DEFAULT_MUSIC_VOLUME,
   prompt: override,
+  file: selectedFile = null,
   dryRun = false,
+  generate = generateLyria,
+  probe = probeAudioDuration,
+  detect = detectBeats,
 } = {}) {
-  const hits = pictureChanges(doc);
-  const prompt = override || musicPrompt(doc, { hits, projectDir });
-  const hash = promptHash(prompt);
-  const paths = musicCachePaths(projectDir);
-  const prev = readMusicMeta(paths.meta);
-  const cached = fs.existsSync(paths.file);
-  const stale = !cached || prev.hash !== hash;
-  if (dryRun) {
-    const usableCache = cached && !stale;
-    const beats = usableCache && Array.isArray(prev.beats) ? prev.beats : [];
-    const duration = usableCache && Number.isFinite(Number(prev.duration))
-      ? Number(prev.duration)
-      : S(contentEndUs(doc, projectDir));
+  const state = buildMusicState(projectDir, doc, {
+    regen, volume, prompt: override, file: selectedFile,
+  });
+  const base = {
+    hash: state.hash,
+    prompt: state.prompt,
+    brief: state.brief,
+    briefHash: state.briefHash,
+    briefSource: state.briefSource,
+    promptSource: state.promptSource,
+    promptProvenance: state.promptProvenance,
+    timing: state.timing,
+    timingHash: state.timingHash,
+    hits: state.hits,
+    volume: state.volume,
+    file: state.file,
+    mode: state.mode,
+    model: MUSIC_MODEL,
+    cached: state.cached,
+    stale: state.stale,
+    needsBrief: state.needsBrief,
+    error: state.needsBrief ? MUSIC_BRIEF_REQUIRED : null,
+  };
+
+  if (state.needsBrief) {
+    if (!dryRun) {
+      throw new CapcutError(MUSIC_BRIEF_REQUIRED, {
+        code: 'MUSIC_BRIEF_REQUIRED',
+        exitCode: 2,
+        details: { action: 'provide-brief', ...base },
+      });
+    }
     return {
-      hash,
-      prompt,
+      ...base,
       generated: false,
-      wouldGenerate: Boolean(regen || stale),
-      duration,
-      beats,
-      hits: hits.map(h => ({ t: h.t, kind: h.kind })),
-      align: beatOffset(beats, hits),
-      volume,
-      file: paths.file,
-      model: 'lyria-3-pro-preview',
+      wouldGenerate: false,
+      duration: state.timing.duration,
+      beats: [],
+      align: beatOffset([], state.hits),
       dryRun: true,
     };
   }
+
+  if (state.selected) {
+    if (dryRun) {
+      return {
+        ...base,
+        local: true,
+        generated: false,
+        wouldGenerate: false,
+        duration: null,
+        beats: [],
+        align: beatOffset([], state.hits),
+        dryRun: true,
+      };
+    }
+    const duration = probe(state.selected);
+    const beats = detect(state.selected);
+    const meta = {
+      version: 2,
+      ...base,
+      mode: 'local',
+      local: true,
+      generated: false,
+      wouldGenerate: false,
+      duration,
+      beats,
+      align: beatOffset(beats, state.hits),
+      dryRun: false,
+    };
+    fs.mkdirSync(state.paths.dir, { recursive: true });
+    fs.writeFileSync(state.paths.meta, JSON.stringify(meta, null, 2) + '\n');
+    return meta;
+  }
+
+  if (dryRun) {
+    const usableCache = state.cached && !state.stale;
+    const beats = usableCache && Array.isArray(state.prev.beats) ? state.prev.beats : [];
+    const duration = usableCache && Number.isFinite(Number(state.prev.duration))
+      ? Number(state.prev.duration)
+      : state.timing.duration;
+    return {
+      ...base,
+      generated: false,
+      wouldGenerate: state.wouldGenerate,
+      duration,
+      beats,
+      align: beatOffset(beats, state.hits),
+      dryRun: true,
+    };
+  }
+
+  const { paths } = state;
   fs.mkdirSync(paths.dir, { recursive: true });
   let generated = false;
-  if (regen || stale) {
-    const buf = await generateLyria({ prompt });
+  if (state.wouldGenerate) {
+    const buf = await generate({ prompt: state.prompt, model: MUSIC_MODEL });
     fs.writeFileSync(paths.file, buf);
     generated = true;
   }
-  const duration = probeAudioDuration(paths.file);
-  const beats = detectBeats(paths.file);
-  const align = beatOffset(beats, hits);
+  const duration = probe(paths.file);
+  const beats = detect(paths.file);
+  const align = beatOffset(beats, state.hits);
   const meta = {
-    hash, prompt, generated, duration, beats: beats.slice(0, 80),
-    hits: hits.map(h => ({ t: h.t, kind: h.kind })),
-    align, volume, file: paths.file, model: 'lyria-3-pro-preview',
+    version: 2,
+    ...base,
+    generated,
+    wouldGenerate: state.wouldGenerate,
+    duration,
+    beats: beats.slice(0, 80),
+    align,
+    file: paths.file,
+    model: MUSIC_MODEL,
+    dryRun: false,
   };
   fs.writeFileSync(paths.meta, JSON.stringify(meta, null, 2) + '\n');
   return meta;

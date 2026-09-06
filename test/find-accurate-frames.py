@@ -23,9 +23,16 @@ class FindAccurateFramesTests(unittest.TestCase):
             cache.mkdir()
             media = Path(tmp) / "screen recording.mp4"
             media.write_bytes(b"fixture")
+            frames = {str(second): ("hello world" if second in (10, 11) else "")
+                      for second in range(12)}
             (cache / "screen recording.ocr.json").write_text(json.dumps({
-                "10": "hello world",
-                "11": "hello world",
+                "version": find.OCR_INDEX_VERSION,
+                "media": find.canonical_media(media),
+                "source_token": find.source_token(media),
+                "source_duration": 12.0,
+                "sample_interval": 1.0,
+                "coverage": {"start": 0, "end": 12, "samples": 12},
+                "frames": frames,
             }))
             strip = Path(tmp) / "strip.png"
             sample = frame_qa.FrameSample(
@@ -34,6 +41,7 @@ class FindAccurateFramesTests(unittest.TestCase):
             )
             output = io.StringIO()
             with patch.object(find, "CACHE", str(cache)), \
+                    patch.object(find, "_probe_duration", return_value=12.0), \
                     patch.object(frame_qa, "extract_frame", return_value=sample) as extractor, \
                     patch.object(frame_qa, "contact_sheet", return_value=str(strip)) as sheet, \
                     patch.dict(os.environ, {"TMPDIR": tmp}), \
