@@ -52,7 +52,7 @@ DRAFTS = os.path.expanduser("~/Movies/CapCut/User Data/Projects/com.lveditor.dra
 _FRAME_EPS = 1.0 / 24
 _DEFAULT_FRAME_PERIOD = 1.0 / 30.0
 _SEEK_PREROLL = 2.0
-_PREVIEW_COMPOSITOR_VERSION = "preview-v3"
+_PREVIEW_COMPOSITOR_VERSION = "preview-v4"
 _DEFAULT_PREVIEW_BOUNDS = (360, 640)
 _DEFAULT_CUT_OFFSET = None  # one timeline frame, resolved from the draft FPS
 _PREVIEW_HWACCEL = None
@@ -2091,10 +2091,33 @@ def _run_progress_encoder(command, total_frames, fps, started, callback):
     _emit_preview_progress(callback, total_frames, total_frames, started)
 
 
+def _audio_filters(segment, materials, speed, offset=0.0):
+    """Shared gain/fades in clip time, after speed and before preview-range placement."""
+    filters = [value for value in (atempo_chain(speed),) if value]
+    volume = segment.get("volume")
+    if volume is not None:
+        filters.append(f"volume={float(volume):.6f}")
+    fade = next((materials[ref] for ref in segment.get("extra_material_refs") or []
+                 if materials.get(ref, {}).get("type") == "audio_fade"), None)
+    if fade:
+        duration = segment["target_timerange"]["duration"] / 1e6
+        # A bounded preview can begin inside a fade. Evaluate at the original clip
+        # offset, then restore zero-based timestamps for concat/delay placement.
+        filters.append(f"asetpts=PTS-STARTPTS+{offset:.9f}/TB")
+        for kind in ("in", "out"):
+            length = min(duration, max(0.0, float(fade.get(f"fade_{kind}_duration") or 0) / 1e6))
+            if length > 0:
+                start = 0.0 if kind == "in" else duration - length
+                filters.append(f"afade=t={kind}:st={start:.9f}:d={length:.9f}")
+        filters.append("asetpts=PTS-STARTPTS")
+    return filters
+
+
 def _write_simple_preview(project_dir, tl, segments, output, fps, duration, output_size,
                           total_frames, started, callback):
     """Encode a plain A-roll from one filter graph, including its original speech audio."""
     infos = {row["path"]: _probe_video_info(row["path"]) for row in segments}
+    materials = _material_index(tl)
     filters = []
     video_labels = []
     audio_labels = []
@@ -2119,12 +2142,9 @@ def _write_simple_preview(project_dir, tl, segments, output, fps, duration, outp
                 f"[{index}:a]atrim=duration={source_duration:.9f},"
                 f"asetpts=PTS-STARTPTS"
             )
-            tempo = atempo_chain(speed)
-            if tempo:
-                audio_filter += f",{tempo}"
-            volume = row["segment"].get("volume")
-            if volume is not None:
-                audio_filter += f",volume={float(volume):.6f}"
+            offset = row["timeline_start"] - row["segment"]["target_timerange"]["start"] / 1e6
+            for value in _audio_filters(row["segment"], materials, speed, offset):
+                audio_filter += f",{value}"
             audio_filter += f"[{audio_label}]"
         else:
             audio_filter = (
@@ -2292,12 +2312,7 @@ def _timeline_audio(proj, tl, tmp, duration_s, range_start=0.0):
     the audio tracks — reading only the principal video track dropped 28 segments and
     13.5s of sound in GrokBuild-20260825 and made the seams silent.
     """
-    idx = {}
-    for _k, v in (tl.get("materials") or {}).items():
-        if isinstance(v, list):
-            for m in v:
-                if isinstance(m, dict) and "id" in m:
-                    idx[m["id"]] = m
+    idx = _material_index(tl)
     _content_start, content_end = content_edit_range(proj, tl)
     principal_index = _content_track_index(tl, content_end)
     if principal_index is not None:
@@ -2341,12 +2356,10 @@ def _timeline_audio(proj, tl, tmp, duration_s, range_start=0.0):
         cmd = ["ffmpeg", "-y", "-loglevel", "error", "-ss", str(max(0, source_start)),
                "-t", str(max(0.01, source_duration)),
                "-i", p]
-        af = [x for x in (atempo_chain(speed),) if x]
-        if abs(vol - 1.0) > 1e-3:
-            af.append(f"volume={vol:.6f}")
+        af = _audio_filters(s, idx, speed, overlap_start - target_start)
         if af:
             cmd += ["-af", ",".join(af)]
-        cmd += ["-ac", "1", "-ar", "44100", wav]
+        cmd += ["-ac", "2", "-ar", "44100", "-c:a", "pcm_f32le", wav]
         try:
             _run_command(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             slices.append((overlap_start - range_start, wav))
@@ -2357,7 +2370,7 @@ def _timeline_audio(proj, tl, tmp, duration_s, range_start=0.0):
     # Mix onto a silent bed so gaps stay gaps.
     bed = os.path.join(tmp, "bed.wav")
     _run_command(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
-                  "-i", "anullsrc=r=44100:cl=mono", "-t", str(max(0.05, duration_s)), bed], check=True)
+                  "-i", "anullsrc=r=44100:cl=stereo", "-t", str(max(0.05, duration_s)), bed], check=True)
     inputs = ["-i", bed]
     filters = []
     mix = ["[0:a]"]
@@ -2370,7 +2383,8 @@ def _timeline_audio(proj, tl, tmp, duration_s, range_start=0.0):
     filters.append("".join(mix) + f"amix=inputs={n}:dropout_transition=0:normalize=0[aout]")
     mixed = os.path.join(tmp, "mix.wav")
     _run_command(["ffmpeg", "-y", "-loglevel", "error", *inputs,
-                  "-filter_complex", ";".join(filters), "-map", "[aout]", mixed], check=True)
+                  "-filter_complex", ";".join(filters), "-map", "[aout]",
+                  "-c:a", "pcm_f32le", mixed], check=True)
     return mixed
 
 

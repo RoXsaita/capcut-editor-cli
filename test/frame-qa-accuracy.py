@@ -458,6 +458,60 @@ class PreviewAndSamplingTests(unittest.TestCase):
 
 
 class RealFfmpegPreviewTests(unittest.TestCase):
+    def test_native_audio_fades_survive_speed_range_trims_and_stereo_mixing(self):
+        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+            self.skipTest("ffmpeg and ffprobe are required for the audio regression")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            media = root / "stereo.mov"
+            subprocess.run([
+                "ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                "color=c=red:s=32x32:r=8:d=6", "-f", "lavfi", "-i",
+                "aevalsrc=0.25*sin(2*PI*440*t)|0.1*sin(2*PI*880*t):s=44100:d=6",
+                "-c:v", "libx264", "-c:a", "pcm_s16le", str(media),
+            ], check=True)
+            clip = {
+                **segment("voice", 1, 2), "volume": 0.5,
+                "source_timerange": {"start": 500_000, "duration": 4_000_000},
+                "extra_material_refs": ["FADE"],
+            }
+            timeline = {
+                "duration": 3_000_000, "canvas_config": {"width": 32, "height": 32},
+                "tracks": [{"type": "video", "flag": 2, "segments": [clip]}],
+                "materials": {
+                    "videos": [{"id": "VIDEO", "path": str(media)}],
+                    "audio_fades": [{"id": "FADE", "type": "audio_fade",
+                                     "fade_in_duration": 500_000, "fade_out_duration": 500_000}],
+                },
+            }
+            for mode in ("a-roll-concat", "compositor-stream"):
+                if mode == "compositor-stream":
+                    # Exercise the music/SFX lane as well as the principal-video path.
+                    timeline["tracks"].append({"type": "audio", "segments": [dict(clip)]})
+                    clip["volume"] = 0
+                for start, end in ((1, 3), (1.25, 2.75), (1.75, 2.25)):
+                    with self.subTest(mode=mode, start=start, end=end):
+                        self.assertEqual(frame_qa.preview_mode(str(root), timeline, start, end), mode)
+                        output = root / "preview.mp4"
+                        frame_qa.write_preview(
+                            str(root), timeline, str(output), fps=8, start=start, end=end,
+                            resolution="32x32", cache=False, announce=False,
+                        )
+                        raw = subprocess.run([
+                            "ffmpeg", "-v", "error", "-i", str(output), "-map", "0:a:0",
+                            "-ac", "2", "-ar", "44100", "-f", "f32le", "-",
+                        ], check=True, capture_output=True).stdout
+                        samples = np.frombuffer(raw, dtype=np.float32).reshape((-1, 2))
+                        # Each window's expected gain comes from ORIGINAL clip time;
+                        # a preview crop must neither restart a fade nor invent a new one.
+                        for at in (0.125, (end - start) / 2, end - start - 0.125):
+                            window = samples[round((at - .025) * 44100):round((at + .025) * 44100)]
+                            local = start - 1 + at
+                            gain = min(1, local / .5, (2 - local) / .5)
+                            rms = np.sqrt(np.mean(window ** 2, axis=0))
+                            expected = np.array([.25, .1]) * .5 * gain / np.sqrt(2)
+                            np.testing.assert_allclose(rms, expected, rtol=.12, atol=.002)
+
     def test_video_only_preview_does_not_overrun_requested_range(self):
         if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
             self.skipTest("ffmpeg and ffprobe are required for the real preview regression")
