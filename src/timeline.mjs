@@ -38,7 +38,7 @@ function videoChar(segment, material) {
  */
 export function renderTimeline(doc, { width = 64 } = {}) {
   const duration = S(doc.duration || 0);
-  const W = Math.max(24, Math.min(120, Number(width) || 64));
+  const W = Math.round(Math.max(24, Math.min(120, Number(width) || 64)));
   const videos = new Map((doc.materials?.videos || []).map(m => [m.id, m]));
   const audios = new Map((doc.materials?.audios || []).map(m => [m.id, m]));
   const trans = new Set((doc.materials?.transitions || []).map(m => m.id));

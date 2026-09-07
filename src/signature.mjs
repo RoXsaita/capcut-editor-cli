@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { CapcutError, clone, seededId, loadPreset, localizeMedia, contentEndUs } from './core.mjs';
+import { CapcutError, clone, seededId, loadPreset, localizeMedia, resolveMediaPath, contentEndUs } from './core.mjs';
 import { principalTrack, sfxPresets } from './polish.mjs';
 import { parkPresetLeftover, opScaleKeyframe } from './add.mjs';
 
@@ -38,8 +38,8 @@ function headerSize(file) {
   }
   if (buf.toString('ascii', 0, 4) === 'RIFF' && buf.toString('ascii', 8, 12) === 'WEBP') {
     const kind = buf.toString('ascii', 12, 16);
-    if (kind === 'VP8X') return { width: buf.readUIntLE(24, 3) + 1, height: buf.readUIntLE(27, 3) + 1 };
-    if (kind === 'VP8 ') return { width: buf.readUInt16LE(26) & 0x3fff, height: buf.readUInt16LE(28) & 0x3fff };
+    if (kind === 'VP8X' && buf.length >= 30) return { width: buf.readUIntLE(24, 3) + 1, height: buf.readUIntLE(27, 3) + 1 };
+    if (kind === 'VP8 ' && buf.length >= 30) return { width: buf.readUInt16LE(26) & 0x3fff, height: buf.readUInt16LE(28) & 0x3fff };
     return null;                                       // VP8L and friends: let sips answer
   }
   if (buf[0] === 0xFF && buf[1] === 0xD8) {            // JPEG: walk to the first SOF marker
@@ -330,11 +330,17 @@ function addTrack(doc, template, name) {
   return t;
 }
 
-function ensureSfx(doc, which, atSeconds, key) {
+function ensureSfx(doc, which, atSeconds, key, unavailable, projectDir) {
   const p = sigPresets();
   const tpl = p.audioTemplates[which];
   if (!tpl) return null;
   let mat = (doc.materials.audios || []).find(m => m.name === tpl.name);
+  const raw = (mat || tpl).path;
+  const file = projectDir ? resolveMediaPath(raw, projectDir) : raw;
+  if (!file || !fs.existsSync(file)) {
+    unavailable.push(tpl.name || which);
+    return null;
+  }
   if (!mat) { mat = clone(tpl); mat.id = mint(`audio:${which}`); arr(doc, 'audios').push(mat); }
   // reuse polish's audio segment shape — it was captured from a real CapCut clip
   return { materialId: mat.id, at: atSeconds, key, duration: Math.min(S(tpl.duration || US(0.5)), 1.2) };
@@ -345,6 +351,7 @@ export function opSignature(doc, op, context = {}) {
   const p = sigPresets();
   const rules = p.rules;
   const result = { logos: [], endcard: null, zooms: [], sfx: 0 };
+  const unavailable = [];
 
   // Start clean — but ONLY for the kinds this op actually writes. Wiping all three
   // unconditionally meant `capcutctl zoom` (which writes neither a logo nor an endcard)
@@ -512,7 +519,7 @@ export function opSignature(doc, op, context = {}) {
                           overshoot: g.core.scale[1][1], underlayAlpha: g.underlay.alpha.at(-1)[1] });
     }
     if (!op.noSfx) {
-      const cue = ensureSfx(doc, rules.logoSfx, l.at - rules.logoSfxLeadSeconds, key);
+      const cue = ensureSfx(doc, rules.logoSfx, l.at - rules.logoSfxLeadSeconds, key, unavailable, context.projectDir);
       if (cue) { cue.owner = 'logo'; cue.duration = Math.min(cue.duration, S(editUs) - cue.at); pending.push(cue); }
     }
   }
@@ -549,7 +556,7 @@ export function opSignature(doc, op, context = {}) {
     const track = addTrack(doc, p.textTrackTemplate, 'sig-endcard');
     track.segments.push(seg);
     if (!op.noSfx) {
-      const cue = ensureSfx(doc, rules.endcardSfx, at - rules.endcardSfxLeadSeconds, key);
+      const cue = ensureSfx(doc, rules.endcardSfx, at - rules.endcardSfxLeadSeconds, key, unavailable, context.projectDir);
       if (cue) { cue.owner = 'endcard'; cue.duration = Math.min(cue.duration, S(durUs) - cue.at); pending.push(cue); }
     }
     result.endcard = { text: style.text, at, hold };
@@ -617,6 +624,7 @@ export function opSignature(doc, op, context = {}) {
     throw new CapcutError('signature wrote nothing: pass logos, an endcard, or zooms.',
       { code: 'NOTHING_TO_SIGN', exitCode: 2 });
   }
+  if (unavailable.length) result.unavailableSfx = [...new Set(unavailable)];
   return result;
 }
 

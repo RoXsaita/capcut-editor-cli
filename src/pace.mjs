@@ -103,16 +103,23 @@ export function setSpeed(doc, seg, speed, { sourceStart = null } = {}) {
  * is exactly what IKEA Refund does 21 times.
  */
 export function pacePlan(doc, { track = null, max = 100, minGap = 5.0 } = {}) {
-  // Do not catch NO_PRINCIPAL_TRACK. Swallowing it used to pace the talking head
-  // itself — dead air already cut looks like "skipped source" and --auto 30×'s it.
-  const principal = track == null ? principalTrack(doc).index : null;
+  // Auto needs a known principal so it cannot mistake speech gaps for B-roll waiting.
+  // An explicit B-roll track can still be paced in a draft without a gapless principal.
+  let principal = null;
+  try { principal = principalTrack(doc).index; }
+  catch (error) { if (track == null || error.code !== 'NO_PRINCIPAL_TRACK') throw error; }
+  if (track === principal) {
+    throw new CapcutError('pace cannot change the talking-head track; recut speech at 1x with cut.',
+      { code: 'PRINCIPAL_TRACK', exitCode: 2 });
+  }
   const rows = [];
   for (const [ti, t] of doc.tracks.entries()) {
-    if (t.type !== 'video' || !(t.segments || []).length) continue;
+    if (t.type !== 'video' || t.flag === 0 || !(t.segments || []).length) continue;
     if (track != null ? ti !== track : ti === principal) continue;
     const segs = [...t.segments].sort((a, b) => a.target_timerange.start - b.target_timerange.start);
     for (const [i, seg] of segs.entries()) {
       if (isPlate(doc, seg)) continue;
+      if ((seg.desc || '').startsWith('layout:') && seg.desc !== 'layout:screen-recording') continue;
       const st = seg.source_timerange, tt = seg.target_timerange;
       if (!st) continue;
       const speed = currentSpeed(doc, seg);
@@ -165,7 +172,7 @@ export function opPace(doc, op) {
   for (const s of op.set || []) {
     const row = find(s.at);
     const speed = s.cover
-      ? (s.cover[1] - s.cover[0]) / row.screen
+      ? (s.cover[1] - s.cover[0]) / S(row.__seg.target_timerange.duration)
       : s.speed;
     const out = setSpeed(doc, row.__seg, speed, { sourceStart: s.cover ? US(s.cover[0]) : null });
     applied.push({ at: row.at, track: row.track, from: row.speed, ...out, desc: row.desc });
@@ -174,6 +181,7 @@ export function opPace(doc, op) {
   if (op.auto) {
     for (const row of rows) {
       if (row.suggested == null) continue;
+      if (applied.some(hit => hit.track === row.track && hit.at === row.at)) continue;
       // Never override a ramp somebody already chose. Auto fills in what was left at 1.0x.
       if (Math.abs(row.speed - 1) >= 0.02) continue;
       const out = setSpeed(doc, row.__seg, row.suggested);

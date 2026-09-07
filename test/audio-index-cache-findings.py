@@ -24,6 +24,37 @@ def write_pcm(path, amplitude, frames=16000):
 
 
 class AudioIndexCacheFindingsTest(unittest.TestCase):
+    def test_pcm_widths_stereo_and_trailing_partial_bin_retain_speech(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            media = Path(tmp) / "take.wav"
+            for width in (1, 2, 3, 4):
+                for channels in (1, 2):
+                    with self.subTest(width=width, channels=channels):
+                        silence = (128 if width == 1 else 0).to_bytes(width, "little", signed=width > 1)
+                        loud = (192 if width == 1 else 2 ** (width * 8 - 2)).to_bytes(
+                            width, "little", signed=width > 1)
+                        with wave.open(str(media), "wb") as handle:
+                            handle.setnchannels(channels)
+                            handle.setsampwidth(width)
+                            handle.setframerate(16000)
+                            handle.writeframes(silence * channels * 160
+                                               + (silence * (channels - 1) + loud) * 161)
+                        index = AudioIndex.from_wav(media)
+                        self.assertEqual(len(index.db), 3)
+                        self.assertLess(index.at(0), -100)
+                        self.assertGreater(index.at(0.01), -10)
+                        self.assertGreater(index.at(0.02), -10)
+                        self.assertEqual(index.at(-0.001), -99)
+
+    def test_exact_bin_end_is_retained_and_invalid_bins_are_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            media = Path(tmp) / "take.wav"
+            write_pcm(media, 20000, frames=160)
+            self.assertEqual(len(AudioIndex.from_wav(media).db), 1)
+            for bin_ms in (0, -1, float("nan"), float("inf")):
+                with self.subTest(bin_ms=bin_ms), self.assertRaisesRegex(ValueError, "bin size"):
+                    AudioIndex.from_wav(media, bin_ms=bin_ms)
+
     def test_audio_token_catches_same_size_fast_overwrite(self):
         with tempfile.TemporaryDirectory() as tmp:
             media = Path(tmp) / "take.mp4"

@@ -69,6 +69,7 @@ if [ "$node_status" -eq 0 ] && [ "${node_fail:-1}" = 0 ] && [ "${node_pass:-0}" 
         fail "node tests skipped ${node_skip} (required under --strict; install ffmpeg)"
     fi
 else
+    printf '%s\n' "$node_out" | awk '/^not ok/ { remaining=35 } remaining > 0 { print; remaining-- }'
     printf '%s\n' "$node_out" | tail -20
     fail "node tests"
 fi
@@ -91,8 +92,7 @@ fi
 
 stage "python selftests"
 if [ -n "$py" ]; then
-    aroll_out=$("$py" tools/aroll.py --selftest 2>&1)
-    if printf '%s' "$aroll_out" | grep -q 'all passed'; then ok "aroll"; else
+    if aroll_out=$("$py" tools/aroll.py --selftest 2>&1) && printf '%s' "$aroll_out" | grep -q 'all passed'; then ok "aroll"; else
         printf '%s\n' "$aroll_out" | tail -10
         fail "aroll selftest"
     fi
@@ -120,8 +120,10 @@ fi
 
 stage "vulture (dead code)"
 if have vulture; then
-    out=$(vulture tools/ --min-confidence 80 2>&1)
-    if [ -z "$out" ]; then ok "no dead code"; else echo "$out"; fail "vulture"; fi
+    if out=$(vulture tools/ --min-confidence 80 2>&1); then ok "no dead code"; else
+        printf '%s\n' "$out"
+        fail "vulture"
+    fi
 else
     skip "vulture" "uv tool install vulture"
 fi

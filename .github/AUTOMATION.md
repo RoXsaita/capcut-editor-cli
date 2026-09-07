@@ -16,8 +16,8 @@ ruleset once branch rules are available for the repository.
 ## Codex pull request review
 
 `.github/workflows/ai-review.yml` runs when a pull request is opened, reopened, marked ready, or
-receives a new commit. Trusted contributors are reviewed automatically. After this repository is
-public, an external contributor's first review requires a maintainer to add the
+receives a new commit. Trusted contributors are reviewed automatically. An external
+contributor's first review requires a maintainer to add the
 `ai-review-approved` label; subsequent commits retain the label and are reviewed automatically.
 This prevents an anonymous PR-spam loop from spending the API budget. The workflow uses
 `gpt-5.6-luna` at `max` effort and the defect-first contract in
@@ -62,7 +62,7 @@ gh label create ai-review-approved \
   --description "Allow the controlled Codex reviewer to run on this external PR"
 ```
 
-After the repository is public (or branch rules are otherwise available), protect `main` and
+To configure branch protection, protect `main` and
 require these checks:
 
 - `Node 20`
@@ -77,10 +77,7 @@ commits, and require review from Code Owners for changes under `.github/`.
 Licensed MIT (`LICENSE`) with a CapCut disclaimer in `NOTICE`. The package remains
 `"private": true` in `package.json` until a distribution channel is chosen.
 
-There is intentionally no deployment workflow yet. Add release automation only after
-deciding whether releases target npm, Homebrew, standalone GitHub archives, or some
-combination; otherwise "CD" would be an unaudited publish button with no defined
-destination.
-
-Before making the GitHub repository public, follow `docs/PRE-PUBLISH.md` — git history
-still contains a harvested catalogue of local draft names.
+Distribution is source-first through GitHub Releases; see `docs/PRE-PUBLISH.md` for
+the release checks. npm and Homebrew publishing remain out of scope.
+The private harvested catalogue was removed from published history; rescan history
+and the current package before each release.

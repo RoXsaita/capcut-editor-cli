@@ -77,6 +77,13 @@ test('--derived-from is accepted only when it names a real, durable file', () =>
   assert.equal(ephemeral.code, 'DERIVED_SOURCE_EPHEMERAL');
 });
 
+test('derived offsets require a source and a finite nonnegative value', () => {
+  for (const options of [{ derivedOffset: 1 }, { derivedOffset: NaN, derivedFrom: '/source' },
+    { derivedOffset: Infinity, derivedFrom: '/source' }, { derivedOffset: -1, derivedFrom: '/source' }]) {
+    assert.throws(() => assertOrigin(options), error => error.code === 'BAD_DERIVED_OFFSET');
+  }
+});
+
 test('an ephemeral source is refused, unless the project is just as temporary', () => {
   const scratch = '/private/tmp/agent-session/scratchpad/broll/grok-work.mp4';
   const error = raises(() => assertOrigin({

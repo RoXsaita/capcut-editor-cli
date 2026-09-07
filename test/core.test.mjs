@@ -16,6 +16,7 @@ import {
   closeCapcut,
   contentEndUs,
   createSnapshot,
+  deepMerge,
   discoverOpenDraft,
   draftEndUs,
   doctor,
@@ -32,8 +33,34 @@ import {
   stableJson,
   syncMirrors,
   validateDocument,
+  unsetPath,
   waitForCapcutClosed
 } from '../src/core.mjs';
+
+test('patch and unset reject prototype traversal', () => {
+  for (const key of ['__proto__', 'constructor', 'prototype']) {
+    assert.throws(() => deepMerge({}, JSON.parse(`{"${key}":{"review_polluted":true}}`)),
+      error => error.code === 'UNSAFE_PROPERTY');
+    assert.throws(() => unsetPath({}, `${key}.review_polluted`), error => error.code === 'UNSAFE_PROPERTY');
+  }
+  assert.equal(Object.prototype.review_polluted, undefined);
+  const value = { clip: { scale: { x: 1, y: 1 } } };
+  deepMerge(value, { clip: { scale: { x: 2 } } });
+  unsetPath(value, 'clip.scale.y');
+  assert.deepEqual(value, { clip: { scale: { x: 2 } } });
+});
+
+test('validation reports malformed document collections without throwing', () => {
+  for (const doc of [{ tracks: {}, materials: {} }, { tracks: [], materials: [] },
+    { tracks: [null], materials: {} }, { tracks: [{ segments: {} }], materials: {} },
+    { tracks: [{ segments: [null] }], materials: {} }]) {
+    assert.ok(validateDocument(doc, { checkFiles: false }).some(issue => issue.level === 'error'));
+    const fx = fixture({ drift: false });
+    fs.writeFileSync(path.join(fx.project, 'draft_info.json'), stableJson(doc));
+    assert.throws(() => doctor(fx.project), error => error.code === 'INVALID_DRAFT_STRUCTURE'
+      && error.details.some(issue => issue.level === 'error'));
+  }
+});
 
 function fixture({ missingMedia = false, drift = true } = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-test-'));
@@ -386,6 +413,26 @@ test('snapshots include created.json so restore does not leave a stale endcard w
   assert.deepEqual(readJson(sidecar).preserved, { start: 1_000_000, end: 2_000_000 });
 });
 
+test('staging failures remove every temporary file before returning', () => {
+  const fx = fixture({ drift: false });
+  assert.throws(() => executeTransaction(fx.project, groups => {
+    for (const group of groups) group.doc.name = 'changed';
+  }, { forceRunning: true, backup: false,
+    extraWrites: () => [{ file: path.join(fx.project, '.capcutctl', 'invalid.json'), data: 'invalid JSON' }] }),
+  error => error.code === 'INVALID_JSON');
+  assert.equal(fs.readdirSync(fx.project, { recursive: true }).filter(name => name.includes('.capcutctl-')).length, 0);
+  assert.equal(readJson(path.join(fx.project, 'draft_info.json')).name, 'Fixture Project');
+});
+
+test('mask.patch rejects an unmatched mask selector instead of editing a different mask', () => {
+  const fx = fixture({ drift: false });
+  const doc = readJson(path.join(fx.project, 'draft_info.json'));
+  assert.throws(() => applyOperations(doc, [{ op: 'mask.patch', selector: { id: 'SEGMENT-ONE' },
+    mask: { name: 'Missing' }, set: { config: { width: 0.25 } } }], {}),
+  error => error.code === 'MASK_NOT_FOUND');
+  assert.equal(doc.materials.common_mask[0].config.width, 1);
+});
+
 test('restore still works after the project folder is renamed', () => {
   const fx = fixture({ drift: false });
   const first = applySpec(fx.project, {
@@ -397,6 +444,73 @@ test('restore still works after the project folder is renamed', () => {
   const snapName = path.basename(first.snapshot);
   restoreProjectSnapshot(renamed, snapName, { forceRunning: true });
   assert.equal(readJson(path.join(renamed, 'draft_info.json')).tracks[0].segments[0].volume, 1);
+});
+
+test('snapshot restore rejects traversal, arbitrary files, symlinks and modified bytes before writing', () => {
+  for (const attack of ['files', 'absent', 'arbitrary', 'symlink', 'checksum']) {
+    const fx = fixture({ drift: false });
+    const snapshot = createSnapshot(fx.project, `malformed-${attack}`);
+    const manifestPath = path.join(snapshot, 'manifest.json');
+    const manifest = readJson(manifestPath);
+    const victim = path.join(fx.temp, 'victim.json');
+    fs.writeFileSync(victim, 'untouched');
+    const before = fs.readFileSync(path.join(fx.project, 'draft_info.json'));
+    if (attack === 'files') manifest.files.push({ relative: '../victim.json', sha256: sha256('bad') });
+    if (attack === 'absent') manifest.absent.push('../victim.json');
+    if (attack === 'arbitrary') manifest.absent.push('.capcutctl/write.lock');
+    if (attack === 'symlink') {
+      const mirror = path.join(fx.project, 'draft_info.json.bak');
+      fs.unlinkSync(mirror);
+      fs.symlinkSync(victim, mirror);
+    }
+    if (attack === 'checksum') fs.writeFileSync(path.join(snapshot, 'draft_info.json'), '{}');
+    fs.writeFileSync(manifestPath, stableJson(manifest));
+    assert.throws(() => restoreProjectSnapshot(fx.project, snapshot, { forceRunning: true, backup: false }),
+      error => error.code === 'RESTORE_ROLLED_BACK'
+        && ['SNAPSHOT_SCOPE', 'PROJECT_FILE_SCOPE', 'SNAPSHOT_CHECKSUM'].includes(error.details?.cause?.code));
+    assert.equal(fs.readFileSync(victim, 'utf8'), 'untouched');
+    assert.deepEqual(fs.readFileSync(path.join(fx.project, 'draft_info.json')), before);
+  }
+});
+
+test('restore dry-run leaves project bytes, locks and history unchanged', () => {
+  const fx = fixture({ drift: false });
+  const snapshot = createSnapshot(fx.project, 'before');
+  for (const dir of [fx.project, fx.timelineDir]) {
+    for (const name of LIVE_FILE_NAMES) {
+      const file = path.join(dir, name);
+      const doc = readJson(file);
+      doc.tracks[0].segments[0].volume = 0.2;
+      fs.writeFileSync(file, stableJson(doc));
+    }
+  }
+  const lock = path.join(fx.project, '.capcutctl', 'write.lock');
+  fs.writeFileSync(lock, stableJson({ pid: process.pid }));
+  const capture = () => fs.readdirSync(fx.project, { recursive: true }).sort().map(relative => {
+    const file = path.join(fx.project, relative);
+    return [relative, fs.statSync(file).isFile() ? sha256(fs.readFileSync(file)) : null];
+  });
+  const before = capture();
+  const result = restoreProjectSnapshot(fx.project, snapshot, { dryRun: true,
+    processProbe: () => ({ running: true, verified: true, pids: ['123'] }) });
+  assert.equal(result.dryRun, true);
+  assert.equal(result.restored, false);
+  assert.deepEqual(capture(), before);
+  assert.equal(readJson(path.join(fx.project, 'draft_info.json')).tracks[0].segments[0].volume, 0.2);
+});
+
+test('project metadata cannot route managed writes through traversal or symlinks', () => {
+  for (const id of ['../../outside', '..', '/outside', '\\outside']) {
+    const fx = fixture({ drift: false });
+    fs.writeFileSync(path.join(fx.project, 'Timelines', 'project.json'), stableJson({ main_timeline_id: id }));
+    assert.throws(() => applySpec(fx.project, { version: 1, operations: [] }, { forceRunning: true }),
+      error => error.code === 'TIMELINE_SCOPE');
+  }
+  const fx = fixture({ drift: false });
+  const outside = path.join(fx.temp, 'outside');
+  fs.renameSync(fx.timelineDir, outside);
+  fs.symlinkSync(outside, fx.timelineDir);
+  assert.throws(() => createSnapshot(fx.project), error => error.code === 'PROJECT_FILE_SCOPE');
 });
 
 test('a stale write.lock from a dead pid is stolen, not a hard lock', () => {

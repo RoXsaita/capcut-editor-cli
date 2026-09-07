@@ -22,7 +22,7 @@ https://github.com/RoXsaita/capcut-editor-cli/security/advisories/new
 
 Include a repro, the affected command, and whether a snapshot still restores.
 
-We will acknowledge the report and fix before any disclosure.
+We will investigate privately and coordinate disclosure after a fix is available.
 
 ## What is in scope
 
@@ -42,3 +42,15 @@ We will acknowledge the report and fix before any disclosure.
 
 Never commit `.env`. Copy `.env.example`. `finish --music` reads `GEMINI_API_KEY`
 from the environment or `cli/.env` (gitignored) and must never log the value.
+
+## Dependency updates
+
+Install the declared requirements in a project environment and keep them current:
+
+```bash
+.venv/bin/python -m pip install --upgrade -e .
+```
+
+Pillow 12.3.0 or newer is required for the image decoder security fixes documented
+in its [release notes](https://pillow.readthedocs.io/en/stable/releasenotes/12.3.0.html).
+Keep ffmpeg and CapCut updated separately; neither is bundled by this repository.

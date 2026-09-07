@@ -1,9 +1,10 @@
+import './helpers/sfx-fixture.mjs';   // use synthetic audio, independent of CapCut's local cache
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { sourceToTimeline, detectBrands, talkingHeadScenes, opSignature, imageSize, logoScaleFor } from '../src/signature.mjs';
+import { sourceToTimeline, detectBrands, talkingHeadScenes, opSignature, imageSize, logoScaleFor, sigPresets } from '../src/signature.mjs';
 
 const US = s => Math.round(s * 1e6);
 
@@ -202,6 +203,21 @@ test('imageSize reads PNG IHDR', () => {
   assert.deepEqual(imageSize(f), { width: 1, height: 1 });
 });
 
+test('imageSize rejects truncated WebP dimension headers without throwing', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcut-webp-test-'));
+  try {
+    const file = path.join(dir, 'truncated.webp');
+    for (const kind of ['VP8X', 'VP8 ']) {
+      for (const length of [24, 29]) {
+        const header = Buffer.alloc(length);
+        header.write('RIFF'); header.write('WEBP', 8); header.write(kind, 12);
+        fs.writeFileSync(file, header);
+        assert.equal(imageSize(file), null);
+      }
+    }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('logoScaleFor keeps 0.36 on width-limited assets (the 1280×276 template and a square PNG)', () => {
   assert.ok(Math.abs(logoScaleFor(1280, 276, 0.36) - 0.36) < 1e-9);
   assert.ok(Math.abs(logoScaleFor(975, 936, 0.36) - 0.36) < 1e-9);
@@ -247,6 +263,49 @@ test('signature refuses rather than silently doing nothing', () => {
 test('a missing logo asset is an error, not a silent skip', () => {
   assert.throws(() => opSignature(doc(), { logos: [{ brand: 'grok', at: 2, logo: '/nope/x.png' }] }),
     /NO_LOGO_ASSET|no logo file/);
+});
+
+test('missing per-machine signature sound is skipped and reported', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcut-signature-sfx-test-'));
+  const previous = process.env.CAPCUTCTL_PRESET_DIR;
+  try {
+    const preset = JSON.parse(fs.readFileSync(new URL('../presets/signature.json', import.meta.url), 'utf8'));
+    for (const template of Object.values(preset.audioTemplates)) template.path = path.join(dir, 'missing.mp3');
+    fs.writeFileSync(path.join(dir, 'signature.json'), JSON.stringify(preset));
+    process.env.CAPCUTCTL_PRESET_DIR = dir;
+    const d = doc();
+    const result = opSignature(d, { endcard: { text: 'Follow' } });
+    assert.equal(result.endcard.text, 'Follow');
+    assert.equal(result.sfx, 0);
+    assert.deepEqual(result.unavailableSfx, [preset.audioTemplates[preset.rules.endcardSfx].name]);
+    assert.deepEqual(d.materials.audios, []);
+  } finally {
+    if (previous == null) delete process.env.CAPCUTCTL_PRESET_DIR;
+    else process.env.CAPCUTCTL_PRESET_DIR = previous;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('signature reuses project audio with placeholder and relative paths', () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcut-signature-local-sfx-'));
+  try {
+    fs.mkdirSync(path.join(projectDir, 'Resources'));
+    fs.writeFileSync(path.join(projectDir, 'Resources', 'local.mp3'), 'sfx-fixture-bytes');
+    const preset = sigPresets();
+    for (const mediaPath of ['##_draftpath_placeholder_TEST_##/Resources/local.mp3', 'Resources/local.mp3']) {
+      const d = doc();
+      d.materials.audios.push({ ...structuredClone(preset.audioTemplates[preset.rules.endcardSfx]),
+        id: 'LOCAL-SFX', path: mediaPath });
+      const result = opSignature(d, { endcard: { text: 'Follow' } }, { projectDir });
+      assert.equal(result.sfx, 1, mediaPath);
+      assert.equal(result.unavailableSfx, undefined);
+      assert.equal(d.materials.audios.length, 1, 'reuse the project material');
+      const cue = d.tracks.flatMap(t => t.segments || []).find(s => s.desc === 'sig:sfx:endcard');
+      assert.equal(cue.material_id, 'LOCAL-SFX');
+    }
+  } finally {
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  }
 });
 
 import { layoutAudit } from '../src/layouts.mjs';

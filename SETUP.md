@@ -13,8 +13,8 @@ installed and launched at least once.
 
 After installing, `capcutctl preflight` checks every one of those and tells you what
 is missing — run it before anything else. It reports the exact Python interpreter
-`cut`, `qa` and `find` will use, so a green preflight and a `ModuleNotFoundError`
-cannot happen in the same session.
+`cut`, `qa` and `find` will use, and checks the declared NumPy and Pillow imports.
+Optional transcription engines are checked when you run `cut`.
 
 ---
 
@@ -39,11 +39,12 @@ like, as long as you use the same paths consistently. The rest of this file uses
 No npm runtime dependencies. Node 20+, Python 3.11+ and ffmpeg are the requirements.
 
 ```bash
-brew install ffmpeg           # cut, qa, find, preview, music and review need it
+brew install node ffmpeg      # Node 20+ plus ffmpeg/ffprobe
 brew install python@3.11      # or newer; 3.11 is the floor
 cd ~/src/capcut-editor-cli
 npm link                      # puts capcutctl on your PATH
-python3 -m pip install -e .   # NumPy and Pillow, which qa/preview/review need
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -e .  # declared NumPy and Pillow versions
 capcutctl preflight           # deps, Python runtime, artwork, SFX palette, drafts folder
 ```
 
@@ -71,10 +72,10 @@ import NumPy and Pillow wins over a newer one that cannot — otherwise
 `pip install -e .` under the `python3` you actually use would lose to a bare
 `python3.13` that merely sorts first.
 
-If you would rather keep the dependencies out of your system Python:
+To refresh the dependencies in the project environment later:
 
 ```bash
-python3.11 -m venv .venv && .venv/bin/python -m pip install -e .
+.venv/bin/python -m pip install --upgrade -e .
 capcutctl preflight            # now reports ".venv" as the source
 ```
 
@@ -86,14 +87,13 @@ options pull large wheels and download model weights on first use:
 
 ```bash
 uv tool install mlx-whisper          # the fast path on Apple silicon, and the default --model
-python3 -m pip install -e '.[whisper]'   # the portable fallback, for plain --model names
+.venv/bin/python -m pip install -e '.[whisper]'   # portable fallback; use --model small (or another plain name)
 ```
 
 `preflight` exits 1 if the install cannot work, and names the fix for each problem.
 The overlay artwork the built-in layouts need is bundled in `assets/`, so
 `layout split-screen` / `circle` / `screen` work immediately. The SFX palette is the
-one thing that cannot be shipped — see the README section *What ships with the tool,
-and what is yours*.
+one thing that cannot be shipped — see the README section *Presets and machine-local resources*.
 
 If you would rather not use `npm link` (it writes to your global npm prefix):
 
@@ -116,22 +116,15 @@ npm test                  # no network, no CapCut required
 validate against, and skips itself with a stated reason when ffmpeg is absent. No
 test downloads a transcription model.
 
-`capcutctl` never writes while CapCut is running, always snapshots before a write,
-and validates the whole document before committing. See **Editing model** in the README.
+Transactional writes refuse a running CapCut unless `--force-running` is supplied,
+snapshot unless `--no-backup` is supplied, and validate before committing.
+`doctor` exits nonzero when it finds errors. See **Editing model** in the README.
 
 ## 3. The agent skills
 
-Symlink the four skill directories into whichever agent directories you use:
-
-```bash
-for AGENT in ~/.claude ~/.codex ~/.grok ~/.hermes; do
-  [ -d "$AGENT" ] || continue
-  mkdir -p "$AGENT/skills"
-  for S in capcut-cli capcut-editing capcut-editing-talking-head capcut-editing-screen-recording; do
-    ln -sfn ~/src/capcut-skills/$S "$AGENT/skills/$S"
-  done
-done
-```
+Follow the companion repository's
+[skill installation steps](https://github.com/RoXsaita/capcut-skills/blob/main/CONTRIBUTING.md#install).
+They link the four skill directories and preserve existing installations for review.
 
 Read `capcut-editing/SKILL.md` first — it is the hub and links to the other three.
 
@@ -180,15 +173,11 @@ are local *by nature*.
   layouts need ship in `assets/`, so `layout split-screen` / `circle` / `screen`
   work on a fresh clone. `CAPCUTCTL_ASSET_DIR` overrides them with your own.
 
-* **The legacy scripts.** `skills/capcut-editing/scripts/{build,full,match,render}.py`
-  predate `capcutctl` and are kept as reference. Their media constants are now read
-  from the environment:
-
-  ```bash
-  CAPCUT_CAM=/path/to/face.mp4 CAPCUT_BROLL=/path/to/screen.mp4 python3 render.py
-  ```
+* **Older helper scripts are retired.** Use `capcutctl cut`, `find`, `qa`, and
+  `preview`; the companion skills include a migration map under
+  `capcut-editing/scripts/README.md`. All project edits go through the CLI.
 
 Every one of these is visible before you hit it: `capcutctl preflight` reports the
 whole environment up front, `capcutctl doctor` reports a missing media path as an
 **error**, and a transaction that would write one is aborted before anything reaches
-disk. Nothing here fails as a stack trace.
+disk. Report unexpected tracebacks with the command and redacted error output.

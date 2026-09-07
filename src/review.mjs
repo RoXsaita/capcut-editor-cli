@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
-import { CapcutError, allSegments, contentEndUs, loadProject, stableJson } from './core.mjs';
+import { CapcutError, allSegments, contentEndUs, loadProject, resolveMediaPath, stableJson } from './core.mjs';
 import { pythonForTool } from './python.mjs';
 import { principalTrack } from './polish.mjs';
 
@@ -176,6 +176,7 @@ export function reviewOutputPaths(projectDir, { outputRoot = path.resolve('outpu
       code: 'BAD_OUTPUT_ID', exitCode: 2, details: { outputRoot: root, id: outputId },
     });
   }
+  assertReviewDestination(dir, projectDir, doc);
   return {
     id: outputId,
     dir,
@@ -184,6 +185,30 @@ export function reviewOutputPaths(projectDir, { outputRoot = path.resolve('outpu
     contactSheet: path.join(dir, 'contact-sheet.png'),
     frames: path.join(dir, 'frames'),
   };
+}
+
+function assertReviewDestination(destination, projectDir, doc) {
+  if (!fs.existsSync(destination)) return;
+  const fail = () => {
+    throw new CapcutError('Review output would replace project data, source media, or an unrelated directory. Choose another --out/--id.',
+      { code: 'REVIEW_OUTPUT_CONFLICT', exitCode: 2, details: { destination } });
+  };
+  const stat = fs.lstatSync(destination);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) fail();
+  const output = fs.realpathSync(destination);
+  const protectedPaths = [projectDir, ...Object.values(doc.materials || {}).filter(Array.isArray)
+    .flatMap(values => values.flatMap(material => ['path', 'original_path', 'source_path', 'derived_from_path', 'media_path']
+      .map(key => resolveMediaPath(material?.[key], projectDir)).filter(Boolean)))];
+  for (const file of protectedPaths) {
+    const resolved = fs.existsSync(file) ? fs.realpathSync(file) : path.resolve(file);
+    if (resolved === output || resolved.startsWith(output + path.sep)) fail();
+  }
+  const names = fs.readdirSync(destination);
+  if (!names.length) return;
+  if (names.some(name => !['proxy.mp4', 'edl.json', 'contact-sheet.png', 'frames'].includes(name))) fail();
+  try {
+    if (JSON.parse(fs.readFileSync(path.join(destination, 'edl.json'), 'utf8')).type !== 'capcutctl-review-edl') fail();
+  } catch { fail(); }
 }
 
 function pathsAtDirectory(dir, id) {
@@ -308,6 +333,7 @@ export function reviewProject(projectDir, {
       '--out', staged.frames, '--sheet', staged.contactSheet, '--width', String(width)],
     'review contact sheet');
     assertReviewArtifacts(staged);
+    assertReviewDestination(outputs.dir, projectDir, doc);
     publishReviewDirectory(staged.dir, outputs.dir);
     published = true;
   } finally {

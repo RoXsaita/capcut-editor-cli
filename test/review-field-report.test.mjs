@@ -151,6 +151,40 @@ test('reviewProject writes the proxy, EDL, frames and labelled sheet for the con
   }
 });
 
+test('review cannot replace the project, its source media, or unrelated output contents', t => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-review-conflict-'));
+  t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
+  const project = path.join(temp, 'project');
+  fs.mkdirSync(project);
+  const doc = fixture();
+  const source = path.join(temp, 'prior-review', 'proxy.mp4');
+  fs.mkdirSync(path.dirname(source));
+  fs.writeFileSync(source, 'keep source');
+  fs.writeFileSync(path.join(temp, 'prior-review', 'edl.json'), JSON.stringify({ type: 'capcutctl-review-edl' }));
+  doc.materials.videos[0].path = source;
+  const draft = path.join(project, 'draft_info.json');
+  fs.writeFileSync(draft, JSON.stringify(doc));
+  fs.mkdirSync(path.join(temp, 'unrelated'));
+  fs.writeFileSync(path.join(temp, 'unrelated', 'notes.txt'), 'keep notes');
+  fs.symlinkSync(project, path.join(temp, 'alias'));
+  for (const id of ['project', 'prior-review', 'unrelated', 'alias']) {
+    assert.throws(() => reviewOutputPaths(project, { outputRoot: temp, id }),
+      error => error.code === 'REVIEW_OUTPUT_CONFLICT');
+  }
+  doc.materials.videos[0].path = path.join(project, 'localized.mp4');
+  for (const key of ['original_path', 'source_path', 'derived_from_path', 'media_path']) {
+    doc.materials.videos[0][key] = source;
+    fs.writeFileSync(draft, JSON.stringify(doc));
+    assert.throws(() => reviewOutputPaths(project, { outputRoot: temp, id: 'prior-review' }),
+      error => error.code === 'REVIEW_OUTPUT_CONFLICT');
+    delete doc.materials.videos[0][key];
+  }
+  fs.writeFileSync(draft, JSON.stringify(doc));
+  assert.equal(fs.readFileSync(draft, 'utf8'), JSON.stringify(doc));
+  assert.equal(fs.readFileSync(source, 'utf8'), 'keep source');
+  assert.equal(fs.readFileSync(path.join(temp, 'unrelated', 'notes.txt'), 'utf8'), 'keep notes');
+});
+
 test('review publishes staged artifacts together and removes stale frames on a shorter rerun', () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-review-staging-'));
   const project = path.join(temp, 'project');

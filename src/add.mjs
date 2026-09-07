@@ -11,7 +11,11 @@ import { assertOrigin, stampOrigin } from './origin.mjs';
 import { rescaleKeyframes } from './pace.mjs';
 import { principalTrack } from './polish.mjs';
 
-const US = s => Math.round(s * 1e6);
+const US = s => {
+  const value = Math.round(s * 1e6);
+  if (!Number.isSafeInteger(value)) throw new CapcutError('Time must be finite and fit microsecond precision.', { code: 'BAD_TIME', exitCode: 2 });
+  return value;
+};
 const S = us => us / 1e6;
 const r3 = n => Math.round(n * 1000) / 1000;
 
@@ -261,7 +265,7 @@ function ensureMaterial(doc, op, context) {
   return material;
 }
 
-function annotateMediaSource(material, segment, originalPath, localizedPath, context, origin = null) {
+export function annotateMediaSource(material, segment, originalPath, localizedPath, context, origin = null) {
   if (!material || !originalPath) return null;
   const original = path.resolve(originalPath);
   const localized = localizedPath ? path.resolve(localizedPath) : path.resolve(material.path || original);
@@ -271,6 +275,7 @@ function annotateMediaSource(material, segment, originalPath, localizedPath, con
   material.source_take_id = takeId;
   material.source_path = original;
   if (localized !== original) material.original_path = original;
+  else delete material.original_path;
   if (segment) segment.source_take_id = takeId;
   if (localized !== original) {
     recordMediaProvenance(context, {
@@ -410,6 +415,11 @@ export function opReplaceMedia(doc, op, context = {}) {
     throw new CapcutError(
       `replace.media: selector matched ${found.length} segments; pass a unique id or "all": true.`,
       { code: 'SELECTOR_AMBIGUOUS', exitCode: 2 });
+  }
+  if (found.length > 1) {
+    const replacements = found.map(({ segment }) => opReplaceMedia(doc,
+      { ...op, selector: { id: segment.id }, all: false }, context));
+    return { changed: replacements.length, replacements };
   }
   const entry = found[0];
   const seg = entry.segment;

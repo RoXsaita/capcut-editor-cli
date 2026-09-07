@@ -77,10 +77,10 @@ const eased = k => (k.keyframe_list || []).some(p => p?.curveType === 'FreeCurve
  * There is no --apply.
  */
 export function harvestDrafts(root = DEFAULT_ROOT, names = defaultSources(root)) {
-  const transitions = {};
-  const sfx = {};
-  const masks = {};
-  const keyframeTypes = {};
+  const transitions = Object.create(null);
+  const sfx = Object.create(null);
+  const masks = Object.create(null);
+  const keyframeTypes = Object.create(null);
   let audioFade = null;
   let positionScale = null;
   let positionScaleEased = null;

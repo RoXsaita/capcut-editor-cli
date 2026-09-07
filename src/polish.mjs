@@ -895,7 +895,8 @@ export function opPolish(doc, op, context = {}) {
 
   // start clean so re-running is idempotent
   for (const track of doc.tracks) {
-    track.segments = (track.segments || []).filter(s => (s.desc || '') !== 'polish:sfx');
+    track.segments = (track.segments || []).filter(s => (s.desc || '') !== 'polish:sfx'
+      && !(op.noSfx && /^polish:(callout|click|type)$/.test(s.desc || '')));
     for (const s of track.segments || []) {
       if (Array.isArray(s.extra_material_refs) && s.__polishTransition) delete s.__polishTransition;
     }
@@ -915,7 +916,7 @@ export function opPolish(doc, op, context = {}) {
   }
 
   const plan = planPolish(doc, { ...op, motivated: Boolean(op.motivated), projectDir: context.projectDir });
-  const lane = ensureAudioTrack(doc, 'polish-sfx');
+  const lane = op.noSfx ? null : ensureAudioTrack(doc, 'polish-sfx');
 
   // Every transition rides the principal track, and the principal track gets sliced to
   // make room. This is the Hermes-agent rule: the transition belongs to the layer above
@@ -952,6 +953,7 @@ export function opPolish(doc, op, context = {}) {
         skipped.push(cue.t);
       }
     }
+    if (op.noSfx) continue;
     const audioId = ensureAudio(doc, cue.sfx);
     if (!audioId) continue;                       // sound not cached on this machine
     const tpl = p.audioTemplates[cue.sfx];
@@ -963,9 +965,10 @@ export function opPolish(doc, op, context = {}) {
     lane.segments.push(audioSegment(doc, audioId, start, clipped, `${i}:${cue.t}`, volume));
     sfxPlaced++;
   }
-  lane.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
-  const callouts = opCalloutSfx(doc, { volume, __seed: op.__seed, projectDir: context.projectDir });
-  const interactions = opInteractions(doc, { volume, __seed: op.__seed, skip: op.noInteractions }, context);
+  lane?.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
+  const callouts = op.noSfx ? { cues: [] }
+    : opCalloutSfx(doc, { volume, __seed: op.__seed, projectDir: context.projectDir });
+  const interactions = opInteractions(doc, { volume, __seed: op.__seed, skip: op.noSfx || op.noInteractions }, context);
   const unavailable = unavailableSfx();
   return { changed: plan.length, transitions, removedTransitions: removed, sfx: sfxPlaced,
            // Named, not silent: a palette entry whose CapCut cache file is not on this machine

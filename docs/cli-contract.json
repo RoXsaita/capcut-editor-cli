@@ -310,7 +310,8 @@
         "--project",
         "--prompt",
         "--regen",
-        "--volume"
+        "--volume",
+        "--width"
       ],
       "transactional": true
     },
@@ -438,10 +439,12 @@
         "--allow-ephemeral",
         "--at",
         "--derived-from",
+        "--derived-offset",
         "--dry-run",
         "--file",
         "--generated",
         "--height",
+        "--media",
         "--media-duration",
         "--no-localize",
         "--project",

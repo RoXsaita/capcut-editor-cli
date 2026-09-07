@@ -230,12 +230,15 @@ Portable fallback:
 
 ## Development
 
+Development commands assume a Git clone. Install the quality tools and build the
+macOS OCR helper as described in [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ```bash
 ./scripts/check.sh --strict
 ```
 
 That runs JavaScript syntax checks, the Node test suite, Python self-tests and compilation,
-Ruff, Vulture, ShellCheck, and the macOS Vision OCR build. Tests use temporary synthetic
+Ruff, Vulture, ShellCheck, and checks that the macOS Vision OCR helper is built. Tests use temporary synthetic
 projects and do not edit the user's CapCut library.
 
 CI runs on Node.js 20 and 24 with Python 3.11. The advisory AI reviewer is documented in

@@ -9,6 +9,7 @@ import {
   CapcutError,
   DEFAULT_ROOT,
   applySpec,
+  assertCapcutClosed,
   createSnapshot,
   doctor,
   inspectProject,
@@ -68,8 +69,9 @@ Usage:
                 [--generated] [--derived-from ORIGINAL [--derived-offset S]] [--allow-ephemeral]
                 [--width W --height H --media-duration S]   (probe override when ffprobe is missing)
   capcutctl replace-media --project NAME --file FILE --at S --track NAME|N | --segments ID
+                (--media FILE is an alias for --file FILE)
                 [--retime] [--no-localize] [--generated] [--derived-from ORIGINAL] [--allow-ephemeral]
-                [--width W --height H --media-duration S]
+                [--derived-offset S] [--width W --height H --media-duration S]
   capcutctl localize --project NAME   — copy outside videos into the project (fixes Link media)
   capcutctl trim --project NAME --at S --track NAME|N | --segments ID  --src IN-OUT | --start S --dur S
   capcutctl shift --project NAME --at S --track NAME|N | --segments ID  --by SECONDS
@@ -134,7 +136,7 @@ Usage:
                                 scorecard + ASCII. --plan is read-only. --music generates
                                 a Lyria bed timed to picture changes and beat-aligned.
                                 --polish runs motivated polish. Voice is never recut.
-  capcutctl music               --project NAME [--plan] [--regen] [--volume 0.08] [--prompt TEXT] [--file FILE] [--json]
+  capcutctl music               --project NAME [--plan] [--regen] [--volume 0.08] [--prompt TEXT] [--file FILE] [--width 64] [--json]
                                 supply a video-specific brief or local music; saved briefs survive later runs
   capcutctl layout auto         --project NAME_OR_PATH [--plan]   — split-screen where B-roll covers, full face where it does not
   capcutctl layout audit        --project NAME_OR_PATH            — what each clip is vs what it should be
@@ -547,6 +549,22 @@ function runPython(interpreter, script, args) {
   });
 }
 
+async function validateOptions(command, args) {
+  const { buildContract } = await import('./contract.mjs');
+  const commands = buildContract().commands;
+  if (!Object.hasOwn(commands, command)) return;
+  const entry = commands[command];
+  const allowed = new Set(['_', 'root', 'project', 'json', 'help',
+    ...entry.options.map(flag => flag.slice(2).replace(/-([a-z])/g, (_, c) => c.toUpperCase())),
+    ...(entry.transactional || command === 'cut' ? ['forceRunning', 'noBackup', 'label'] : []),
+  ]);
+  const unknown = Object.keys(args).find(key => !allowed.has(key));
+  if (unknown) {
+    const flag = unknown.replace(/[A-Z]/g, c => `-${c.toLowerCase()}`);
+    throw new CapcutError(`Unknown ${command} option: --${flag}.`, { code: 'UNKNOWN_OPTION', exitCode: 2 });
+  }
+}
+
 async function runInPlaceCut(args, root, apply = applySpec) {
   if (args.inPlace) {
     if (args.into) throw new CapcutError('cut accepts either --into PROJECT or --in-place, not both.', { code: 'CUT_TARGET_CONFLICT', exitCode: 2 });
@@ -596,6 +614,7 @@ export async function main(argv, dependencies = {}) {
   }
   if (command === 'cut' && (argv.includes('--into') || argv.includes('--in-place'))) {
     const cutArgs = parseArgs(argv);
+    await validateOptions(command, cutArgs);
     const cutRoot = cutArgs.root ? path.resolve(cutArgs.root) : DEFAULT_ROOT;
     return runInPlaceCut(cutArgs, cutRoot, dependencies.applySpec || applySpec);
   }
@@ -615,6 +634,7 @@ export async function main(argv, dependencies = {}) {
   }
   const args = parseArgs(argv);
   if (!command || args.help || command === 'help') return print(HELP);
+  await validateOptions(command, args);
   const root = args.root ? path.resolve(args.root) : DEFAULT_ROOT;
 
   if (command === 'layout' && args._[1] === 'list') {
@@ -766,7 +786,11 @@ export async function main(argv, dependencies = {}) {
   if (!NEEDS_PROJECT.has(command)) throw new CapcutError(`Unknown command: ${command}\n\n${HELP}`, { exitCode: 2 });
   const projectDir = resolveProject(args.project, root);
   if (command === 'inspect') return print(inspectProject(projectDir), true);
-  if (command === 'doctor') return printDoctor(doctor(projectDir), args.json);
+  if (command === 'doctor') {
+    const report = doctor(projectDir);
+    if (report.errors > 0) process.exitCode = 1;
+    return printDoctor(report, args.json);
+  }
   if (command === 'snapshot') return print({ snapshot: createSnapshot(projectDir, args.label || 'manual') }, true);
   if (command === 'history') return print(listSnapshots(projectDir), true);
   const options = {
@@ -1057,6 +1081,7 @@ export async function main(argv, dependencies = {}) {
                    operations: [{ op: 'polish', ...(args.lead ? { lead: Number(args.lead) } : {}),
                                   ...(polishTrack != null ? { track: polishTrack } : {}),
                                   ...(args.noTransitions ? { noTransitions: true } : {}),
+                                  ...(args.noSfx ? { noSfx: true } : {}),
                                   ...(args.motivated ? { motivated: true } : {}),
                                   ...(args.noInteractions ? { noInteractions: true } : {}) }] };
     return print(applySpec(projectDir, spec, options), true);
@@ -1090,6 +1115,7 @@ export async function main(argv, dependencies = {}) {
     const ops = [];
     if (wantMusic) {
       const { prepareMusic, DEFAULT_MUSIC_VOLUME } = await import('./music.mjs');
+      if (!args.dryRun) assertCapcutClosed({ forceRunning: Boolean(args.forceRunning) });
       const prepared = await prepareMusic(projectDir, doc, {
         regen: Boolean(args.regen),
         volume: args.volume != null ? Number(args.volume) : DEFAULT_MUSIC_VOLUME,

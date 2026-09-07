@@ -6,7 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { applySpec, doctor, isLocalMedia, localizeMedia, readJson, stableJson } from '../src/core.mjs';
-import { opClipAdd, opLocalizeAll, opReplaceMedia, parkPresetLeftover } from '../src/add.mjs';
+import { opClipAdd, opClipFade, opLocalizeAll, opReplaceMedia, parkPresetLeftover } from '../src/add.mjs';
 
 function fixture({ duration = 10_000_000, endcard = false } = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-add-'));
@@ -206,6 +206,34 @@ test('replace-media keeps keyframes and does not clone the segment', () => {
   const mat = after.materials.videos.find(m => m.id === next.material_id);
   assert.equal(mat.path, other);
   assert.equal(mat.width, 1080);
+});
+
+test('replace.media all replaces every selected segment and removes stale origin metadata', () => {
+  const f = fixture({ endcard: true });
+  const doc = readJson(path.join(f.project, 'draft_info.json'));
+  Object.assign(doc.materials.videos[0], { capcutctl_origin: 'derived', derived_from_path: '/old/original.mp4',
+    derived_from_offset: 12, capcutctl_preframed: true });
+  const result = opReplaceMedia(doc, { path: f.broll, selector: {}, all: true, width: 1920, height: 1080,
+    mediaDuration: 10_000_000, __seed: 'all-replace' }, { projectDir: f.project });
+  assert.equal(result.changed, 2);
+  for (const segment of doc.tracks[1].segments) {
+    const material = doc.materials.videos.find(m => m.id === segment.material_id);
+    assert.equal(material.path, f.broll);
+    assert.equal(material.capcutctl_origin, 'capture');
+    assert.equal(material.derived_from_path, undefined);
+    assert.equal(material.derived_from_offset, undefined);
+    assert.equal(material.capcutctl_preframed, undefined);
+  }
+});
+
+test('nonfinite fade times are rejected before invalid materials are added', () => {
+  const f = fixture();
+  const doc = readJson(path.join(f.project, 'draft_info.json'));
+  for (const invalid of [NaN, Infinity, -Infinity, 1e20]) {
+    assert.throws(() => opClipFade(doc, { selector: { id: 'SUBJECT' }, in: invalid }),
+      error => error.code === 'BAD_TIME');
+  }
+  assert.equal(doc.materials.audio_fades, undefined);
 });
 
 test('add past the end slides the endcard on root AND the timeline, not just created.json', () => {
@@ -600,6 +628,25 @@ test('two different takes with the same name and the same size get different fil
   assert.equal(localizeMedia(project, one), destOne);
   assert.equal(localizeMedia(project, two), destTwo);
   assert.equal(fs.readdirSync(path.join(project, 'Resources', 'CapcutctlMedia')).length, 2);
+
+  fs.writeFileSync(two, 'CCCC');
+  const replacement = localizeMedia(project, two);
+  assert.notEqual(replacement, destTwo, 're-recording an already colliding source must preserve the imported take');
+  assert.equal(fs.readFileSync(destTwo, 'utf8'), 'BBBB');
+  assert.equal(fs.readFileSync(replacement, 'utf8'), 'CCCC');
+  assert.equal(localizeMedia(project, two), replacement);
+});
+
+test('localize refuses a symlink destination and copies media linked from outside the project', () => {
+  const f = fixture();
+  const linkedSource = path.join(f.project, 'source-link.mp4');
+  fs.symlinkSync(f.broll, linkedSource);
+  assert.equal(isLocalMedia(f.project, linkedSource), false);
+  const copied = localizeMedia(f.project, linkedSource);
+  assert.equal(fs.lstatSync(copied).isSymbolicLink(), false);
+  const candidate = localizeMedia(f.project, f.broll, undefined, { dryRun: true });
+  fs.symlinkSync(f.broll, candidate);
+  assert.throws(() => localizeMedia(f.project, f.broll), error => error.code === 'PROJECT_FILE_SCOPE');
 });
 
 test('adding a localized rl2 take copies its trace sidecar next to the draft, once', () => {

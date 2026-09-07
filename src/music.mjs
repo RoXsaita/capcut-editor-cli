@@ -152,6 +152,7 @@ export async function generateLyria({ prompt, model = 'lyria-3-pro-preview', tim
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   let res;
+  let text;
   try {
     res = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', {
       method: 'POST',
@@ -166,12 +167,12 @@ export async function generateLyria({ prompt, model = 'lyria-3-pro-preview', tim
         response_format: { type: 'audio' },
       }),
     });
+    text = await res.text();
   } catch (e) {
     throw new CapcutError(`Lyria request failed: ${e.message}`, { code: 'LYRIA_HTTP', exitCode: 2 });
   } finally {
     clearTimeout(timer);
   }
-  const text = await res.text();
   let body;
   try { body = JSON.parse(text); } catch {
     throw new CapcutError(`Lyria returned non-JSON (${res.status}): ${text.slice(0, 240)}`, { code: 'LYRIA_HTTP', exitCode: 2 });

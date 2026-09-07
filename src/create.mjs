@@ -8,7 +8,8 @@ import {
   clone, listProjects, loadPreset, readJson, resolveProject, stableJson, uuid, localizeMedia,
   requireBinary
 } from './core.mjs';
-import { assertOrigin } from './origin.mjs';
+import { assertOrigin, stampOrigin } from './origin.mjs';
+import { annotateMediaSource } from './add.mjs';
 
 /**
  * A new project is a literal duplicate of the branded preset with the name changed —
@@ -26,15 +27,22 @@ export function parseScenes(spec) {
   // a real A-roll cut is dozens of scenes; accept @file as well as an inline list
   if (typeof spec === 'string' && spec.startsWith('@')) spec = fs.readFileSync(spec.slice(1), 'utf8').trim();
   for (const raw of String(spec).split(',').map(s => s.trim()).filter(Boolean)) {
-    const [range, source] = raw.split('@');
-    const [a, b] = range.split(':').map(Number);
-    if (!Number.isFinite(a) || !Number.isFinite(b) || b <= a) {
+    const [range, source, extra] = raw.split('@');
+    const values = range.split(':');
+    const [a, b] = values.map(Number);
+    if (extra != null || values.length !== 2 || values.some(v => !v.trim())
+        || !Number.isFinite(a) || !Number.isFinite(b) || a < 0 || b <= a) {
       throw new CapcutError(`Bad scene "${raw}". Use START:END in seconds, e.g. 0:6 or 0:6@122.4.`, { code: 'BAD_SCENES', exitCode: 2 });
     }
     const src = source == null ? a : Number(source);
-    if (!Number.isFinite(src) || src < 0) throw new CapcutError(`Bad source offset in "${raw}".`, { code: 'BAD_SCENES', exitCode: 2 });
-    out.push({ start: Math.round(a * 1e6), duration: Math.round((b - a) * 1e6), source: Math.round(src * 1e6) });
+    if (source?.trim() === '' || !Number.isFinite(src) || src < 0) throw new CapcutError(`Bad source offset in "${raw}".`, { code: 'BAD_SCENES', exitCode: 2 });
+    const scene = { start: Math.round(a * 1e6), duration: Math.round((b - a) * 1e6), source: Math.round(src * 1e6) };
+    if (!Object.values(scene).every(Number.isSafeInteger) || scene.duration <= 0) {
+      throw new CapcutError(`Bad scene "${raw}": times must fit positive microsecond precision.`, { code: 'BAD_SCENES', exitCode: 2 });
+    }
+    out.push(scene);
   }
+  if (!out.length) throw new CapcutError('Bad scenes: provide at least one START:END range.', { code: 'BAD_SCENES', exitCode: 2 });
   for (let i = 1; i < out.length; i++) {
     if (out[i].start < out[i - 1].start + out[i - 1].duration) {
       throw new CapcutError('Scenes overlap; they must be in order and disjoint.', { code: 'BAD_SCENES', exitCode: 2 });
@@ -105,7 +113,6 @@ function pickTemplate(root, from, { blank = false } = {}) {
 }
 
 function duplicate(from, to) {
-  fs.mkdirSync(to, { recursive: true });
   for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
     if (SKIP_COPY.has(entry.name)) continue;
     const src = path.join(from, entry.name);
@@ -166,7 +173,7 @@ function shiftContent(doc, startUs) {
 
 const LOOK_KINDS = new Set([
   'common_mask', 'video_effects', 'material_animations',
-  'filters', 'adjusts', 'effects', 'chromas', 'hsl'
+  'filters', 'adjusts', 'effects', 'chromas', 'hsl', 'transitions'
 ]);
 
 function pickSegmentTemplate(doc) {
@@ -186,13 +193,13 @@ function parseCanvas(spec) {
   const m = String(spec).match(/^(\d+)\s*[x×]\s*(\d+)$/i);
   if (!m) throw new CapcutError('--canvas expects WIDTHxHEIGHT, e.g. 1080x1920.', { code: 'BAD_CANVAS', exitCode: 2 });
   const width = Number(m[1]), height = Number(m[2]);
-  if (!(width > 0 && height > 0)) throw new CapcutError('--canvas dimensions must be positive.', { exitCode: 2 });
+  if (![width, height].every(v => Number.isSafeInteger(v) && v > 0)) throw new CapcutError('--canvas dimensions must be positive finite integers.', { exitCode: 2 });
   const gcd = (a, b) => (b ? gcd(b, a % b) : a);
   const d = gcd(width, height);
   return { width, height, ratio: `${width / d}:${height / d}` };
 }
 
-function addScenes(doc, mediaPath, probe, scenes, ids, templates = {}) {
+function addScenes(doc, mediaPath, probe, scenes, ids, templates = {}, context = {}) {
   const matTemplate = templates.matTemplate
     || (doc.materials?.videos || []).find(m => m.type === 'video')
     || { type: 'video', crop_scale: 1 };
@@ -212,18 +219,24 @@ function addScenes(doc, mediaPath, probe, scenes, ids, templates = {}) {
   material.width = probe.width;
   material.height = probe.height;
   material.duration = probe.duration;
+  stampOrigin(material, context.origin);
+  annotateMediaSource(material, null, context.source, mediaPath, context, context.origin);
   (doc.materials.videos ||= []).push(material);
 
   const segments = scenes.map((scene, i) => {
     const segment = clone(segTemplate);
     segment.id = ids.next();
     segment.material_id = material.id;
+    segment.source_take_id = material.source_take_id;
     segment.target_timerange = { start: scene.start, duration: scene.duration };
     segment.source_timerange = { start: scene.source, duration: scene.duration };
     segment.clip = { scale: { x: 1, y: 1 }, rotation: 0, transform: { x: 0, y: 0 }, flip: { horizontal: false, vertical: false }, alpha: 1 };
     segment.enable_video_mask = false;
     segment.volume = 1;
     segment.speed = 1;
+    segment.keyframe_refs = [];
+    segment.common_keyframes = [];
+    if (segment.render_timerange?.duration) segment.render_timerange = { start: scene.start, duration: scene.duration };
     segment.render_index = 2;
     segment.desc = `scene ${i + 1}`;
     // structure only — never inherit the preset's mask/blur/animation
@@ -237,6 +250,7 @@ function addScenes(doc, mediaPath, probe, scenes, ids, templates = {}) {
       if (!copied) return [];
       copied.id = ids.next();
       if (copied.bind_segment_id) copied.bind_segment_id = segment.id;
+      if (copied.type === 'speed') Object.assign(copied, { speed: 1, mode: 0, curve_speed: null });
       (doc.materials[k] ||= []).push(copied);
       return [copied.id];
     });
@@ -282,8 +296,10 @@ function registerDraft(root, projectDir, name, draftId, durationUs) {
 
 export function createProject(name, options = {}) {
   const root = options.root ? path.resolve(options.root) : DEFAULT_ROOT;
-  assertCapcutClosed({ forceRunning: options.forceRunning });
-  if (/[/\\]/.test(name)) throw new CapcutError('Project name must not contain path separators.', { exitCode: 2 });
+  assertCapcutClosed({ forceRunning: options.forceRunning || options.dryRun });
+  if (typeof name !== 'string' || !name.trim() || name === '.' || name === '..' || /[/\\\0]/.test(name)) {
+    throw new CapcutError('Project name must be nonempty and must not contain path separators.', { exitCode: 2 });
+  }
 
   const projectDir = path.join(root, name);
   if (fs.existsSync(projectDir)) {
@@ -292,6 +308,8 @@ export function createProject(name, options = {}) {
   const templateDir = pickTemplate(root, options.from, { blank: Boolean(options.blank) });
 
   let probe = null;
+  let origin = null;
+  let originalMedia = null;
   let scenes = [];
   if (options.media) {
     const media = path.resolve(options.media);
@@ -299,6 +317,9 @@ export function createProject(name, options = {}) {
     probe = (options.width && options.height && options.duration)
       ? { width: Number(options.width), height: Number(options.height), duration: Math.round(Number(options.duration) * 1e6) }
       : probeMedia(media);
+    if (![probe.width, probe.height, probe.duration].every(v => Number.isSafeInteger(v) && v > 0)) {
+      throw new CapcutError('Media dimensions and duration must be finite and positive.', { code: 'BAD_MEDIA_METADATA', exitCode: 2 });
+    }
     scenes = options.scenes ? parseScenes(options.scenes) : [{ start: 0, duration: probe.duration, source: 0 }];
     for (const s of scenes) {
       if (s.source + s.duration > probe.duration) {
@@ -311,14 +332,15 @@ export function createProject(name, options = {}) {
     // The talking head is the timeline's clock; a pre-framed or scratchpad A-roll poisons every
     // scene hung off it. Same contract as clip.add, checked before the draft is registered.
     // The canvas is not built yet, so use the requested one (or the 1080x1920 default).
-    const [cw, ch] = String(options.canvas || '1080x1920').split('x').map(Number);
-    assertOrigin({
+    const requestedCanvas = parseCanvas(options.canvas || '1080x1920');
+    origin = assertOrigin({
       file: media, width: probe.width, height: probe.height,
-      canvas: [cw || 1080, ch || 1920], label: 'new --media', projectDir,
+      canvas: [requestedCanvas.width, requestedCanvas.height], label: 'new --media', projectDir,
       generated: options.generated === true, derivedFrom: options.derivedFrom || null,
       derivedOffset: options.derivedOffset, allowEphemeral: options.allowEphemeral === true,
     });
     options.media = media;
+    originalMedia = media;
   }
 
   if (options.newTimelineId) {
@@ -328,7 +350,7 @@ export function createProject(name, options = {}) {
   }
   const canvas = options.canvas ? parseCanvas(options.canvas) : null;
   const fps = options.fps != null ? Number(options.fps) : null;
-  if (fps != null && !(fps > 0)) throw new CapcutError('--fps must be positive.', { exitCode: 2 });
+  if (fps != null && (!Number.isFinite(fps) || !(fps > 0))) throw new CapcutError('--fps must be finite and positive.', { exitCode: 2 });
 
   if (options.dryRun) {
     return {
@@ -338,19 +360,21 @@ export function createProject(name, options = {}) {
     };
   }
 
-  duplicate(templateDir, projectDir);
+  fs.mkdirSync(root, { recursive: true });
+  fs.mkdirSync(projectDir);
   try {
+    duplicate(templateDir, projectDir);
     if (options.media && options.localize !== false) {
       options.media = localizeMedia(projectDir, options.media);
     }
-    return finishCreate(projectDir, { name, root, templateDir, options, probe, scenes, canvas, fps });
+    return finishCreate(projectDir, { name, root, templateDir, options, probe, scenes, canvas, fps, origin, originalMedia });
   } catch (error) {
     try { fs.rmSync(projectDir, { recursive: true, force: true }); } catch {}
     throw error;
   }
 }
 
-function finishCreate(projectDir, { name, root, templateDir, options, probe, scenes, canvas, fps }) {
+function finishCreate(projectDir, { name, root, templateDir, options, probe, scenes, canvas, fps, origin, originalMedia }) {
   const contentUs = scenes.length ? Math.max(...scenes.map(s => s.start + s.duration)) : 0;
   let contentTrack = null;
   let shifted = 0;
@@ -398,7 +422,7 @@ function finishCreate(projectDir, { name, root, templateDir, options, probe, sce
     if (scenes.length) {
       if (!options.blank) shifted = shiftContent(doc, contentUs + PRESET_PARK_GAP_US);
       ids.reset();
-      contentTrack = addScenes(doc, options.media, probe, scenes, ids, templates);
+      contentTrack = addScenes(doc, options.media, probe, scenes, ids, templates, { projectDir, origin, source: originalMedia });
       doc.duration = Math.max(doc.duration || 0, contentUs);
     }
     if (canvas) {
@@ -483,7 +507,7 @@ function finishCreate(projectDir, { name, root, templateDir, options, probe, sce
  */
 export function removeProject(name, options = {}) {
   const root = options.root ? path.resolve(options.root) : DEFAULT_ROOT;
-  assertCapcutClosed({ forceRunning: options.forceRunning });
+  assertCapcutClosed({ forceRunning: options.forceRunning || options.dryRun });
   const projectDir = resolveProject(name, root);
   const label = path.basename(projectDir);
   if (path.resolve(projectDir) === path.resolve(root)) {
@@ -496,22 +520,42 @@ export function removeProject(name, options = {}) {
 
   const registry = path.join(root, 'root_meta_info.json');
   let removedEntries = 0;
-  if (!options.dryRun) {
-    fs.mkdirSync(bin, { recursive: true });
-    fs.renameSync(projectDir, dest);
-  }
+  let meta = null;
   if (fs.existsSync(registry)) {
-    const meta = readJson(registry);
+    meta = readJson(registry);
+    if (!meta || typeof meta !== 'object' || Array.isArray(meta)
+        || (meta.all_draft_store != null && !Array.isArray(meta.all_draft_store))) {
+      throw new CapcutError('Invalid draft registry.', { code: 'INVALID_REGISTRY' });
+    }
     const before = (meta.all_draft_store || []).length;
     meta.all_draft_store = (meta.all_draft_store || [])
       .filter(e => path.resolve(e.draft_fold_path || '') !== path.resolve(projectDir));
     removedEntries = before - meta.all_draft_store.length;
-    if (!options.dryRun && removedEntries) {
-      fs.copyFileSync(registry, `${registry}.bak_capcutctl`);
-      const staged = `${registry}.capcutctl-staged`;
-      fs.writeFileSync(staged, stableJson(meta));
-      readJson(staged);
-      fs.renameSync(staged, registry);
+  }
+  if (!options.dryRun) {
+    fs.mkdirSync(bin, { recursive: true });
+    fs.renameSync(projectDir, dest);
+    const staged = `${registry}.capcutctl-staged`;
+    let stagedCreated = false;
+    try {
+      if (removedEntries) {
+        fs.copyFileSync(registry, `${registry}.bak_capcutctl`);
+        const fd = fs.openSync(staged, 'wx');
+        stagedCreated = true;
+        try { fs.writeFileSync(fd, stableJson(meta)); }
+        finally { fs.closeSync(fd); }
+        readJson(staged);
+        fs.renameSync(staged, registry);
+      }
+    } catch (error) {
+      try { fs.renameSync(dest, projectDir); }
+      catch (rollbackError) {
+        throw new CapcutError(`Registry update failed; draft remains at ${dest}: ${rollbackError.message}`,
+          { code: 'REMOVE_ROLLBACK_FAILED', details: { cause: error.message, recycled: dest } });
+      }
+      throw error;
+    } finally {
+      if (stagedCreated && fs.existsSync(staged)) fs.unlinkSync(staged);
     }
   }
   return { removed: projectDir, recycled: dest, registryEntriesRemoved: removedEntries,

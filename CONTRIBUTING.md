@@ -20,6 +20,8 @@ the thing we wrote." Tests catch the structural ones; pixels still need a Mac.
 ```bash
 git clone https://github.com/RoXsaita/capcut-editor-cli.git
 cd capcut-editor-cli
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -e .
 npm test
 npm run check
 ```
@@ -27,17 +29,19 @@ npm run check
 Node 20+. No runtime npm dependencies. Tests build synthetic drafts in a temp
 dir and **do not** touch your CapCut library.
 
-`qa` and `review` require NumPy and Pillow: `python3 -m pip install -e .`.
+Install ffmpeg/ffprobe for the media regressions (`brew install ffmpeg` on macOS).
+Install Ruff, Vulture, and ShellCheck before running the strict gate.
 
-Optional, macOS only:
+Build the OCR helper on macOS before the strict gate:
 
 ```bash
 swiftc -O -o tools/vision/ocr tools/vision/ocr.swift   # qa --ocr
-python3 tools/aroll.py --selftest
+.venv/bin/python tools/aroll.py --selftest
 ./scripts/check.sh --strict
 ```
 
-`cut` needs `mlx_whisper` and ffmpeg on Apple Silicon. `finish --music` needs
+`cut` supports the `mlx_whisper` fast path on Apple silicon or `openai-whisper`
+with a plain `--model` name; see [SETUP.md](SETUP.md). Generated music needs
 `GEMINI_API_KEY` in `.env` (see `.env.example`). Neither runs in CI.
 
 ## What CI runs

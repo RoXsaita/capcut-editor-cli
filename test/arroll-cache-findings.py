@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from argparse import Namespace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
@@ -14,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from aroll import (
     AROLL_INDEX_VERSION,
     cmd_cut,
+    cmd_index,
     first_word_in,
     group_duplicates,
     index_is_current,
@@ -21,6 +23,7 @@ from aroll import (
     repair,
     suggested_keep,
     trustworthy_word_start,
+    transcribe,
 )
 from audio_index import AudioIndex, lint
 
@@ -39,6 +42,44 @@ def beat(identifier, text, take, start, end, **extra):
 
 
 class ArollCacheFindingsTest(unittest.TestCase):
+    def test_spoken_credit_is_preserved_and_silent_hallucination_is_removed_acoustically(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            media = Path(tmp) / "take.mp4"
+            media.write_bytes(b"source")
+            output = Path(tmp) / "take.aroll.json"
+            credit = "ترجمة نانسي قنقر"
+            audio = AudioIndex([-70.0] * 100 + [-20.0] * 100 + [-70.0] * 100, .01)
+            transcript = {"segments": [
+                {"start": .5, "end": 2.1, "text": credit},
+                {"start": 2.2, "end": 2.8, "text": credit},
+            ]}
+            args = Namespace(media=str(media), lang="ar", model="fixture", reindex=False,
+                             fps=30.0, out=str(output))
+            with patch("aroll.AudioIndex.build_or_load", return_value=audio), \
+                    patch("aroll.transcribe", return_value=transcript), patch("aroll.print_handout"):
+                self.assertEqual(cmd_index(args), 0)
+            beats = json.loads(output.read_text())["beats"]
+            self.assertEqual(len(beats), 1)
+            self.assertEqual(beats[0]["text"], credit)
+
+    def test_transcript_cache_matches_language_and_model_and_publishes_atomically(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            media = Path(tmp) / "take.wav"
+            media.write_bytes(b"source")
+            calls = []
+
+            def fake_transcribe(_media, **options):
+                calls.append(options["language"])
+                return {"segments": [], "language": options["language"]}
+
+            whisper = SimpleNamespace(load_model=lambda _model: SimpleNamespace(transcribe=fake_transcribe))
+            with patch.dict(sys.modules, {"whisper": whisper}), patch("aroll.shutil.which", return_value=None):
+                self.assertEqual(transcribe(str(media), "ar", "tiny", tmp)["language"], "ar")
+                self.assertEqual(transcribe(str(media), "ar", "tiny", tmp)["language"], "ar")
+                self.assertEqual(transcribe(str(media), "en", "tiny", tmp)["language"], "en")
+            self.assertEqual(calls, ["ar", "en"])
+            self.assertEqual(list(Path(tmp).glob(".audio-index-*")), [])
+
     def test_same_path_same_size_fast_overwrite_invalidates_aroll_index(self):
         with tempfile.TemporaryDirectory() as tmp:
             media = Path(tmp) / "take.mp4"

@@ -17,7 +17,7 @@ authors = [{ name = "Suheil Abu Aittah" }]
 requires-python = ">=3.11"
 dependencies = [
     "numpy>=1.24",
-    "pillow>=10.0",
+    "pillow>=12.3.0",
 ]
 
 [project.optional-dependencies]

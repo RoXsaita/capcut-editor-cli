@@ -6,8 +6,8 @@ import { fileURLToPath } from 'node:url';
 /**
  * Make the SFX palette resolvable on any machine.
  *
- * `presets/sfx.json` points into CapCut's own effect/music cache — paths CapCut mints on the
- * machine where the sound was downloaded. `polish` now checks that a sound is actually present
+ * `presets/sfx.json` and `presets/signature.json` point into CapCut's own effect/music cache —
+ * paths CapCut mints where the sound was downloaded. The operations check that sound is present
  * before writing a reference to it (otherwise the whole transaction dies with a dozen
  * MISSING_MEDIA errors on anyone else's Mac), which means a test asserting that clicks and
  * wooshes get placed only passes where those files happen to exist. It did not on CI.
@@ -20,21 +20,23 @@ import { fileURLToPath } from 'node:url';
  * Import this for side effects BEFORE importing anything that reads presets.
  */
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const REAL = path.join(HERE, '..', '..', 'presets', 'sfx.json');
+const PRESETS = path.join(HERE, '..', '..', 'presets');
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-sfx-preset-'));
 const stand_in = path.join(dir, 'sound.dat');
 fs.writeFileSync(stand_in, 'sfx-fixture-bytes');
 
-const palette = JSON.parse(fs.readFileSync(REAL, 'utf8'));
-for (const kind of ['audioTemplates', 'transitionTemplates']) {
-  for (const template of Object.values(palette[kind] || {})) {
-    if (template.path) template.path = stand_in;
+for (const name of ['sfx', 'signature']) {
+  const palette = JSON.parse(fs.readFileSync(path.join(PRESETS, `${name}.json`), 'utf8'));
+  for (const kind of ['audioTemplates', 'transitionTemplates']) {
+    for (const template of Object.values(palette[kind] || {})) {
+      if (template.path) template.path = stand_in;
+    }
   }
+  fs.writeFileSync(path.join(dir, `${name}.json`), JSON.stringify(palette, null, 2));
 }
-fs.writeFileSync(path.join(dir, 'sfx.json'), JSON.stringify(palette, null, 2));
 
-// Every other preset still falls back to the bundled one, so this overrides sfx.json alone.
+// Every other preset still falls back to the bundled one.
 process.env.CAPCUTCTL_PRESET_DIR = dir;
 
 export const SFX_FIXTURE_DIR = dir;

@@ -45,11 +45,26 @@ test('the plan skips the principal track — faces never ramp', () => {
   assert.equal(rows.length, 3);
 });
 
+test('explicit tracks cannot pace the face, cover or layout helpers', () => {
+  const d = doc();
+  assert.throws(() => opPace(d, { track: 2, set: [{ at: 0, speed: 2 }] }), { code: 'PRINCIPAL_TRACK' });
+  d.tracks[0] = { ...d.tracks[1], flag: 0 };
+  assert.deepEqual(pacePlan(d, { track: 0 }), []);
+  for (const desc of ['layout:screen-pip', 'layout:screen-blur', 'layout:background']) {
+    d.tracks[1].segments[0].desc = desc;
+    assert.equal(pacePlan(d, { track: 1 }).some(row => row.at === 0), false, desc);
+  }
+  d.tracks[1].segments[0].desc = 'layout:screen-recording';
+  assert.equal(pacePlan(d, { track: 1 }).some(row => row.at === 0), true);
+});
+
 test('pace refuses rather than ramping the face when there is no principal', () => {
   const d = doc();
   d.tracks.pop();                                 // drop the face
   d.tracks[1].segments[1].target_timerange.start = US(10);  // open a hole
   assert.throws(() => pacePlan(d), /NO_PRINCIPAL_TRACK|no principal track/);
+  const result = opPace(d, { track: 1, set: [{ at: 0, speed: 2 }] });
+  assert.equal(result.applied[0].speed, 2, 'an explicit B-roll track still works without a principal');
 });
 
 test('the plan suggests only for a long skip, and matches by path not material id', () => {
@@ -123,6 +138,16 @@ test('--cover computes the speed from the range', () => {
   const r = opPace(d, { set: [{ at: 0, cover: [10, 70] }] });
   assert.equal(r.applied[0].speed, 30);                       // 60s of source in a 2s slot
   assert.deepEqual(r.applied[0].source, [10, 70]);
+});
+
+test('--cover uses exact clip duration and an explicit choice survives --auto', () => {
+  const d = doc();
+  d.tracks[1].segments[0].target_timerange.duration = 333333;
+  const r = opPace(d, { set: [{ at: 0, cover: [10, 11] }] });
+  assert.deepEqual(r.applied[0].source, [10, 11]);
+  const explicit = doc();
+  opPace(explicit, { set: [{ at: 0, speed: 2 }], auto: true });
+  assert.equal(explicit.tracks[1].segments[0].speed, 2);
 });
 
 test('pace refuses rather than silently doing nothing', () => {

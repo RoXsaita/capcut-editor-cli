@@ -5,7 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { readJson, stableJson, PRESET_PARK_GAP_US } from '../src/core.mjs';
-import { createProject, parseScenes } from '../src/create.mjs';
+import { createProject, parseScenes, removeProject } from '../src/create.mjs';
 
 /**
  * A stand-in for "Preset 3": an endcard sitting late on the timeline whose backdrop
@@ -72,6 +72,101 @@ test('parseScenes reads ranges and source offsets, and rejects nonsense', () => 
   assert.equal(parseScenes('0:6,6:12').length, 2);
   assert.throws(() => parseScenes('6:6'), /Bad scene/);
   assert.throws(() => parseScenes('0:10,5:12'), /overlap/);
+  for (const input of ['-1:2@0', ':2', '0:2:3', '0:2@', '0:2@0@4', '0:0.0000001', '0:1e20', '']) {
+    assert.throws(() => parseScenes(input), error => error.code === 'BAD_SCENES', input);
+  }
+});
+
+test('new rejects invalid media metadata and nonfinite canvas/fps before creating a draft', () => {
+  const { root, media } = templateLibrary();
+  for (const invalid of [{ width: -1 }, { height: Infinity }, { duration: -2 }, { duration: Infinity },
+    { fps: Infinity }, { canvas: `${'9'.repeat(400)}x1920` }]) {
+    assert.throws(() => createProject('invalid', opts({ root, media, ...invalid })));
+    assert.equal(fs.existsSync(path.join(root, 'invalid')), false);
+  }
+});
+
+test('new records the accepted media origin and clears inherited playback and motion', () => {
+  const { root, media } = templateLibrary();
+  const original = path.join(root, 'original.mp4');
+  fs.writeFileSync(original, 'original');
+  for (const dir of [path.join(root, 'Preset 3'), path.join(root, 'Preset 3', 'Timelines', 'TPL-TIMELINE')]) {
+    const file = path.join(dir, 'draft_info.json');
+    const doc = readJson(file);
+    doc.materials.speeds[0].speed = 2;
+    doc.materials.speeds[0].curve_speed = { old: true };
+    doc.materials.transitions = [{ id: 'OLD-TRANSITION', type: 'transition' }];
+    const segment = doc.tracks[1].segments[0];
+    segment.extra_material_refs.push('OLD-TRANSITION');
+    segment.common_keyframes = [{ id: 'OLD-KEYFRAME' }];
+    segment.keyframe_refs = ['OLD-REF'];
+    segment.source_take_id = 'old-take';
+    fs.writeFileSync(file, stableJson(doc));
+  }
+  const r = createProject('derived', opts({ root, media, scenes: '0:6', blank: true,
+    derivedFrom: original, derivedOffset: 12 }));
+  const doc = activeDoc(r.project);
+  const segment = doc.tracks[r.contentTrack].segments[0];
+  const material = doc.materials.videos.find(m => m.id === segment.material_id);
+  assert.equal(material.capcutctl_origin, 'derived');
+  assert.equal(material.derived_from_path, fs.realpathSync.native(original));
+  assert.equal(material.derived_from_offset, 12);
+  assert.equal(material.original_path, media);
+  assert.equal(segment.source_take_id, material.source_take_id);
+  assert.notEqual(segment.source_take_id, 'old-take');
+  assert.deepEqual(segment.common_keyframes, []);
+  assert.deepEqual(segment.keyframe_refs, []);
+  assert.equal(doc.materials.speeds.find(m => segment.extra_material_refs.includes(m.id)).speed, 1);
+  assert.equal(doc.materials.transitions.length, 0);
+  const map = readJson(path.join(r.project, '.capcutctl', 'media-map.json'));
+  assert.equal(map.materials[material.id].derived_from_path, fs.realpathSync.native(original));
+});
+
+test('new cleans a partial duplicate when copying template files fails', () => {
+  const { root } = templateLibrary();
+  fs.symlinkSync(path.join(root, 'missing'), path.join(root, 'Preset 3', 'dangling'));
+  assert.throws(() => createProject('incomplete', opts({ root })));
+  assert.equal(fs.existsSync(path.join(root, 'incomplete')), false);
+});
+
+test('remove preserves the draft and registry if parsing or staging the registry fails', () => {
+  for (const failure of ['parse', 'write']) {
+    const { root } = templateLibrary();
+    const project = path.join(root, 'Preset 3');
+    const registry = path.join(root, 'root_meta_info.json');
+    fs.writeFileSync(registry, failure === 'parse' ? 'broken JSON' : stableJson({
+      all_draft_store: [{ draft_fold_path: project }],
+    }));
+    if (failure === 'write') fs.mkdirSync(`${registry}.capcutctl-staged`);
+    const before = fs.readFileSync(registry);
+    assert.throws(() => removeProject('Preset 3', { root, forceRunning: true }));
+    assert.ok(fs.existsSync(path.join(project, 'draft_info.json')));
+    assert.equal(fs.existsSync(path.join(root, '.recycle_bin', 'Preset 3')), false);
+    assert.deepEqual(fs.readFileSync(registry), before);
+  }
+});
+
+test('remove cleans an owned partial registry stage after a disk write fails', () => {
+  const { root } = templateLibrary();
+  const project = path.join(root, 'Preset 3');
+  const registry = path.join(root, 'root_meta_info.json');
+  fs.writeFileSync(registry, stableJson({ all_draft_store: [{ draft_fold_path: project }] }));
+  const before = fs.readFileSync(registry);
+  const write = fs.writeFileSync;
+  let stageFd = null;
+  fs.writeFileSync = (file, ...args) => {
+    if (typeof file !== 'number') return write(file, ...args);
+    stageFd = file;
+    write(file, 'partial');
+    throw Object.assign(new Error('injected disk full'), { code: 'ENOSPC' });
+  };
+  try {
+    assert.throws(() => removeProject('Preset 3', { root, forceRunning: true }), error => error.code === 'ENOSPC');
+  } finally { fs.writeFileSync = write; }
+  assert.ok(fs.existsSync(path.join(project, 'draft_info.json')));
+  assert.deepEqual(fs.readFileSync(registry), before);
+  assert.equal(fs.existsSync(`${registry}.capcutctl-staged`), false);
+  assert.throws(() => fs.fstatSync(stageFd), error => error.code === 'EBADF');
 });
 
 test('new clones the preset and parks its leftover after a gap, not as the ending', () => {

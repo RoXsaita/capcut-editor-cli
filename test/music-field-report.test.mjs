@@ -5,9 +5,29 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { main, setOutput } from '../src/cli.mjs';
-import { musicCachePaths, musicPrompt, opMusic, prepareMusic, promptHash } from '../src/music.mjs';
+import { generateLyria, musicCachePaths, musicPrompt, opMusic, prepareMusic, promptHash } from '../src/music.mjs';
 
 const US = seconds => Math.round(seconds * 1e6);
+
+test('music request timeout remains active while reading the response body', async t => {
+  const previous = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = 'test-placeholder';
+  t.after(() => {
+    if (previous == null) delete process.env.GEMINI_API_KEY;
+    else process.env.GEMINI_API_KEY = previous;
+  });
+  t.mock.method(globalThis, 'fetch', async (_url, { signal }) => ({
+    text: () => new Promise((resolve, reject) => {
+      const timer = setTimeout(() => resolve('{}'), 100);
+      signal.addEventListener('abort', () => {
+        clearTimeout(timer);
+        reject(new Error('response body timed out'));
+      }, { once: true });
+    }),
+  }));
+  await assert.rejects(generateLyria({ prompt: 'test', timeoutMs: 10 }),
+    error => error.code === 'LYRIA_HTTP' && /timed out/.test(error.message));
+});
 
 function dryRunProject(root) {
   const project = path.join(root, 'project');
@@ -93,6 +113,23 @@ test('music --dry-run propagates through finish preparation without Lyria or cac
 function readDraft(project) {
   return JSON.parse(fs.readFileSync(path.join(project, 'draft_info.json'), 'utf8'));
 }
+
+test('a running CapCut blocks music generation before any network or cache writes', async t => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-music-running-'));
+  const project = dryRunProject(temp);
+  const previous = process.env.CAPCUTCTL_ASSUME_RUNNING;
+  process.env.CAPCUTCTL_ASSUME_RUNNING = '1';
+  t.after(() => {
+    if (previous == null) delete process.env.CAPCUTCTL_ASSUME_RUNNING;
+    else process.env.CAPCUTCTL_ASSUME_RUNNING = previous;
+    fs.rmSync(temp, { recursive: true, force: true });
+  });
+  const fetch = t.mock.method(globalThis, 'fetch', () => { throw new Error('must not generate'); });
+  await assert.rejects(main(['music', '--project', project, '--prompt', 'quiet strings']),
+    error => error.code === 'CAPCUT_RUNNING');
+  assert.equal(fetch.mock.callCount(), 0);
+  assert.equal(fs.existsSync(musicCachePaths(project).dir), false);
+});
 
 function addPictureChange(doc, at) {
   const first = doc.tracks[0].segments[0];

@@ -27,6 +27,22 @@ def write_ocr(cache, media, frames, duration):
 
 
 class FindIndexTests(unittest.TestCase):
+    def test_invalid_search_inputs_are_rejected_before_loading_media(self):
+        for options in ([" "], ["q", "--settle", "nan"], ["q", "--settle", "-1"],
+                        ["q", "--shows", "--says"]):
+            with self.subTest(options=options), patch.object(sys, "argv", ["find.py", "--media", "missing", *options]), \
+                    contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+                find.main()
+            self.assertEqual(raised.exception.code, 2)
+
+    def test_fractional_settling_requires_the_complete_requested_window(self):
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["find.py", "q", "--media", "unused", "--settle", "1.5"]), \
+                patch.object(find, "load_ocr_record", return_value=({0: "q", 1: "other"}, {})), \
+                contextlib.redirect_stdout(output):
+            find.main()
+        self.assertNotIn("held", output.getvalue())
+
     def test_same_basename_sources_use_their_own_ocr_indexes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

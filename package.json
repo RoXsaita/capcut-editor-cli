@@ -28,11 +28,17 @@
     "pyproject.toml",
     "LICENSE",
     "NOTICE",
-    "README.md"
+    "README.md",
+    "SETUP.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "CODE_OF_CONDUCT.md",
+    "docs/",
+    ".github/AUTOMATION.md"
   ],
   "scripts": {
     "test": "node --test",
-    "check": "node --check bin/capcutctl.mjs && node --check src/core.mjs && node --check src/cli.mjs && node --check src/layouts.mjs && node --check src/add.mjs && node --check src/origin.mjs && node --check src/create.mjs && node --check src/diff.mjs && node --check src/harvest.mjs && node --check src/pace.mjs && node --check src/polish.mjs && node --check src/grade.mjs && node --check src/signature.mjs && node --check src/env.mjs && node --check src/python.mjs && node --check src/timeline.mjs && node --check src/music.mjs && node --check src/finish.mjs && node --check src/review.mjs"
+    "check": "node --check bin/capcutctl.mjs && node --check src/core.mjs && node --check src/cli.mjs && node --check src/layouts.mjs && node --check src/add.mjs && node --check src/origin.mjs && node --check src/create.mjs && node --check src/diff.mjs && node --check src/harvest.mjs && node --check src/pace.mjs && node --check src/polish.mjs && node --check src/grade.mjs && node --check src/signature.mjs && node --check src/env.mjs && node --check src/python.mjs && node --check src/timeline.mjs && node --check src/music.mjs && node --check src/finish.mjs && node --check src/review.mjs && node --check src/contract.mjs"
   },
   "engines": {
     "node": ">=20"

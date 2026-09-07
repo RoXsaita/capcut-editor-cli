@@ -52,7 +52,7 @@ DRAFTS = os.path.expanduser("~/Movies/CapCut/User Data/Projects/com.lveditor.dra
 _FRAME_EPS = 1.0 / 24
 _DEFAULT_FRAME_PERIOD = 1.0 / 30.0
 _SEEK_PREROLL = 2.0
-_PREVIEW_COMPOSITOR_VERSION = "preview-v4"
+_PREVIEW_COMPOSITOR_VERSION = "preview-v5"
 _DEFAULT_PREVIEW_BOUNDS = (360, 640)
 _DEFAULT_CUT_OFFSET = None  # one timeline frame, resolved from the draft FPS
 _PREVIEW_HWACCEL = None
@@ -377,6 +377,21 @@ def _frame_period(period, fps=None):
     return 1.0 / value if value > 0 else _DEFAULT_FRAME_PERIOD
 
 
+def _batch_timing(stderr, requested, seek_start, fps):
+    """Match decoded timestamps to requests; counts alone cannot establish VFR alignment."""
+    decoded = [_showinfo(line) for line in (stderr or "").splitlines() if _SHOWINFO_TIME.search(line)]
+    if len(decoded) != len(requested):
+        return None
+    timing = []
+    for wanted, (pts, duration) in zip(requested, decoded, strict=True):
+        period = _frame_period(duration, fps)
+        delivered = pts + seek_start
+        if abs(delivered - wanted) > period + 1e-6:
+            return None
+        timing.append((delivered, period))
+    return timing
+
+
 def _extract_path(path, requested, method):
     """Use ffmpeg to write one frame and return ``(image, pts, period)``.
 
@@ -436,9 +451,10 @@ def extract_frame(path, t, fps=None, force_accurate=False):
     the returned object records that retry in ``reextracted``.
     """
     path = os.fspath(path)
-    requested = max(0.0, float(t))
+    requested = float(t)
     if not np.isfinite(requested):
         raise FrameExtractionError(f"frame timestamp must be finite, got {t!r}")
+    requested = max(0.0, requested)
     if path.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
         with Image.open(path) as opened:
             image = opened.convert("RGBA")
@@ -499,7 +515,8 @@ def grab(path, t, return_info=False, fps=None, size=None):
     if size and sample.image.size != tuple(size):
         sample = _copy_sample(sample, sample.image.resize(tuple(size), Image.LANCZOS))
     _cache_put(key, sample.image)
-    _FRAME_INFO[key] = _copy_sample(sample)
+    if key in _CACHE:
+        _FRAME_INFO[key] = sample
     if return_info:
         return _copy_sample(sample)
     return sample.image.copy()
@@ -913,7 +930,9 @@ def write_simple_targeted(proj, tl, times, out_dir, sheet=None, labels=None,
     )
     canvas = tl.get("canvas_config") or {}
     width, height = int(canvas.get("width") or 1080), int(canvas.get("height") or 1920)
-    filters = [f"select='{selector}'", f"scale={width}:{height}:flags=fast_bilinear"]
+    filters = [f"select='{selector}'", "showinfo",
+               f"scale={width}:{height}:force_original_aspect_ratio=decrease:flags=fast_bilinear",
+               f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black", "setsar=1"]
     for guide in (guides or [height / 2]):
         filters.append(f"drawbox=x=0:y={max(0, round(float(guide)) - 2)}:w=iw:h=4:color=red:t=fill")
 
@@ -921,7 +940,7 @@ def write_simple_targeted(proj, tl, times, out_dir, sheet=None, labels=None,
     try:
         pattern = os.path.join(tmp, "%06d.png")
         command = [
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+            "ffmpeg", "-hide_banner", "-loglevel", "info", "-nostdin", "-y",
             *_preview_decode_options(), "-ss", f"{seek_start:.9f}", "-i", source,
             "-t", f"{unique[-1] - seek_start + half + period:.9f}",
         ]
@@ -944,10 +963,11 @@ def write_simple_targeted(proj, tl, times, out_dir, sheet=None, labels=None,
         if result.returncode:
             raise FrameExtractionError(f"targeted QA ffmpeg failed: {(result.stderr or '').strip()}")
         generated = sorted(Path(tmp).glob("[0-9]*.png"))
-        if len(generated) != len(unique):
-            raise FrameExtractionError(
-                f"targeted QA decoded {len(generated)} frames for {len(unique)} source requests")
+        timing = _batch_timing(result.stderr, unique, seek_start, 1 / period)
+        if len(generated) != len(unique) or timing is None:
+            return None  # Let the caller use timestamp-verified individual extractions.
         by_source = dict(zip(unique, generated, strict=True))
+        delivered_times = dict(zip(unique, (pts for pts, _period in timing), strict=True))
         os.makedirs(out_dir, exist_ok=True)
         tiles = []
         labels = labels or []
@@ -957,7 +977,8 @@ def write_simple_targeted(proj, tl, times, out_dir, sheet=None, labels=None,
             label = labels[index] if index < len(labels) else f"t={timeline_time:g}"
             tiles.append((destination, label))
             print(f"\n=== t={timeline_time}  z=track  canvas {width}x{height}")
-            print(f"  frame requested/delivered PTS {source_time_:.6f}s (targeted-batch)")
+            delivered = delivered_times[round(source_time_, 6)]
+            print(f"  frame requested PTS {source_time_:.6f}s delivered PTS {delivered:.6f}s (targeted-batch)")
             print(f"  trk{row['track_index']:<2} {str(row['segment'].get('id') or '')[:8]} "
                   f"{os.path.basename(source)[:34]} x0..{width} y0..{height}  {width}x{height}")
             print(f"  -> {destination}")
@@ -1800,9 +1821,10 @@ def _atomic_copy(source, destination):
     os.makedirs(os.path.dirname(destination) or ".", exist_ok=True)
     if os.path.abspath(source) == destination:
         return destination
-    temporary = f"{destination}.tmp-{os.getpid()}"
+    fd, temporary = tempfile.mkstemp(prefix=".capcutctl-copy-", dir=os.path.dirname(destination))
     try:
-        shutil.copyfile(source, temporary)
+        with os.fdopen(fd, "wb") as output, open(source, "rb") as input_file:
+            shutil.copyfileobj(input_file, output)
         os.replace(temporary, destination)
     finally:
         with suppress(FileNotFoundError):
@@ -1929,40 +1951,44 @@ def _decode_batch(path, requests, output_size, timeline_fps):
         hi = requested - seek_start + half
         windows.append(f"between(t\\,{lo:.9f}\\,{hi:.9f})")
     selector = "+".join(windows)
-    vf = f"select='{selector}',scale={source_size[0]}:{source_size[1]}:flags=fast_bilinear"
+    vf = f"select='{selector}',showinfo,scale={source_size[0]}:{source_size[1]}:flags=fast_bilinear"
     decode_options = _preview_decode_options()
     command = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", *decode_options,
+        "ffmpeg", "-hide_banner", "-loglevel", "info", "-nostdin", *decode_options,
         "-ss", f"{seek_start:.9f}", "-i", path, "-t",
         f"{ordered[-1] - seek_start + half + period:.9f}",
         "-vf", vf, "-an", "-sn", "-fps_mode", "vfr", "-f", "rawvideo",
         "-pix_fmt", "rgb24", "-",
     ]
-    process = _start_process(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    # A file keeps showinfo from filling a stderr pipe while stdout streams raw frames.
     frame_bytes = source_size[0] * source_size[1] * 3
     images = []
-    try:
-        while True:
-            _check_preview_cancelled()
-            data = process.stdout.read(frame_bytes)
-            if not data:
-                break
-            while len(data) < frame_bytes:
-                rest = process.stdout.read(frame_bytes - len(data))
-                if not rest:
+    with tempfile.TemporaryFile() as log:
+        process = _start_process(command, stdout=subprocess.PIPE, stderr=log)
+        try:
+            while True:
+                _check_preview_cancelled()
+                data = process.stdout.read(frame_bytes)
+                if not data:
                     break
-                data += rest
-            if len(data) != frame_bytes:
-                break
-            images.append(Image.frombytes("RGB", source_size, data).convert("RGBA"))
-        return_code = process.wait()
-    finally:
-        if process.stdout is not None:
-            process.stdout.close()
-        if _ACTIVE_PREVIEW is not None:
-            _ACTIVE_PREVIEW.discard(process)
+                while len(data) < frame_bytes:
+                    rest = process.stdout.read(frame_bytes - len(data))
+                    if not rest:
+                        break
+                    data += rest
+                if len(data) != frame_bytes:
+                    break
+                images.append(Image.frombytes("RGB", source_size, data).convert("RGBA"))
+            return_code = process.wait()
+            log.seek(0)
+            timing = _batch_timing(log.read().decode(errors="replace"), ordered, seek_start, source_fps)
+        finally:
+            if process.stdout is not None:
+                process.stdout.close()
+            if _ACTIVE_PREVIEW is not None:
+                _ACTIVE_PREVIEW.discard(process)
     _check_preview_cancelled()
-    if return_code != 0 or len(images) != len(ordered):
+    if return_code != 0 or len(images) != len(ordered) or timing is None:
         if decode_options:
             # VideoToolbox can legally drop a frame at a seek boundary on some HEVC
             # builds. Retry the same bounded window in software rather than falling all
@@ -1975,11 +2001,11 @@ def _decode_batch(path, requests, output_size, timeline_fps):
         (path, round(requested, 6)): FrameSample(
             image=image,
             requested_pts=requested,
-            delivered_pts=requested,
-            frame_period=period,
+            delivered_pts=delivered,
+            frame_period=actual_period,
             method="preview-batch",
         )
-        for requested, image in zip(ordered, images, strict=True)
+        for requested, image, (delivered, actual_period) in zip(ordered, images, timing, strict=True)
     }
 
 
@@ -2053,7 +2079,7 @@ def _run_progress_encoder(command, total_frames, fps, started, callback):
                     if line.startswith("out_time_us=") or line.startswith("out_time_ms="):
                         try:
                             value = float(line.split("=", 1)[1])
-                            seconds = value / (1e6 if line.startswith("out_time_us=") else 1e3)
+                            seconds = value / 1e6  # ffmpeg's legacy out_time_ms is also microseconds
                             completed = min(total_frames, max(last, math.floor(seconds * float(fps) + 1e-6)))
                             if completed > last:
                                 last = completed
@@ -2072,7 +2098,7 @@ def _run_progress_encoder(command, total_frames, fps, started, callback):
                 if line.startswith("out_time_us=") or line.startswith("out_time_ms="):
                     try:
                         value = float(line.split("=", 1)[1])
-                        seconds = value / (1e6 if line.startswith("out_time_us=") else 1e3)
+                        seconds = value / 1e6
                         completed = min(total_frames, max(last, math.floor(seconds * float(fps) + 1e-6)))
                         if completed > last:
                             last = completed
@@ -2132,7 +2158,10 @@ def _write_simple_preview(project_dir, tl, segments, output, fps, duration, outp
         video_label = f"v{index}"
         video_filter = (
             f"[{index}:v]trim=duration={source_duration:.9f},"
-            f"setpts=PTS-STARTPTS/{speed:.9f}[{video_label}]"
+            f"setpts=(PTS-STARTPTS)/{speed:.9f},"
+            f"scale={output_size[0]}:{output_size[1]}:force_original_aspect_ratio=decrease,"
+            f"pad={output_size[0]}:{output_size[1]}:(ow-iw)/2:(oh-ih)/2:color=black,"
+            f"setsar=1[{video_label}]"
         )
         filters.append(video_filter)
         video_labels.append(f"[{video_label}]")
@@ -2157,9 +2186,7 @@ def _write_simple_preview(project_dir, tl, segments, output, fps, duration, outp
     filters.append("".join(video_labels) + f"concat=n={count}:v=1:a=0[vcat]")
     filters.append("".join(audio_labels) + f"concat=n={count}:v=0:a=1[acat]")
     filters.append(
-        f"[vcat]fps={float(fps):.9f},scale={output_size[0]}:{output_size[1]}:"
-        f"force_original_aspect_ratio=decrease,pad={output_size[0]}:{output_size[1]}:"
-        f"(ow-iw)/2:(oh-ih)/2:color=black,trim=end_frame={total_frames}[vout]"
+        f"[vcat]fps={float(fps):.9f},trim=end_frame={total_frames}[vout]"
     )
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
     # Open one bounded input per edit. A single full-source input makes every atrim branch

@@ -42,6 +42,46 @@ class FrameAccuracyTests(unittest.TestCase):
     def tearDown(self):
         frame_qa._cache_reset()
 
+    def test_nonfinite_frame_timestamp_is_rejected_before_decoding(self):
+        for timestamp in (float("nan"), float("inf"), -float("inf")):
+            with self.subTest(timestamp=timestamp), self.assertRaisesRegex(frame_qa.FrameExtractionError, "finite"):
+                frame_qa.extract_frame("unused.mp4", timestamp)
+
+    def test_frame_metadata_respects_the_image_cache_budget_without_duplicate_images(self):
+        sample = frame_qa.FrameSample(Image.new("RGBA", (4, 4)), 0, 0, 1 / 30, "test")
+        with patch.object(frame_qa, "extract_frame", return_value=sample):
+            with patch.object(frame_qa, "_CACHE_BUDGET", 64):
+                frame_qa.grab("take.mp4", 0)
+                key = next(iter(frame_qa._CACHE))
+                self.assertIs(frame_qa._FRAME_INFO[key].image, frame_qa._CACHE[key])
+            frame_qa._cache_reset()
+            with patch.object(frame_qa, "_CACHE_BUDGET", 32):
+                frame_qa.grab("take.mp4", 0)
+                self.assertEqual(len(frame_qa._CACHE), 0)
+                self.assertEqual(len(frame_qa._FRAME_INFO), 0)
+
+    def test_atomic_preview_copy_does_not_follow_a_preplanted_temporary_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, destination, victim = (root / name for name in ("source", "destination", "victim"))
+            source.write_bytes(b"preview")
+            victim.write_bytes(b"keep this")
+            planted = Path(f"{destination}.tmp-{os.getpid()}")
+            planted.symlink_to(victim)
+            frame_qa._atomic_copy(source, destination)
+            self.assertEqual(destination.read_bytes(), b"preview")
+            self.assertEqual(victim.read_bytes(), b"keep this")
+            self.assertTrue(planted.is_symlink())
+
+    def test_ffmpeg_legacy_progress_field_uses_microseconds(self):
+        process = SimpleNamespace(stderr=io.StringIO("out_time_ms=500000\n"), poll=lambda: 0, wait=lambda: 0)
+        completed = []
+        with patch.object(frame_qa, "_start_process", return_value=process), \
+                patch.object(frame_qa.select, "select", return_value=([process.stderr], [], [])):
+            frame_qa._run_progress_encoder([], 8, 4, 0,
+                                           lambda count, *_rest: completed.append(count))
+        self.assertEqual(completed, [2, 8])
+
     def test_drift_over_one_frame_reextracts_with_coarse_timestamp_selection(self):
         calls = []
 
@@ -458,6 +498,67 @@ class PreviewAndSamplingTests(unittest.TestCase):
 
 
 class RealFfmpegPreviewTests(unittest.TestCase):
+    def test_vfr_batch_reports_decoded_pts_and_rejects_misaligned_samples(self):
+        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+            self.skipTest("ffmpeg and ffprobe are required for the VFR regression")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rows = []
+            for index, duration in enumerate((0.12, 0.88, 0.24, 0.76)):
+                Image.new("RGB", (32, 32), (index * 50, 0, 0)).save(root / f"{index}.png")
+                rows.extend((f"file '{index}.png'", f"duration {duration}"))
+            rows.append("file '3.png'")
+            (root / "frames.txt").write_text("\n".join(rows) + "\n")
+            media = root / "vfr.mp4"
+            subprocess.run([
+                "ffmpeg", "-v", "error", "-y", "-f", "concat", "-i", str(root / "frames.txt"),
+                "-fps_mode", "vfr", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(media),
+            ], check=True)
+            decoded = frame_qa._decode_batch(str(media), [1.01], (32, 32), 25)
+            self.assertEqual(len(decoded), 1)
+            sample = next(iter(decoded.values()))
+            self.assertAlmostEqual(sample.requested_pts, 1.01)
+            self.assertAlmostEqual(sample.delivered_pts, 1.0)
+            self.assertIsNone(frame_qa._batch_timing(
+                "[showinfo] n: 0 pts: 0 pts_time:0 duration_time:0.04", [1.0], 0, 25))
+
+    def test_simple_preview_respects_speed_and_normalises_mixed_source_dimensions(self):
+        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+            self.skipTest("ffmpeg and ffprobe are required for the real preview regression")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, size in (("first", "32x32"), ("second", "64x64")):
+                subprocess.run([
+                    "ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                    f"color=c=red:s={size}:r=8:d=1", "-f", "lavfi", "-i",
+                    f"color=c=blue:s={size}:r=8:d=1", "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(root / f"{name}.mp4"),
+                ], check=True)
+            timeline = {
+                "duration": 2_000_000, "canvas_config": {"width": 32, "height": 32},
+                "tracks": [{"type": "video", "name": "content", "segments": [
+                    {**segment("first", 0, 1, "first"),
+                     "source_timerange": {"start": 0, "duration": 2_000_000}},
+                    {**segment("second", 1, 1, "second"),
+                     "source_timerange": {"start": 0, "duration": 2_000_000}},
+                ]}],
+                "materials": {"videos": [{"id": name, "path": str(root / f"{name}.mp4")}
+                                          for name in ("first", "second")]},
+            }
+            output = root / "preview.mp4"
+            frame_qa.write_preview(str(root), timeline, str(output), fps=4, resolution="32x32",
+                                   cache=False, announce=False)
+            raw = subprocess.run([
+                "ffmpeg", "-v", "error", "-i", str(output), "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+            ], check=True, capture_output=True).stdout
+            frames = np.frombuffer(raw, dtype=np.uint8).reshape((-1, 32, 32, 3))
+            self.assertEqual(len(frames), 8)
+            # Both 2x clips cross from red to blue halfway through their one-second slot.
+            for index in (1, 5):
+                self.assertGreater(int(frames[index, 16, 16, 0]), 200)
+            for index in (3, 7):
+                self.assertGreater(int(frames[index, 16, 16, 2]), 200)
+
     def test_native_audio_fades_survive_speed_range_trims_and_stereo_mixing(self):
         if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
             self.skipTest("ffmpeg and ffprobe are required for the audio regression")
@@ -662,12 +763,12 @@ class RealFfmpegPreviewTests(unittest.TestCase):
             media = root / "face.mp4"
             subprocess.run([
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                "-f", "lavfi", "-i", "color=c=red:s=32x32:r=8:d=2",
+                "-f", "lavfi", "-i", "color=c=red:s=64x32:r=8:d=2",
                 "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(media),
             ], check=True)
             timeline = {
                 "duration": 2_000_000, "fps": 8,
-                "canvas_config": {"width": 32, "height": 32},
+                "canvas_config": {"width": 32, "height": 64},
                 "tracks": [{"type": "video", "name": "content", "flag": 2, "segments": [
                     segment("left", 0, 1, material="VIDEO"),
                     {**segment("right", 1, 1, material="VIDEO"),
@@ -682,7 +783,9 @@ class RealFfmpegPreviewTests(unittest.TestCase):
             )
             self.assertEqual(len(tiles), 2)
             with Image.open(tiles[0][0]) as image:
-                self.assertEqual(image.size, (32, 32))
+                self.assertEqual(image.size, (32, 64))
+                self.assertLess(max(image.getpixel((16, 8))), 5)
+                self.assertGreater(image.getpixel((16, 28))[0], 200)
             self.assertTrue(sheet.is_file())
 
 

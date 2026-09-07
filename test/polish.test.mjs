@@ -263,6 +263,29 @@ test('a callout click never lands on top of the seam woosh it triggered', () => 
   assert.deepEqual(overlaps(d), []);
 });
 
+test('noSfx keeps transitions but removes generated cues and preserves manual audio', () => {
+  const d = doc();
+  d.materials.videos.push({ id: 'RECT', type: 'gif', path: '/x/rect-16-9-1080x608.gif' });
+  d.tracks.push(track('video', [{ ...seg(4, 2), material_id: 'RECT' }]));
+  opPolish(d, { __seed: 'WITH_SOUND' });
+  const lane = d.tracks.find(t => t.name === 'polish-sfx');
+  assert.ok(lane.segments.length > 0);
+  const cue = lane.segments[0];
+  for (const desc of ['polish:click', 'polish:type', 'manual sound']) {
+    lane.segments.push({ ...structuredClone(cue), id: desc, desc });
+  }
+  const result = opPolish(d, { __seed: 'SILENT', noSfx: true });
+  assert.ok(result.transitions > 0);
+  assert.equal(result.sfx, 0);
+  assert.deepEqual(result.callouts, []);
+  assert.deepEqual(result.interactions, []);
+  const audio = d.tracks.filter(t => t.type === 'audio').flatMap(t => t.segments);
+  assert.deepEqual(audio.map(s => s.desc), ['manual sound']);
+  const fresh = doc();
+  opPolish(fresh, { noSfx: true });
+  assert.equal(fresh.tracks.some(t => t.type === 'audio'), false);
+});
+
 test('two callouts closer together than the click is long do not stack either', () => {
   const d = doc();
   d.materials.videos.push({ id: 'RECT', type: 'gif', path: '/x/rect-16-9-1080x608.gif' });

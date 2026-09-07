@@ -56,6 +56,17 @@ const minimal = (transition) => ({
   tracks: []
 });
 
+test('catalogue counts names that coincide with Object prototype properties', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-harvest-names-'));
+  for (const name of ['__proto__', 'constructor', 'toString']) {
+    fs.mkdirSync(path.join(root, name));
+    fs.writeFileSync(path.join(root, name, 'draft_info.json'), stableJson(minimal(name)));
+  }
+  const catalogue = harvestDrafts(root);
+  assert.equal(catalogue.transitions.length, 3);
+  assert.ok(catalogue.transitions.every(item => item.n === 1));
+});
+
 test('one unparseable draft is skipped, not fatal — every other draft still catalogues', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-harvest-bad-'));
   for (const [name, body] of [['Bad Draft', '{ this is not json'],

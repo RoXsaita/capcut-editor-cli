@@ -45,7 +45,8 @@ Never `git init` the parent. Never upload the umbrella as a zip.
 
 - [ ] Branch protection on `main`: require `Node 20`, `Node 24`, `Python and shell quality`
 - [ ] `gh label create ai-review-approved` (see `.github/AUTOMATION.md`)
-- [ ] Enable private vulnerability reporting
+- [x] Private vulnerability reporting enabled (verified 2026-09-07)
+- [x] Secret scanning and push protection enabled (verified 2026-09-07)
 - [x] Description and topics set (see below)
 
 Suggested description:

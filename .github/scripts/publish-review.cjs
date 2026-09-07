@@ -54,10 +54,10 @@ function changedLines(patch) {
       newLine = Number(hunk[2]);
       continue;
     }
-    if (line.startsWith("+") && !line.startsWith("+++")) {
+    if (line.startsWith("+")) {
       right.add(newLine);
       newLine += 1;
-    } else if (line.startsWith("-") && !line.startsWith("---")) {
+    } else if (line.startsWith("-")) {
       left.add(oldLine);
       oldLine += 1;
     } else if (!line.startsWith("\\")) {
@@ -131,7 +131,7 @@ async function upsertSummary({ github, context, body }) {
     per_page: 100,
   });
   const existing = comments.find(
-    (comment) => comment.user?.type === "Bot" && comment.body?.includes(SUMMARY_MARKER),
+    (comment) => comment.user?.login === "github-actions[bot]" && comment.body?.includes(SUMMARY_MARKER),
   );
   if (existing) {
     await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
@@ -161,6 +161,7 @@ async function publishInlineFindings({ github, context, core, pull, findings }) 
   });
   const seen = new Set();
   for (const comment of priorComments) {
+    if (comment.user?.login !== "github-actions[bot]") continue;
     const match = comment.body?.match(/<!-- codex-finding:([a-f0-9]+) -->/);
     if (match) seen.add(match[1]);
   }

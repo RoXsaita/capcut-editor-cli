@@ -27,6 +27,7 @@ from pathlib import Path
 SPEECH, SOFT, SIL = -28.0, -45.0, -55.0     # dB thresholds, tuned on this user's cam audio
 FIRST_WORD_CLIP_TOLERANCE_FRAMES = 0.5
 SOURCE_SAMPLE_BYTES = 64 * 1024
+ENERGY_INDEX_VERSION = 2
 
 
 def _content_hash(media, stat_result=None, sample_bytes=SOURCE_SAMPLE_BYTES):
@@ -93,15 +94,29 @@ class AudioIndex:
     # ---------- build / cache ----------
     @staticmethod
     def from_wav(wav, bin_ms=10):
-        with wave.open(wav) as w:
+        if not math.isfinite(bin_ms) or bin_ms <= 0:
+            raise ValueError("energy bin size must be finite and positive")
+        with wave.open(os.fspath(wav)) as w:
             sr, nch = w.getframerate(), w.getnchannels()
-            s = struct.unpack(f"<{w.getnframes()}h", w.readframes(w.getnframes()))
-        if nch > 1: s = s[::nch]
-        n = int(bin_ms/1000*sr); out = []
-        for i in range(0, len(s)-n, n):
+            width = w.getsampwidth()
+            raw = w.readframes(w.getnframes())
+        if not raw:
+            raise ValueError("audio contains no samples")
+        if len(raw) % (width * nch):
+            raise ValueError("audio ends with an incomplete PCM frame")
+        if width == 3:
+            s = [int.from_bytes(raw[i:i+3], "little", signed=True) for i in range(0, len(raw), 3)]
+        else:
+            s = struct.unpack(f"<{len(raw) // width}{ {1: 'B', 2: 'h', 4: 'i'}[width]}", raw)
+            if width == 1: s = [sample - 128 for sample in s]
+        frames = max(1, round(bin_ms / 1000 * sr))
+        n = frames * nch; out = []
+        peak = 2 ** (width * 8 - 1)
+        # Include every channel and the final partial bin so trailing speech remains visible.
+        for i in range(0, len(s), n):
             ch = s[i:i+n]
-            out.append(round(20*math.log10(math.sqrt(sum(x*x for x in ch)/len(ch))/32768 + 1e-9), 1))
-        return AudioIndex(out, bin_ms/1000, wav)
+            out.append(round(20*math.log10(math.sqrt(sum(x*x for x in ch)/len(ch))/peak + 1e-9), 1))
+        return AudioIndex(out, frames / sr, wav)
 
     @staticmethod
     def _token(media):
@@ -120,8 +135,10 @@ class AudioIndex:
                 d = json.loads(Path(key).read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError, TypeError):
                 d = None
-            if (isinstance(d, dict) and d.get("token") == token
-                    and isinstance(d.get("db"), list) and d.get("bin") is not None):
+            if (isinstance(d, dict) and d.get("version") == ENERGY_INDEX_VERSION and d.get("token") == token
+                    and isinstance(d.get("db"), list) and d["db"]
+                    and all(isinstance(value, (int, float)) and math.isfinite(value) for value in d["db"])
+                    and isinstance(d.get("bin"), (int, float)) and math.isfinite(d["bin"]) and d["bin"] > 0):
                 return AudioIndex(d["db"], d["bin"], media, token=token)
 
         wav = media
@@ -147,12 +164,14 @@ class AudioIndex:
 
         idx.path = media
         idx.token = token
-        _write_json_atomic(key, {"bin": idx.bin, "db": idx.db, "token": token})
+        if source_token(media) != token:
+            raise RuntimeError("media changed while its energy index was being built; rerun indexing")
+        _write_json_atomic(key, {"version": ENERGY_INDEX_VERSION, "bin": idx.bin, "db": idx.db, "token": token})
         return idx
 
     # ---------- queries ----------
     def at(self, t):
-        i = int(t/self.bin)
+        i = math.floor(t/self.bin)
         return self.db[i] if 0 <= i < len(self.db) else -99.0
 
     def rising(self, t, span=0.10):
@@ -185,7 +204,7 @@ class AudioIndex:
         n = int(win/self.bin)
         for i in range(-n, n+1):
             tt = t + i*self.bin
-            sample = int(tt / self.bin)
+            sample = math.floor(tt / self.bin)
             if sample < 0 or sample >= len(self.db):
                 continue
             v = self.at(tt)

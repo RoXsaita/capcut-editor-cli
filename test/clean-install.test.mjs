@@ -171,3 +171,18 @@ test('the packed tarball ships no private catalogue, media, or local paths', t =
   }
   assert.deepEqual(offenders, [], 'no absolute user paths may ship in the package');
 });
+
+test('doctor exits unsuccessfully when the project contains structural errors', t => {
+  const box = packageSandbox();
+  if (box.skip) return t.skip(box.skip);
+  const project = path.join(box.root, 'broken-project');
+  fs.mkdirSync(project);
+  fs.writeFileSync(path.join(project, 'draft_info.json'), JSON.stringify({
+    id: 'broken', name: 'Broken', tracks: [], duration: 0,
+    materials: { videos: [{ id: 'missing', type: 'video', path: path.join(project, 'missing.mp4') }] },
+  }));
+  const run = runPacked(box, ['doctor', '--project', project, '--json']);
+  const report = JSON.parse(run.stdout);
+  assert.ok(report.errors > 0);
+  assert.equal(run.status, 1, run.stderr);
+});

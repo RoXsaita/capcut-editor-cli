@@ -37,11 +37,11 @@ from itertools import pairwise
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from audio_index import SIL, SOFT, AudioIndex, lint, loud_out_finding, source_token
+from audio_index import SIL, SOFT, AudioIndex, _write_json_atomic, lint, loud_out_finding, source_token
 
 FPS = 30.0
 FRAME = 1.0 / FPS
-AROLL_INDEX_VERSION = 5
+AROLL_INDEX_VERSION = 6
 LEAD_FRAMES = 2          # start this many frames before the onset, so the attack survives
 AUDIO_RAMP_FRAMES = 2     # native audio fade on both sides of every generated splice
 HESITATION = 0.60        # silence longer than this inside a beat is dead air
@@ -80,9 +80,6 @@ def quantise(t, fps=FPS):
 
 
 DEFAULT_MODEL = "mlx-community/whisper-large-v3-turbo"
-
-
-CREDIT = re.compile(r"ترجمة|نانسي")
 
 
 def media_token(media):
@@ -130,12 +127,14 @@ def transcribe(media, lang, model, cache_dir, force=False):
     slug = re.sub(r"[^a-zA-Z0-9._-]", "-", model)
     cache = os.path.join(cache_dir, os.path.basename(media).rsplit(".", 1)[0] + f".whisper-{slug}.json")
     token = media_token(media)
+    settings = {"language": lang, "model": model}
     if not force and os.path.exists(cache):
         try:
             d = json.loads(Path(cache).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, TypeError):
             d = None
-        if isinstance(d, dict) and d.get("_token") == token:
+        if (isinstance(d, dict) and d.get("_token") == token
+                and d.get("_settings") == settings and isinstance(d.get("segments"), list)):
             print(f"  transcript: cached ({model})", file=sys.stderr)
             return d
 
@@ -159,8 +158,11 @@ def transcribe(media, lang, model, cache_dir, force=False):
             media, language=lang, word_timestamps=True, verbose=False,
             condition_on_previous_text=False,      # stops one hallucination poisoning the rest
         )
+    if media_token(media) != token:
+        raise SystemExit("media changed while it was being transcribed; rerun indexing")
     result["_token"] = token
-    Path(cache).write_text(json.dumps(result, ensure_ascii=False))
+    result["_settings"] = settings
+    _write_json_atomic(cache, result)
     return result
 
 
@@ -649,7 +651,7 @@ def cmd_index(args):
     beats = []
     for segment_id, seg in enumerate(segments):
         text = seg.get("text", "").strip()
-        if not text or CREDIT.search(text):
+        if not text:
             continue
         for a, b in split_on_dead_air(idx, seg["start"], seg["end"]):
             floor = beats[-1]["src_out"] if beats else 0.0
@@ -703,6 +705,8 @@ def cmd_index(args):
 
     raw = sum(b["dur"] for b in beats)
     token = media_token(media)
+    if idx.token is not None and token != idx.token:
+        raise SystemExit("media changed while its A-roll index was being built; rerun indexing")
     out = {
         "version": AROLL_INDEX_VERSION, "media": media, "fps": fps,
         "source_token": token, "media_token": token,
@@ -1750,7 +1754,6 @@ def cmd_selftest(args):
     check("quantise snaps to frames", abs(quantise(1.0 / 30 * 2.4) - 2 / 30) < 1e-9)
     check("norm folds arabic orthography", norm("أَحْلَى") == norm("احلى"))
     check("norm strips punctuation", norm("hello, world!") == "hello world")
-    check("credit line is dropped", bool(CREDIT.search("ترجمة نانسي قنقر")))
     demo = [
         {"id": 0, "text": "شرح طويل لكل خطوات الربط", "take": 0},
         {"id": 1, "text": "اكتبوا دليل بالتعليقات", "take": 0},

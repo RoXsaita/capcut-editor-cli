@@ -985,28 +985,50 @@ export function resolveProject(input, root = DEFAULT_ROOT) {
 }
 
 export function activeTimelineId(projectDir) {
-  const projectJson = path.join(projectDir, 'Timelines/project.json');
+  const projectJson = managedFile(projectDir, 'Timelines/project.json');
   if (!fs.existsSync(projectJson)) return null;
-  return readJson(projectJson).main_timeline_id || null;
+  const id = readJson(projectJson).main_timeline_id || null;
+  if (id != null && (typeof id !== 'string' || id === '.' || id === '..' || /[/\\\0]/.test(id))) {
+    throw new CapcutError('Active timeline id must be a directory name inside Timelines.', { code: 'TIMELINE_SCOPE' });
+  }
+  return id;
+}
+
+/** Managed draft files must never follow a project-supplied symlink outside the draft. */
+function managedFile(root, relative) {
+  const base = path.resolve(root);
+  const file = path.resolve(base, relative);
+  if (!relative || path.isAbsolute(relative) || path.win32.isAbsolute(relative)
+      || file === base || !file.startsWith(base + path.sep)) {
+    throw new CapcutError(`Managed file is outside its directory: ${relative}`, { code: 'PROJECT_FILE_SCOPE' });
+  }
+  for (let cursor = file; cursor !== base; cursor = path.dirname(cursor)) {
+    try {
+      if (fs.lstatSync(cursor).isSymbolicLink()) {
+        throw new CapcutError(`Managed file must not follow a symlink: ${cursor}`, { code: 'PROJECT_FILE_SCOPE' });
+      }
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+  return file;
 }
 
 export function documentGroups(projectDir) {
   const groups = [{
     name: 'root',
     dir: projectDir,
-    canonical: path.join(projectDir, 'draft_info.json'),
-    mirrors: LIVE_FILE_NAMES.map(name => path.join(projectDir, name))
+    canonical: managedFile(projectDir, 'draft_info.json'),
+    mirrors: LIVE_FILE_NAMES.map(name => managedFile(projectDir, name))
   }];
   const timelineId = activeTimelineId(projectDir);
   if (timelineId) {
     const timelineDir = path.join(projectDir, 'Timelines', timelineId);
-    const canonical = path.join(timelineDir, 'draft_info.json');
+    const canonical = managedFile(projectDir, path.join('Timelines', timelineId, 'draft_info.json'));
     if (fs.existsSync(canonical)) {
       groups.push({
         name: `timeline:${timelineId}`,
         dir: timelineDir,
         canonical,
-        mirrors: LIVE_FILE_NAMES.map(name => path.join(timelineDir, name))
+        mirrors: LIVE_FILE_NAMES.map(name => managedFile(projectDir, path.join('Timelines', timelineId, name)))
       });
     }
   }
@@ -1016,6 +1038,8 @@ export function documentGroups(projectDir) {
 export function loadProject(projectDir) {
   const groups = documentGroups(projectDir).map(group => {
     const doc = readJson(group.canonical);
+    const issues = documentShapeIssues(doc, group.canonical);
+    if (issues.length) throw new CapcutError(`Malformed draft structure: ${group.canonical}`, { code: 'INVALID_DRAFT_STRUCTURE', details: issues });
     return { ...group, doc, durations: durationInfo(doc, projectDir) };
   });
   return { projectDir, groups, activeTimelineId: activeTimelineId(projectDir) };
@@ -1107,6 +1131,22 @@ function baselineDuplicateMatches(doc, baseline) {
   return matches;
 }
 
+function documentShapeIssues(doc, file) {
+  const issues = [];
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return [issue('error', 'DOC_TYPE', 'Draft must be an object.', { file })];
+  if (!Array.isArray(doc.tracks)) issues.push(issue('error', 'TRACKS_TYPE', 'tracks must be an array.', { file }));
+  if (!doc.materials || typeof doc.materials !== 'object' || Array.isArray(doc.materials)) issues.push(issue('error', 'MATERIALS_TYPE', 'materials must be an object.', { file }));
+  if (issues.length) return issues;
+  for (const [trackIndex, track] of doc.tracks.entries()) {
+    if (!track || typeof track !== 'object' || Array.isArray(track) || (track.segments != null && !Array.isArray(track.segments))) {
+      issues.push(issue('error', 'TRACK_TYPE', `Track ${trackIndex} must be an object with a segments array.`, { file, trackIndex }));
+    } else if ((track.segments || []).some(segment => !segment || typeof segment !== 'object' || Array.isArray(segment))) {
+      issues.push(issue('error', 'SEGMENT_TYPE', `Track ${trackIndex} contains an invalid segment.`, { file, trackIndex }));
+    }
+  }
+  return issues;
+}
+
 export function validateDocument(doc, {
   file = '<memory>',
   checkFiles = true,
@@ -1114,10 +1154,8 @@ export function validateDocument(doc, {
   parked = null,
   duplicateBaseline = [],
 } = {}) {
-  const issues = [];
-  if (!doc || typeof doc !== 'object') return [issue('error', 'DOC_TYPE', 'Draft must be an object.', { file })];
-  if (!Array.isArray(doc.tracks)) issues.push(issue('error', 'TRACKS_TYPE', 'tracks must be an array.', { file }));
-  if (!doc.materials || typeof doc.materials !== 'object') issues.push(issue('error', 'MATERIALS_TYPE', 'materials must be an object.', { file }));
+  const issues = documentShapeIssues(doc, file);
+  if (issues.length) return issues;
   const materials = materialIndex(doc);
   const parkedWindow = parked || preservedRange(projectDir);
   // one line per distinct path; 48 materials for one file is CapCut's shape, not 48 faults
@@ -1667,8 +1705,11 @@ function walk(value, visitor, prefix = '') {
   }
 }
 
+const unsafeProperty = key => ['__proto__', 'constructor', 'prototype'].includes(key);
+
 export function deepMerge(target, patch) {
   for (const [key, value] of Object.entries(patch || {})) {
+    if (unsafeProperty(key)) throw new CapcutError(`Unsafe patch property: ${key}`, { code: 'UNSAFE_PROPERTY' });
     if (value && typeof value === 'object' && !Array.isArray(value)) {
       if (!target[key] || typeof target[key] !== 'object' || Array.isArray(target[key])) target[key] = {};
       deepMerge(target[key], value);
@@ -1679,6 +1720,7 @@ export function deepMerge(target, patch) {
 
 export function unsetPath(target, dotted) {
   const keys = dotted.split('.');
+  if (keys.some(unsafeProperty)) throw new CapcutError(`Unsafe unset path: ${dotted}`, { code: 'UNSAFE_PROPERTY' });
   let cursor = target;
   for (let i = 0; i < keys.length - 1; i++) {
     if (!cursor || typeof cursor !== 'object') return;
@@ -1841,7 +1883,8 @@ function opMaskPatch(doc, op) {
     const masks = (entry.segment.extra_material_refs || []).map(id => index.get(id)).filter(item => item?.kind === 'common_mask' || item?.value?.type === 'mask');
     if (!masks.length) throw new CapcutError(`mask.patch: segment ${entry.segment.id} has no bound mask.`, { code: 'MASK_NOT_FOUND' });
     if (masks.length > 1 && !op.mask?.id && !op.mask?.name) throw new CapcutError(`mask.patch: segment ${entry.segment.id} has multiple masks; select one.`, { code: 'MASK_AMBIGUOUS' });
-    const mask = masks.find(item => matches(item.value, op.mask || {})) || masks[0];
+    const mask = masks.find(item => matches(item.value, op.mask || {}));
+    if (!mask) throw new CapcutError(`mask.patch: no bound mask matched ${JSON.stringify(op.mask)}.`, { code: 'MASK_NOT_FOUND' });
     deepMerge(mask.value, op.set || {});
     entry.segment.enable_video_mask = op.enable ?? true;
     changed++;
@@ -1854,9 +1897,9 @@ export const LOCAL_MEDIA_DIR = path.join('Resources', 'CapcutctlMedia');
 const sanitizeName = s => String(s || '').replace(/[^a-zA-Z0-9._-]/g, '_') || 'media';
 
 export function isLocalMedia(projectDir, mediaPath) {
-  if (!projectDir || typeof mediaPath !== 'string') return false;
-  const root = path.resolve(projectDir);
-  const resolved = path.resolve(mediaPath);
+  if (!projectDir || typeof mediaPath !== 'string' || !mediaPath.trim()) return false;
+  const root = canonicalMediaPath(projectDir);
+  const resolved = canonicalMediaPath(mediaPath);
   return resolved === root || resolved.startsWith(root + path.sep);
 }
 
@@ -1890,7 +1933,7 @@ function sameContents(a, b) {
 export function localizeMedia(projectDir, source, fileName, { dryRun = false } = {}) {
   source = path.resolve(source);
   if (!fs.existsSync(source)) throw new CapcutError(`Source media does not exist: ${source}`, { code: 'MISSING_SOURCE' });
-  const mediaDir = path.join(projectDir, LOCAL_MEDIA_DIR);
+  const mediaDir = managedFile(projectDir, LOCAL_MEDIA_DIR);
   if (isLocalMedia(projectDir, source)) return source;
 
   const base = sanitizeName(fileName || path.basename(source));
@@ -1898,19 +1941,19 @@ export function localizeMedia(projectDir, source, fileName, { dryRun = false } =
   // rl2 writes every take as screen.mp4 — basename alone would collide and CapCut
   // then cannot tell three files named screen.mp4 apart in its "Link media" dialog.
   let safe = parent && parent !== '_' ? `${parent}__${base}` : base;
-  let destination = path.join(mediaDir, safe);
-  // The tag is derived from the SOURCE PATH, so localizing the same file twice keeps
-  // resolving to the same destination instead of piling up copies.
-  if (fs.existsSync(destination) && path.resolve(destination) !== source
-      && !sameContents(source, destination)) {
-    const tag = crypto.createHash('sha1').update(source).digest('hex').slice(0, 8);
-    const ext = path.extname(base);
-    safe = `${parent}__${path.basename(base, ext)}__${tag}${ext}`;
-    destination = path.join(mediaDir, safe);
+  let destination = managedFile(projectDir, path.join(LOCAL_MEDIA_DIR, safe));
+  // A source can be re-recorded in place. Check every candidate, including a tagged
+  // collision, so importing the new bytes never overwrites an earlier take.
+  const tag = crypto.createHash('sha1').update(source).digest('hex').slice(0, 8);
+  const ext = path.extname(base);
+  for (let n = 1; fs.existsSync(destination); n++) {
+    if (sameContents(source, destination)) return destination;
+    safe = `${parent}__${path.basename(base, ext)}__${tag}${n > 1 ? `_${n}` : ''}${ext}`;
+    destination = managedFile(projectDir, path.join(LOCAL_MEDIA_DIR, safe));
   }
   if (!dryRun) {
     fs.mkdirSync(mediaDir, { recursive: true });
-    if (path.resolve(source) !== path.resolve(destination)) fs.copyFileSync(source, destination);
+    fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
   }
   // The rl2 trace sidecar is not copied here: the material-level operations (clip.add,
   // replace.media, layout.screen) record it through layouts.recordMediaProvenance, keyed by
@@ -2822,14 +2865,14 @@ function snapshotFiles(projectDir) {
   const files = new Set();
   for (const group of documentGroups(projectDir)) for (const file of group.mirrors) if (fs.existsSync(file)) files.add(file);
   for (const relative of ['draft_meta_info.json', 'draft_virtual_store.json', 'Timelines/project.json', SIDECAR_RELATIVE]) {
-    const file = path.join(projectDir, relative);
+    const file = managedFile(projectDir, relative);
     if (fs.existsSync(file)) files.add(file);
   }
   return [...files];
 }
 
 export function createSnapshot(projectDir, label = 'snapshot') {
-  const root = path.join(projectDir, '.capcutctl', 'history', `${nowStamp()}-${label.replace(/[^a-zA-Z0-9._-]/g, '_')}`);
+  const root = managedFile(projectDir, path.join('.capcutctl', 'history', `${nowStamp()}-${label.replace(/[^a-zA-Z0-9._-]/g, '_')}`));
   fs.mkdirSync(root, { recursive: true });
   const managed = documentGroups(projectDir).flatMap(group => group.mirrors);
   const sidecar = path.join(projectDir, SIDECAR_RELATIVE);
@@ -2854,18 +2897,46 @@ export function createSnapshot(projectDir, label = 'snapshot') {
   return root;
 }
 
-function restoreSnapshot(snapshotDir, destRoot = null) {
+function snapshotRestoreFiles(snapshotDir, projectDir) {
   const manifest = readJson(path.join(snapshotDir, 'manifest.json'));
-  const root = destRoot || manifest.projectDir;
-  for (const relative of manifest.absent || []) {
-    const destination = path.join(root, relative);
-    try { if (fs.existsSync(destination)) fs.unlinkSync(destination); } catch {}
+  if (manifest.version !== 1 || !Array.isArray(manifest.files)
+      || (manifest.absent != null && !Array.isArray(manifest.absent))) {
+    throw new CapcutError('Invalid snapshot manifest.', { code: 'SNAPSHOT_MANIFEST' });
   }
-  for (const item of manifest.files) {
-    const source = path.join(snapshotDir, item.relative);
-    const destination = path.join(root, item.relative);
+  const seen = new Set();
+  const destinationFor = relative => {
+    const pieces = typeof relative === 'string' ? relative.split('/') : [];
+    const allowed = LIVE_FILE_NAMES.includes(relative)
+      || ['draft_meta_info.json', 'draft_virtual_store.json', 'Timelines/project.json', '.capcutctl/created.json'].includes(relative)
+      || (pieces.length === 3 && pieces[0] === 'Timelines' && pieces[1] && pieces[1] !== '.'
+        && pieces[1] !== '..' && !/[\\\0]/.test(pieces[1]) && LIVE_FILE_NAMES.includes(pieces[2]));
+    if (!allowed || seen.has(relative)) {
+      throw new CapcutError(`Invalid or repeated snapshot file: ${relative}`, { code: 'SNAPSHOT_SCOPE' });
+    }
+    seen.add(relative);
+    return managedFile(projectDir, relative);
+  };
+  const absent = (manifest.absent || []).map(destinationFor);
+  const files = manifest.files.map(item => {
+    const destination = destinationFor(item?.relative);
+    const source = managedFile(snapshotDir, item.relative);
+    const data = fs.readFileSync(source);
+    if (typeof item.sha256 !== 'string' || sha256(data) !== item.sha256) {
+      throw new CapcutError(`Snapshot checksum mismatch: ${item.relative}`, { code: 'SNAPSHOT_CHECKSUM' });
+    }
+    return { destination, data };
+  });
+  return { files, absent };
+}
+
+function restoreSnapshot(snapshotDir, projectDir, prepared = null) {
+  const { files, absent } = prepared || snapshotRestoreFiles(snapshotDir, projectDir);
+  for (const destination of absent) {
+    if (fs.existsSync(destination)) fs.unlinkSync(destination);
+  }
+  for (const { destination, data } of files) {
     fs.mkdirSync(path.dirname(destination), { recursive: true });
-    fs.copyFileSync(source, destination);
+    fs.writeFileSync(destination, data);
   }
 }
 
@@ -3080,7 +3151,7 @@ function reclaimStaleLock(projectDir, file, staleStatus) {
 }
 
 function acquireLock(projectDir, retried = false) {
-  const dir = path.join(projectDir, '.capcutctl');
+  const dir = managedFile(projectDir, '.capcutctl');
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, 'write.lock');
   const owner = lockOwner();
@@ -3122,17 +3193,23 @@ function releaseLock(lock) {
 
 function stageWrites(writes, transactionId) {
   const staged = [];
-  for (const write of writes) {
-    fs.mkdirSync(path.dirname(write.file), { recursive: true });
-    const temp = `${write.file}.capcutctl-${transactionId}.tmp`;
-    const fd = fs.openSync(temp, 'w');
-    fs.writeFileSync(fd, write.data);
-    fs.fsyncSync(fd);
-    fs.closeSync(fd);
-    readJson(temp);
-    staged.push({ ...write, temp });
+  try {
+    for (const write of writes) {
+      fs.mkdirSync(path.dirname(write.file), { recursive: true });
+      const temp = `${write.file}.capcutctl-${transactionId}.tmp`;
+      const fd = fs.openSync(temp, 'wx');
+      staged.push({ ...write, temp });
+      try {
+        fs.writeFileSync(fd, write.data);
+        fs.fsyncSync(fd);
+      } finally { fs.closeSync(fd); }
+      readJson(temp);
+    }
+    return staged;
+  } catch (error) {
+    cleanStaged(staged);
+    throw error;
   }
-  return staged;
 }
 
 function commitStaged(staged) {
@@ -3344,7 +3421,7 @@ export function applySpec(projectDir, spec, options = {}) {
 }
 
 export function restoreProjectSnapshot(projectDir, snapshotNameOrPath, options = {}) {
-  assertCapcutClosed({ forceRunning: options.forceRunning });
+  assertCapcutClosed({ forceRunning: options.forceRunning || options.dryRun, probe: options.processProbe || capcutProcess });
   const history = path.resolve(projectDir, '.capcutctl', 'history');
   const snapshotDir = path.resolve(snapshotNameOrPath.includes(path.sep) ? snapshotNameOrPath : path.join(history, snapshotNameOrPath));
   const relative = path.relative(history, snapshotDir);
@@ -3352,6 +3429,18 @@ export function restoreProjectSnapshot(projectDir, snapshotNameOrPath, options =
     throw new CapcutError('Snapshot must be a named entry inside this project\'s .capcutctl/history directory.', { code: 'SNAPSHOT_SCOPE', exitCode: 2 });
   }
   const manifestFile = path.join(snapshotDir, 'manifest.json');
+  if (options.dryRun) {
+    managedFile(projectDir, path.relative(projectDir, manifestFile));
+    const prepared = snapshotRestoreFiles(snapshotDir, projectDir);
+    const sidecar = prepared.files.find(item => item.destination === path.resolve(projectDir, SIDECAR_RELATIVE));
+    const parked = pendingSidecarRange(sidecar ? { data: sidecar.data } : null, projectDir);
+    const validation = prepared.files.filter(item => path.basename(item.destination) === 'draft_info.json')
+      .flatMap(item => validateDocument(JSON.parse(item.data), { file: item.destination, checkFiles: false, projectDir, parked }));
+    const errors = validation.filter(item => item.level === 'error');
+    if (errors.length) throw new CapcutError(`Snapshot failed validation with ${errors.length} error(s).`, { code: 'RESTORE_VALIDATION', details: errors });
+    return { dryRun: true, restored: false, snapshot: snapshotDir,
+      files: prepared.files.map(item => item.destination), absent: prepared.absent, validation };
+  }
   const lock = acquireLock(projectDir);
   let rescue = null;
   let journal = null;
@@ -3362,17 +3451,18 @@ export function restoreProjectSnapshot(projectDir, snapshotNameOrPath, options =
     if (!fs.existsSync(manifestFile)) {
       throw new CapcutError(`Snapshot not found: ${snapshotNameOrPath}`, { code: 'SNAPSHOT_NOT_FOUND', exitCode: 2 });
     }
-    const manifest = readJson(manifestFile);
+    managedFile(projectDir, path.relative(projectDir, manifestFile));
+    const prepared = snapshotRestoreFiles(snapshotDir, projectDir);
     journal = captureRollbackJournal([
-      ...(manifest.files || []).map(item => path.join(projectDir, item.relative)),
-      ...(manifest.absent || []).map(item => path.join(projectDir, item)),
+      ...prepared.files.map(item => item.destination),
+      ...prepared.absent,
     ]);
     if (options.backup !== false) rescue = createSnapshot(projectDir, options.label || 'before-restore');
     // Restore into THIS projectDir, not the absolute path baked into the manifest.
     // CapCut (and `mv`) rename draft folders; the snapshot already lives inside
     // `.capcutctl/history`, so pinning to the original path made every snapshot
     // unrestorable after a rename.
-    restoreSnapshot(snapshotDir, projectDir);
+    restoreSnapshot(snapshotDir, projectDir, prepared);
     const post = doctor(projectDir, { checkFiles: true });
     if (post.errors) throw new CapcutError(`Restored snapshot has ${post.errors} validation error(s).`, { code: 'RESTORE_VALIDATION', details: post.issues });
     return { restored: snapshotDir, rescue, postDoctor: post };

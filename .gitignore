@@ -1,4 +1,6 @@
 node_modules/
+.venv/
+*.egg-info/
 *.log
 .DS_Store
 __pycache__/

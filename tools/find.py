@@ -395,8 +395,9 @@ def main():
     ap = argparse.ArgumentParser(prog="capcutctl find")
     ap.add_argument("query", help="text to look for (case-insensitive, all words must appear)")
     ap.add_argument("--media", required=True)
-    ap.add_argument("--shows", action="store_true", help="search the OCR index (screen recording)")
-    ap.add_argument("--says", action="store_true", help="search the transcript (talking head)")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--shows", action="store_true", help="search the OCR index (screen recording)")
+    mode.add_argument("--says", action="store_true", help="search the transcript (talking head)")
     ap.add_argument("--refresh", action="store_true",
                     help="build or replace a verified OCR index before a --shows search")
     ap.add_argument("--settle", type=float, default=2.0,
@@ -411,6 +412,10 @@ def main():
     if a.refresh and a.says:
         raise SystemExit("--refresh only applies to --shows; run `capcutctl cut` to refresh a transcript")
     terms = [w for w in a.query.lower().split() if w]
+    if not terms:
+        ap.error("query must contain at least one word")
+    if not math.isfinite(a.settle) or a.settle < 0:
+        ap.error("--settle must be finite and nonnegative")
 
     if a.says:
         tr = load_transcript(a.media)
@@ -442,7 +447,7 @@ def main():
     for lo, hi in runs[:25]:
         stable = next((t for t in range(lo, hi + 1)
                        if all(all(x in idx.get(t + k, "") for x in terms)
-                              for k in range(int(a.settle)))), None)
+                              for k in range(math.ceil(a.settle)))), None)
         if stable is None:
             continue
         held = hi - lo + 1

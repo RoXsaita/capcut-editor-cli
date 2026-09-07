@@ -88,6 +88,16 @@ test('`capcutctl contract` emits the same document', async () => {
   assert.deepEqual(JSON.parse(stdout), JSON.parse(read(CONTRACT_FILE)));
 });
 
+test('misspelled or misplaced options fail before a project can be edited', async () => {
+  for (const args of [
+    ['remove', '--project', 'missing', '--dryrun', 'true'],
+    ['trim', '--project', 'missing', '--plan'],
+    ['cut', 'missing.mp4', '--into', 'missing', '--kep', '1,2'],
+  ]) {
+    await assert.rejects(main(args), error => error.code === 'UNKNOWN_OPTION');
+  }
+});
+
 test('the dry-run guarantee names every transactional command and no others', () => {
   // The claim in capcut-cli/SKILL.md used to be "Everything that writes takes --dry-run",
   // which was false: snapshot, init-spec --output, harvest --out and review all write and

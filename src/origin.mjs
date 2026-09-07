@@ -111,6 +111,10 @@ export function assertOrigin({
   if (projectDir && isEphemeralPath(projectDir)) allowEphemeral = true;
   const found = classifyOrigin({ file, width, height, canvas });
   const name = file ? path.basename(file) : '<media>';
+  if (derivedOffset != null && (!Number.isFinite(Number(derivedOffset)) || Number(derivedOffset) < 0 || !derivedFrom)) {
+    throw new CapcutError(`${label}: --derived-offset must be finite, nonnegative, and paired with --derived-from.`,
+      { code: 'BAD_DERIVED_OFFSET', exitCode: 2 });
+  }
 
   let original = null;
   if (derivedFrom) {
@@ -163,6 +167,7 @@ export function assertOrigin({
 /** Stamp the contract's verdict where both a project copy and media-map.json can read it. */
 export function stampOrigin(material, note) {
   if (!material || !note) return material;
+  for (const key of ['derived_from_path', 'derived_from_offset', 'capcutctl_preframed']) delete material[key];
   material.capcutctl_origin = note.kind;
   if (note.derivedFrom) material.derived_from_path = note.derivedFrom;
   if (note.derivedOffset != null) material.derived_from_offset = note.derivedOffset;

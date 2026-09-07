@@ -41,7 +41,7 @@ def rasterize(svg, out, size=1024, threshold=246):
     bbox = im.getbbox()
     if bbox:
         im = im.crop(bbox)
-    os.makedirs(os.path.dirname(out), exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     im.save(out)
     pct = 100.0 * kept / (w * h)
     print(f"{out}\n  {im.size[0]}x{im.size[1]}  {pct:.1f}% of the source frame is ink")
