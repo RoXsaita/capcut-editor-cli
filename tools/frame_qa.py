@@ -731,6 +731,13 @@ def place(canvas, im, clip, W, H, blur=False, mask=None):
         elif kind == "line":
             rot = float(cfg.get("rotation", 0)) % 360
             d.rectangle([0, mcy, w, h] if abs(rot - 180) < 1 else [0, 0, w, mcy], fill=255)
+        elif kind == "rectangle":
+            # Exact sharp, axis-aligned masks; other native treatments need CapCut review.
+            if any(float(cfg.get(k, 0)) for k in ("rotation", "feather", "expansion", "roundCorner")) or cfg.get("invert"):
+                raise ValueError("Rectangle mask treatment requires native CapCut review")
+            rx = float(cfg.get("width", 1)) * w / 2
+            ry = float(cfg.get("height", 1)) * h / 2
+            d.rectangle([mcx - rx, mcy - ry, mcx + rx, mcy + ry], fill=255)
         else:
             a = Image.new("L", (w, h), 255)
         im.putalpha(Image.fromarray(np.minimum(np.array(im.getchannel("A")), np.array(a))))

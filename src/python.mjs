@@ -44,6 +44,7 @@ export const TOOL_IMPORTS = Object.freeze({
   'find.py': Object.freeze([]),
   'frame_qa.py': Object.freeze(['numpy', 'PIL']),
   'rasterize.py': Object.freeze(['PIL']),
+  'export_grid.py': Object.freeze(['numpy', 'PIL']),
 });
 
 /**

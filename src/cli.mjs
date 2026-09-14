@@ -42,8 +42,13 @@ Usage:
                       — targeted native-resolution pixel QA; --at-cuts samples both
                         sides of each cut. --preview is a separate streamed proxy job
                         and cannot be combined with selectors, --times, --sheet, or --expect.
-  capcutctl find "agent running" --media FILE [--shows|--says] [--context] [--refresh]
-                      — when is it on screen / when was it said.
+  capcutctl find ["agent running"] --media FILE [--shows|--says|--moments] [--focus APP]
+                 [--context] [--refresh] [--min-score N]
+                      — when is it on screen / when was it said / when did anything happen.
+                        --moments reads an rl2 take's change sidecar instead of a blind 1 fps
+                        grid: with no query it lists every moment the screen changed, with one
+                        it OCRs only those frames. --focus narrows to one app on a
+                        multi-window take.
 
   capcutctl preflight [--root PATH] [--json]   — will this work on this machine? deps, assets, tools, disk
   capcutctl projects [--root PATH] [--json]
@@ -51,6 +56,10 @@ Usage:
   capcutctl close [--timeout MS] [--json]      — quit CapCut and wait for it to exit
   capcutctl status [--json] [--wait-for-close [--timeout MS]]
                                 report CapCut state; optionally request quit and return a branchable close result
+  capcutctl export --project NAME --out FILE.mp4 [--overwrite] [--grid FILE.png] [--times 3,9,15]
+                      — explicitly requested native macOS export, verified before replacing output.
+  capcutctl export-grid --media FILE --out GRID.png [--times 3,9,15]
+                      — fast labelled grid from an existing exported video; no CapCut UI.
   capcutctl review --project NAME [--out DIR] [--id NAME] [--fps 6] [--width 240]
                       — write outputs/<id>/proxy.mp4, edl.json, and contact-sheet.png (never CapCut export)
   capcutctl new --project NAME [--media FILE] [--scenes 0:6,6:12,12:18]
@@ -199,7 +208,7 @@ export function parseArgs(argv) {
          'noLocalize', 'motivated', 'regen', 'music', 'noMusic', 'polish', 'noInteractions',
          'waitForClose', 'force', 'reindex', 'noRepair', 'inPlace',
          'generated', 'allowEphemeral', 'measure', 'apply', 'native', 'noCache', 'noGrade',
-         'glow', 'plain', 'clear', 'reset'].includes(key)) result[key] = true;
+         'glow', 'plain', 'clear', 'reset', 'overwrite'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
       const value = argv[++i];
@@ -718,6 +727,16 @@ export async function main(argv, dependencies = {}) {
       payload.ok = true;
     }
     return args.json || args.waitForClose ? print(payload, true) : print(statusText(payload));
+  }
+  if (command === 'export-grid') {
+    if (!args.media || !args.out) throw new CapcutError('export-grid requires --media FILE --out GRID.png', { exitCode: 2 });
+    const { exportGrid } = await import('./export.mjs');
+    return print(exportGrid(args.media, args.out, args.times), true);
+  }
+  if (command === 'export') {
+    if (!args.project) throw new CapcutError('export requires --project NAME', { exitCode: 2 });
+    const { exportProject } = await import('./export.mjs');
+    return print(await exportProject(resolveProject(args.project, root), args), true);
   }
   if (command === 'review') {
     if (!args.project) throw new CapcutError('review requires --project NAME.', { exitCode: 2 });

@@ -132,6 +132,24 @@
       ],
       "transactional": true
     },
+    "export": {
+      "options": [
+        "--grid",
+        "--out",
+        "--overwrite",
+        "--project",
+        "--times"
+      ],
+      "transactional": false
+    },
+    "export-grid": {
+      "options": [
+        "--media",
+        "--out",
+        "--times"
+      ],
+      "transactional": false
+    },
     "fade": {
       "options": [
         "--at",
@@ -148,7 +166,10 @@
     "find": {
       "options": [
         "--context",
+        "--focus",
         "--media",
+        "--min-score",
+        "--moments",
         "--refresh",
         "--says",
         "--settle",

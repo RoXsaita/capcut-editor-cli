@@ -36,6 +36,14 @@ def segment(segment_id, start, duration, material="VIDEO", desc=""):
 
 
 class FrameAccuracyTests(unittest.TestCase):
+    def test_rectangle_mask_hides_surrounding_content(self):
+        canvas = Image.new("RGBA", (100, 100), "black")
+        frame_qa.place(canvas, Image.new("RGBA", (100, 100), "white"), {}, 100, 100,
+                       mask=("rectangle", {"width": .4, "height": .2, "centerX": .2, "centerY": .4}))
+        self.assertEqual(canvas.getpixel((60, 30)), (255, 255, 255, 255))
+        for point in [(39, 30), (81, 30), (60, 19), (60, 41)]:
+            self.assertEqual(canvas.getpixel(point), (0, 0, 0, 255))
+
     def setUp(self):
         frame_qa._cache_reset()
 

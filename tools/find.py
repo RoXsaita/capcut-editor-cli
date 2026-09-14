@@ -2,9 +2,15 @@
 """
 capcutctl find — where does this phrase happen?
 
-Two haystacks, one answer shape:
-  --says   the Whisper transcript of a talking-head recording  (what was SAID, and when)
-  --shows  the OCR index of a screen recording                 (what was ON SCREEN, and when)
+Three haystacks, one answer shape:
+  --says     the Whisper transcript of a talking-head recording  (what was SAID, and when)
+  --shows    the OCR index of a screen recording                 (what was ON SCREEN, and when)
+  --moments  the rl2 change signal                               (when did anything HAPPEN)
+
+`--moments` is the cheap one and it reads a take's own sidecars, so it costs no OCR at all
+to list what happened, and one frame per moment to search it. See change_index.py. It also
+sharpens `--shows`: the 1 fps grid can only report the whole second it sampled, but the
+change signal knows which frame inside that second the text actually arrived on.
 
 This exists because doing it by hand got a shot wrong. A coarse OCR search reported
 "reading files 168-318"; source 168 is actually the sidebar drawer, and the file list
@@ -26,13 +32,18 @@ from itertools import pairwise
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from audio_index import _write_json_atomic, source_token
+import change_index  # noqa: E402
+from audio_index import _write_json_atomic, source_token  # noqa: E402
 
 CACHE = os.path.expanduser("~/Downloads/.video-index")
 OCR_BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vision", "ocr")
 OCR_INDEX_VERSION = 2
-# ponytail: 1 fps misses sub-second UI changes; event-level indexing is outside this bounded repair.
+# 1 fps misses sub-second UI changes. That is still true of this grid and always will be —
+# what changed is that an rl2 take no longer has to rely on it: `--moments` indexes the
+# frames the recorder already flagged as different, and `--shows` uses the same signal to
+# name the frame inside a sampled second where the text actually appeared.
 OCR_SAMPLE_INTERVAL = 1.0
+MOMENT_INDEX_VERSION = 1
 
 
 def canonical_media(media):
@@ -342,6 +353,132 @@ def load_ocr(media, refresh=False, cache_dir=None):
     return load_ocr_record(media, refresh=refresh, cache_dir=cache_dir)[0]
 
 
+def moments_cache_path(media, token=None, cache_dir=None):
+    media = canonical_media(media)
+    token = token or source_token(media)
+    return Path(_cache_dir(cache_dir)) / (
+        f"{Path(media).stem}.moments-{_source_cache_key(media, token)}.json")
+
+
+def _moment_times(index):
+    return [round(moment.start, 3) for moment in index.moments]
+
+
+def _extract_frame_at(media, when, destination):
+    """One frame at a source time, scaled the same way the 1 fps grid is.
+
+    Input seeking, so a 40-minute source does not get decoded from the top once per moment.
+    ffmpeg still decodes forward from the preceding keyframe, so the frame is the one at the
+    requested time and not the keyframe itself.
+    """
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-v", "error", "-ss", f"{when:.3f}", "-i", media,
+             "-frames:v", "1", "-vf", "scale=810:-2", "-q:v", "3", "-y", destination],
+            capture_output=True, text=True,
+        )
+    except OSError as error:
+        raise SystemExit(f"could not run ffmpeg for the moment index: {error}") from None
+    if result.returncode != 0 or not os.path.isfile(destination):
+        detail = (result.stderr or "").strip() or "ffmpeg returned an error"
+        raise SystemExit(f"could not extract the frame at {when:.3f}s: {detail}")
+
+
+def build_moment_index(media, index, cache_dir=None):
+    """OCR exactly one frame at the head of every change moment.
+
+    This is the whole point of the prefilter: a 22-minute take is 1327 samples on the 1 fps
+    grid and 86 here, and each of these lands on the frame the change happened rather than
+    on whichever whole second the grid happened to tick.
+    """
+    media = canonical_media(media)
+    token = source_token(media)
+    if not os.path.isfile(OCR_BIN) or not os.access(OCR_BIN, os.X_OK):
+        raise SystemExit(
+            "the OCR helper is not built. Run:\n"
+            "  swiftc -O -o tools/vision/ocr tools/vision/ocr.swift")
+
+    samples = {}
+    with tempfile.TemporaryDirectory(prefix="capcutctl-moments-") as tmp:
+        for position, moment in enumerate(index.moments):
+            frame = os.path.join(tmp, f"m{position:05d}.jpg")
+            _extract_frame_at(media, moment.start, frame)
+            samples[f"{moment.start:.3f}"] = _ocr_frame(frame)
+
+    if source_token(media) != token:
+        raise SystemExit("media changed while its moment index was being built; rerun --refresh")
+    record = {
+        "version": MOMENT_INDEX_VERSION,
+        "media": media,
+        "source_token": token,
+        "source_duration": round(index.duration, 3),
+        "min_score": index.min_score,
+        "merge_gap": index.merge_gap,
+        "moments": _moment_times(index),
+        "samples": samples,
+    }
+    destination = moments_cache_path(media, token, cache_dir)
+    os.makedirs(destination.parent, exist_ok=True)
+    _write_json_atomic(str(destination), record)
+    print(f"  moment index: wrote {destination} ({len(samples)} samples)", file=sys.stderr)
+    return record
+
+
+def _validate_moment_record(data, media, token, index):
+    """Same contract as the OCR index: bound to one source, and complete for it.
+
+    The moment list is part of the fingerprint. Change --min-score and the cached samples
+    describe a different set of moments, so they are refused rather than partially reused.
+    """
+    if not isinstance(data, dict) or data.get("version") != MOMENT_INDEX_VERSION:
+        return None, "untrusted legacy moment index"
+    if _ocr_source_path(data) != media:
+        return None, "moment index source path does not match the requested media"
+    if _ocr_source_token(data) != token:
+        return None, "stale moment index: source fingerprint does not match the media"
+    try:
+        if abs(float(data.get("min_score")) - index.min_score) > 1e-9:
+            return None, "moment index was built at a different --min-score; refresh it"
+        if abs(float(data.get("merge_gap")) - index.merge_gap) > 1e-9:
+            return None, "moment index was built at a different merge gap; refresh it"
+    except (TypeError, ValueError):
+        return None, "incomplete moment index: threshold metadata is missing"
+    if data.get("moments") != _moment_times(index):
+        return None, "stale moment index: the sidecar now describes different moments"
+    samples = data.get("samples")
+    if not isinstance(samples, dict):
+        return None, "incomplete moment index: samples are missing"
+    parsed = {}
+    for moment in index.moments:
+        key = f"{moment.start:.3f}"
+        text = samples.get(key)
+        if not isinstance(text, str):
+            return None, f"incomplete moment index: no sample for {key}s"
+        parsed[moment.start] = _normalise_text(text)
+    return parsed, None
+
+
+def load_moment_record(media, index, refresh=False, cache_dir=None):
+    media = canonical_media(media)
+    token = source_token(media)
+    if not refresh:
+        path = moments_cache_path(media, token, cache_dir)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            data = None
+        if data is not None:
+            samples, reason = _validate_moment_record(data, media, token, index)
+            if samples is not None:
+                return samples
+            print(f"  moment index: rebuilding — {reason}", file=sys.stderr)
+    record = build_moment_index(media, index, cache_dir)
+    samples, reason = _validate_moment_record(record, media, token, index)
+    if reason:
+        raise SystemExit(f"new moment index failed validation: {reason}")
+    return samples
+
+
 def load_transcript(media):
     media = canonical_media(media)
     token = source_token(media)
@@ -381,6 +518,67 @@ def load_transcript(media):
     )
 
 
+def optional_change_index(media, min_score):
+    """(index, reason) for a take that may not be an rl2 take at all.
+
+    Looks for the sidecar directory before probing, so a plain recording — which is most of
+    them — costs an `is_file` and not an ffprobe on every `--shows` search.
+    """
+    if change_index.sidecar_dir(media) is None:
+        return None, "no rl2 sidecar next to this media"
+    return change_index.load(media, _probe_duration(media), min_score=min_score)
+
+
+def require_change_index(media, min_score):
+    """The take's change index, or a SystemExit naming why there isn't one."""
+    index, reason = optional_change_index(media, min_score)
+    if index is None:
+        raise SystemExit(
+            f"no change index for {os.path.basename(media)}: {reason}. "
+            "--moments reads an rl2 take's own sidecars; search a plain recording with --shows."
+        )
+    if not index.moments:
+        raise SystemExit(
+            f"{os.path.basename(media)} has no moment above --min-score {min_score:g}; "
+            "nothing on screen changed that much."
+        )
+    return index
+
+
+def _in_focus(index, when, app):
+    """Was `app` frontmost at this source time? True for everything when no app is asked for."""
+    if not app:
+        return True
+    front = index.app_at(when)
+    return bool(front) and app.lower() in front.lower()
+
+
+def _contact_sheet(options, picks):
+    """Grab a frame per reported hit and tile them, because OCR matches text it cannot see."""
+    if not options.strip or not picks:
+        return
+    from frame_qa import contact_sheet, extract_frame
+    out = os.path.abspath(options.strip)
+    # Keep every extraction's intermediate images in a private per-invocation directory.
+    # The old shared /tmp/capcutctl-find/f{second}.png let concurrent searches overwrite
+    # one another and gave a local symlink a predictable write target.
+    with tempfile.TemporaryDirectory(prefix="capcutctl-find-") as tmp:
+        tiles = []
+        for position, (at, label) in enumerate(picks[:12]):
+            frame = os.path.join(tmp, f"f{position:03d}.png")
+            sample = extract_frame(options.media, at)
+            sample.image.convert("RGB").save(frame)
+            retry = "  re-extracted accurately" if sample.reextracted else ""
+            print(
+                f"  frame {at:g}s requested PTS {sample.requested_pts:.6f}s "
+                f"delivered PTS {sample.delivered_pts:.6f}s "
+                f"drift {sample.drift:.6f}s ({sample.method}){retry}"
+            )
+            tiles.append((frame, label))
+        print(f"\n  -> {contact_sheet(tiles, out)}")
+    print("     OCR sees text it cannot see is occluded. Check the frames before you cut.")
+
+
 def collapse(hits, gap=3):
     runs = []
     for t in sorted(hits):
@@ -393,11 +591,22 @@ def collapse(hits, gap=3):
 
 def main():
     ap = argparse.ArgumentParser(prog="capcutctl find")
-    ap.add_argument("query", help="text to look for (case-insensitive, all words must appear)")
+    ap.add_argument("query", nargs="?",
+                    help="text to look for (case-insensitive, all words must appear); "
+                         "optional with --moments, which lists them all when it is omitted")
     ap.add_argument("--media", required=True)
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--shows", action="store_true", help="search the OCR index (screen recording)")
     mode.add_argument("--says", action="store_true", help="search the transcript (talking head)")
+    mode.add_argument("--moments", action="store_true",
+                      help="use the rl2 change signal: list what happened, or OCR one frame "
+                           "per moment to search only those")
+    ap.add_argument("--focus", metavar="APP",
+                    help="only report while APP was frontmost (multi-window takes; "
+                         "needs the rl2 trace sidecar)")
+    ap.add_argument("--min-score", type=float, default=change_index.MIN_SCORE,
+                    help="mean absolute luma delta a frame must reach to be a moment "
+                         f"(default {change_index.MIN_SCORE})")
     ap.add_argument("--refresh", action="store_true",
                     help="build or replace a verified OCR index before a --shows search")
     ap.add_argument("--settle", type=float, default=2.0,
@@ -407,15 +616,19 @@ def main():
                     help="grab a frame at each run and write a contact sheet — OCR matches text "
                          "that can be occluded or scrolled off, so LOOK before you cut")
     a = ap.parse_args()
-    if not (a.shows or a.says):
+    if not (a.shows or a.says or a.moments):
         a.shows = True
     if a.refresh and a.says:
         raise SystemExit("--refresh only applies to --shows; run `capcutctl cut` to refresh a transcript")
-    terms = [w for w in a.query.lower().split() if w]
-    if not terms:
+    if a.focus and a.says:
+        raise SystemExit("--focus reads the rl2 window trace, which a transcript search has no use for")
+    terms = [w for w in (a.query or "").lower().split() if w]
+    if not terms and not a.moments:
         ap.error("query must contain at least one word")
     if not math.isfinite(a.settle) or a.settle < 0:
         ap.error("--settle must be finite and nonnegative")
+    if not math.isfinite(a.min_score) or a.min_score < 0:
+        ap.error("--min-score must be finite and nonnegative")
 
     if a.says:
         tr = load_transcript(a.media)
@@ -438,7 +651,44 @@ def main():
             print(f"  {t:8.2f}s  {word}" + (f"   — {line[:70]}" if a.context else ""))
         return
 
+    if a.moments:
+        index = require_change_index(a.media, a.min_score)
+        chosen = [m for m in index.moments if _in_focus(index, m.start, a.focus)]
+        where = f" while {a.focus} was frontmost" if a.focus else ""
+        picks = []
+        if terms:
+            samples = load_moment_record(a.media, index, refresh=a.refresh)
+            chosen = [m for m in chosen if all(x in samples.get(m.start, "") for x in terms)]
+            print(f"{len(chosen)} moment(s) showing it in {os.path.basename(a.media)}{where}")
+        else:
+            covered = sum(m.end - m.start for m in chosen)
+            print(f"{len(chosen)} moment(s) in {os.path.basename(a.media)}{where}  "
+                  f"({covered:.0f}s of {index.duration:.0f}s, "
+                  f"{index.frames} frames indexed)")
+        if not chosen and a.focus:
+            # The app name has to match what the trace recorded, which is the process name
+            # and not always what the Dock calls it. Say what is actually in there.
+            known = ", ".join(index.apps()) or "nothing — this take has no window trace"
+            print(f"  frontmost in this take: {known}")
+        for moment in chosen[:40]:
+            app = index.app_at(moment.start)
+            held = moment.end - moment.start
+            tail = f"  [{app}]" if app and not a.focus else ""
+            print(f"  {moment.start:8.2f}s -> {moment.end:8.2f}s   held {held:5.2f}s  "
+                  f"peak {moment.peak:6.1f}  blocks {moment.blocks:2d}{tail}")
+            if a.context and terms:
+                line = re.sub(r"\s+", " ", samples.get(moment.start, ""))
+                print(f"           {line[:100]}")
+            picks.append((moment.start, f"{moment.start:.2f}s"))
+        if len(chosen) > 40:
+            print(f"  ... {len(chosen) - 40} more")
+        _contact_sheet(a, picks)
+        return
+
     idx, _record = load_ocr_record(a.media, refresh=a.refresh)
+    index, reason = optional_change_index(a.media, a.min_score)
+    if a.focus and index is None:
+        raise SystemExit(f"--focus needs the rl2 trace for {os.path.basename(a.media)}: {reason}")
     hits = [t for t in idx if all(x in idx[t] for x in terms)]
     runs = collapse(hits)
     picks = []
@@ -450,36 +700,23 @@ def main():
                               for k in range(math.ceil(a.settle)))), None)
         if stable is None:
             continue
+        if index is not None and not _in_focus(index, stable, a.focus):
+            continue
         held = hi - lo + 1
         mark = "" if stable == lo else f"  (flickers from {lo}s)"
+        # The grid can only ever name the second it sampled. When the sidecar has a moment
+        # inside that second, that frame is when the text actually arrived, and cutting to
+        # the rounded second lands early on a screen that has not painted yet.
+        edge = index.snap(stable) if index is not None else None
+        at = edge.start if edge is not None else float(stable)
+        mark += f"  (changed at {edge.start:.2f}s)" if edge is not None else ""
         print(f"  {stable:6d}s -> {hi:6d}s   held {held:4d}s{mark}")
         if a.context:
             line = re.sub(r"\s+", " ", idx.get(stable, ""))
             print(f"           {line[:100]}")
-        picks.append((stable, f"{stable}s ({held}s)"))
+        picks.append((at, f"{stable}s ({held}s)"))
 
-    if a.strip and picks:
-        from frame_qa import contact_sheet, extract_frame
-        out = os.path.abspath(a.strip)
-        # Keep every extraction's intermediate images in a private per-invocation directory.
-        # The old shared /tmp/capcutctl-find/f{second}.png let concurrent searches overwrite
-        # one another and gave a local symlink a predictable write target.
-        with tempfile.TemporaryDirectory(prefix="capcutctl-find-") as tmp:
-            tiles = []
-            for i, (t, label) in enumerate(picks[:12]):
-                f = os.path.join(tmp, f"f{i:03d}.png")
-                sample = extract_frame(a.media, t)
-                sample.image.convert("RGB").save(f)
-                retry = "  re-extracted accurately" if sample.reextracted else ""
-                print(
-                    f"  frame {t:g}s requested PTS {sample.requested_pts:.6f}s "
-                    f"delivered PTS {sample.delivered_pts:.6f}s "
-                    f"drift {sample.drift:.6f}s ({sample.method}){retry}"
-                )
-                tiles.append((f, label))
-            print(f"\n  -> {contact_sheet(tiles, out)}")
-        print("     OCR sees text it cannot see is occluded. Check the frames before you cut.")
-
+    _contact_sheet(a, picks)
 
 if __name__ == "__main__":
     main()

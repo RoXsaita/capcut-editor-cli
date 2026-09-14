@@ -23,6 +23,7 @@ tools/vision/ocr
 
 # Local compositor output, never fixtures
 qa/
+outputs/
 *.mp4
 .capcutctl/
 

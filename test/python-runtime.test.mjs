@@ -22,7 +22,8 @@ import {
   resolvePython,
 } from '../src/python.mjs';
 
-for (const script of ['find-index.py', 'find-accurate-frames.py', 'frame-qa-accuracy.py']) {
+for (const script of ['find-index.py', 'change-index.py', 'find-accurate-frames.py',
+  'frame-qa-accuracy.py']) {
   test(`${script} media regressions`, () => {
     const python = resolvePython().executable;
     execFileSync(python, [fileURLToPath(new URL(script, import.meta.url))], { stdio: 'pipe' });

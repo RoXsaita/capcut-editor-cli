@@ -116,6 +116,8 @@ the mirrors, and rolls back if the post-write doctor fails.
 | Apply a native layout | `capcutctl layout split-screen --project NAME --at 5 --track 2 --dry-run` |
 | Audit layout choices | `capcutctl layout audit --project NAME` |
 | Check exact frames | `capcutctl qa --project NAME --at-cuts --sheet --out qa/` |
+| Export through CapCut on macOS (explicit request) | `capcutctl export --project NAME --out final.mp4 --grid grid.png` |
+| Inspect an existing export without opening CapCut | `capcutctl export-grid --media final.mp4 --out grid.png --times 0,8,15` |
 | Render a lightweight proxy | `capcutctl preview --project NAME --out preview.mp4` |
 | Measure or apply colour matching | `capcutctl grade --project NAME --measure` |
 | View or restore snapshots | `capcutctl history --project NAME` |
@@ -265,3 +267,16 @@ MIT licensed. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 This project reads and writes local CapCut project files. CapCut, its effects, fonts,
 sounds, and project format belong to their respective owners. Use of this software with
 CapCut remains subject to CapCut's terms and to the laws that apply to you.
+
+### Native export bridge (macOS)
+
+`export` uses CapCut's real renderer through native accessibility controls and keyboard
+actions; it is not headless. CapCut must be open on Home with the project visible, or in
+the requested project. Swift, macOS Accessibility/Automation permission, and brief app
+focus are required. The command uses the current native export settings, verifies the
+project, stages a unique MP4 in CapCut's configured export folder, checks duration and
+decoding, then publishes the requested file. Existing output needs `--overwrite`.
+Unknown controls or lost focus stop with a named error; no blind click loop is attempted.
+`export-grid` uses ffmpeg and the declared Python runtime to create labelled frames from
+an existing video. Grids verify picture; review relevant normal-speed sections for sound
+and motion. A new export requires an explicit user request.
