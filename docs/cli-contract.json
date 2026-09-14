@@ -165,6 +165,7 @@
     },
     "find": {
       "options": [
+        "--boxes",
         "--context",
         "--focus",
         "--media",

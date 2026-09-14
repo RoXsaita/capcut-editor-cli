@@ -37,13 +37,16 @@ from audio_index import _write_json_atomic, source_token  # noqa: E402
 
 CACHE = os.path.expanduser("~/Downloads/.video-index")
 OCR_BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vision", "ocr")
-OCR_INDEX_VERSION = 2
+# v3 keeps per-word boxes + confidence beside the joined text. v2 stored only the string
+# and is refused so a --refresh rebuilds rather than searching a geometry-less index.
+OCR_INDEX_VERSION = 3
 # 1 fps misses sub-second UI changes. That is still true of this grid and always will be —
 # what changed is that an rl2 take no longer has to rely on it: `--moments` indexes the
 # frames the recorder already flagged as different, and `--shows` uses the same signal to
 # name the frame inside a sampled second where the text actually appeared.
 OCR_SAMPLE_INTERVAL = 1.0
-MOMENT_INDEX_VERSION = 1
+# v2 stores the same {text, boxes} shape as the OCR index; v1 was text-only.
+MOMENT_INDEX_VERSION = 2
 
 
 def canonical_media(media):
@@ -142,6 +145,78 @@ def ocr_cache_path(media, token=None, cache_dir=None):
     return Path(_cache_dir(cache_dir)) / f"{stem}.ocr-{_source_cache_key(media, token)}.json"
 
 
+def _ocr_observation(row):
+    """One Vision word/line: {text, conf, x, y, w, h}, or None if unusable.
+
+    Origin is top-left, coordinates normalised 0..1 — the same shape tools/vision/ocr.swift
+    prints (swift's `confidence` is stored as `conf`).
+    """
+    if not isinstance(row, dict):
+        return None
+    text = str(row.get("text") or "").strip()
+    if not text:
+        return None
+    conf_raw = row.get("conf", row.get("confidence"))
+    try:
+        conf = float(0 if conf_raw is None else conf_raw)
+        x = float(row["x"])
+        y = float(row["y"])
+        w = float(row["w"])
+        h = float(row["h"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not all(math.isfinite(v) for v in (conf, x, y, w, h)):
+        return None
+    return {"text": text, "conf": conf, "x": x, "y": y, "w": w, "h": h}
+
+
+def _parse_boxes(raw):
+    if not isinstance(raw, list):
+        return None
+    boxes = []
+    for row in raw:
+        obs = _ocr_observation(row)
+        if obs is None:
+            return None
+        boxes.append(obs)
+    return boxes
+
+
+def _frame_entry(value):
+    """Normalise a frame to {text, boxes} for the cache."""
+    if isinstance(value, str):
+        return {"text": _normalise_text(value), "boxes": []}
+    if not isinstance(value, dict):
+        return {"text": "", "boxes": []}
+    boxes = []
+    for row in value.get("boxes") or []:
+        obs = _ocr_observation(row)
+        if obs is not None:
+            boxes.append(obs)
+    text = value.get("text")
+    if not isinstance(text, str) or not text.strip():
+        text = " ".join(box["text"] for box in boxes)
+    return {"text": _normalise_text(text), "boxes": boxes}
+
+
+def _frame_text(entry):
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict):
+        return str(entry.get("text") or "")
+    return ""
+
+
+def _frame_boxes(entry):
+    if isinstance(entry, dict) and isinstance(entry.get("boxes"), list):
+        return entry["boxes"]
+    return []
+
+
+def _print_boxes(boxes, indent="           "):
+    print(f"{indent}boxes {json.dumps(boxes, ensure_ascii=False, separators=(',', ':'))}")
+
+
 def _ocr_frame(path):
     try:
         result = subprocess.run(
@@ -159,9 +234,12 @@ def _ocr_frame(path):
         raise SystemExit(f"OCR returned invalid JSON for {path}: {error}") from None
     if not isinstance(rows, list):
         raise SystemExit(f"OCR returned an unexpected result for {path}")
-    return _normalise_text(" ".join(
-        str(row.get("text", "")) for row in rows if isinstance(row, dict)
-    ))
+    boxes = []
+    for row in rows:
+        obs = _ocr_observation(row)
+        if obs is not None:
+            boxes.append(obs)
+    return {"text": _normalise_text(" ".join(box["text"] for box in boxes)), "boxes": boxes}
 
 
 def _ocr_record(media, token, duration, frames):
@@ -176,7 +254,7 @@ def _ocr_record(media, token, duration, frames):
         "coverage": {
             "start": times[0], "end": round(end, 3), "samples": len(times),
         },
-        "frames": {str(second): _normalise_text(text) for second, text in frames.items()},
+        "frames": {str(second): _frame_entry(value) for second, value in frames.items()},
     }
 
 
@@ -185,13 +263,18 @@ def _parse_ocr_frames(data):
     if not isinstance(frames, dict) or not frames:
         return None, "incomplete OCR index: frames are missing"
     parsed = {}
-    for raw_second, text in frames.items():
+    for raw_second, value in frames.items():
         if not isinstance(raw_second, str) or not re.fullmatch(r"\d+", raw_second):
             return None, "incomplete OCR index: frame times are not integer seconds"
         second = int(raw_second)
-        if not isinstance(text, str):
+        if isinstance(value, str):
             return None, "incomplete OCR index: frame text is malformed"
-        parsed[second] = _normalise_text(text)
+        if not isinstance(value, dict) or not isinstance(value.get("text"), str):
+            return None, "incomplete OCR index: frame text is malformed"
+        boxes = _parse_boxes(value.get("boxes"))
+        if boxes is None:
+            return None, "incomplete OCR index: frame boxes are malformed"
+        parsed[second] = {"text": _normalise_text(value["text"]), "boxes": boxes}
     if len(parsed) != len(frames):
         return None, "incomplete OCR index: frame times are duplicated"
     return parsed, None
@@ -350,7 +433,20 @@ def load_ocr_record(media, refresh=False, cache_dir=None):
 
 
 def load_ocr(media, refresh=False, cache_dir=None):
-    return load_ocr_record(media, refresh=refresh, cache_dir=cache_dir)[0]
+    frames, _record = load_ocr_record(media, refresh=refresh, cache_dir=cache_dir)
+    return {second: _frame_text(entry) for second, entry in frames.items()}
+
+
+def ocr_boxes(media, t, refresh=False, cache_dir=None):
+    """Per-word OCR boxes for the 1 fps sample covering source time *t*.
+
+    Origin is top-left, coordinates normalised 0..1, matching tools/vision/ocr.swift.
+    ``t=10.7`` looks up the sample at 10s. Returns [] when that second has no boxes.
+    """
+    if not isinstance(t, (int, float)) or not math.isfinite(t) or t < 0:
+        return []
+    frames, _record = load_ocr_record(media, refresh=refresh, cache_dir=cache_dir)
+    return list(_frame_boxes(frames.get(int(t))))
 
 
 def moments_cache_path(media, token=None, cache_dir=None):
@@ -403,7 +499,7 @@ def build_moment_index(media, index, cache_dir=None):
         for position, moment in enumerate(index.moments):
             frame = os.path.join(tmp, f"m{position:05d}.jpg")
             _extract_frame_at(media, moment.start, frame)
-            samples[f"{moment.start:.3f}"] = _ocr_frame(frame)
+            samples[f"{moment.start:.3f}"] = _frame_entry(_ocr_frame(frame))
 
     if source_token(media) != token:
         raise SystemExit("media changed while its moment index was being built; rerun --refresh")
@@ -451,10 +547,15 @@ def _validate_moment_record(data, media, token, index):
     parsed = {}
     for moment in index.moments:
         key = f"{moment.start:.3f}"
-        text = samples.get(key)
-        if not isinstance(text, str):
+        value = samples.get(key)
+        if isinstance(value, str):
             return None, f"incomplete moment index: no sample for {key}s"
-        parsed[moment.start] = _normalise_text(text)
+        if not isinstance(value, dict) or not isinstance(value.get("text"), str):
+            return None, f"incomplete moment index: no sample for {key}s"
+        boxes = _parse_boxes(value.get("boxes"))
+        if boxes is None:
+            return None, f"incomplete moment index: boxes for {key}s are malformed"
+        parsed[moment.start] = {"text": _normalise_text(value["text"]), "boxes": boxes}
     return parsed, None
 
 
@@ -609,6 +710,8 @@ def main():
                          f"(default {change_index.MIN_SCORE})")
     ap.add_argument("--refresh", action="store_true",
                     help="build or replace a verified OCR index before a --shows search")
+    ap.add_argument("--boxes", action="store_true",
+                    help="print per-word OCR geometry (top-left, normalised 0..1) for each hit")
     ap.add_argument("--settle", type=float, default=2.0,
                     help="seconds a run must persist before its start is reported as stable")
     ap.add_argument("--context", action="store_true", help="print the matching line(s)")
@@ -622,6 +725,8 @@ def main():
         raise SystemExit("--refresh only applies to --shows; run `capcutctl cut` to refresh a transcript")
     if a.focus and a.says:
         raise SystemExit("--focus reads the rl2 window trace, which a transcript search has no use for")
+    if a.boxes and a.says:
+        raise SystemExit("--boxes reads the OCR index; it does not apply to --says")
     terms = [w for w in (a.query or "").lower().split() if w]
     if not terms and not a.moments:
         ap.error("query must contain at least one word")
@@ -656,9 +761,12 @@ def main():
         chosen = [m for m in index.moments if _in_focus(index, m.start, a.focus)]
         where = f" while {a.focus} was frontmost" if a.focus else ""
         picks = []
-        if terms:
+        samples = None
+        if terms or a.boxes:
             samples = load_moment_record(a.media, index, refresh=a.refresh)
-            chosen = [m for m in chosen if all(x in samples.get(m.start, "") for x in terms)]
+        if terms:
+            chosen = [m for m in chosen
+                      if all(x in _frame_text(samples.get(m.start)) for x in terms)]
             print(f"{len(chosen)} moment(s) showing it in {os.path.basename(a.media)}{where}")
         else:
             covered = sum(m.end - m.start for m in chosen)
@@ -677,8 +785,10 @@ def main():
             print(f"  {moment.start:8.2f}s -> {moment.end:8.2f}s   held {held:5.2f}s  "
                   f"peak {moment.peak:6.1f}  blocks {moment.blocks:2d}{tail}")
             if a.context and terms:
-                line = re.sub(r"\s+", " ", samples.get(moment.start, ""))
+                line = re.sub(r"\s+", " ", _frame_text(samples.get(moment.start)))
                 print(f"           {line[:100]}")
+            if a.boxes:
+                _print_boxes(_frame_boxes(samples.get(moment.start) if samples else None))
             picks.append((moment.start, f"{moment.start:.2f}s"))
         if len(chosen) > 40:
             print(f"  ... {len(chosen) - 40} more")
@@ -689,14 +799,14 @@ def main():
     index, reason = optional_change_index(a.media, a.min_score)
     if a.focus and index is None:
         raise SystemExit(f"--focus needs the rl2 trace for {os.path.basename(a.media)}: {reason}")
-    hits = [t for t in idx if all(x in idx[t] for x in terms)]
+    hits = [t for t in idx if all(x in _frame_text(idx[t]) for x in terms)]
     runs = collapse(hits)
     picks = []
     print(f"{len(runs)} run(s) on screen in {os.path.basename(a.media)}  "
           f"(index {min(idx)}-{max(idx)}s)")
     for lo, hi in runs[:25]:
         stable = next((t for t in range(lo, hi + 1)
-                       if all(all(x in idx.get(t + k, "") for x in terms)
+                       if all(all(x in _frame_text(idx.get(t + k, "")) for x in terms)
                               for k in range(math.ceil(a.settle)))), None)
         if stable is None:
             continue
@@ -712,8 +822,10 @@ def main():
         mark += f"  (changed at {edge.start:.2f}s)" if edge is not None else ""
         print(f"  {stable:6d}s -> {hi:6d}s   held {held:4d}s{mark}")
         if a.context:
-            line = re.sub(r"\s+", " ", idx.get(stable, ""))
+            line = re.sub(r"\s+", " ", _frame_text(idx.get(stable, "")))
             print(f"           {line[:100]}")
+        if a.boxes:
+            _print_boxes(ocr_boxes(a.media, stable))
         picks.append((at, f"{stable}s ({held}s)"))
 
     _contact_sheet(a, picks)

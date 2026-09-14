@@ -263,12 +263,30 @@ class MomentCacheTests(unittest.TestCase):
                     patch.object(find, "OCR_BIN", sys.executable), \
                     contextlib.redirect_stderr(io.StringIO()):
                 first = find.load_moment_record(media, index, cache_dir=cache)
-            self.assertEqual(first, {5.0: "signal bay"})
+            self.assertEqual(first[5.0]["text"], "signal bay")
+            self.assertEqual(first[5.0]["boxes"], [])
 
             with patch.object(find, "_ocr_frame", side_effect=AssertionError("rebuilt")), \
                     contextlib.redirect_stderr(io.StringIO()):
                 again = find.load_moment_record(media, index, cache_dir=cache)
             self.assertEqual(again, first)
+
+    def test_moment_samples_keep_word_boxes(self):
+        box = {"text": "signal", "conf": 0.88, "x": 0.1, "y": 0.2, "w": 0.3, "h": 0.05}
+        with tempfile.TemporaryDirectory() as tmp:
+            media, index = self.take(tmp)
+            cache = str(Path(tmp) / "cache")
+            with patch.object(find, "_extract_frame_at"), \
+                    patch.object(find, "_ocr_frame",
+                                 return_value={"text": "signal bay", "boxes": [box]}), \
+                    patch.object(find, "OCR_BIN", sys.executable), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                samples = find.load_moment_record(media, index, cache_dir=cache)
+            self.assertEqual(samples[5.0]["text"], "signal bay")
+            self.assertEqual(samples[5.0]["boxes"], [box])
+            data = json.loads(find.moments_cache_path(media, cache_dir=cache).read_text())
+            self.assertEqual(data["version"], find.MOMENT_INDEX_VERSION)
+            self.assertEqual(data["samples"]["5.000"]["boxes"], [box])
 
     def test_a_different_threshold_describes_different_moments_and_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:

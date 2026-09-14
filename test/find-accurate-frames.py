@@ -23,8 +23,12 @@ class FindAccurateFramesTests(unittest.TestCase):
             cache.mkdir()
             media = Path(tmp) / "screen recording.mp4"
             media.write_bytes(b"fixture")
-            frames = {str(second): ("hello world" if second in (10, 11) else "")
-                      for second in range(12)}
+            frames = {str(second): {
+                "text": ("hello world" if second in (10, 11) else ""),
+                "boxes": ([{"text": "hello", "conf": 0.9, "x": 0.1, "y": 0.2, "w": 0.2, "h": 0.05},
+                           {"text": "world", "conf": 0.8, "x": 0.32, "y": 0.2, "w": 0.22, "h": 0.05}]
+                          if second in (10, 11) else []),
+            } for second in range(12)}
             (cache / "screen recording.ocr.json").write_text(json.dumps({
                 "version": find.OCR_INDEX_VERSION,
                 "media": find.canonical_media(media),

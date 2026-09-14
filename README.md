@@ -116,6 +116,7 @@ the mirrors, and rolls back if the post-write doctor fails.
 | Apply a native layout | `capcutctl layout split-screen --project NAME --at 5 --track 2 --dry-run` |
 | Audit layout choices | `capcutctl layout audit --project NAME` |
 | Check exact frames | `capcutctl qa --project NAME --at-cuts --sheet --out qa/` |
+| Find on-screen text | `capcutctl find "phrase" --media FILE --shows [--boxes]` |
 | Export through CapCut on macOS (explicit request) | `capcutctl export --project NAME --out final.mp4 --grid grid.png` |
 | Inspect an existing export without opening CapCut | `capcutctl export-grid --media final.mp4 --out grid.png --times 0,8,15` |
 | Render a lightweight proxy | `capcutctl preview --project NAME --out preview.mp4` |

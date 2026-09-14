@@ -149,7 +149,71 @@ class FindIndexTests(unittest.TestCase):
             self.assertEqual(record["coverage"]["samples"], len(loaded))
             self.assertEqual(len(loaded), 3, "the partial final second must be indexed")
             self.assertTrue(all(isinstance(text, str) for text in loaded.values()))
+            self.assertTrue(all(
+                isinstance(frame, dict) and isinstance(frame.get("boxes"), list)
+                for frame in record["frames"].values()),
+                "each sample must keep per-word boxes beside the joined text")
             self.assertIn("run(s) on screen", output.getvalue())
+            self.assertNotIn("boxes ", output.getvalue(),
+                             "default --shows output must not print box geometry")
+
+    def test_ocr_boxes_round_trip_and_legacy_string_indexes_are_refused(self):
+        box = {"text": "Publish", "conf": 0.91, "x": 0.2, "y": 0.41, "w": 0.18, "h": 0.04}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            media = root / "screen.mp4"
+            media.write_bytes(b"source")
+            cache = root / "cache"
+            write_ocr(cache, media, {
+                0: {"text": "hit Publish", "boxes": [box]},
+                1: {"text": "idle", "boxes": []},
+            }, 2.0)
+
+            with patch.object(find, "CACHE", str(cache)), \
+                    patch.object(find, "_probe_duration", return_value=2.0):
+                self.assertEqual(find.load_ocr(media), {0: "hit publish", 1: "idle"})
+                self.assertEqual(find.ocr_boxes(media, 0), [box])
+                self.assertEqual(find.ocr_boxes(media, 0.7), [box])
+                self.assertEqual(find.ocr_boxes(media, 1), [])
+
+            default = io.StringIO()
+            boxed = io.StringIO()
+            argv = ["find.py", "publish", "--media", str(media), "--shows", "--settle", "1"]
+            with patch.object(find, "CACHE", str(cache)), \
+                    patch.object(find, "_probe_duration", return_value=2.0):
+                with patch.object(sys, "argv", argv), contextlib.redirect_stdout(default):
+                    find.main()
+                with patch.object(sys, "argv", [*argv, "--boxes"]), \
+                        contextlib.redirect_stdout(boxed):
+                    find.main()
+
+            shown = default.getvalue()
+            geometry = boxed.getvalue()
+            self.assertIn("run(s) on screen", shown)
+            self.assertNotIn("boxes ", shown)
+            self.assertTrue(geometry.startswith(shown),
+                            "--boxes must add geometry under the same --shows lines")
+            self.assertIn("boxes ", geometry)
+            dumped = json.loads(geometry.split("boxes ", 1)[1].splitlines()[0])
+            self.assertEqual(dumped, [box])
+
+            legacy = root / "legacy.mp4"
+            legacy.write_bytes(b"legacy-v2")
+            token = find.source_token(legacy)
+            path = find.ocr_cache_path(legacy, token, cache)
+            path.write_text(json.dumps({
+                "version": 2,
+                "media": find.canonical_media(legacy),
+                "source_token": token,
+                "source_duration": 2.0,
+                "sample_interval": 1.0,
+                "coverage": {"start": 0, "end": 2, "samples": 2},
+                "frames": {"0": "old text", "1": "old text"},
+            }))
+            with patch.object(find, "CACHE", str(cache)), \
+                    patch.object(find, "_probe_duration", return_value=2.0), \
+                    self.assertRaisesRegex(SystemExit, "untrusted legacy.*--refresh"):
+                find.load_ocr(legacy)
 
 
 if __name__ == "__main__":

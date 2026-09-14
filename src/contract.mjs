@@ -69,7 +69,7 @@ export const TOOL_OPTIONS = Object.freeze({
     '--ocr', '--out', '--preview', '--project', '--rects-only', '--resolution', '--selftest',
     '--sheet', '--times', '--to', '--width', '--z',
   ]),
-  find: Object.freeze(['--context', '--focus', '--media', '--min-score', '--moments',
+  find: Object.freeze(['--boxes', '--context', '--focus', '--media', '--min-score', '--moments',
     '--refresh', '--says', '--settle', '--shows', '--strip']),
 });
 

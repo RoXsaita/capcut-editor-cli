@@ -43,12 +43,13 @@ Usage:
                         sides of each cut. --preview is a separate streamed proxy job
                         and cannot be combined with selectors, --times, --sheet, or --expect.
   capcutctl find ["agent running"] --media FILE [--shows|--says|--moments] [--focus APP]
-                 [--context] [--refresh] [--min-score N]
+                 [--context] [--refresh] [--min-score N] [--boxes]
                       — when is it on screen / when was it said / when did anything happen.
                         --moments reads an rl2 take's change sidecar instead of a blind 1 fps
                         grid: with no query it lists every moment the screen changed, with one
                         it OCRs only those frames. --focus narrows to one app on a
-                        multi-window take.
+                        multi-window take. --boxes prints per-word OCR geometry kept in the
+                        index (default --shows output is unchanged).
 
   capcutctl preflight [--root PATH] [--json]   — will this work on this machine? deps, assets, tools, disk
   capcutctl projects [--root PATH] [--json]
