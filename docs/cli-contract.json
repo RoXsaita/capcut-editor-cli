@@ -18,6 +18,7 @@
       "new",
       "pace",
       "polish",
+      "punch",
       "ramp",
       "remove",
       "replace-media",
@@ -415,6 +416,23 @@
         "--root"
       ],
       "transactional": false
+    },
+    "punch": {
+      "options": [
+        "--at",
+        "--dry-run",
+        "--hold",
+        "--kind",
+        "--on",
+        "--plan",
+        "--project",
+        "--ramp",
+        "--segment",
+        "--track",
+        "--word",
+        "--zoom"
+      ],
+      "transactional": true
     },
     "qa": {
       "options": [

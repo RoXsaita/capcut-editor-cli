@@ -93,6 +93,13 @@ Usage:
                     [--from SCALE] [--to SCALE] [--hold 1.6] [--ramp 0.2] [--clear] [--plan]
                     [--focus X,Y,W,H] [--viewport X,Y,W,H]
                     focus uses source pixels; viewport uses canvas pixels. Default: current scale ×1.15.
+  capcutctl punch   --project NAME --on TEXT --segment ID|--at T [--word TEXT] [--track NAME|N]
+                    [--kind click|result] [--zoom 1.6] [--hold auto|S] [--ramp 0.2] [--plan] [--dry-run]
+                    — name an on-screen element; the CLI locates it via OCR boxes and writes
+                      a native camera move through the existing focus-rectangle path. The
+                      model never outputs a coordinate. Click arrives 250 ms early and holds
+                      through the reaction; a result settles first. Refuses a zoom above 2.0×
+                      and a second punch-in before a return to wide.
   capcutctl preview --project NAME --out preview.mp4 [--fps 6] [--from S] [--to S]
                     [--resolution 360x640|--native] [--no-cache] [--no-grade]
                       — lightweight streamed proxy; defaults to 360x640 and never writes
@@ -805,7 +812,7 @@ export async function main(argv, dependencies = {}) {
 
   const NEEDS_PROJECT = new Set([
     'inspect', 'doctor', 'snapshot', 'history', 'restore', 'sync', 'scenes',
-    'pace', 'ramp', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
+    'pace', 'ramp', 'punch', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
     'replace-media', 'localize', 'trim', 'shift', 'remove', 'volume', 'fade', 'keyframe',
     'preview', 'diff', 'apply', 'timeline', 'finish', 'music', 'grade'
   ]);
@@ -945,6 +952,27 @@ export async function main(argv, dependencies = {}) {
       ...(rampTrack != null ? { track: rampTrack } : {}),
     }] };
     return print(applySpec(projectDir, spec, options), true);
+  }
+  if (command === 'punch') {
+    if (!args.on) throw new CapcutError('punch requires --on TEXT naming the on-screen element.', { exitCode: 2 });
+    if (args.segment == null && args.segments == null && args.at == null) {
+      throw new CapcutError('punch requires --segment ID or --at T.', { exitCode: 2 });
+    }
+    const punchTrack = await trackIndex(projectDir, args.track);
+    const spec = { version: 1, name: 'punch', operations: [{
+      op: 'punch',
+      on: String(args.on),
+      kind: args.kind || 'click',
+      zoom: args.zoom != null ? Number(args.zoom) : 1.6,
+      ramp: args.ramp != null ? Number(args.ramp) : 0.2,
+      hold: args.hold == null ? 'auto' : args.hold,
+      ...(args.segment != null ? { segment: String(args.segment) } : {}),
+      ...(args.segments != null ? { segment: String(args.segments).split(',')[0].trim() } : {}),
+      ...(args.at != null ? { at: Number(args.at) } : {}),
+      ...(args.word != null ? { word: String(args.word) } : {}),
+      ...(punchTrack != null ? { track: punchTrack } : {}),
+    }] };
+    return print(applySpec(projectDir, spec, { ...options, dryRun: Boolean(args.plan || args.dryRun) }), true);
   }
   if (command === 'logo' || command === 'endcard' || command === 'zoom' || command === 'wrap') {
     const sig = await import('./signature.mjs');
