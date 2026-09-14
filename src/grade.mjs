@@ -41,6 +41,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { CapcutError, clone, seededId, allSegments, loadPreset, resolveMediaPath } from './core.mjs';
 import { principalTrack } from './polish.mjs';
+import { isBrollSegment } from './broll-lint.mjs';
 
 export { resolveMediaPath };
 
@@ -676,6 +677,55 @@ const ADJUST_TYPES = new Set(['brightness', 'contrast', 'saturation', 'highlight
   'white', 'black', 'temperature', 'tone', 'sharpen', 'clear', 'fade', 'light_sensation',
   'vignetting', 'particle']);
 
+/** Sharpen / clarity / vignette: record shape harvested at 0.0; non-zero is UNVERIFIED. */
+export const FACE_DETAIL_TYPES = Object.freeze(['sharpen', 'clear', 'vignetting']);
+export const FACE_DETAIL_DEFAULTS = Object.freeze({
+  sharpen: 0.6,
+  clear: 0.6,
+  vignetting: 0.6,
+});
+export const FACE_DETAIL_WARNING = 'UNVERIFIED: non-zero sharpen / clear / vignetting have never been seen rendered. First pass is a calibration, like grade 0.6. Apply on a disposable copy, open in CapCut, save, then capcutctl diff.';
+
+export function faceDetailSliders({
+  sharpen = FACE_DETAIL_DEFAULTS.sharpen,
+  clarity = FACE_DETAIL_DEFAULTS.clear,
+  vignette = FACE_DETAIL_DEFAULTS.vignetting,
+  strength = 1,
+} = {}) {
+  const scale = Number(strength);
+  if (!Number.isFinite(scale)) {
+    throw new CapcutError('grade strength must be finite.', { code: 'BAD_GRADE_STRENGTH', exitCode: 2 });
+  }
+  const clamp = (name, raw) => {
+    const value = Number(raw) * scale;
+    if (!Number.isFinite(value) || value < -1 || value > 1) {
+      throw new CapcutError(`Adjust slider "${name}" must be finite and between -1 and 1.`, {
+        code: 'BAD_SLIDER_VALUE', exitCode: 2,
+      });
+    }
+    return +value.toFixed(3);
+  };
+  return {
+    sharpen: clamp('sharpen', sharpen),
+    clear: clamp('clear', clarity),
+    vignetting: clamp('vignetting', vignette),
+  };
+}
+
+function hasFaceDetail(sliders) {
+  return FACE_DETAIL_TYPES.some(type => sliders && Math.abs(Number(sliders[type]) || 0) >= 1e-4);
+}
+
+function isFaceSegment(doc, segment, material) {
+  if (isBrollSegment(segment, material)) return false;
+  try {
+    const { track } = principalTrack(doc);
+    return (track.segments || []).includes(segment);
+  } catch {
+    return false;
+  }
+}
+
 /** CapCut's own effect cache moved between machines; rebuild the path from the local one. */
 function localEffectPath(fallback) {
   const home = process.env.HOME || '';
@@ -802,6 +852,18 @@ export function opGradeApply(doc, op, context = {}) {
       { code: 'MISSING_PRESET' });
   }
   const { selected, targets } = gradeTargets(doc, op || {}, context);
+  const videos = new Map((doc.materials?.videos || []).map(item => [item.id, item]));
+  for (const { segment, entry } of targets) {
+    const sliders = selected.find(item => item.entry.identity === entry.identity)?.sliders || {};
+    if (!hasFaceDetail(sliders)) continue;
+    const material = videos.get(segment.material_id);
+    if (!isFaceSegment(doc, segment, material)) {
+      throw new CapcutError(
+        'face-detail (sharpen / clarity / vignette) is face-only; screen recordings are refused because sharpening haloes UI text.',
+        { code: 'SCREEN_FACE_DETAIL', exitCode: 2, details: { source: entry.source, id: segment.id } },
+      );
+    }
+  }
   // Clear what this pass owns on the segments it is about to write.
   const cleared = clearOwnedEffects(doc, targets);
   const pending = [];
@@ -843,11 +905,13 @@ export function opGradeApply(doc, op, context = {}) {
     }
   }
 
+  const usedDetail = selected.some(item => hasFaceDetail(item.sliders));
   return {
     changed: targets.length,
     materials: written,
     replaced: cleared.removedRefs,
     sources: Object.fromEntries(selected.map(({ entry, sliders }) => [entry.source, sliders])),
+    ...(usedDetail ? { unverified: true, warning: FACE_DETAIL_WARNING } : {}),
   };
 }
 

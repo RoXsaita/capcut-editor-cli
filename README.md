@@ -126,6 +126,7 @@ the mirrors, and rolls back if the post-write doctor fails.
 | Inspect an existing export without opening CapCut | `capcutctl export-grid --media final.mp4 --out grid.png --times 0,8,15` |
 | Render a lightweight proxy | `capcutctl preview --project NAME --out preview.mp4` |
 | Measure or apply colour matching | `capcutctl grade --project NAME --measure` |
+| Sharpen + clarity + light vignette on the face (UNVERIFIED) | `capcutctl grade --project NAME --face-detail --apply --dry-run` |
 | View or restore snapshots | `capcutctl history --project NAME` |
 | Show the full command surface | `capcutctl help` |
 

@@ -168,8 +168,10 @@ Usage:
   capcutctl grade               --project NAME [--measure] [--plan] [--strength 1] [--samples 3]
                                 [--apply] [--dry-run] [--target JSON] [--reference FILE] [--reference-at S]
                                 [--set 'FILE:brightness=0.05,white=0.2'] [--reset [--source FILE]]
+                                [--face-detail] [--sharpen 0.6] [--clarity 0.6] [--vignette 0.6]
                                 preserve colour by default; an explicit target/reference enables the approximate solver.
                                 --reset removes CLI-owned grades (all sources unless --source is supplied).
+                                --face-detail writes UNVERIFIED sharpen/clarity/vignette on FACE clips only.
   capcutctl timeline            --project NAME [--width 64] [--json]   — ASCII dump of the stacked timeline
   capcutctl finish              --project NAME [--plan] [--music] [--polish] [--regen]
                                 [--volume 0.08] [--prompt TEXT] [--file FILE] [--track N] [--width 64] [--json]
@@ -239,7 +241,8 @@ export function parseArgs(argv) {
          'noLocalize', 'motivated', 'regen', 'music', 'noMusic', 'polish', 'noInteractions',
          'waitForClose', 'force', 'reindex', 'noRepair', 'inPlace',
          'generated', 'allowEphemeral', 'measure', 'apply', 'native', 'noCache', 'noGrade',
-         'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'easePosition', 'stress', 'allowBoost'].includes(key)) result[key] = true;
+         'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'easePosition', 'stress', 'allowBoost',
+         'faceDetail'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
       const value = argv[++i];
@@ -894,7 +897,7 @@ export async function main(argv, dependencies = {}) {
     const g = await import('./grade.mjs');
     const doc = await loadWorking(projectDir);
     if (args.reset) {
-      if (args.set || args.target || args.reference || args.measure) throw new CapcutError('--reset cannot be combined with correction or measurement flags.', { exitCode: 2 });
+      if (args.set || args.target || args.reference || args.measure || args.faceDetail) throw new CapcutError('--reset cannot be combined with correction or measurement flags.', { exitCode: 2 });
       const op = { op: 'grade.reset', ...(args.source ? { sources: [args.source] } : { all: true }) };
       return print(applySpec(projectDir, { version: 1, name: 'grade-reset', operations: [op] },
         { ...options, dryRun: Boolean(args.plan || args.dryRun) }), true);
@@ -924,6 +927,28 @@ export async function main(argv, dependencies = {}) {
         const [k, v] = pair.split('=');
         row.sliders[k.trim()] = Number(v);
       }
+    }
+    const wantDetail = Boolean(args.faceDetail || args.sharpen != null || args.clarity != null || args.vignette != null);
+    if (wantDetail) {
+      const detail = g.faceDetailSliders({
+        ...(args.sharpen != null ? { sharpen: Number(args.sharpen) } : {}),
+        ...(args.clarity != null ? { clarity: Number(args.clarity) } : {}),
+        ...(args.vignette != null ? { vignette: Number(args.vignette) } : {}),
+        strength: args.strength != null ? Number(args.strength) : 1,
+      });
+      const faces = plan.sources.filter(row => row.role === 'face');
+      if (!faces.length) {
+        throw new CapcutError(
+          'face-detail needs a talking-head (principal) source; screen recordings are refused because sharpening haloes UI text.',
+          { code: 'SCREEN_FACE_DETAIL', exitCode: 2 },
+        );
+      }
+      for (const row of faces) {
+        Object.assign(row.sliders, detail);
+        row.faceDetail = detail;
+      }
+      plan.unverified = true;
+      plan.warning = g.FACE_DETAIL_WARNING;
     }
     if (!args.apply) return print(plan, true);
     const sources = Object.fromEntries(plan.sources

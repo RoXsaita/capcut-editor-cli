@@ -531,12 +531,19 @@ def grab(path, t, return_info=False, fps=None, size=None):
 # AmazingFeature_adjustColor/xshader/colorAdjust.frag), in the shader's own order. It is the
 # same model as src/grade.mjs; keep the two in step. Preview only — nothing here is ever
 # written back into the project's media.
+#
+# sharpen / clear / vignetting appear in harvested Adjust records only at 0.0. Non-zero
+# values are UNVERIFIED; apply_face_detail() is a documented approximation for qa numbers.
 ADJUST_TYPES = ("brightness", "contrast", "saturation", "highlight", "shadow",
-                "white", "black", "temperature", "tone")
+                "white", "black", "temperature", "tone", "sharpen", "clear", "vignetting")
+FACE_DETAIL_TYPES = ("sharpen", "clear", "vignetting")
 _SAT_LUMA = np.array([0.208540, 0.702086, 0.089374], dtype=np.float32)
 _REC709 = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
 _CONTRAST_GAIN, _BLACK_REACH, _WHITE_REACH = 2.0, 0.20, 0.30
 _TEMP_REACH, _TINT_REACH = 0.22, 0.18
+# vignetting=0.6 → corners ~10% darker in this approximation (never seen rendered).
+_VIGNETTE_CORNER_AT_DEFAULT = 0.10
+_FACE_DETAIL_DEFAULT = 0.6
 
 
 def apply_adjust(rgb, g):
@@ -601,6 +608,78 @@ def apply_adjust(rgb, g):
     return c
 
 
+def apply_face_detail(rgb, g):
+    """Spatial approximations of sharpen / clear / vignetting for qa numbers.
+
+    CapCut's Adjust records list these types, but every harvested value is 0.0.
+    Non-zero strength has never been seen rendered. This is a preview stand-in:
+    a radial luma falloff (vignetting=0.6 → corners ~10% darker) plus unsharp
+    masks for sharpen (small radius) and clear/clarity (wider local contrast).
+    """
+    c = np.clip(rgb.astype(np.float32), 0.0, 1.0)
+    v = float(g.get("vignetting", 0.0) or 0.0)
+    if v:
+        h, w = c.shape[:2]
+        yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+        cy = (h - 1) / 2.0 if h > 1 else 0.0
+        cx = (w - 1) / 2.0 if w > 1 else 0.0
+        dy = 1.0 if cy == 0 else (yy - cy) / cy
+        dx = 1.0 if cx == 0 else (xx - cx) / cx
+        r2 = np.clip((dx * dx + dy * dy) / 2.0, 0.0, 1.0)
+        strength = (_VIGNETTE_CORNER_AT_DEFAULT / _FACE_DETAIL_DEFAULT) * v
+        c = np.clip(c * (1.0 - strength * r2)[..., None], 0.0, 1.0)
+
+    def unsharp(amount, radius):
+        src = Image.fromarray(np.round(c * 255.0).astype(np.uint8), "RGB")
+        blur = np.asarray(src.filter(ImageFilter.GaussianBlur(radius=radius)),
+                          dtype=np.float32) / 255.0
+        return np.clip(c + amount * (c - blur), 0.0, 1.0)
+
+    s = float(g.get("sharpen", 0.0) or 0.0)
+    if s:
+        c = unsharp(s, 0.8)
+    cl = float(g.get("clear", 0.0) or 0.0)
+    if cl:
+        c = unsharp(cl * 0.6, 2.0)
+    return c
+
+
+def luma01(rgb):
+    return np.clip(rgb.astype(np.float32), 0.0, 1.0) @ _REC709
+
+
+def face_detail_metrics(im):
+    """corner-vs-centre luma ratio and a simple edge-contrast number.
+
+    Centre is the middle 20% box; corners are four 15% boxes. Edge contrast is
+    the mean absolute difference from a 3px Gaussian blur. Preview approximation.
+    """
+    rgb = np.asarray(im.convert("RGB"), dtype=np.float32) / 255.0
+    y = luma01(rgb)
+    h, w = y.shape
+    ch0, ch1 = int(h * 0.4), max(int(h * 0.4) + 1, int(h * 0.6))
+    cw0, cw1 = int(w * 0.4), max(int(w * 0.4) + 1, int(w * 0.6))
+    centre = float(np.mean(y[ch0:ch1, cw0:cw1])) if centre_ok(h, w, ch0, ch1, cw0, cw1) else float(np.mean(y))
+    box = max(1, int(min(h, w) * 0.15))
+    corners = [
+        y[:box, :box], y[:box, w - box:], y[h - box:, :box], y[h - box:, w - box:],
+    ]
+    corner = float(np.mean([np.mean(part) for part in corners]))
+    ratio = corner / centre if centre > 1e-6 else 0.0
+    blur = np.asarray(im.convert("RGB").filter(ImageFilter.GaussianBlur(radius=1.2)),
+                      dtype=np.float32) / 255.0
+    edge = float(np.mean(np.abs(luma01(rgb) - luma01(blur))))
+    return {
+        "corner_centre_luma": round(ratio, 4),
+        "edge_contrast": round(edge, 5),
+        "approx": True,
+    }
+
+
+def centre_ok(h, w, ch0, ch1, cw0, cw1):
+    return h > 4 and w > 4 and ch1 > ch0 and cw1 > cw0
+
+
 def segment_grade(segment, idx):
     """The Adjust sliders CapCut would apply to this segment, or {} if it carries none."""
     if segment.get("enable_adjust") is False:
@@ -619,8 +698,14 @@ def grade_image(im, g):
     """Apply `g` to an RGBA PIL image, leaving alpha untouched."""
     if not g:
         return im
+    colour = {k: v for k, v in g.items() if k not in FACE_DETAIL_TYPES}
+    detail = {k: v for k, v in g.items() if k in FACE_DETAIL_TYPES}
     a = np.asarray(im.convert("RGBA"), dtype=np.uint8)
-    rgb = apply_adjust(a[..., :3].astype(np.float32) / 255.0, g)
+    rgb = a[..., :3].astype(np.float32) / 255.0
+    if colour:
+        rgb = apply_adjust(rgb, colour)
+    if any(abs(float(detail.get(k, 0) or 0)) > 1e-4 for k in FACE_DETAIL_TYPES):
+        rgb = apply_face_detail(rgb, detail)
     a = np.dstack([np.round(rgb * 255.0).astype(np.uint8), a[..., 3:4]])
     return Image.fromarray(a, "RGBA")
 
@@ -1250,6 +1335,10 @@ def main():
                 else:
                     x, y, w, h = rc
                     print(f"  trk{ti:<2} {sid} {nm:<34} x{x}..{x+w} y{y}..{y+h}  {w}x{h}")
+            if any(any(token in nm for token in FACE_DETAIL_TYPES) for _ti, _sid, nm, _rc in rows):
+                metrics = face_detail_metrics(img)
+                print(f"  face-detail  corner/centre {metrics['corner_centre_luma']:.3f}"
+                      f"  edge {metrics['edge_contrast']:.4f}  (vignette/sharpen approx)")
             wanted = [p for et, phrases in expectations.items() if times_close(et, t) for p in phrases]
             if a.rects_only:
                 # --rects-only skips the PNGs, never the assertions: this mode used to exit 0
@@ -2485,6 +2574,20 @@ def _selftest():
     check("1x atempo is a no-op", atempo_chain(1.0) is None)
     check("slow atempo chains below 0.5", atempo_chain(0.44) == "atempo=0.5,atempo=0.880000")
     check("very fast atempo chains", atempo_chain(250).startswith("atempo=100"))
+
+    gray = Image.new("RGB", (64, 64), (160, 160, 160))
+    vig = grade_image(gray.convert("RGBA"), {"vignetting": 0.6})
+    vm = face_detail_metrics(vig)
+    check("vignette 0.6 darkens corners ~10% (approx)", 0.86 <= vm["corner_centre_luma"] <= 0.94)
+    check("flat gray has near-zero edge contrast",
+          face_detail_metrics(gray)["edge_contrast"] < 0.01)
+    soft = Image.new("RGB", (64, 64), (80, 80, 80))
+    ImageDraw.Draw(soft).ellipse([12, 12, 52, 52], fill=(200, 200, 200))
+    soft = soft.filter(ImageFilter.GaussianBlur(radius=2.5))
+    before_edge = face_detail_metrics(soft)["edge_contrast"]
+    sharp = grade_image(soft.convert("RGBA"), {"sharpen": 0.6})
+    check("sharpen raises edge contrast on a soft edge (approx)",
+          face_detail_metrics(sharp)["edge_contrast"] > before_edge)
 
     print("selftest:", "all passed" if all(ok) else "FAILURES")
     return 0 if all(ok) else 1
