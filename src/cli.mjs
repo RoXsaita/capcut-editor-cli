@@ -94,10 +94,14 @@ Usage:
   capcutctl fade --project NAME --at S --track NAME|N | --segments ID  [--in 0.08] [--out 0.12] [--plan]
   capcutctl keyframe --project NAME --at S --track NAME|N | --segments ID
                     [--from SCALE] [--to SCALE] [--hold 1.6] [--ramp 0.2] [--clear] [--plan]
-                    [--focus X,Y,W,H] [--viewport X,Y,W,H]
+                    [--focus X,Y,W,H] [--viewport X,Y,W,H] [--ease] [--ease-position]
                     focus uses source pixels; viewport uses canvas pixels. Default: current scale ×1.15.
+                    --ease writes FreeCurveInOut on ScaleX/ScaleY (handles match logo pops).
+                    Position stays Line unless --ease-position (UNVERIFIED — apply on a
+                    disposable copy, open in CapCut, save, capcutctl diff; test curveType).
   capcutctl punch   --project NAME --on TEXT --segment ID|--at T [--word TEXT] [--track NAME|N]
-                    [--kind click|result] [--zoom 1.6] [--hold auto|S] [--ramp 0.2] [--plan] [--dry-run]
+                    [--kind click|result] [--zoom 1.6] [--hold auto|S] [--ramp 0.2]
+                    [--ease] [--ease-position] [--plan] [--dry-run]
                     — name an on-screen element; the CLI locates it via OCR boxes and writes
                       a native camera move through the existing focus-rectangle path. The
                       model never outputs a coordinate. Click arrives 250 ms early and holds
@@ -225,7 +229,7 @@ export function parseArgs(argv) {
          'noLocalize', 'motivated', 'regen', 'music', 'noMusic', 'polish', 'noInteractions',
          'waitForClose', 'force', 'reindex', 'noRepair', 'inPlace',
          'generated', 'allowEphemeral', 'measure', 'apply', 'native', 'noCache', 'noGrade',
-         'glow', 'plain', 'clear', 'reset', 'overwrite'].includes(key)) result[key] = true;
+         'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'easePosition'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
       const value = argv[++i];
@@ -974,6 +978,8 @@ export async function main(argv, dependencies = {}) {
       ...(args.at != null ? { at: Number(args.at) } : {}),
       ...(args.word != null ? { word: String(args.word) } : {}),
       ...(punchTrack != null ? { track: punchTrack } : {}),
+      ...(args.ease ? { ease: true } : {}),
+      ...(args.easePosition ? { easePosition: true } : {}),
     }] };
     return print(applySpec(projectDir, spec, { ...options, dryRun: Boolean(args.plan || args.dryRun) }), true);
   }
@@ -1447,7 +1453,8 @@ export async function main(argv, dependencies = {}) {
         from: args.from != null ? Number(args.from) : undefined,
         to: args.to != null ? Number(args.to) : undefined, hold: args.hold != null ? Number(args.hold) : undefined,
         ramp: args.ramp != null ? Number(args.ramp) : undefined, track: args.track,
-        focus: args.focus, viewport: args.viewport, clear: Boolean(args.clear) };
+        focus: args.focus, viewport: args.viewport, clear: Boolean(args.clear),
+        ease: Boolean(args.ease), easePosition: Boolean(args.easePosition) };
       return print(applySpec(projectDir, { version: 1, name: 'keyframe', operations: [op] },
         { ...options, dryRun: Boolean(args.plan || args.dryRun) }), true);
     }

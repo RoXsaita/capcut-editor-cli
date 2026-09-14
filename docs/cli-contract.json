@@ -252,6 +252,8 @@
         "--at",
         "--clear",
         "--dry-run",
+        "--ease",
+        "--ease-position",
         "--focus",
         "--from",
         "--hold",
@@ -423,6 +425,8 @@
       "options": [
         "--at",
         "--dry-run",
+        "--ease",
+        "--ease-position",
         "--hold",
         "--kind",
         "--on",

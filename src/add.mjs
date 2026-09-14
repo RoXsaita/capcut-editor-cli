@@ -10,6 +10,7 @@ import { insertOverlayTrack, renumberTracks, recordMediaProvenance, sourceTakeId
 import { assertOrigin, stampOrigin } from './origin.mjs';
 import { rescaleKeyframes } from './pace.mjs';
 import { principalTrack } from './polish.mjs';
+import { applyFreeCurve } from './easing.mjs';
 
 const US = s => {
   const value = Math.round(s * 1e6);
@@ -784,9 +785,14 @@ export function opScaleKeyframe(doc, op) {
       const list = offsets.map((time, i) => ({ id: mint(`${s.id}:${property}:${time}`), curveType: 'Line',
         time_offset: sourceTime(time), left_control: { x: 0, y: 0 }, right_control: { x: 0, y: 0 },
         values: [values[i]], string_value: '', graphID: '' }));
+      const isPosition = property === 'KFTypePositionX' || property === 'KFTypePositionY';
+      const eased = isPosition ? Boolean(op.easePosition) : Boolean(op.ease);
+      const written = eased ? applyFreeCurve(list).map((point, i) => (
+        i === 0 ? point : { ...point, graphID: point.graphID || mint(`graph:${s.id}:${property}:${point.time_offset}`) }
+      )) : list;
       const previous = (s.common_keyframes || []).find(k => k.property_type === property);
-      const outside = (previous?.keyframe_list || []).filter(k => k.time_offset < list[0].time_offset || k.time_offset > list.at(-1).time_offset);
-      const merged = [...outside, ...list].sort((a, b) => a.time_offset - b.time_offset)
+      const outside = (previous?.keyframe_list || []).filter(k => k.time_offset < written[0].time_offset || k.time_offset > written.at(-1).time_offset);
+      const merged = [...outside, ...written].sort((a, b) => a.time_offset - b.time_offset)
         .filter((p, i, all) => i === all.length - 1 || p.time_offset !== all[i + 1].time_offset);
       s.common_keyframes = [...(s.common_keyframes || []).filter(k => k.property_type !== property),
         { id: previous?.id || mint(`${s.id}:${property}`), material_id: '', property_type: property, keyframe_list: merged }];
@@ -794,7 +800,14 @@ export function opScaleKeyframe(doc, op) {
   }
   return { changed: plans.length, id: segment.id, offsets: offsets.map(k => r3(S(k))), from, to,
     shape: release ? 'push-hold-release' : 'push', hold, shortenedHold: op.hold == null && hold < 1.6,
-    focus: op.focus || null, transform: { x: tx, y: ty }, frameIds: frames.map(s => s.id) };
+    focus: op.focus || null, transform: { x: tx, y: ty }, frameIds: frames.map(s => s.id),
+    ease: Boolean(op.ease),
+    easePosition: Boolean(op.easePosition),
+    ...(op.easePosition ? {
+      unverified: ['KFTypePositionX', 'KFTypePositionY'],
+      warning: 'UNVERIFIED: eased PositionX/Y has never been written by this CLI. Apply on a disposable copy, open in CapCut, save, then capcutctl diff. Test curveType, not the presence of control objects.',
+    } : {}),
+  };
 }
 
 function resolveOpClip(doc, op) {

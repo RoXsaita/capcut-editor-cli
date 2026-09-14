@@ -4,6 +4,7 @@ import path from 'node:path';
 import { CapcutError, clone, seededId, loadPreset, localizeMedia, resolveMediaPath, contentEndUs } from './core.mjs';
 import { principalTrack, sfxPresets } from './polish.mjs';
 import { parkPresetLeftover, opScaleKeyframe } from './add.mjs';
+import { freeCurveControls } from './easing.mjs';
 
 const US = s => Math.round(s * 1e6);
 const S = us => us / 1e6;
@@ -280,12 +281,13 @@ function easedBlock(property, points, key, holdSeconds, h) {
     const inSpan = prev ? US(t - prev[0]) : 0;
     const outDv = next ? next[1] - v : 0;
     const inDv = prev ? v - prev[1] : 0;
+    const controls = freeCurveControls({ inSpan, outSpan, inDv, outDv, handles: h });
     return {
       id: mint(`kf:${key}:${property}:${i}`),
       curveType: 'FreeCurveInOut',
       time_offset: Math.round(US(t)),
-      left_control: { x: Math.round(h.inX * inSpan), y: h.inY * inDv },
-      right_control: { x: Math.round(h.outX * outSpan), y: h.outY * outDv },
+      left_control: controls.left_control,
+      right_control: controls.right_control,
       values: [v],
       string_value: '',
       graphID: i === 0 ? '' : mint(`graph:${key}:${property}:${i}`),
