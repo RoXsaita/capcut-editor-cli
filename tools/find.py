@@ -37,16 +37,26 @@ from audio_index import _write_json_atomic, source_token  # noqa: E402
 
 CACHE = os.path.expanduser("~/Downloads/.video-index")
 OCR_BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vision", "ocr")
-# v3 keeps per-word boxes + confidence beside the joined text. v2 stored only the string
-# and is refused so a --refresh rebuilds rather than searching a geometry-less index.
-OCR_INDEX_VERSION = 3
+# v4 tags each box with region chat|canvas|toolbar. v3 kept geometry but no region and
+# is refused so a --refresh rebuilds rather than searching an untagged index.
+OCR_INDEX_VERSION = 4
 # 1 fps misses sub-second UI changes. That is still true of this grid and always will be —
 # what changed is that an rl2 take no longer has to rely on it: `--moments` indexes the
 # frames the recorder already flagged as different, and `--shows` uses the same signal to
 # name the frame inside a sampled second where the text actually appeared.
 OCR_SAMPLE_INTERVAL = 1.0
-# v2 stores the same {text, boxes} shape as the OCR index; v1 was text-only.
-MOMENT_INDEX_VERSION = 2
+# v3 stores {text, boxes} with per-box region; v2 was geometry without region.
+MOMENT_INDEX_VERSION = 3
+# Verbs that mean "show the thing, not a chat log describing it".
+ACTION_VERBS = frozenset({
+    "click", "tap", "hit", "press", "open", "run", "type", "select", "submit",
+    "drag", "scroll", "hover", "focus",
+})
+CHAT_APP = re.compile(r"chat|slack|discord|messages|whatsapp|telegram|imessage", re.I)
+TOOLBAR_BAND = 0.12
+CHAT_X = 0.28
+SHORT_H = 0.08
+MIN_CHAT_STACK = 3
 
 
 def canonical_media(media):
@@ -167,7 +177,11 @@ def _ocr_observation(row):
         return None
     if not all(math.isfinite(v) for v in (conf, x, y, w, h)):
         return None
-    return {"text": text, "conf": conf, "x": x, "y": y, "w": w, "h": h}
+    obs = {"text": text, "conf": conf, "x": x, "y": y, "w": w, "h": h}
+    region = row.get("region")
+    if region in ("chat", "canvas", "toolbar"):
+        obs["region"] = region
+    return obs
 
 
 def _parse_boxes(raw):
@@ -215,6 +229,110 @@ def _frame_boxes(entry):
 
 def _print_boxes(boxes, indent="           "):
     print(f"{indent}boxes {json.dumps(boxes, ensure_ascii=False, separators=(',', ':'))}")
+
+
+def _bit(row, col):
+    return row * 8 + col
+
+
+def _box_blocks(box):
+    """8×8 cells overlapping a normalised box. Row 0 is the top, matching OCR origin."""
+    x0 = min(7, max(0, int(box["x"] * 8)))
+    x1 = min(7, max(0, int((box["x"] + box["w"]) * 8 - 1e-9)))
+    y0 = min(7, max(0, int(box["y"] * 8)))
+    y1 = min(7, max(0, int((box["y"] + box["h"]) * 8 - 1e-9)))
+    if x1 < x0:
+        x1 = x0
+    if y1 < y0:
+        y1 = y0
+    return [(row, col) for row in range(y0, y1 + 1) for col in range(x0, x1 + 1)]
+
+
+def _columnar_change(mask, col_lo, col_hi):
+    """Chat panels scroll as a column: many rows, few columns of the 8×8 mask."""
+    rows, cols = set(), set()
+    for index in range(64):
+        if not (mask & (1 << index)):
+            continue
+        row, col = divmod(index, 8)
+        if col_lo <= col <= col_hi:
+            rows.add(row)
+            cols.add(col)
+    return bool(cols) and len(cols) <= 3 and len(rows) >= 4
+
+
+def _blob_change(mask, blocks):
+    """Canvas regions change in two dimensions: multiple rows and columns."""
+    lit_rows = {row for row, col in blocks if mask & (1 << _bit(row, col))}
+    lit_cols = {col for row, col in blocks if mask & (1 << _bit(row, col))}
+    return len(lit_rows) >= 2 and len(lit_cols) >= 2
+
+
+def _uniform_heights(heights):
+    if not heights:
+        return False
+    mean = sum(heights) / len(heights)
+    if mean <= 0:
+        return False
+    var = sum((height - mean) ** 2 for height in heights) / len(heights)
+    return math.sqrt(var) / mean <= 0.35
+
+
+def tag_regions(boxes, mask=0, focus_app=None):
+    """Tag each OCR box as chat, canvas, or toolbar.
+
+    Heuristics, in priority order:
+      toolbar — short boxes in the top/bottom 12% (static strips; mask usually dark there)
+      chat    — a side column of uniform line-height, often a scrolling mask column,
+                stronger when the frontmost app looks like a messenger
+      canvas  — the rest, especially boxes sitting on a 2D change blob
+    """
+    tagged = [dict(box) for box in boxes or []]
+    if not tagged:
+        return tagged
+    try:
+        mask = int(mask or 0)
+    except (TypeError, ValueError):
+        mask = 0
+    chatty = bool(focus_app and CHAT_APP.search(str(focus_app)))
+    chat_ids = set()
+    for _side, inside, col_lo, col_hi in (
+        ("left", lambda cx: cx < CHAT_X, 0, 2),
+        ("right", lambda cx: cx > 1 - CHAT_X, 5, 7),
+    ):
+        group = [i for i, box in enumerate(tagged) if inside(box["x"] + box["w"] / 2)]
+        columnar = _columnar_change(mask, col_lo, col_hi) if mask else False
+        heights = [tagged[i]["h"] for i in group]
+        stacked = len(group) >= MIN_CHAT_STACK and _uniform_heights(heights)
+        hinted = (chatty or columnar) and len(group) >= 2 and _uniform_heights(heights)
+        if stacked or hinted or (columnar and chatty and group):
+            chat_ids.update(group)
+
+    for index, box in enumerate(tagged):
+        y0, height = box["y"], box["h"]
+        y1 = y0 + height
+        if height <= SHORT_H and (y0 <= TOOLBAR_BAND or y1 >= 1 - TOOLBAR_BAND):
+            box["region"] = "toolbar"
+        elif index in chat_ids:
+            box["region"] = "chat"
+        else:
+            box["region"] = "canvas"
+            if mask and _blob_change(mask, _box_blocks(box)):
+                box["region"] = "canvas"
+    return tagged
+
+
+def _mask_at(index, when):
+    if index is None:
+        return 0, None
+    app = index.app_at(when)
+    snapped = index.snap(when) if hasattr(index, "snap") else None
+    if snapped is not None:
+        return snapped.mask, app
+    for moment in index.moments:
+        if moment.start <= when <= moment.end:
+            return moment.mask, app
+    return 0, app
 
 
 def _ocr_frame(path):
@@ -371,6 +489,13 @@ def build_ocr_index(media, cache_dir=None):
                     "rerun with --refresh after checking the source")
             frames[second] = _ocr_frame(frame)
 
+    index, _reason = optional_change_index(media, change_index.MIN_SCORE)
+    for second, entry in frames.items():
+        mask, app = _mask_at(index, float(second))
+        entry["boxes"] = tag_regions(entry.get("boxes") or [], mask=mask, focus_app=app)
+        entry["text"] = _normalise_text(
+            entry.get("text") or " ".join(box["text"] for box in entry["boxes"]))
+
     if source_token(media) != token:
         raise SystemExit("media changed while its OCR index was being built; rerun --refresh")
     record = _ocr_record(media, token, duration, frames)
@@ -437,16 +562,21 @@ def load_ocr(media, refresh=False, cache_dir=None):
     return {second: _frame_text(entry) for second, entry in frames.items()}
 
 
-def ocr_boxes(media, t, refresh=False, cache_dir=None):
+def ocr_boxes(media, t, refresh=False, cache_dir=None, region=None):
     """Per-word OCR boxes for the 1 fps sample covering source time *t*.
 
     Origin is top-left, coordinates normalised 0..1, matching tools/vision/ocr.swift.
     ``t=10.7`` looks up the sample at 10s. Returns [] when that second has no boxes.
+    ``region`` of chat|canvas|toolbar filters; None/"any" returns every box (F01).
     """
     if not isinstance(t, (int, float)) or not math.isfinite(t) or t < 0:
         return []
     frames, _record = load_ocr_record(media, refresh=refresh, cache_dir=cache_dir)
-    return list(_frame_boxes(frames.get(int(t))))
+    boxes = list(_frame_boxes(frames.get(int(t))))
+    wanted = None if region in (None, "", "any") else str(region)
+    if wanted:
+        boxes = [box for box in boxes if box.get("region") == wanted]
+    return boxes
 
 
 def moments_cache_path(media, token=None, cache_dir=None):
@@ -499,7 +629,10 @@ def build_moment_index(media, index, cache_dir=None):
         for position, moment in enumerate(index.moments):
             frame = os.path.join(tmp, f"m{position:05d}.jpg")
             _extract_frame_at(media, moment.start, frame)
-            samples[f"{moment.start:.3f}"] = _frame_entry(_ocr_frame(frame))
+            entry = _frame_entry(_ocr_frame(frame))
+            entry["boxes"] = tag_regions(
+                entry.get("boxes") or [], mask=moment.mask, focus_app=index.app_at(moment.start))
+            samples[f"{moment.start:.3f}"] = _frame_entry(entry)
 
     if source_token(media) != token:
         raise SystemExit("media changed while its moment index was being built; rerun --refresh")
@@ -690,6 +823,38 @@ def collapse(hits, gap=3):
     return runs
 
 
+def _query_is_action(terms, kind):
+    if kind == "action":
+        return True
+    return any(term in ACTION_VERBS for term in terms)
+
+
+def _boxes_for_terms(boxes, terms):
+    matched = [box for box in boxes or []
+               if any(term in (box.get("text") or "").lower() for term in terms)]
+    return matched or list(boxes or [])
+
+
+def _region_ok(entry, terms, region="any", action=False):
+    """True when this frame's OCR should count as a hit under region/action filters.
+
+    Default region=any and action=False keep the joined-text --shows behaviour.
+    """
+    if not all(term in _frame_text(entry) for term in terms):
+        return False
+    boxes = _frame_boxes(entry)
+    matching = _boxes_for_terms(boxes, terms)
+    if region not in (None, "", "any"):
+        matching = [box for box in matching if box.get("region") == region]
+        if not matching:
+            return False
+    if action:
+        regions = {box.get("region") for box in matching}
+        if regions and regions <= {"chat"}:
+            return False
+    return True
+
+
 def main():
     ap = argparse.ArgumentParser(prog="capcutctl find")
     ap.add_argument("query", nargs="?",
@@ -712,6 +877,16 @@ def main():
                     help="build or replace a verified OCR index before a --shows search")
     ap.add_argument("--boxes", action="store_true",
                     help="print per-word OCR geometry (top-left, normalised 0..1) for each hit")
+    ap.add_argument("--region", choices=["chat", "canvas", "toolbar", "any"], default="any",
+                    help="restrict --shows/--moments to boxes in that region (default any, "
+                         "output unchanged). toolbar = static top/bottom strips; chat = a side "
+                         "column of uniform line-height (often a scrolling mask column); "
+                         "canvas = the changing 2D app surface. Uses box clusters, the 8x8 "
+                         "change-mask, and the frontmost app when an rl2 trace is present.")
+    ap.add_argument("--kind", choices=["action", "any"], default="any",
+                    help="action queries prefer canvas/toolbar hits (the thing on screen) over "
+                         "chat that only describes it. Implied when the query contains a verb "
+                         "like click/tap/hit/open.")
     ap.add_argument("--settle", type=float, default=2.0,
                     help="seconds a run must persist before its start is reported as stable")
     ap.add_argument("--context", action="store_true", help="print the matching line(s)")
@@ -727,6 +902,8 @@ def main():
         raise SystemExit("--focus reads the rl2 window trace, which a transcript search has no use for")
     if a.boxes and a.says:
         raise SystemExit("--boxes reads the OCR index; it does not apply to --says")
+    if a.says and (a.region != "any" or a.kind != "any"):
+        raise SystemExit("--region and --kind read the OCR index; they do not apply to --says")
     terms = [w for w in (a.query or "").lower().split() if w]
     if not terms and not a.moments:
         ap.error("query must contain at least one word")
@@ -734,6 +911,7 @@ def main():
         ap.error("--settle must be finite and nonnegative")
     if not math.isfinite(a.min_score) or a.min_score < 0:
         ap.error("--min-score must be finite and nonnegative")
+    action = _query_is_action(terms, a.kind)
 
     if a.says:
         tr = load_transcript(a.media)
@@ -766,7 +944,7 @@ def main():
             samples = load_moment_record(a.media, index, refresh=a.refresh)
         if terms:
             chosen = [m for m in chosen
-                      if all(x in _frame_text(samples.get(m.start)) for x in terms)]
+                      if _region_ok(samples.get(m.start), terms, region=a.region, action=action)]
             print(f"{len(chosen)} moment(s) showing it in {os.path.basename(a.media)}{where}")
         else:
             covered = sum(m.end - m.start for m in chosen)
@@ -788,7 +966,10 @@ def main():
                 line = re.sub(r"\s+", " ", _frame_text(samples.get(moment.start)))
                 print(f"           {line[:100]}")
             if a.boxes:
-                _print_boxes(_frame_boxes(samples.get(moment.start) if samples else None))
+                printed = _frame_boxes(samples.get(moment.start) if samples else None)
+                if a.region not in (None, "", "any"):
+                    printed = [box for box in printed if box.get("region") == a.region]
+                _print_boxes(printed)
             picks.append((moment.start, f"{moment.start:.2f}s"))
         if len(chosen) > 40:
             print(f"  ... {len(chosen) - 40} more")
@@ -799,14 +980,14 @@ def main():
     index, reason = optional_change_index(a.media, a.min_score)
     if a.focus and index is None:
         raise SystemExit(f"--focus needs the rl2 trace for {os.path.basename(a.media)}: {reason}")
-    hits = [t for t in idx if all(x in _frame_text(idx[t]) for x in terms)]
+    hits = [t for t in idx if _region_ok(idx[t], terms, region=a.region, action=action)]
     runs = collapse(hits)
     picks = []
     print(f"{len(runs)} run(s) on screen in {os.path.basename(a.media)}  "
           f"(index {min(idx)}-{max(idx)}s)")
     for lo, hi in runs[:25]:
         stable = next((t for t in range(lo, hi + 1)
-                       if all(all(x in _frame_text(idx.get(t + k, "")) for x in terms)
+                       if all(_region_ok(idx.get(t + k), terms, region=a.region, action=action)
                               for k in range(math.ceil(a.settle)))), None)
         if stable is None:
             continue
@@ -825,7 +1006,7 @@ def main():
             line = re.sub(r"\s+", " ", _frame_text(idx.get(stable, "")))
             print(f"           {line[:100]}")
         if a.boxes:
-            _print_boxes(ocr_boxes(a.media, stable))
+            _print_boxes(ocr_boxes(a.media, stable, region=None if a.region == "any" else a.region))
         picks.append((at, f"{stable}s ({held}s)"))
 
     _contact_sheet(a, picks)

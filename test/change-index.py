@@ -273,6 +273,7 @@ class MomentCacheTests(unittest.TestCase):
 
     def test_moment_samples_keep_word_boxes(self):
         box = {"text": "signal", "conf": 0.88, "x": 0.1, "y": 0.2, "w": 0.3, "h": 0.05}
+        tagged = {**box, "region": "canvas"}
         with tempfile.TemporaryDirectory() as tmp:
             media, index = self.take(tmp)
             cache = str(Path(tmp) / "cache")
@@ -283,10 +284,10 @@ class MomentCacheTests(unittest.TestCase):
                     contextlib.redirect_stderr(io.StringIO()):
                 samples = find.load_moment_record(media, index, cache_dir=cache)
             self.assertEqual(samples[5.0]["text"], "signal bay")
-            self.assertEqual(samples[5.0]["boxes"], [box])
+            self.assertEqual(samples[5.0]["boxes"], [tagged])
             data = json.loads(find.moments_cache_path(media, cache_dir=cache).read_text())
             self.assertEqual(data["version"], find.MOMENT_INDEX_VERSION)
-            self.assertEqual(data["samples"]["5.000"]["boxes"], [box])
+            self.assertEqual(data["samples"]["5.000"]["boxes"], [tagged])
 
     def test_a_different_threshold_describes_different_moments_and_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -216,5 +216,84 @@ class FindIndexTests(unittest.TestCase):
                 find.load_ocr(legacy)
 
 
+def _mask(cells):
+    value = 0
+    for row, col in cells:
+        value |= 1 << (row * 8 + col)
+    return value
+
+
+def _box(text, x, y, w=0.18, h=0.04):
+    return {"text": text, "conf": 0.9, "x": x, "y": y, "w": w, "h": h}
+
+
+class RegionTagTests(unittest.TestCase):
+    def test_toolbar_is_a_static_top_or_bottom_strip(self):
+        boxes = [_box("File", 0.02, 0.01), _box("Edit", 0.20, 0.01), _box("View", 0.38, 0.01)]
+        canvas_mask = _mask((r, c) for r in range(3, 7) for c in range(2, 7))
+        tagged = find.tag_regions(boxes, mask=canvas_mask)
+        self.assertEqual({box["region"] for box in tagged}, {"toolbar"})
+
+    def test_chat_is_a_side_column_of_uniform_lines_over_a_scrolling_mask(self):
+        boxes = [_box("hello", 0.04, 0.20), _box("there", 0.04, 0.30),
+                 _box("gold", 0.04, 0.40), _box("wave", 0.04, 0.50)]
+        column = _mask((r, 0) for r in range(8)) | _mask((r, 1) for r in range(8))
+        tagged = find.tag_regions(boxes, mask=column)
+        self.assertEqual({box["region"] for box in tagged}, {"chat"})
+
+    def test_canvas_is_a_2d_change_blob(self):
+        boxes = [_box("gold", 0.42, 0.40, w=0.22, h=0.08), _box("wave", 0.42, 0.52, w=0.22, h=0.08)]
+        blob = _mask((r, c) for r in range(3, 6) for c in range(3, 7))
+        tagged = find.tag_regions(boxes, mask=blob)
+        self.assertEqual({box["region"] for box in tagged}, {"canvas"})
+
+    def test_frontmost_chat_app_strengthens_a_short_side_column(self):
+        boxes = [_box("gold wave", 0.06, 0.25), _box("ok", 0.06, 0.36)]
+        column = _mask((r, 0) for r in range(8))
+        tagged = find.tag_regions(boxes, mask=column, focus_app="ChatGPT")
+        self.assertEqual({box["region"] for box in tagged}, {"chat"})
+
+    def test_ocr_boxes_filters_by_region_and_default_shows_is_unchanged(self):
+        chat = {**_box("gold wave", 0.05, 0.30), "region": "chat"}
+        canvas = {**_box("gold wave", 0.45, 0.40), "region": "canvas"}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            media = root / "screen.mp4"
+            media.write_bytes(b"source")
+            cache = root / "cache"
+            write_ocr(cache, media, {
+                0: {"text": "gold wave in chat", "boxes": [chat]},
+                1: {"text": "gold wave on canvas", "boxes": [canvas]},
+            }, 2.0)
+            with patch.object(find, "CACHE", str(cache)), \
+                    patch.object(find, "_probe_duration", return_value=2.0):
+                self.assertEqual(find.ocr_boxes(media, 0, region="chat"), [chat])
+                self.assertEqual(find.ocr_boxes(media, 0, region="canvas"), [])
+                self.assertEqual(find.ocr_boxes(media, 1, region="canvas"), [canvas])
+                self.assertEqual(len(find.ocr_boxes(media, 0)), 1)
+
+                default = io.StringIO()
+                canvas_only = io.StringIO()
+                action = io.StringIO()
+                argv = ["find.py", "gold wave", "--media", str(media), "--shows", "--settle", "1"]
+                with patch.object(sys, "argv", argv), contextlib.redirect_stdout(default):
+                    find.main()
+                with patch.object(sys, "argv", [*argv, "--region", "canvas"]), \
+                        contextlib.redirect_stdout(canvas_only):
+                    find.main()
+                with patch.object(sys, "argv", [*argv, "--kind", "action"]), \
+                        contextlib.redirect_stdout(action):
+                    find.main()
+
+            shown = default.getvalue()
+            self.assertIn("run(s) on screen", shown)
+            self.assertIn("0s", shown)
+            self.assertIn("1s", shown)
+            self.assertIn("1s", canvas_only.getvalue())
+            self.assertNotIn("     0s", canvas_only.getvalue())
+            self.assertIn("1s", action.getvalue())
+            self.assertNotIn("     0s", action.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

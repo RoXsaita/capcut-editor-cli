@@ -45,12 +45,15 @@ Usage:
                         and cannot be combined with selectors, --times, --sheet, or --expect.
   capcutctl find ["agent running"] --media FILE [--shows|--says|--moments] [--focus APP]
                  [--context] [--refresh] [--min-score N] [--boxes]
+                 [--region chat|canvas|toolbar|any] [--kind action|any]
                       — when is it on screen / when was it said / when did anything happen.
-                        --moments reads an rl2 take's change sidecar instead of a blind 1 fps
-                        grid: with no query it lists every moment the screen changed, with one
-                        it OCRs only those frames. --focus narrows to one app on a
-                        multi-window take. --boxes prints per-word OCR geometry kept in the
-                        index (default --shows output is unchanged).
+                        --moments reads an rl2 take's own sidecars; search a plain recording with --shows.
+                        --boxes prints per-word OCR geometry kept in the index.
+                        --region filters those boxes: toolbar = static top/bottom strips,
+                        chat = a side column of uniform line-height (scrolling mask column),
+                        canvas = the changing 2D app surface. Default any (output unchanged).
+                        --kind action prefers canvas/toolbar hits over chat that only describes
+                        the thing; implied when the query contains a verb like click/tap/hit.
 
   capcutctl preflight [--root PATH] [--json]   — will this work on this machine? deps, assets, tools, disk
   capcutctl projects [--root PATH] [--json]

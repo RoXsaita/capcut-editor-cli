@@ -116,7 +116,7 @@ the mirrors, and rolls back if the post-write doctor fails.
 | Apply a native layout | `capcutctl layout split-screen --project NAME --at 5 --track 2 --dry-run` |
 | Audit layout choices | `capcutctl layout audit --project NAME` |
 | Check exact frames | `capcutctl qa --project NAME --at-cuts --sheet --out qa/` |
-| Find on-screen text | `capcutctl find "phrase" --media FILE --shows [--boxes]` |
+| Find on-screen text | `capcutctl find "phrase" --media FILE --shows [--boxes] [--region canvas]` |
 | Ramp B-roll wait, land the result at 1× | `capcutctl ramp --project NAME --segment ID --speed 20 --dry-run` |
 | Punch-in on a named on-screen element | `capcutctl punch --project NAME --segment ID --on Publish --dry-run` |
 | Export through CapCut on macOS (explicit request) | `capcutctl export --project NAME --out final.mp4 --grid grid.png` |
