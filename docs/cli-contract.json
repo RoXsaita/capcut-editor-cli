@@ -644,12 +644,15 @@
         "--at",
         "--auto",
         "--dry-run",
+        "--ease",
         "--hold",
         "--min-length",
         "--plan",
         "--project",
+        "--stress",
         "--to",
-        "--track"
+        "--track",
+        "--words"
       ],
       "transactional": true
     },

@@ -134,8 +134,13 @@ Usage:
                                 the artwork is the primitive: any image pops; --brand/--auto time
                                 themselves off the transcript. Glow reveal by default, --plain for the pop.
   capcutctl endcard             --project NAME_OR_PATH [--text Follow] [--at S] [--hold S] [--scale S] [--no-sfx]
-  capcutctl zoom                --project NAME_OR_PATH --at S[,S...] | --auto [--min-length 2.5] [--to 1.15] [--hold 1.6]
-                                [--track N] [--plan]
+  capcutctl zoom                --project NAME_OR_PATH --at S[,S...] | --auto | --stress
+                                [--min-length 2.5] [--to 1.15] [--hold 1.6] [--track N] [--plan]
+                                [--ease] [--words FILE]
+                                --auto pushes in on every talking-head scene (unchanged).
+                                --stress replaces that: a 1.08× push on the word hit hardest
+                                (≥ +6 dB vs its sentence median, from energy10), at most once
+                                every 8 s. Full-face only; circle is refused; masked insets skip.
   capcutctl wrap                --project NAME_OR_PATH [--words TRANSCRIPT.json] [--text Follow] [--only BRANDS]
                                 [--zoom-at S[,S…]|--no-zoom] [--track N] [--glow] [--no-sfx] [--plan]
                                 brand logos from what he says + the endcard + face push-ins, in one pass
@@ -229,7 +234,7 @@ export function parseArgs(argv) {
          'noLocalize', 'motivated', 'regen', 'music', 'noMusic', 'polish', 'noInteractions',
          'waitForClose', 'force', 'reindex', 'noRepair', 'inPlace',
          'generated', 'allowEphemeral', 'measure', 'apply', 'native', 'noCache', 'noGrade',
-         'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'easePosition'].includes(key)) result[key] = true;
+         'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'easePosition', 'stress'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
       const value = argv[++i];
@@ -1121,6 +1126,20 @@ export async function main(argv, dependencies = {}) {
                      ...(args.scale ? { scale: Number(args.scale) } : {}) };
     }
     if (command === 'zoom') {
+      if (args.stress) {
+        const stressOp = {
+          op: 'zoom.stress',
+          ...(args.to ? { to: Number(args.to) } : {}),
+          ...(args.hold != null ? { hold: Number(args.hold) } : {}),
+          ...(args.minLength ? { minLength: Number(args.minLength) } : {}),
+          ...(args.ease ? { ease: true } : {}),
+          ...(args.words ? { wordsFile: path.resolve(args.words) } : {}),
+        };
+        const stressTrack = await trackIndex(projectDir, args.track);
+        if (stressTrack != null) stressOp.track = stressTrack;
+        return print(applySpec(projectDir, { version: 1, name: 'zoom-stress', operations: [stressOp] },
+          { ...options, dryRun: Boolean(args.plan || args.dryRun) }), true);
+      }
       if (args.auto) {
         const doc = await loadWorking(projectDir);
         const scenes = sig.talkingHeadScenes(doc, await trackIndex(projectDir, args.track),
@@ -1130,7 +1149,7 @@ export async function main(argv, dependencies = {}) {
         args.at = scenes.map(s => (s.start + 0.4).toFixed(2)).join(',');
         if (args.plan) return print({ talkingHeadScenes: scenes, zoomAt: args.at.split(',').map(Number) }, true);
       }
-      if (args.at == null) throw new CapcutError('zoom requires --at SECONDS (comma-separated), or --auto.', { exitCode: 2 });
+      if (args.at == null) throw new CapcutError('zoom requires --at SECONDS (comma-separated), or --auto, or --stress.', { exitCode: 2 });
       op.zooms = String(args.at).split(',').map(Number).map(at => ({ at,
         ...(args.to ? { to: Number(args.to) } : {}),
         ...(args.hold != null ? { hold: Number(args.hold) } : {}) }));
