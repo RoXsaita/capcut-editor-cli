@@ -4,6 +4,7 @@ import { pictureChanges, planPolish, cutPoints, seamVariety, principalTrack, col
 import { renderTimeline } from './timeline.mjs';
 import { musicPrompt, musicCachePaths } from './music.mjs';
 import { scoreCrispness, crispnessLine } from './crispness.mjs';
+import { lintProjectBroll } from './broll-lint.mjs';
 
 const S = us => (us || 0) / 1e6;
 const r2 = n => Math.round(n * 100) / 100;
@@ -138,6 +139,7 @@ export function finishScorecard(doc, { projectDir = null, width = 64 } = {}) {
     coldOpen: coldOpen(doc),
     firstPictureProof: proof,
     crispness: scoreCrispness(doc, { projectDir }),
+    brollLint: lintProjectBroll(doc, { projectDir }),
     laws: [
       'Transition only on a picture change (B-roll shot or layout class), never on an A-roll splice over the same screen.',
       'Do not recut speech to a beat. Generate and offset the bed so beats land on picture changes.',
@@ -169,6 +171,13 @@ export function finishText(score) {
   if (score.crispness?.warnings?.length) {
     lines.push(`crispness WARN >${score.crispness.warnAbove}×: `
       + score.crispness.warnings.map(w => `${w.id} ${w.factor}×@${w.at}s`).join(', '));
+  }
+  if (score.brollLint?.skipped?.length) {
+    lines.push(`b-roll lint skipped: ${score.brollLint.skipped.map(s => `${s.code} (${s.reason})`).join(', ')}`);
+  }
+  if (score.brollLint?.findings?.length) {
+    lines.push(`b-roll lint: ${score.brollLint.findings.length} finding(s)`);
+    for (const finding of score.brollLint.findings) lines.push(`  ${finding.message}`);
   }
   if (score.coldOpen) {
     lines.push(`cold-open: first ${score.coldOpen.seconds}s are ${score.coldOpen.layout} with no screen — hook on the payoff`);

@@ -184,6 +184,14 @@ test('finish scorecard reports per-segment peak upscale and warns above 1.5×', 
   assert.match(finishText(score), /crispness WARN >1\.5×: b0 2\.813×@0s/);
 });
 
+test('finish scorecard reports B-roll seam lint without changing A-roll findings', () => {
+  const score = finishScorecard(grokLike());
+  assert.ok(score.brollLint, 'JSON carries a brollLint field');
+  assert.ok(score.brollLint.skipped.some(s => s.code === 'BROLL_IN_MOTION'));
+  assert.ok(score.brollLint.skipped.some(s => s.code === 'BROLL_OUT_MIDWORD'));
+  assert.match(finishText(score), /b-roll lint skipped:.*BROLL_IN_MOTION/);
+});
+
 test('finish scorecard flags same-screen cuts', () => {
   const score = finishScorecard(grokLike());
   assert.ok(score.sameScreenCuts.length >= 1, score.sameScreenCuts);

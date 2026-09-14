@@ -14,6 +14,7 @@ import {
   doctor,
   inspectProject,
   listSnapshots,
+  loadProject,
   preflight,
   listProjects,
   capcutStatus,
@@ -808,6 +809,21 @@ export async function main(argv, dependencies = {}) {
   if (command === 'inspect') return print(inspectProject(projectDir), true);
   if (command === 'doctor') {
     const report = doctor(projectDir);
+    try {
+      const { lintProjectBroll } = await import('./broll-lint.mjs');
+      const loaded = loadProject(projectDir);
+      const doc = loaded.groups.find(g => g.name.startsWith('timeline:'))?.doc || loaded.groups[0]?.doc;
+      if (doc) {
+        const broll = lintProjectBroll(doc, { projectDir });
+        report.issues.push(...broll.issues);
+        report.brollLint = { findings: broll.findings, skipped: broll.skipped };
+        report.errors = report.issues.filter(item => item.level === 'error').length;
+        report.warnings = report.issues.filter(item => item.level === 'warning').length;
+      }
+    } catch {
+      // Structural doctor already ran. A missing sidecar or unreadable draft
+      // must not swallow those findings or the JSON report.
+    }
     if (report.errors > 0) process.exitCode = 1;
     return printDoctor(report, args.json);
   }
