@@ -638,6 +638,15 @@
       ],
       "transactional": true
     },
+    "verify-shots": {
+      "options": [
+        "--json",
+        "--out",
+        "--project",
+        "--shots"
+      ],
+      "transactional": false
+    },
     "version": {
       "options": [],
       "transactional": false

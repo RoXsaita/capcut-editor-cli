@@ -109,6 +109,12 @@ Usage:
                       (or hand-edit shots.json then match --apply --shots shots.json).
                       Weak matches stay on the face (flag/none) and are never placed wrong.
                       "No B-roll" is a valid answer.
+  capcutctl verify-shots --project NAME [--shots shots.json] [--out DIR] [--json]
+                    — blind before / action / after strip + SUPPORTED / CONTRADICTED /
+                      INSUFFICIENT. A deterministic baseline runs in-process. prompt.md
+                      per shot is for a fresh agent in the session (no API billing) to
+                      second-guess from the strip alone. CONTRADICTED exits non-zero and
+                      blocks the build; INSUFFICIENT flags only. Never writes the draft.
   capcutctl punch   --project NAME --on TEXT --segment ID|--at T [--word TEXT] [--track NAME|N]
                     [--kind click|result] [--zoom 1.6] [--hold auto|S] [--ramp 0.2]
                     [--ease] [--ease-position] [--plan] [--dry-run]
@@ -842,7 +848,7 @@ export async function main(argv, dependencies = {}) {
 
   const NEEDS_PROJECT = new Set([
     'inspect', 'doctor', 'snapshot', 'history', 'restore', 'sync', 'scenes',
-    'pace', 'ramp', 'punch', 'match', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
+    'pace', 'ramp', 'punch', 'match', 'verify-shots', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
     'replace-media', 'localize', 'trim', 'shift', 'remove', 'volume', 'fade', 'keyframe',
     'preview', 'diff', 'apply', 'timeline', 'finish', 'music', 'grade', 'loudness'
   ]);
@@ -1088,6 +1094,24 @@ export async function main(argv, dependencies = {}) {
       return print({ ...result, applied: applySpec(projectDir, spec, options) }, true);
     }
     return print(result, true);
+  }
+  if (command === 'verify-shots') {
+    const verifier = await import('./verify.mjs');
+    const doc = await loadWorking(projectDir);
+    const outDir = path.resolve(args.out || path.join(projectDir, '.capcutctl', 'verify-shots'));
+    const loaded = verifier.loadVerifyShots({
+      shotsFile: args.shots ? path.resolve(args.shots) : null,
+      doc,
+      projectDir,
+    });
+    const shots = verifier.attachSidecarEvidence(loaded, { projectDir });
+    const summary = verifier.verifyShots({
+      shots,
+      outDir,
+      writeStrip: shots.some(shot => shot.media && fs.existsSync(shot.media)),
+    });
+    if (summary.contradicted > 0) process.exitCode = 1;
+    return print(summary, true);
   }
   if (command === 'logo' || command === 'endcard' || command === 'zoom' || command === 'wrap') {
     const sig = await import('./signature.mjs');

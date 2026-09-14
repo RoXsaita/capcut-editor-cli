@@ -120,6 +120,7 @@ the mirrors, and rolls back if the post-write doctor fails.
 | Ramp B-roll wait, land the result at 1× | `capcutctl ramp --project NAME --segment ID --speed 20 --dry-run` |
 | Punch-in on a named on-screen element | `capcutctl punch --project NAME --segment ID --on Publish --dry-run` |
 | Match spoken sentences to screen moments (shot list; `--apply` writes) | `capcutctl match --project NAME --screen FILE` then `match --apply` |
+| Blind-verify placed B-roll (before/action/after strip) | `capcutctl verify-shots --project NAME [--shots shots.json]` |
 | Punch-in on stressed words (full-face, 1.08×, energy10) | `capcutctl zoom --project NAME --stress --plan` |
 | Match speech/SFX loudness via clip volume (−14 LUFS) | `capcutctl loudness --project NAME --dry-run` |
 | Eased scale push-in (`FreeCurveInOut`; position stays Line) | `capcutctl keyframe --project NAME --segments ID --at S --ease --dry-run` |
