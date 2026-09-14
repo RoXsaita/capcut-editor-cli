@@ -10,6 +10,7 @@ import {
 import { opPolish, opCalloutSfx, opInteractions, principalTrack } from './polish.mjs';
 import { opGradeApply, opGradeReset } from './grade.mjs';
 import { opPace } from './pace.mjs';
+import { opRamp } from './ramp.mjs';
 import { opSignature } from './signature.mjs';
 import {
   opClipAdd, opReplaceMedia, opScaleKeyframe,
@@ -2842,6 +2843,7 @@ export function applyOperations(doc, operations, context) {
     else if (op.op === 'polish.callouts') result = opCalloutSfx(doc, op);
     else if (op.op === 'polish.interactions') result = opInteractions(doc, op, context);
     else if (op.op === 'pace') result = opPace(doc, op, context);
+    else if (op.op === 'ramp') result = opRamp(doc, op, context);
     else if (op.op === 'signature') result = opSignature(doc, op, context);
     else if (op.op === 'clip.add') result = opClipAdd(doc, op, context);
     else if (op.op === 'replace.media') result = opReplaceMedia(doc, op, context);

@@ -18,6 +18,7 @@
       "new",
       "pace",
       "polish",
+      "ramp",
       "remove",
       "replace-media",
       "restore",
@@ -445,6 +446,19 @@
         "--z"
       ],
       "transactional": false
+    },
+    "ramp": {
+      "options": [
+        "--at",
+        "--dry-run",
+        "--project",
+        "--result-at",
+        "--segment",
+        "--settle",
+        "--speed",
+        "--track"
+      ],
+      "transactional": true
     },
     "remove": {
       "options": [

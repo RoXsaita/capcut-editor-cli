@@ -384,32 +384,38 @@ function cloneRefs(doc, segment, key) {
  * made or already existed. Keyframed segments are refused — their values are anchored to
  * the segment's own timeline and splitting silently rescales the animation.
  */
-export function sliceAt(doc, track, t, key) {
-  const us = US(t);
-  const segs = track.segments || [];
-  if (segs.some(s => Math.abs(s.target_timerange.start - us) < 20000)) return 'existing';
-  const seg = segs.find(s => s.target_timerange.start + 20000 < us
-                          && s.target_timerange.start + s.target_timerange.duration - 20000 > us);
-  if (!seg) return false;
-  if ((seg.common_keyframes || []).some(k => (k.keyframe_list || []).length)) return 'keyframed';
+export function sliceAt(doc, track, t, key, seed) {
+  const prev = SEED;
+  if (seed !== undefined) SEED = seed;
+  try {
+    const us = US(t);
+    const segs = track.segments || [];
+    if (segs.some(s => Math.abs(s.target_timerange.start - us) < 20000)) return 'existing';
+    const seg = segs.find(s => s.target_timerange.start + 20000 < us
+                            && s.target_timerange.start + s.target_timerange.duration - 20000 > us);
+    if (!seg) return false;
+    if ((seg.common_keyframes || []).some(k => (k.keyframe_list || []).length)) return 'keyframed';
 
-  const tt = seg.target_timerange, st = seg.source_timerange;
-  const offset = us - tt.start;
-  const ratio = st && tt.duration ? st.duration / tt.duration : 1;
-  const srcOffset = Math.round(offset * ratio);
+    const tt = seg.target_timerange, st = seg.source_timerange;
+    const offset = us - tt.start;
+    const ratio = st && tt.duration ? st.duration / tt.duration : 1;
+    const srcOffset = Math.round(offset * ratio);
 
-  const right = clone(seg);
-  right.id = mint(`slice:${key}`);
-  right.extra_material_refs = cloneRefs(doc, seg, `slice:${key}`);
-  right.target_timerange = { ...tt, start: us, duration: tt.duration - offset };
-  if (st) right.source_timerange = { ...st, start: st.start + srcOffset, duration: st.duration - srcOffset };
+    const right = clone(seg);
+    right.id = mint(`slice:${key}`);
+    right.extra_material_refs = cloneRefs(doc, seg, `slice:${key}`);
+    right.target_timerange = { ...tt, start: us, duration: tt.duration - offset };
+    if (st) right.source_timerange = { ...st, start: st.start + srcOffset, duration: st.duration - srcOffset };
 
-  tt.duration = offset;
-  if (st) st.duration = srcOffset;
+    tt.duration = offset;
+    if (st) st.duration = srcOffset;
 
-  segs.push(right);
-  segs.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
-  return 'split';
+    segs.push(right);
+    segs.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
+    return 'split';
+  } finally {
+    if (seed !== undefined) SEED = prev;
+  }
 }
 
 /**

@@ -128,6 +128,11 @@ Usage:
   capcutctl pace                --project NAME_OR_PATH [--track N] [--max 100] [--min-gap 5.0]
                                 no flags = print the plan; --auto applies it
                                 --at T --speed X | --at T --cover IN-OUT for one clip
+  capcutctl ramp                --project NAME --segment ID|--at T --speed 20 [--settle 0.5]
+                                [--result-at T] [--track N] [--dry-run]
+                                — split a B-roll clip at the result (first change-index peak
+                                  after a quiet stretch), pace the waiting half, leave the
+                                  result at 1×. Faces never ramp. Never writes curve_speed.
   capcutctl polish              --project NAME_OR_PATH [--lead 0.14] [--track N] [--motivated] [--dry-run]
                                 [--no-transitions] [--no-sfx] [--no-interactions]
                                 transitions ride the principal (talking-head) track; it is sliced to fit
@@ -800,7 +805,7 @@ export async function main(argv, dependencies = {}) {
 
   const NEEDS_PROJECT = new Set([
     'inspect', 'doctor', 'snapshot', 'history', 'restore', 'sync', 'scenes',
-    'pace', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
+    'pace', 'ramp', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
     'replace-media', 'localize', 'trim', 'shift', 'remove', 'volume', 'fade', 'keyframe',
     'preview', 'diff', 'apply', 'timeline', 'finish', 'music', 'grade'
   ]);
@@ -923,6 +928,22 @@ export async function main(argv, dependencies = {}) {
       ...(paceTrack != null ? { track: paceTrack } : {}),
       ...(args.max ? { max: Number(args.max) } : {}),
       ...(args.minGap ? { minGap: Number(args.minGap) } : {}) }] };
+    return print(applySpec(projectDir, spec, options), true);
+  }
+  if (command === 'ramp') {
+    if (args.segment == null && args.at == null) {
+      throw new CapcutError('ramp requires --segment ID or --at T.', { exitCode: 2 });
+    }
+    const rampTrack = await trackIndex(projectDir, args.track);
+    const spec = { version: 1, name: 'ramp', operations: [{
+      op: 'ramp',
+      speed: args.speed != null ? Number(args.speed) : 20,
+      settle: args.settle != null ? Number(args.settle) : 0.5,
+      ...(args.segment != null ? { segment: String(args.segment) } : {}),
+      ...(args.at != null ? { at: Number(args.at) } : {}),
+      ...(args.resultAt != null ? { resultAt: Number(args.resultAt) } : {}),
+      ...(rampTrack != null ? { track: rampTrack } : {}),
+    }] };
     return print(applySpec(projectDir, spec, options), true);
   }
   if (command === 'logo' || command === 'endcard' || command === 'zoom' || command === 'wrap') {
