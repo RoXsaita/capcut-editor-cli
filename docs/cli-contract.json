@@ -14,6 +14,7 @@
       "layout",
       "localize",
       "logo",
+      "loudness",
       "music",
       "new",
       "pace",
@@ -326,6 +327,16 @@
         "--scale",
         "--track",
         "--words"
+      ],
+      "transactional": true
+    },
+    "loudness": {
+      "options": [
+        "--allow-boost",
+        "--dry-run",
+        "--plan",
+        "--project",
+        "--target"
       ],
       "transactional": true
     },

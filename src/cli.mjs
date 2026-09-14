@@ -160,6 +160,11 @@ Usage:
                         Also clicks every rectangle/arrow/circle callout (Enter / click / select).
                         rl2 click/typing events on the chopped B-roll (Mouse click / Typing).
                         --no-interactions skips that pass.
+  capcutctl loudness            --project NAME [--target -14] [--allow-boost] [--plan]
+                                — match speech/SFX clip volume to −14 LUFS (ffmpeg ebur128).
+                                  Attenuation < 1.0 is round-tripped. A needed boost is
+                                  VOLUME_BOOST_UNVERIFIED unless --allow-boost (UNVERIFIED).
+                                  Music beds are left alone. Does not touch loudnesses.enable.
   capcutctl grade               --project NAME [--measure] [--plan] [--strength 1] [--samples 3]
                                 [--apply] [--dry-run] [--target JSON] [--reference FILE] [--reference-at S]
                                 [--set 'FILE:brightness=0.05,white=0.2'] [--reset [--source FILE]]
@@ -234,7 +239,7 @@ export function parseArgs(argv) {
          'noLocalize', 'motivated', 'regen', 'music', 'noMusic', 'polish', 'noInteractions',
          'waitForClose', 'force', 'reindex', 'noRepair', 'inPlace',
          'generated', 'allowEphemeral', 'measure', 'apply', 'native', 'noCache', 'noGrade',
-         'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'easePosition', 'stress'].includes(key)) result[key] = true;
+         'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'easePosition', 'stress', 'allowBoost'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
       const value = argv[++i];
@@ -826,7 +831,7 @@ export async function main(argv, dependencies = {}) {
     'inspect', 'doctor', 'snapshot', 'history', 'restore', 'sync', 'scenes',
     'pace', 'ramp', 'punch', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
     'replace-media', 'localize', 'trim', 'shift', 'remove', 'volume', 'fade', 'keyframe',
-    'preview', 'diff', 'apply', 'timeline', 'finish', 'music', 'grade'
+    'preview', 'diff', 'apply', 'timeline', 'finish', 'music', 'grade', 'loudness'
   ]);
   if (!NEEDS_PROJECT.has(command)) throw new CapcutError(`Unknown command: ${command}\n\n${HELP}`, { exitCode: 2 });
   const projectDir = resolveProject(args.project, root);
@@ -875,6 +880,15 @@ export async function main(argv, dependencies = {}) {
         || (r.id || '').toLowerCase().includes(needle));
     }
     return print(rows, true);
+  }
+  if (command === 'loudness') {
+    const op = {
+      op: 'loudness',
+      target: args.target != null ? Number(args.target) : -14,
+      ...(args.allowBoost ? { allowBoost: true } : {}),
+    };
+    return print(applySpec(projectDir, { version: 1, name: 'loudness', operations: [op] },
+      { ...options, dryRun: Boolean(args.plan || args.dryRun) }), true);
   }
   if (command === 'grade') {
     const g = await import('./grade.mjs');
