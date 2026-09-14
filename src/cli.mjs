@@ -99,6 +99,16 @@ Usage:
                     --ease writes FreeCurveInOut on ScaleX/ScaleY (handles match logo pops).
                     Position stays Line unless --ease-position (UNVERIFIED — apply on a
                     disposable copy, open in CapCut, save, capcutctl diff; test curveType).
+  capcutctl match   --project NAME --screen FILE [--face FILE] [--out shots.json]
+                    [--min-margin 0.15] [--shots shots.json] [--apply] [--dry-run] [--json]
+                    — sentence → moment matcher. Default writes nothing: emits a shot list
+                      (JSON) with per-sentence source in/out, score breakdown, margin to the
+                      runner-up, decision place|flag|none, and the add / layout screen /
+                      pace / punch / ramp ops that would realise a place.
+                      Intended loop: match → review flags → match --apply
+                      (or hand-edit shots.json then match --apply --shots shots.json).
+                      Weak matches stay on the face (flag/none) and are never placed wrong.
+                      "No B-roll" is a valid answer.
   capcutctl punch   --project NAME --on TEXT --segment ID|--at T [--word TEXT] [--track NAME|N]
                     [--kind click|result] [--zoom 1.6] [--hold auto|S] [--ramp 0.2]
                     [--ease] [--ease-position] [--plan] [--dry-run]
@@ -832,7 +842,7 @@ export async function main(argv, dependencies = {}) {
 
   const NEEDS_PROJECT = new Set([
     'inspect', 'doctor', 'snapshot', 'history', 'restore', 'sync', 'scenes',
-    'pace', 'ramp', 'punch', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
+    'pace', 'ramp', 'punch', 'match', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
     'replace-media', 'localize', 'trim', 'shift', 'remove', 'volume', 'fade', 'keyframe',
     'preview', 'diff', 'apply', 'timeline', 'finish', 'music', 'grade', 'loudness'
   ]);
@@ -1026,6 +1036,58 @@ export async function main(argv, dependencies = {}) {
       ...(args.easePosition ? { easePosition: true } : {}),
     }] };
     return print(applySpec(projectDir, spec, { ...options, dryRun: Boolean(args.plan || args.dryRun) }), true);
+  }
+  if (command === 'match') {
+    const matcher = await import('./match.mjs');
+    const doc = await loadWorking(projectDir);
+    let result;
+    if (args.shots) {
+      result = matcher.readShotsFile(path.resolve(args.shots));
+    } else {
+      if (!args.screen) throw new CapcutError('match requires --screen FILE (or --shots FILE).', { exitCode: 2 });
+      const screen = path.resolve(args.screen);
+      const face = args.face ? path.resolve(args.face) : null;
+      const inputs = matcher.loadMatchInputs({ screen, face, doc, projectDir });
+      let probe = {};
+      try {
+        const { probeMedia } = await import('./create.mjs');
+        probe = probeMedia(screen);
+      } catch { /* a plan can still run on injected dimensions */ }
+      result = matcher.matchShots({
+        ...inputs,
+        doc,
+        screen,
+        width: probe.width,
+        height: probe.height,
+        mediaDuration: probe.duration,
+        canvas: doc.canvas_config,
+        sourceDims: probe.width ? { width: probe.width, height: probe.height } : null,
+        minMargin: args.minMargin != null ? Number(args.minMargin) : matcher.DEFAULT_MIN_MARGIN,
+      });
+    }
+    if (args.out) {
+      const dest = path.resolve(args.out);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, `${JSON.stringify(result, null, 2)}\n`);
+      result = { ...result, wrote: dest };
+    }
+    if (args.apply) {
+      const spec = matcher.shotsToSpec(result, {
+        screen: args.screen ? path.resolve(args.screen) : undefined,
+      });
+      const check = matcher.writersAccept(spec.operations);
+      if (!check.ok) {
+        throw new CapcutError(
+          `match --apply would emit ops the existing writers do not accept: ${check.rejected.map(row => row.op).join(', ')}`,
+          { code: 'UNSUPPORTED_OPERATION', exitCode: 2, details: check.rejected },
+        );
+      }
+      if (!spec.operations.length) {
+        return print({ ...result, applied: false, reason: 'no place decisions' }, true);
+      }
+      return print({ ...result, applied: applySpec(projectDir, spec, options) }, true);
+    }
+    return print(result, true);
   }
   if (command === 'logo' || command === 'endcard' || command === 'zoom' || command === 'wrap') {
     const sig = await import('./signature.mjs');

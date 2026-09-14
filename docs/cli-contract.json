@@ -15,6 +15,7 @@
       "localize",
       "logo",
       "loudness",
+      "match",
       "music",
       "new",
       "pace",
@@ -341,6 +342,20 @@
         "--plan",
         "--project",
         "--target"
+      ],
+      "transactional": true
+    },
+    "match": {
+      "options": [
+        "--apply",
+        "--dry-run",
+        "--face",
+        "--json",
+        "--min-margin",
+        "--out",
+        "--project",
+        "--screen",
+        "--shots"
       ],
       "transactional": true
     },
