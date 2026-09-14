@@ -3,6 +3,7 @@ import { CapcutError, contentEndUs } from './core.mjs';
 import { pictureChanges, planPolish, cutPoints, seamVariety, principalTrack, coldOpen } from './polish.mjs';
 import { renderTimeline } from './timeline.mjs';
 import { musicPrompt, musicCachePaths } from './music.mjs';
+import { scoreCrispness, crispnessLine } from './crispness.mjs';
 
 const S = us => (us || 0) / 1e6;
 const r2 = n => Math.round(n * 100) / 100;
@@ -136,6 +137,7 @@ export function finishScorecard(doc, { projectDir = null, width = 64 } = {}) {
     brollHot: volumeOutliers(doc),
     coldOpen: coldOpen(doc),
     firstPictureProof: proof,
+    crispness: scoreCrispness(doc, { projectDir }),
     laws: [
       'Transition only on a picture change (B-roll shot or layout class), never on an A-roll splice over the same screen.',
       'Do not recut speech to a beat. Generate and offset the bed so beats land on picture changes.',
@@ -161,6 +163,12 @@ export function finishText(score) {
   }
   if (score.brollHot.length) {
     lines.push(`B-roll at full volume: ${score.brollHot.map(b => `${b.at}s`).join(', ')}`);
+  }
+  const upscale = crispnessLine(score.crispness);
+  if (upscale) lines.push(upscale);
+  if (score.crispness?.warnings?.length) {
+    lines.push(`crispness WARN >${score.crispness.warnAbove}×: `
+      + score.crispness.warnings.map(w => `${w.id} ${w.factor}×@${w.at}s`).join(', '));
   }
   if (score.coldOpen) {
     lines.push(`cold-open: first ${score.coldOpen.seconds}s are ${score.coldOpen.layout} with no screen — hook on the payoff`);

@@ -155,6 +155,35 @@ test('timeline ASCII shows stacked tracks and a gap in B-roll', () => {
   assert.ok(view.text.split('\n').some(l => l.includes('·')), 'gap shown as ·');
 });
 
+test('finish scorecard reports per-segment peak upscale and warns above 1.5×', () => {
+  const d = grokLike();
+  d.canvas_config = { width: 1080, height: 1920 };
+  d.materials.videos[1].width = 1920;
+  d.materials.videos[1].height = 1080;
+  d.tracks[1].segments[0].clip = { scale: { x: 5, y: 5 } };
+  d.tracks[1].segments[0].common_keyframes = [{
+    property_type: 'KFTypeScaleX',
+    keyframe_list: [
+      { time_offset: 0, values: [5], curveType: 'Line' },
+      { time_offset: US(1), values: [5], curveType: 'Line' },
+    ],
+  }];
+  d.tracks[1].segments[1].clip = { scale: { x: 1, y: 1 } };
+  const score = finishScorecard(d);
+  assert.ok(score.crispness, 'JSON carries a crispness field');
+  const hook = score.crispness.segments.find(row => row.id === 'b0');
+  assert.equal(hook.factor, 2.813);
+  assert.equal(hook.warn, true);
+  const tab = score.crispness.segments.find(row => row.id === 'b1');
+  assert.equal(tab.factor, 0.563);
+  assert.equal(tab.warn, false);
+  const bar = score.crispness.segments.find(row => row.desc === 'layout:seam-bar');
+  assert.equal(bar.exempt, true);
+  assert.match(finishText(score), /upscale /);
+  assert.match(finishText(score), /b0:2\.813× WARN/);
+  assert.match(finishText(score), /crispness WARN >1\.5×: b0 2\.813×@0s/);
+});
+
 test('finish scorecard flags same-screen cuts', () => {
   const score = finishScorecard(grokLike());
   assert.ok(score.sameScreenCuts.length >= 1, score.sameScreenCuts);
