@@ -15,7 +15,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CapcutError, allSegments, resolveMediaPath } from './core.mjs';
 import { isBrollSegment } from './broll-lint.mjs';
-import { scoreAt, loadClicks } from './punch.mjs';
+import { scoreAt, loadClicks, loadOcrBoxes } from './punch.mjs';
 import { momentsFromSidecar } from './broll-lint.mjs';
 import { ACTION_VERBS, sentenceKind, tokenize, readShotsFile } from './match.mjs';
 import { pythonForTool } from './python.mjs';
@@ -160,7 +160,7 @@ export function baselineVerdict(brief) {
   const afterNames = canvasNames(after);
   const missing = wanted.filter(token => !shown.has(token) && !afterNames.includes(token));
   const foreign = afterNames.filter(name => !wanted.includes(name) && !tokens.includes(name));
-  if (wanted.length && missing.length && foreign.length) return 'CONTRADICTED';
+  if (shown.size && wanted.length && missing.length && foreign.length) return 'CONTRADICTED';
 
   if (kind === 'action' && !changed) return 'CONTRADICTED';
 
@@ -277,7 +277,12 @@ export function verifyShots({
     const dir = path.join(outDir, shot.id || `shot-${index}`);
     fs.mkdirSync(dir, { recursive: true });
     let strip = null;
-    if (writeStrip && media && fs.existsSync(media)) {
+    if (writeStrip && (!media || !fs.existsSync(media))) {
+      throw new CapcutError(`verify-shots cannot read the source for ${shot.id || index}.`, {
+        code: 'VERIFY_MEDIA_MISSING', exitCode: 2,
+      });
+    }
+    if (writeStrip) {
       strip = composeStrip(media, times, labels, path.join(dir, 'strip.png'))?.strip || path.join(dir, 'strip.png');
     }
     const frames = shot.frames || {
@@ -324,7 +329,10 @@ export function loadVerifyShots({ shots, shotsFile, doc, projectDir, words } = {
   if (Array.isArray(shots) && shots.length) return shots;
   if (shotsFile) {
     const data = readShotsFile(shotsFile);
-    return (data.shots || []).filter(shot => shot.decision === 'place');
+    return (data.shots || []).filter(shot => shot.decision === 'place').map(shot => ({
+      ...shot,
+      media: shot.media || shot.screen || shot.ops?.find(op => op.op === 'layout.screen' || op.op === 'clip.add')?.media,
+    }));
   }
   if (doc) return brollShotsFromDoc(doc, { projectDir, words });
   return [];
@@ -338,6 +346,9 @@ export function attachSidecarEvidence(shots, { projectDir, moments, clicks } = {
     const loadedClicks = shot.clicks || clicks || (media ? loadClicks(media, projectDir) : []);
     return {
       ...shot,
+      ...(!shot.frames && !shot.ocr && media && fs.existsSync(media) ? { ocr: Object.fromEntries(
+        ['before', 'action', 'after'].map((label, i) => [label, loadOcrBoxes(media, Math.max(0, srcIn + (i - 1) * 0.5))]),
+      ) } : {}),
       changeScore: shot.changeScore ?? (loadedMoments ? scoreAt(loadedMoments, srcIn) : 0),
       clicks: nearbyClicks(loadedClicks, srcIn),
     };

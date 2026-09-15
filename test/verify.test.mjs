@@ -5,10 +5,24 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   baselineVerdict, buildBrief, assertBlindBrief, verifyShots, BLIND_FORBIDDEN_KEYS,
-  changeOccurred,
+  changeOccurred, loadVerifyShots, attachSidecarEvidence,
 } from '../src/verify.mjs';
 
 const ocr = (text, region) => [{ text, region, conf: 0.9 }];
+
+test('matcher shot files resolve source media and missing strips fail closed', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-verify-media-'));
+  try {
+    const file = path.join(dir, 'shots.json');
+    fs.writeFileSync(file, JSON.stringify({ shots: [{ id: 'selected', decision: 'place',
+      ops: [{ op: 'layout.screen', media: '/missing-screen.mp4' }] }] }));
+    const shots = loadVerifyShots({ shotsFile: file });
+    assert.equal(shots[0].media, '/missing-screen.mp4');
+    assert.throws(() => verifyShots({ shots, outDir: path.join(dir, 'out') }), { code: 'VERIFY_MEDIA_MISSING' });
+    const attached = attachSidecarEvidence(shots);
+    assert.equal(attached[0].ocr, undefined);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
 
 function brief(sentence, { before = [], action = [], after = [], changeScore = 0, clicks = [] } = {}) {
   return buildBrief({ sentence }, {
@@ -58,6 +72,15 @@ test('right screen, wrong instance: Grok Build vs Grok Chat is CONTRADICTED', ()
     changeScore: 0.6,
   });
   assert.equal(baselineVerdict(row), 'CONTRADICTED');
+});
+
+test('unmatched narration and foreign-language UI are insufficient, not contradicted', () => {
+  const row = brief('فاكيوم احدث وارخص', {
+    before: ocr('Allegro cart', 'canvas'),
+    after: ocr('Dyson cart 1359 PLN', 'canvas'),
+    changeScore: 0.8,
+  });
+  assert.equal(baselineVerdict(row), 'INSUFFICIENT');
 });
 
 test('before-vs-after frames swapped is CONTRADICTED', () => {

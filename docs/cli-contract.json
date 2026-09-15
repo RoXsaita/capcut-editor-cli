@@ -341,6 +341,7 @@
         "--dry-run",
         "--plan",
         "--project",
+        "--segments",
         "--target"
       ],
       "transactional": true

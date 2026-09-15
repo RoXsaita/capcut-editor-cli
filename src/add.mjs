@@ -787,9 +787,8 @@ export function opScaleKeyframe(doc, op) {
         values: [values[i]], string_value: '', graphID: '' }));
       const isPosition = property === 'KFTypePositionX' || property === 'KFTypePositionY';
       const eased = isPosition ? Boolean(op.easePosition) : Boolean(op.ease);
-      const written = eased ? applyFreeCurve(list).map((point, i) => (
-        i === 0 ? point : { ...point, graphID: point.graphID || mint(`graph:${s.id}:${property}:${point.time_offset}`) }
-      )) : list;
+      // Native 9.4.0 keeps FreeCurveInOut and its handles, but clears graphID.
+      const written = eased ? applyFreeCurve(list) : list;
       const previous = (s.common_keyframes || []).find(k => k.property_type === property);
       const outside = (previous?.keyframe_list || []).filter(k => k.time_offset < written[0].time_offset || k.time_offset > written.at(-1).time_offset);
       const merged = [...outside, ...written].sort((a, b) => a.time_offset - b.time_offset)
@@ -803,10 +802,7 @@ export function opScaleKeyframe(doc, op) {
     focus: op.focus || null, transform: { x: tx, y: ty }, frameIds: frames.map(s => s.id),
     ease: Boolean(op.ease),
     easePosition: Boolean(op.easePosition),
-    ...(op.easePosition ? {
-      unverified: ['KFTypePositionX', 'KFTypePositionY'],
-      warning: 'UNVERIFIED: eased PositionX/Y has never been written by this CLI. Apply on a disposable copy, open in CapCut, save, then capcutctl diff. Test curveType, not the presence of control objects.',
-    } : {}),
+    ...(op.ease || op.easePosition ? { verifiedIn: 'CapCut 9.4.0' } : {}),
   };
 }
 

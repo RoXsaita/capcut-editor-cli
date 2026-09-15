@@ -211,6 +211,16 @@ export function opLoudness(doc, op = {}, context = {}) {
     });
   }
   const allowBoost = Boolean(op.allowBoost);
+  const selected = op.segments == null ? null : new Set(
+    (Array.isArray(op.segments) ? op.segments : String(op.segments).split(','))
+      .map(id => String(id).trim()).filter(Boolean),
+  );
+  if (selected) {
+    const ids = new Set((doc.tracks || []).flatMap(t => (t.segments || []).map(s => s.id)));
+    if (!selected.size || [...selected].some(id => !ids.has(id))) {
+      throw new CapcutError('loudness --segments must name existing segment IDs.', { code: 'SELECTOR_EMPTY', exitCode: 2 });
+    }
+  }
   const loudnessesBefore = doc.loudnesses ? JSON.stringify(doc.loudnesses) : null;
   const segments = [];
   const skipped = [];
@@ -219,6 +229,7 @@ export function opLoudness(doc, op = {}, context = {}) {
 
   for (const track of doc.tracks || []) {
     for (const segment of track.segments || []) {
+      if (selected && !selected.has(segment.id)) continue;
       const material = materialFor(doc, segment.material_id);
       const role = classifyLoudnessRole(track, segment, material);
       if (role === 'music') {
@@ -241,6 +252,13 @@ export function opLoudness(doc, op = {}, context = {}) {
           `loudness has no LUFS measurement for ${path.basename(mediaPath) || segment.id}. Inject op.measurements in tests, or keep ffmpeg on PATH.`,
           { code: 'LUFS_MEASURE_FAILED', exitCode: 2, details: { id: segment.id } },
         );
+      }
+      // ebur128 reports its -70 LUFS floor for silence and sub-gate short SFX.
+      // That is not a usable measurement and must never become a 631x boost.
+      if (measured <= -69.9) {
+        refused.push({ id: segment.id, code: 'LUFS_UNMEASURABLE', measuredLufs: measured,
+          message: 'No gated loudness measurement; keep this silent or short clip at its reviewed volume.' });
+        continue;
       }
 
       const previousVolume = segment.volume == null ? 1 : Number(segment.volume);

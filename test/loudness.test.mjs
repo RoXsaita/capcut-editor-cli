@@ -73,6 +73,22 @@ test('volumeForLufs is 10^((target-measured)/20)', () => {
   assert.equal(playbackLufs(-8, volumeForLufs(-8, -14)), -14);
 });
 
+test('a selected boost leaves other clips alone and ebur128 silence is never amplified', () => {
+  const d = doc(); const before = structuredClone(d.tracks[3]);
+  const out = opLoudness(d, { segments: ['face0'], measurements: -18, allowBoost: true });
+  assert.equal(out.changed, 1);
+  assert.ok(d.tracks[1].segments[0].volume > 1);
+  assert.deepEqual(d.tracks[3], before);
+  const silent = opLoudness(d, { segments: ['sfx0'], measurements: -70, allowBoost: true });
+  assert.equal(silent.changed, 0);
+  assert.equal(silent.refused[0].code, 'LUFS_UNMEASURABLE');
+  assert.deepEqual(d.tracks[3], before);
+  assert.throws(() => opLoudness(d, { segments: ['missing'], measurements: -18 }), { code: 'SELECTOR_EMPTY' });
+  const trimmed = opLoudness(doc(), { segments: ' face0 ', measurements: -18, allowBoost: true });
+  assert.equal(trimmed.changed, 1);
+  assert.throws(() => opLoudness(doc(), { segments: 'missing', measurements: -18 }), { code: 'SELECTOR_EMPTY' });
+});
+
 test('parseEbur128 reads the Integrated loudness summary', () => {
   const stderr = `
 [Parsed_ebur128_0 @ 0x1] Summary:

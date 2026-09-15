@@ -97,8 +97,8 @@ Usage:
                     [--focus X,Y,W,H] [--viewport X,Y,W,H] [--ease] [--ease-position]
                     focus uses source pixels; viewport uses canvas pixels. Default: current scale ×1.15.
                     --ease writes FreeCurveInOut on ScaleX/ScaleY (handles match logo pops).
-                    Position stays Line unless --ease-position (UNVERIFIED — apply on a
-                    disposable copy, open in CapCut, save, capcutctl diff; test curveType).
+                    Position stays Line unless --ease-position. Scale and position curves
+                    round-tripped in CapCut 9.4.0; check curveType, not just control objects.
   capcutctl match   --project NAME --screen FILE [--face FILE] [--out shots.json]
                     [--min-margin 0.15] [--shots shots.json] [--apply] [--dry-run] [--json]
                     — sentence → moment matcher. Default writes nothing: emits a shot list
@@ -176,7 +176,7 @@ Usage:
                         Also clicks every rectangle/arrow/circle callout (Enter / click / select).
                         rl2 click/typing events on the chopped B-roll (Mouse click / Typing).
                         --no-interactions skips that pass.
-  capcutctl loudness            --project NAME [--target -14] [--allow-boost] [--plan]
+  capcutctl loudness            --project NAME [--target -14] [--segments ID[,ID...]] [--allow-boost] [--plan]
                                 — match speech/SFX clip volume to −14 LUFS (ffmpeg ebur128).
                                   Attenuation < 1.0 is round-tripped. A needed boost is
                                   VOLUME_BOOST_UNVERIFIED unless --allow-boost (UNVERIFIED).
@@ -184,10 +184,11 @@ Usage:
   capcutctl grade               --project NAME [--measure] [--plan] [--strength 1] [--samples 3]
                                 [--apply] [--dry-run] [--target JSON] [--reference FILE] [--reference-at S]
                                 [--set 'FILE:brightness=0.05,white=0.2'] [--reset [--source FILE]]
-                                [--face-detail] [--sharpen 0.6] [--clarity 0.6] [--vignette 0.6]
+                                [--face-detail] [--sharpen 0.15] [--clarity 0.1] [--vignette 0]
                                 preserve colour by default; an explicit target/reference enables the approximate solver.
                                 --reset removes CLI-owned grades (all sources unless --source is supplied).
-                                --face-detail writes UNVERIFIED sharpen/clarity/vignette on FACE clips only.
+                                --face-detail writes native sharpen/clarity/vignette on FACE clips only.
+                                Verified in CapCut 9.4.0. Vignette is opt-in after native calibration.
   capcutctl timeline            --project NAME [--width 64] [--json]   — ASCII dump of the stacked timeline
   capcutctl finish              --project NAME [--plan] [--music] [--polish] [--regen]
                                 [--volume 0.08] [--prompt TEXT] [--file FILE] [--track N] [--width 64] [--json]
@@ -905,6 +906,7 @@ export async function main(argv, dependencies = {}) {
       op: 'loudness',
       target: args.target != null ? Number(args.target) : -14,
       ...(args.allowBoost ? { allowBoost: true } : {}),
+      ...(args.segments ? { segments: String(args.segments).split(',').map(s => s.trim()).filter(Boolean) } : {}),
     };
     return print(applySpec(projectDir, { version: 1, name: 'loudness', operations: [op] },
       { ...options, dryRun: Boolean(args.plan || args.dryRun) }), true);
@@ -963,7 +965,7 @@ export async function main(argv, dependencies = {}) {
         Object.assign(row.sliders, detail);
         row.faceDetail = detail;
       }
-      plan.unverified = true;
+      plan.verifiedIn = 'CapCut 9.4.0';
       plan.warning = g.FACE_DETAIL_WARNING;
     }
     if (!args.apply) return print(plan, true);
@@ -1108,7 +1110,6 @@ export async function main(argv, dependencies = {}) {
     const summary = verifier.verifyShots({
       shots,
       outDir,
-      writeStrip: shots.some(shot => shot.media && fs.existsSync(shot.media)),
     });
     if (summary.contradicted > 0) process.exitCode = 1;
     return print(summary, true);

@@ -32,8 +32,8 @@ from itertools import pairwise
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import change_index  # noqa: E402
-from audio_index import _write_json_atomic, source_token  # noqa: E402
+import change_index
+from audio_index import _write_json_atomic, source_token
 
 CACHE = os.path.expanduser("~/Downloads/.video-index")
 OCR_BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vision", "ocr")

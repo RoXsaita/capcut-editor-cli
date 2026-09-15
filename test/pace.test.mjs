@@ -104,6 +104,22 @@ test('setSpeed preserves each zoom ON-SCREEN duration', () => {
   for (const kf of kl) assert.ok(kf.time_offset >= start && kf.time_offset <= start + duration);
 });
 
+test('setSpeed creates the native speed reference missing from generated clips in both mirrors', () => {
+  const drafts = [doc(), doc()];
+  const records = drafts.map(d => {
+    const seg = d.tracks[1].segments[0];
+    seg.extra_material_refs = [];
+    setSpeed(d, seg, 20);
+    setSpeed(d, seg, 20);
+    assert.equal(seg.extra_material_refs.length, 1);
+    const record = d.materials.speeds.find(s => s.id === seg.extra_material_refs[0]);
+    assert.deepEqual(record, { id: record.id, type: 'speed', speed: 20, mode: 0, curve_speed: null });
+    assert.equal(d.materials.speeds.filter(s => s.id === record.id).length, 1);
+    return record;
+  });
+  assert.deepEqual(records[0], records[1]);
+});
+
 test('setSpeed clamps at the end of the source instead of running past it', () => {
   const d = doc();
   const seg = d.tracks[1].segments[2];

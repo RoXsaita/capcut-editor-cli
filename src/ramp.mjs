@@ -205,14 +205,18 @@ export function opRamp(doc, op = {}, context = {}) {
     );
   }
 
-  const splitSource = Math.min(srcOut - MIN_PIECE, Math.max(srcIn + MIN_PIECE, resultAt - settle));
+  // Native saving snaps both cuts to frame boundaries. At 20x, a 20ms timeline
+  // correction otherwise repeats almost half a second of the result source.
+  const fps = Number(doc.fps) > 0 ? Number(doc.fps) : 30;
+  const snap = seconds => Math.floor(Math.round(seconds * fps) * 1e6 / fps) / 1e6;
+  const splitSource = snap(Math.min(srcOut - MIN_PIECE, Math.max(srcIn + MIN_PIECE, resultAt - settle)));
   if (!(splitSource > srcIn + EDGE && splitSource < srcOut - EDGE)) {
     throw new CapcutError(
       'not enough room inside the clip to split wait from result. Pick a later --result-at or a smaller --settle.',
       { code: 'SPLIT_EDGE', exitCode: 2 }
     );
   }
-  const splitAt = timelineOfSource(seg, splitSource);
+  const splitAt = snap(timelineOfSource(seg, splitSource));
   const sliced = sliceAt(doc, clip.track, splitAt, `ramp:${seg.id}`, op.__seed);
   if (sliced === 'keyframed') {
     throw new CapcutError(
@@ -237,15 +241,17 @@ export function opRamp(doc, op = {}, context = {}) {
   }
 
   const waitTl = S(wait.target_timerange.duration);
-  const splitSrc = S(wait.source_timerange.start + wait.source_timerange.duration);
+  const splitSrc = splitSource;
   const wantCover = waitTl * speed;
   const sourceStart = Math.max(0, splitSrc - wantCover);
-  const actualSpeed = waitTl > 0 ? (splitSrc - sourceStart) / waitTl : 1;
+  const actualSpeed = sourceStart > 0 ? speed : (waitTl > 0 ? splitSrc / waitTl : 1);
   const paced = actualSpeed > 1.02
     ? setSpeed(doc, wait, actualSpeed, { sourceStart: US(sourceStart) })
-    : { speed: currentSpeed(wait), clamped: true, source: [S(wait.source_timerange.start), splitSrc] };
+    : { speed: currentSpeed(wait), clamped: true, source: [S(wait.source_timerange.start), S(wait.source_timerange.start + wait.source_timerange.duration)] };
 
-  if (Math.abs(currentSpeed(shown) - 1) >= 0.02) setSpeed(doc, shown, 1);
+  // When the wait is re-paced, both halves meet at the snapped split. When it is not,
+  // keep the slice's source seam — forcing shown to splitSrc would skip or repeat frames.
+  setSpeed(doc, shown, 1, { sourceStart: US(paced.source[1]) });
   for (const ref of shown.extra_material_refs || []) {
     const material = materialFor(doc, ref);
     if (material && material.type === 'speed') material.curve_speed = null;

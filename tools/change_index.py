@@ -21,9 +21,10 @@ media's duration, so a trimmed, recut or derived copy is refused outright rather
 reported against a timeline it does not describe. A take whose recorder died mid-write
 still indexes: a truncated final line is skipped, not fatal.
 """
+import json
+import math
 from collections import namedtuple
 from pathlib import Path
-import json
 
 # Mean absolute luma delta a frame must reach to count as "something happened". Measured
 # across six takes at 0.25/0.5/1.0/2.0: the moment count stays roughly flat while the
@@ -129,7 +130,8 @@ def _moments_of(rows, min_score, gap):
     marks = []
     for row in rows:
         score, at = row.get("score"), row.get("vt")
-        if not isinstance(score, (int, float)) or not isinstance(at, (int, float)):
+        if (not isinstance(score, (int, float)) or not isinstance(at, (int, float))
+                or not math.isfinite(score) or not math.isfinite(at)):
             continue
         if score < min_score:
             continue
@@ -157,9 +159,11 @@ def _moments_of(rows, min_score, gap):
 def _focus_of(rows, session, duration):
     clock = session.get("clock")
     origin = (clock or {}).get("first_frame_host") if isinstance(clock, dict) else None
-    if not isinstance(origin, (int, float)):
+    if not isinstance(origin, (int, float)) or not math.isfinite(origin):
         origin = session.get("start_host")
-    if not isinstance(origin, (int, float)):
+    if not isinstance(origin, (int, float)) or not math.isfinite(origin):
+        return []
+    if not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration < 0:
         return []
 
     marks = []
@@ -167,7 +171,7 @@ def _focus_of(rows, session, duration):
         if row.get("type") != "focus_change":
             continue
         host, app = row.get("host"), row.get("app")
-        if not isinstance(host, (int, float)) or not app:
+        if not isinstance(host, (int, float)) or not math.isfinite(host) or not app:
             continue
         marks.append((min(max(float(host) - float(origin), 0.0), duration), str(app)))
     marks.sort(key=lambda mark: mark[0])
@@ -245,9 +249,12 @@ def load(media, duration, min_score=MIN_SCORE, gap=MERGE_GAP):
     directory = sidecar_dir(media)
     if directory is None:
         return None, "no rl2 sidecar next to this media"
+    if not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration <= 0:
+        return None, "media duration is missing or invalid"
 
     rows = _read_ndjson(directory / CHANGE)
-    frames = [row for row in rows if isinstance(row.get("vt"), (int, float))]
+    frames = [row for row in rows
+              if isinstance(row.get("vt"), (int, float)) and math.isfinite(row["vt"])]
     if not frames:
         return None, f"{directory.name}/{CHANGE} holds no usable frames"
 

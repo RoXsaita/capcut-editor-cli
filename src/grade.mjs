@@ -677,14 +677,14 @@ const ADJUST_TYPES = new Set(['brightness', 'contrast', 'saturation', 'highlight
   'white', 'black', 'temperature', 'tone', 'sharpen', 'clear', 'fade', 'light_sensation',
   'vignetting', 'particle']);
 
-/** Sharpen / clarity / vignette: record shape harvested at 0.0; non-zero is UNVERIFIED. */
+/** Nonzero native controls and saved values verified in CapCut 9.4.0. */
 export const FACE_DETAIL_TYPES = Object.freeze(['sharpen', 'clear', 'vignetting']);
 export const FACE_DETAIL_DEFAULTS = Object.freeze({
-  sharpen: 0.6,
-  clear: 0.6,
-  vignetting: 0.6,
+  sharpen: 0.15,
+  clear: 0.1,
+  vignetting: 0,
 });
-export const FACE_DETAIL_WARNING = 'UNVERIFIED: non-zero sharpen / clear / vignetting have never been seen rendered. First pass is a calibration, like grade 0.6. Apply on a disposable copy, open in CapCut, save, then capcutctl diff.';
+export const FACE_DETAIL_WARNING = 'Face detail verified in CapCut 9.4.0. Vignette defaults to zero: even 0.01 visibly darkened the test frame corners; calibrate it on your footage.';
 
 export function faceDetailSliders({
   sharpen = FACE_DETAIL_DEFAULTS.sharpen,
@@ -851,19 +851,21 @@ export function opGradeApply(doc, op, context = {}) {
     throw new CapcutError('presets/adjust.json is missing its harvested effectTemplate.',
       { code: 'MISSING_PRESET' });
   }
-  const { selected, targets } = gradeTargets(doc, op || {}, context);
+  const { selected, targets: sourceTargets } = gradeTargets(doc, op || {}, context);
   const videos = new Map((doc.materials?.videos || []).map(item => [item.id, item]));
-  for (const { segment, entry } of targets) {
-    const sliders = selected.find(item => item.entry.identity === entry.identity)?.sliders || {};
+  const face = segment => isFaceSegment(doc, segment, videos.get(segment.material_id));
+  for (const { entry, sliders } of selected) {
     if (!hasFaceDetail(sliders)) continue;
-    const material = videos.get(segment.material_id);
-    if (!isFaceSegment(doc, segment, material)) {
+    if (!entry.videoSegments.some(({ segment }) => face(segment))) {
       throw new CapcutError(
         'face-detail (sharpen / clarity / vignette) is face-only; screen recordings are refused because sharpening haloes UI text.',
-        { code: 'SCREEN_FACE_DETAIL', exitCode: 2, details: { source: entry.source, id: segment.id } },
+        { code: 'SCREEN_FACE_DETAIL', exitCode: 2, details: { source: entry.source } },
       );
     }
   }
+  // A face source can also back a blur/pip helper; leave those layers untouched.
+  const targets = sourceTargets.filter(({ segment, entry }) =>
+    !hasFaceDetail(selected.find(item => item.entry.identity === entry.identity)?.sliders) || face(segment));
   // Clear what this pass owns on the segments it is about to write.
   const cleared = clearOwnedEffects(doc, targets);
   const pending = [];
@@ -911,7 +913,7 @@ export function opGradeApply(doc, op, context = {}) {
     materials: written,
     replaced: cleared.removedRefs,
     sources: Object.fromEntries(selected.map(({ entry, sliders }) => [entry.source, sliders])),
-    ...(usedDetail ? { unverified: true, warning: FACE_DETAIL_WARNING } : {}),
+    ...(usedDetail ? { verifiedIn: 'CapCut 9.4.0', warning: FACE_DETAIL_WARNING } : {}),
   };
 }
 

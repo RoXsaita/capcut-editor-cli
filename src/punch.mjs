@@ -367,7 +367,7 @@ export function loadOcrBoxes(media, t, { cacheDir } = {}) {
     'print(json.dumps(find.ocr_boxes(media, t, cache_dir=cache)))',
   ].join('; ');
   const result = spawnSync(python.executable, ['-c', script, tools, media, String(t), cacheDir || ''], {
-    encoding: 'utf8', timeout: 60_000,
+    encoding: 'utf8', timeout: 60_000, maxBuffer: 32 * 1024 * 1024,
   });
   if (result.error || result.status !== 0) {
     const detail = String(result.stderr || result.error?.message || 'ocr_boxes failed').trim();

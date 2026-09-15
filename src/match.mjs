@@ -559,6 +559,7 @@ export function matchShots({
 export function shotsToSpec(result, extras = {}) {
   const operations = [];
   for (const shot of result.shots || []) {
+    if (shot.decision !== 'place') continue;
     const ops = shot.ops?.length
       ? shot.ops
       : planShotOps(shot, extras);
@@ -592,7 +593,7 @@ export function writersAccept(operations) {
   return { ok: rejected.length === 0, accepted, rejected };
 }
 
-function loadBoxesAtTimes(media, times, { cacheDir } = {}) {
+export function loadBoxesAtTimes(media, times, { cacheDir } = {}) {
   if (!media || !times?.length) return {};
   const python = pythonForTool('find.py');
   const tools = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'tools');
@@ -605,7 +606,7 @@ function loadBoxesAtTimes(media, times, { cacheDir } = {}) {
   ].join('; ');
   const result = spawnSync(python.executable, [
     '-c', script, tools, media, JSON.stringify(times), cacheDir || '',
-  ], { encoding: 'utf8', timeout: 120_000 });
+  ], { encoding: 'utf8', timeout: 120_000, maxBuffer: 32 * 1024 * 1024 });
   if (result.error || result.status !== 0) {
     const detail = String(result.stderr || result.error?.message || 'ocr_boxes failed').trim();
     throw new CapcutError(

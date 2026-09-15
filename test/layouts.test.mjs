@@ -482,7 +482,8 @@ test('layout screen source-times pip and blur across A-roll seams while preservi
   const doc = activeDoc(f);
   const principal = subjectOf(doc);
   doc.materials.common_mask.push({ id: 'NATIVE-MASK', resource_type: 'line', config: { centerY: 0.4 } });
-  principal.extra_material_refs = ['NATIVE-MASK'];
+  doc.materials.transitions = [{ id: 'NATIVE-TRANSITION', type: 'transition', duration: 200000 }];
+  principal.extra_material_refs = ['NATIVE-MASK', 'NATIVE-TRANSITION'];
   principal.keyframe_refs = ['NATIVE-REF'];
   principal.common_keyframes = [
     { property_type: 'KFTypePositionX', keyframe_list: [{ time_offset: 2_000_000, values: [0.1] }] },
@@ -505,6 +506,8 @@ test('layout screen source-times pip and blur across A-roll seams while preservi
 
   const pips = screenLayers(doc).filter(segment => segment.desc === 'layout:screen-pip');
   for (const pip of pips) {
+    assert.equal(pip.extra_material_refs.includes('NATIVE-TRANSITION'), false,
+      'a partial picture-in-picture track must not inherit principal transitions');
     assert.equal(pip.common_keyframes.some(group => group.property_type === 'KFTypePositionX'), false,
       'absolute source position must not override circle framing');
     assert.ok(pip.common_keyframes.some(group => group.property_type === 'KFTypeAlpha'), 'retain non-camera animation');
@@ -526,7 +529,7 @@ test('layout screen source-times pip and blur across A-roll seams while preservi
   ]);
   for (const segment of principalPieces) {
     assert.equal(segment.volume, 1);
-    assert.deepEqual(segment.extra_material_refs, ['NATIVE-MASK']);
+    assert.deepEqual(segment.extra_material_refs, ['NATIVE-MASK', 'NATIVE-TRANSITION']);
     assert.deepEqual(segment.keyframe_refs, ['NATIVE-REF']);
     assert.ok(segment.common_keyframes.some(group => group.property_type === 'KFTypePositionX'));
   }

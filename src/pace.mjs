@@ -1,4 +1,4 @@
-import { CapcutError, allSegments } from './core.mjs';
+import { CapcutError, allSegments, seededId } from './core.mjs';
 import { principalTrack } from './polish.mjs';
 
 const US = s => Math.round(s * 1e6);
@@ -91,8 +91,18 @@ export function setSpeed(doc, seg, speed, { sourceStart = null } = {}) {
   st.start = newStart;
   st.duration = newDur;
   seg.speed = speed;
-  const sm = speedMaterial(doc, seg);
-  if (sm) { sm.speed = speed; sm.mode = 0; sm.curve_speed = null; }
+  let sm = speedMaterial(doc, seg);
+  if (!sm) {
+    // CapCut 9.4.0 resets a segment-only speed to 1x when saving the draft.
+    const id = seededId(seg.id, 'speed');
+    doc.materials.speeds ||= [];
+    sm = doc.materials.speeds.find(material => material.id === id);
+    if (!sm) { sm = { id, type: 'speed' }; doc.materials.speeds.push(sm); }
+    if (!(seg.extra_material_refs || []).includes(id)) {
+      seg.extra_material_refs = [...(seg.extra_material_refs || []), id];
+    }
+  }
+  sm.speed = speed; sm.mode = 0; sm.curve_speed = null;
   return { speed, clamped, source: [S(newStart), S(newStart + newDur)] };
 }
 

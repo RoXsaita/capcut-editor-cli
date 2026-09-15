@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { principalTrack } from './polish.mjs';
 import { assertOrigin } from './origin.mjs';
+import { setSpeed } from './pace.mjs';
 import {
   CapcutError, clone, seededId, allSegments, selectSegments, loadProject, loadPreset,
   expandHome, localizeMedia, stableJson, assetSearchRoots, preservedRange
@@ -1665,7 +1666,7 @@ function upsertScreenRecording(doc, op, context, screen) {
   recording.keyframe_refs = [];
   recording.common_keyframes = [];
   recording.enable_video_mask = false;
-  recording.speed = sourceDurationUs / durationUs;
+  setSpeed(doc, recording, sourceDurationUs / durationUs);
   recording.volume = 0;
   recording.source_take_id = material.source_take_id;
   recording.render_index = Number.isFinite(recording.render_index) ? recording.render_index : 2;
@@ -1717,7 +1718,8 @@ function buildScreenPip(doc, recording, source, circle, piece) {
   pip.source_timerange = clone(piece.source);
   pip.clip = clone(circle.subject.clip);
   pip.uniform_scale = { on: true, value: 1.0 };
-  pip.extra_material_refs = (source.segment.extra_material_refs || []).slice();
+  const transitions = new Set((doc.materials.transitions || []).map(material => material.id));
+  pip.extra_material_refs = (source.segment.extra_material_refs || []).filter(id => !transitions.has(id));
   delete pip.keyframe_refs;
   delete pip.common_keyframes;
   if (Object.prototype.hasOwnProperty.call(source.segment, SCREEN_ORIGINAL_KEYFRAME_REFS)) {

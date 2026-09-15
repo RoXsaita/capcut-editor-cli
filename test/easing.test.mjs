@@ -40,7 +40,7 @@ test('--ease writes FreeCurveInOut on ScaleX with harvested handle shape', () =>
   assert.equal(second.left_control.x, Math.round(FREE_CURVE_HANDLES.inX * span));
 });
 
-test('--ease leaves PositionX/Y as Line; --ease-position is gated UNVERIFIED', () => {
+test('--ease leaves PositionX/Y as Line; --ease-position writes the native round-tripped curve', () => {
   const s = clip('screen');
   opScaleKeyframe(doc(s), {
     selector: { id: s.id }, at: 1, hold: 1, ease: true,
@@ -58,9 +58,9 @@ test('--ease leaves PositionX/Y as Line; --ease-position is gated UNVERIFIED', (
   });
   const pos2 = s2.common_keyframes.find(k => k.property_type === 'KFTypePositionX').keyframe_list;
   assert.ok(pos2.every(k => k.curveType === 'FreeCurveInOut'));
-  assert.deepEqual(result.unverified, ['KFTypePositionX', 'KFTypePositionY']);
-  assert.match(result.warning, /UNVERIFIED/);
-  assert.match(result.warning, /curveType/);
+  assert.equal(result.verifiedIn, 'CapCut 9.4.0');
+  assert.equal(result.unverified, undefined);
+  assert.ok(pos2.every(k => k.graphID === ''));
 });
 
 test('applyFreeCurve matches freeCurveControls on neighbouring legs', () => {

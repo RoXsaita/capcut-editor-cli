@@ -1,7 +1,13 @@
 import test from 'node:test';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { pythonForTool } from '../src/python.mjs';
 import assert from 'node:assert/strict';
 import {
-  tokenize, sentencesFromWords, timelineSentence, textScore, scorePair,
+  loadBoxesAtTimes, tokenize, sentencesFromWords, timelineSentence, textScore, scorePair,
   alignMonotone, matchShots, shotsToSpec, writersAccept, MATCH_WRITER_OPS,
   SKIP_SCORE, DEFAULT_MIN_MARGIN,
 } from '../src/match.mjs';
@@ -239,6 +245,18 @@ test('--apply produces only ops the existing writers accept (dry-run path)', () 
   assert.ok(!spec.operations.some(op => !MATCH_WRITER_OPS.includes(op.op)));
 });
 
+test('shotsToSpec never places a flagged shot even if leftover ops remain', () => {
+  const spec = shotsToSpec({
+    shots: [
+      { decision: 'flag', ops: [{ op: 'layout.screen', media: '/screen.mp4', at: 1, duration: 2, src: 0 }] },
+      { decision: 'none', ops: [{ op: 'clip.add', media: '/screen.mp4', at: 2, duration: 1 }] },
+      { decision: 'place', ops: [{ op: 'layout.screen', media: '/screen.mp4', at: 4, duration: 2, src: 10 }] },
+    ],
+  });
+  assert.equal(spec.operations.length, 1);
+  assert.equal(spec.operations[0].at, 4);
+});
+
 test('alignMonotone skips a weak pair rather than forcing a match', () => {
   const { assignment } = alignMonotone(
     [{ id: 's0' }],
@@ -255,4 +273,28 @@ test('scorePair weights canvas above chat for the same tokens', () => {
   assert.ok(canvas.total > chat.total);
   assert.ok(chat.total < SKIP_SCORE);
   assert.ok(canvas.total > SKIP_SCORE);
+});
+
+// Exercise the real Python bridge: ordinary recordings exceed spawnSync's 1 MiB default.
+test('matcher reads OCR payloads larger than 1 MiB', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-match-ocr-'));
+  try {
+    const media = path.join(dir, 'screen.mp4');
+    execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=s=32x32:d=1', media]);
+    const tools = fileURLToPath(new URL('../tools', import.meta.url));
+    execFileSync(pythonForTool('find.py').executable, ['-c', [
+      'import sys,json',
+      'sys.path.insert(0,sys.argv[1])',
+      'import find',
+      'media,cache=sys.argv[2:]',
+      'boxes=[dict(text="label"*100,conf=0.9,x=0.1,y=0.2,w=0.3,h=0.1,region="canvas")]*300',
+      'record=find._ocr_record(media,find.source_token(media),1,{0:{"text":"labels","boxes":boxes}})',
+      'find.ocr_cache_path(media,cache_dir=cache).write_text(json.dumps(record))',
+    ].join(';'), tools, media, dir]);
+    const result = loadBoxesAtTimes(media, Array.from({ length: 10 }, (_, i) => i / 10), { cacheDir: dir });
+    assert.ok(JSON.stringify(result).length > 1024 * 1024);
+    assert.equal(result['0.9'].length, 300);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

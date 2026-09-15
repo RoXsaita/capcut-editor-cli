@@ -84,6 +84,40 @@ test('opRamp --result-at does not need a change sidecar', () => {
   assert.equal(d.tracks[1].segments.length, 2);
 });
 
+test('native 30fps ramp cut keeps the 20x wait contiguous with the 1x result after frame snapping', () => {
+  const d = doc(); d.fps = 30;
+  const s = d.tracks[1].segments[0];
+  s.source_timerange = { start: US(930), duration: US(20) };
+  s.target_timerange = { start: US(22.3), duration: US(0.9) };
+  d.materials.videos.find(m => m.id === s.material_id).duration = US(1400);
+  opRamp(d, { segment: 'b0', speed: 20, resultAt: 935.988822, settle: 0.5 });
+  const [wait, result] = d.tracks[1].segments;
+  assert.equal(result.target_timerange.start, 22533333);
+  assert.equal(result.source_timerange.start, 935500000);
+  assert.equal(wait.speed, 20);
+  assert.equal(wait.source_timerange.start + wait.source_timerange.duration, result.source_timerange.start);
+  assert.equal(wait.target_timerange.duration, 233333);
+  const waitMat = d.materials.speeds.find(m => (wait.extra_material_refs || []).includes(m.id));
+  const resultMat = d.materials.speeds.find(m => (result.extra_material_refs || []).includes(m.id));
+  assert.equal(waitMat.speed, 20);
+  assert.equal(resultMat.speed, 1);
+  assert.notEqual(waitMat.id, resultMat.id);
+});
+
+test('an unpaced wait keeps the slice source seam instead of jumping to the snapped split', () => {
+  const d = doc(); d.fps = 30;
+  const s = d.tracks[1].segments[0];
+  s.source_timerange = { start: US(930), duration: US(20) };
+  s.target_timerange = { start: US(22.3), duration: US(0.9) };
+  d.materials.videos.find(m => m.id === s.material_id).duration = US(1400);
+  opRamp(d, { segment: 'b0', speed: 1.01, resultAt: 935.988822, settle: 0.5 });
+  const [wait, result] = d.tracks[1].segments;
+  assert.equal(wait.source_timerange.start + wait.source_timerange.duration, result.source_timerange.start);
+  const waitImplied = wait.source_timerange.duration / wait.target_timerange.duration;
+  assert.ok(waitImplied > 20, waitImplied);
+  assert.ok(Math.abs(result.source_timerange.duration / result.target_timerange.duration - 1) < 0.02);
+});
+
 test('opRamp uses the first peak after quiet when moments are supplied', () => {
   const d = doc();
   const out = opRamp(d, {

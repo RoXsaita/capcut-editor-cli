@@ -163,6 +163,7 @@ test('opStressZoom writes a 1.08× Line push on the stressed word', () => {
   assert.ok(keys.length >= 4);
   assert.ok(keys.every(key => key.curveType === 'Line'));
   assert.ok(Math.abs(keys[1].values[0] - STRESS_SCALE) < 1e-9);
+  assert.equal(keys[1].time_offset, US(out.punches[0].at), 'peak lands on the word, not one ramp later');
 });
 
 test('--ease writes FreeCurveInOut on ScaleX/Y only', () => {

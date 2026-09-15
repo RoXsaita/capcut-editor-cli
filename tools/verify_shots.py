@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import tempfile
 from pathlib import Path
 
@@ -16,6 +17,10 @@ from frame_qa import contact_sheet, extract_frame
 
 def compose_strip(media, times, labels, out, tile_w=270):
     """Write a 1×N labelled PNG of source frames. ``times`` and ``labels`` align 1:1."""
+    if not times:
+        raise SystemExit("times must not be empty")
+    if tile_w <= 0:
+        raise SystemExit("tile width must be a positive pixel size")
     if len(times) != len(labels):
         raise SystemExit("times and labels must be the same length")
     out = str(Path(out).resolve())
@@ -39,7 +44,14 @@ def main(argv=None):
     parser.add_argument("--labels", help="comma-separated labels (default before,action,after)")
     parser.add_argument("--tile", type=int, default=270)
     args = parser.parse_args(argv)
-    times = [float(item) for item in str(args.times).split(",") if item.strip()]
+    try:
+        times = [float(item) for item in str(args.times).split(",") if item.strip()]
+    except ValueError:
+        parser.error("times must be comma-separated finite seconds")
+    if not times or any(not math.isfinite(t) or t < 0 for t in times):
+        parser.error("times must contain finite nonnegative seconds")
+    if args.tile <= 0:
+        parser.error("--tile must be a positive pixel width")
     labels = [item.strip() for item in str(args.labels).split(",")] if args.labels else (
         ["before", "action", "after"][:len(times)]
     )

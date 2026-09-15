@@ -1,6 +1,7 @@
 """Build a timestamped QA grid from an actual export, without compositing the draft."""
 import argparse
 import json
+import math
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -17,12 +18,24 @@ def main():
     parser.add_argument('--times')
     args = parser.parse_args()
     media = str(Path(args.media).resolve())
-    probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_format',
-                                               '-show_streams', '-of', 'json', media]))
-    duration = float(probe['format']['duration'])
-    times = ([float(t) for t in args.times.split(',')] if args.times else
-             [i * max(0, duration - .1) / 15 for i in range(16)])
-    if not times or len(times) > 128 or any(not 0 <= t < duration for t in times):
+    try:
+        probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-show_format',
+                                                   '-show_streams', '-of', 'json', media],
+                                                  timeout=60))
+    except (OSError, subprocess.CalledProcessError, json.JSONDecodeError, subprocess.TimeoutExpired) as error:
+        parser.error(f'could not probe export: {error}')
+    try:
+        duration = float((probe.get('format') or {}).get('duration'))
+    except (TypeError, ValueError):
+        duration = float('nan')
+    if not math.isfinite(duration) or duration <= 0:
+        parser.error('could not read a positive duration from the export')
+    try:
+        times = ([float(t) for t in args.times.split(',')] if args.times else
+                 [i * max(0, duration - .1) / 15 for i in range(16)])
+    except ValueError:
+        parser.error('times must contain 1-128 finite timestamps within the export')
+    if not times or len(times) > 128 or any(not math.isfinite(t) or not 0 <= t < duration for t in times):
         parser.error('times must contain 1-128 finite timestamps within the export')
     out = Path(args.out).resolve()
     if out == Path(media):

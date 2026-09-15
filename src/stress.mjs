@@ -359,7 +359,8 @@ export function opStressZoom(doc, op = {}, context = {}) {
       skipped.push({ ...hit, skipped: 'hidden face' });
       continue;
     }
-    const remaining = S(segment.target_timerange.start + segment.target_timerange.duration) - hit.at;
+    const moveAt = Math.max(S(segment.target_timerange.start), hit.at - ramp);
+    const remaining = S(segment.target_timerange.start + segment.target_timerange.duration) - moveAt;
     if (remaining < 2 * ramp) {
       skipped.push({ ...hit, skipped: 'too short for a push and return' });
       continue;
@@ -371,7 +372,7 @@ export function opStressZoom(doc, op = {}, context = {}) {
       / segment.target_timerange.duration;
     const st = segment.source_timerange || { start: 0, duration: segment.target_timerange.duration };
     const tt = segment.target_timerange;
-    const startUs = st.start + US((hit.at - S(tt.start)) * speed);
+    const startUs = st.start + US((moveAt - S(tt.start)) * speed);
     const endUs = startUs + US((2 * ramp + hold) * speed);
     try {
       assertNoDoublePunch(segment, startUs, endUs);
@@ -386,7 +387,7 @@ export function opStressZoom(doc, op = {}, context = {}) {
     const to = toIsAbsolute ? scale : from * STRESS_SCALE;
     const written = opScaleKeyframe(doc, {
       selector: { id: segment.id },
-      at: hit.at,
+      at: moveAt,
       ramp,
       to,
       hold,
@@ -397,6 +398,8 @@ export function opStressZoom(doc, op = {}, context = {}) {
     punches.push({
       ...hit,
       segment: segment.id,
+      moveAt: r3(moveAt),
+      arrivesAt: r3(moveAt + ramp),
       to: written.to,
       hold: written.hold,
       shape: written.shape,
