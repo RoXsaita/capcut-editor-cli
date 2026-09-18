@@ -11,6 +11,7 @@ import { opPolish, opCalloutSfx, opInteractions, principalTrack } from './polish
 import { opGradeApply, opGradeReset, opGradeLayer } from './grade.mjs';
 import { opPace } from './pace.mjs';
 import { opRamp } from './ramp.mjs';
+import { opReframe } from './reframe.mjs';
 import { opCursor } from './cursor.mjs';
 import { opPunch } from './punch.mjs';
 import { opStressZoom } from './stress.mjs';
@@ -2833,6 +2834,7 @@ export function applyOperations(doc, operations, context) {
     else if (op.op === 'polish.interactions') result = opInteractions(doc, op, context);
     else if (op.op === 'pace') result = opPace(doc, op, context);
     else if (op.op === 'ramp') result = opRamp(doc, op, context);
+    else if (op.op === 'reframe') result = opReframe(doc, op, context);
     else if (op.op === 'cursor') result = opCursor(doc, op, context);
     else if (op.op === 'punch') result = opPunch(doc, op, context);
     else if (op.op === 'zoom.stress') result = opStressZoom(doc, op, context);

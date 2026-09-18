@@ -659,6 +659,20 @@ export function opScaleKeyframe(doc, op) {
   const segment = entry?.segment;
   if (!segment) throw new CapcutError('keyframe: no segment matched.', { code: 'SELECTOR_EMPTY', exitCode: 2 });
   if (entry.track.type !== 'video') throw new CapcutError('Camera keyframes require a video overlay.', { code: 'NOT_VIDEO', exitCode: 2 });
+  if (op.path) {
+    if (segment.reverse || (doc.materials.common_mask||[]).some(m=>(segment.extra_material_refs||[]).includes(m.id))
+      || (doc.materials.speeds||[]).some(m=>(segment.extra_material_refs||[]).includes(m.id)&&m.curve_speed)) {
+      throw new CapcutError('Sampled camera paths require an unmasked forward constant-speed clip.', {code:'MOTION_MASK_UNSUPPORTED',exitCode:2});
+    }
+    const st = segment.source_timerange;
+    if (!Array.isArray(op.path) || !op.path.length || op.path.some((p,i)=>!Number.isFinite(p.t)
+      || !Array.isArray(p.v) || p.v.length!==4 || !p.v.every(Number.isFinite) || p.v[0]<=0 || p.v[1]<=0
+      || US(p.t)<st.start || US(p.t)>st.start+st.duration || (i && US(p.t)<=US(op.path[i-1].t)))) {
+      throw new CapcutError('Invalid sampled camera path.', {code:'BAD_MOTION_PATH',exitCode:2});
+    }
+    writeCameraPath(segment,op.path,{seed:op.__seed,ease:op.ease!==false});
+    return {changed:1,id:segment.id,keys:op.path.length};
+  }
   const owner = segment.screen_recording_id || segment.screenRecordingId || segment.id;
   const frames = allSegments(doc).map(e => e.segment).filter(s => segment.desc === 'layout:screen-recording' && s.desc === 'layout:screen-frame'
     && (s.screen_recording_id || s.screenRecordingId || s.layout_owner_id) === owner);

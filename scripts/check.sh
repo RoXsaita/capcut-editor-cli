@@ -153,6 +153,15 @@ else
     skip "vision ocr helper" "swiftc -O -o tools/vision/ocr tools/vision/ocr.swift"
 fi
 
+stage "vision face helper"
+if [ "$(uname -s)" != "Darwin" ]; then
+    printf 'SKIP vision face helper — macOS only\n'
+elif [ -x tools/vision/face ]; then
+    ok "built"
+else
+    skip "vision face helper" "swiftc -O -o tools/vision/face tools/vision/face.swift"
+fi
+
 printf '\n'
 if [ "$status" -ne 0 ]; then
     printf '\033[31mchecks failed\033[0m\n'

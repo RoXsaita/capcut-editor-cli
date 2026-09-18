@@ -150,3 +150,14 @@ survived a copy/delete/save cycle, doctor reported zero errors, and rerunning
 from the native-saved document succeeded. CapCut discards custom take/owner
 fields: ownership uses surviving `desc`, and sidecars can reattach through an
 exact recorded media path (never a basename guess).
+
+## Q05 face reframe evidence
+
+The on-device helper uses Vision's normalized top-left box convention, matching
+OCR (`y = 1 - maxY`). A disposable four-second square face fixture was sampled
+at 10 fps, reframed with constant scale and eased position keys, then rendered
+at 0, 1.5 and 3 seconds. Planning checks face visibility ≥95% and estimated
+headroom ≥3% on every sample; the estimate extends half a face height above the
+facial box to avoid treating eyebrows as the top of the head. Frame QA is still
+required. Existing camera animation, masked/rotated clips and non-1× speech
+are refused; 5 px synthetic wobble produces no keys.

@@ -214,6 +214,8 @@ Usage:
                                 scorecard + ASCII. --plan is read-only. --music generates
                                 a Lyria bed timed to picture changes and beat-aligned.
                                 --polish runs motivated polish. Voice is never recut.
+  capcutctl reframe --project NAME --segment ID | --auto [--plan] [--dry-run]
+                      — on-device face camera path; masked/existing moves are excluded.
   capcutctl cursor --project NAME --segment ID | --auto [--plan] [--dry-run]
                       — native telemetry halo; missing pointer samples are skipped.
   capcutctl music               --project NAME [--plan] [--regen] [--volume 0.08] [--prompt TEXT] [--file FILE] [--hits S[,S...]] [--offset S] [--width 64] [--json]
@@ -900,7 +902,7 @@ export async function main(argv, dependencies = {}) {
 
   const NEEDS_PROJECT = new Set([
     'inspect', 'doctor', 'snapshot', 'history', 'restore', 'sync', 'scenes',
-    'cursor', 'pace', 'ramp', 'punch', 'match', 'verify-shots', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
+    'reframe', 'cursor', 'pace', 'ramp', 'punch', 'match', 'verify-shots', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
     'replace-media', 'localize', 'trim', 'shift', 'remove', 'volume', 'fade', 'keyframe',
     'preview', 'diff', 'apply', 'timeline', 'finish', 'music', 'grade', 'loudness'
   ]);
@@ -1404,6 +1406,14 @@ export async function main(argv, dependencies = {}) {
     const view = renderTimeline(doc, { width: args.width ? Number(args.width) : 64 });
     if (args.json) return print(view, true);
     return print(view.text);
+  }
+  if (command === 'reframe') {
+    const op = { op:'reframe',segment:args.segment,auto:Boolean(args.auto) };
+    if (args.plan) {
+      const { planReframe } = await import('./reframe.mjs');
+      return print(planReframe(await loadWorking(projectDir),op,{projectDir}),true);
+    }
+    return print(applySpec(projectDir,{version:1,name:'reframe',operations:[op]},options),true);
   }
   if (command === 'cursor') {
     const op = { op: 'cursor', segment: args.segment, auto: Boolean(args.auto) };

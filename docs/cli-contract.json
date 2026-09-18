@@ -23,6 +23,7 @@
       "polish",
       "punch",
       "ramp",
+      "reframe",
       "remove",
       "replace-media",
       "restore",
@@ -559,6 +560,16 @@
         "--settle",
         "--speed",
         "--track"
+      ],
+      "transactional": true
+    },
+    "reframe": {
+      "options": [
+        "--auto",
+        "--dry-run",
+        "--plan",
+        "--project",
+        "--segment"
       ],
       "transactional": true
     },
