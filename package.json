@@ -25,6 +25,7 @@
     "!presets/harvest.json",
     "tools/*.py",
     "tools/vision/ocr.swift",
+    "tools/vision/face.swift",
     "pyproject.toml",
     "LICENSE",
     "NOTICE",
