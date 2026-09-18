@@ -1,6 +1,6 @@
 # Q-wave: features that change how agent videos look and sound
 
-**Status:** ready to execute · **Date:** 2026-09-18 · **Repos:** `cli` (this one) + companion `capcut-skills`  
+**Status:** implemented except Q04 harvest gate · **Updated:** 2026-09-19 · **Repos:** `cli` (this one) + companion `capcut-skills`
 **Audience:** subsequent agents implementing one feature at a time.
 
 This spec is the filtered remainder of a CapCut-v9 deep-research report, crossed with
@@ -11,6 +11,39 @@ The report’s headline architectural finding is already implemented. Most of it
 “new CapCut primitives” would not raise the quality of *these* videos. The ceiling
 is still: **the right picture at the right word, motion that does not look like a
 tween, and a mix where speech wins.**
+
+## Execution status — 2026-09-19
+
+| Feature | Status | CLI / companion skills commit |
+|---|---|---|
+| Q00 matcher workflow | Complete | skills `0c226d8` |
+| Q01 default easing | Complete | `7f34771` / `8516b54` |
+| QI1 oracle harness | Complete | `879fe53`, `34ade45` |
+| Q02 native music duck | Complete; native controls and saved keys verified | `887b0fd` / `58ea4ba` |
+| Q03 telemetry halo | Complete; native alignment and saved keys verified | `221d27f` / `1c419b1` |
+| Q04 rectangle spotlight | **Not implemented: geometry harvest awaiting approval** | Feather/corner measurements in [oracle evidence](../oracle.md#q04-rectangle-measurements--harvest-incomplete) |
+| Q05 face reframe | Complete; composed-frame face/headroom checks | `72bc360` / `b3c3ed6` |
+| Q06 optional blur | Complete; native full-frame derivative and recovery verified | `cd36d75` / `5612fad` |
+| Q07 measured denoise | Complete; video bytes and native timing preserved | `2e88866` / `1f9c00f` |
+
+CLI strict checks pass with 483 Node tests, Python self-tests, lint and both Vision
+helpers. Companion contract validation and all 13 validator regressions pass.
+[Oracle evidence](../oracle.md) records the native checks and their limits.
+No final export was initiated. The independent motion-graphics skill work was
+preserved.
+
+Q04 remains a real gate: its old harvest brief prohibits geometry edits, and
+automatic approval review rejected the nonzero geometry pass required here. An
+explicit approval request for the disposable measurement is pending. No mask
+writer has been added. The completed feather/corner harvest alone cannot prove
+position units.
+
+The sections below retain the original design rationale; claims about missing
+features describe the pre-wave baseline. Q03 subsequently taught frame QA to
+solve native eased curves, replacing the linear proxy described under Q01.
+The invariant that Q07 “refuse the principal track” is read as refusing **retiming**
+it: Q07 explicitly requires cleaning that track's audio while copying video and
+preserving every source window at 1×.
 
 ## How to use this spec
 

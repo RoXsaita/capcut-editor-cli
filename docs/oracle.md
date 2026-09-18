@@ -192,3 +192,44 @@ exactly; the original path and offset survived in the sidecar. An initial
 250,000 µs test start (half a 30 fps frame) was normalized by CapCut to 266,666 µs.
 This is native frame snapping, not denoise retiming. Native doctor reported no
 errors; two generated-fixture B-roll sidecar checks were skipped.
+
+Q06 also opened in CapCut 9.4.0: the moving test pointer showed a visible blur
+trail while the stationary frame remained sharp. After copy/delete/save, its
+source and target remained exactly 0–1,000,000 µs at native speed 1.0, and
+recovery metadata survived in the sidecar.
+
+## Q04 rectangle measurements — harvest incomplete
+
+Disposable native project `0919`, CapCut 9.4.0, 640×360 video. Each setting below
+was read in the UI immediately after entry, then saved/quit and captured. The
+record is `materials.common_mask`, `resource_type: rectangle`.
+
+| Capture | UI setting | Saved field | Exact saved value |
+|---|---|---|---|
+| `b-rect-default` | Feather 0, default | `config.feather` | `0.0` |
+| `c-feather-0` | Feather 0 | `config.feather` | `0.0` |
+| `c-feather-25` | Feather 25 | `config.feather` | `0.25` |
+| `c-feather-50` | Feather 50 | `config.feather` | `0.5` |
+| `c-feather-100` | Feather 100 | `config.feather` | `1.0` |
+| `d-corner-0` | Round corners 0 | `config.roundCorner` | `0.0` |
+| `d-corner-max` | Round corners 100, slider maximum | `config.roundCorner` | `1.0` |
+
+Corner passes retained feather 100. The untouched geometry controls showed
+X 0, Y 0, width 179, height 180 and rotation 0; saved values were `centerX: 0.0`,
+`centerY: 0.0`, `width: 0.28`, `height: 0.5`, `rotation: 0.0`. `invert` is boolean
+`false`. An unlabelled invert-style icon was visible, but its action has not been
+verified. Width/height/position controls exist and were not changed.
+
+On reopening, the feather/corner numeric controls sometimes displayed zero even
+though the saved values and softened preview persisted. The table uses the
+readings immediately after setting the controls, not those stale reopen readings.
+
+**Q04 does not ship yet.** A nonzero position/size pass is needed to establish the
+source-pixel conversion. The older harvest brief forbids changing those controls;
+automatic approval review rejected that pass. The requested disposable pass is
+X=64, Y=36, width=320, height=180, feather=4, corners=20. Until explicitly approved,
+no geometry writer or guessed coordinate conversion is installed.
+
+The raw captures remain in the disposable project. Desktop diffs are
+`oracle-mask-created.json`, `oracle-mask-c-feather-{0,25,50,100}.json`,
+`oracle-mask-d-corner-0.json` and `oracle-mask-d-corner-max.json`.
