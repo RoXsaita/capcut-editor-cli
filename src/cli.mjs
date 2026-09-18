@@ -215,6 +215,8 @@ Usage:
                                 a Lyria bed timed to picture changes and beat-aligned.
                                 --polish runs motivated polish. Voice is never recut.
   capcutctl music               --project NAME [--plan] [--regen] [--volume 0.08] [--prompt TEXT] [--file FILE] [--hits S[,S...]] [--offset S] [--width 64] [--json]
+                                --duck [--under-db 12] [--attack-ms 120] [--release-ms 380] [--min-gap-ms 450]
+                                [--track N] [--words FILE] ducks an existing bed from speech indexes; --plan writes nothing.
                                 supply a video-specific brief or local music; saved briefs survive later runs
                                 --hits selects emphasis times; --offset overrides music shift (−0.4..0.4s).
                                 --plan --json measures a local file and reports beats/alignment without writes.
@@ -276,7 +278,7 @@ export function parseArgs(argv) {
     const key = token.slice(2).replace(/-([a-z])/g, (_, char) => char.toUpperCase());
     if (['json', 'dryRun', 'forceRunning', 'noBackup', 'help', 'noOverlay', 'blank', 'includeTemplate', 'newTimelineId',
          'transcript', 'noTransitions', 'noSeam', 'auto', 'plan', 'noSfx', 'noZoom', 'retime', 'localize',
-         'noLocalize', 'motivated', 'regen', 'music', 'noMusic', 'polish', 'noInteractions',
+         'noLocalize', 'motivated', 'regen', 'music', 'noMusic', 'polish', 'noInteractions', 'duck',
          'waitForClose', 'force', 'reindex', 'noRepair', 'inPlace',
          'generated', 'allowEphemeral', 'measure', 'apply', 'native', 'noCache', 'noGrade',
          'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'noEase', 'easePosition', 'stress', 'allowBoost', 'values',
@@ -1400,6 +1402,22 @@ export async function main(argv, dependencies = {}) {
     const view = renderTimeline(doc, { width: args.width ? Number(args.width) : 64 });
     if (args.json) return print(view, true);
     return print(view.text);
+  }
+  if (command === 'music' && !args.duck && ['underDb', 'attackMs', 'releaseMs', 'minGapMs', 'words'].some(key => args[key] != null)) {
+    throw new CapcutError('Ducking controls require music --duck.', { code: 'MUSIC_OPTIONS', exitCode: 2 });
+  }
+  if (command === 'music' && args.duck) {
+    if (['file', 'prompt', 'regen', 'volume', 'hits', 'offset'].some(key => args[key] != null)) {
+      throw new CapcutError('Use music --duck on the existing bed separately from music generation/placement flags.', { code: 'MUSIC_OPTIONS', exitCode: 2 });
+    }
+    const op = { op: 'music', duck: true, track: await trackIndex(projectDir, args.track),
+      ...(args.words ? { wordsFile: path.resolve(args.words) } : {}) };
+    for (const key of ['underDb', 'attackMs', 'releaseMs', 'minGapMs']) if (args[key] != null) op[key] = Number(args[key]);
+    if (args.plan) {
+      const { planDuckMusic } = await import('./duck.mjs');
+      return print(planDuckMusic(await loadWorking(projectDir), op, { projectDir }), true);
+    }
+    return print(applySpec(projectDir, { version: 1, name: 'music-duck', operations: [op] }, options), true);
   }
   if (command === 'finish' || command === 'music') {
     const { assertFirstPictureProof, finishScorecard, finishText } = await import('./finish.mjs');

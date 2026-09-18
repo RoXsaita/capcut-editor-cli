@@ -105,3 +105,33 @@ path missed a group, not a reason to add a third mirror.
 - **No verdict on fields we did not write.** The diff reports what moved between the two
   captures; a record CapCut rewrites on every save will show up every time, which is
   information about CapCut, not about your change.
+
+## Q02 volume automation evidence — CapCut 9.4.0
+
+Native UI authoring on 2026-09-19 resolved the static-gain interaction:
+
+| UI action | Saved `KFTypeVolume` value |
+|---|---|
+| Set clip to −20 dB, add first key | `0.10000000149011612` |
+| Set second key to −32 dB | `0.025118863210082054` |
+
+`segment.volume` became the last edited value. Key values are **absolute linear
+amplitudes**, not multipliers on that field. Source microseconds and the harvested
+`Line` curve are preserved in `presets/volume-keyframes.json`.
+
+A separate eight-second disposable project used an existing 0.08 music bed with
+0.4/1.2-second fades and synthetic speech intervals 1–2, 2.2–3, and 5–6 seconds.
+`music --duck --words` generated ten keys. Native UI readings were:
+
+| Timeline time | Volume shown |
+|---|---|
+| 0 seconds | −21.9 dB |
+| 1.5 seconds, inside speech | −33.9 dB |
+| 4.033 seconds, pause | −21.9 dB |
+
+After copying/deleting a temporary second clip to dirty the project, saving, and
+quitting, `cli-written` and `native-saved` captures had identical volume blocks
+(including ids, times, and values) in both root and active timeline. Original fade
+records also matched exactly. Doctor reported zero errors; two B-roll checks were
+skipped because the generated test pattern has no change/transcript sidecars.
+This verifies the native controls and saved JSON; no export or listening claim.

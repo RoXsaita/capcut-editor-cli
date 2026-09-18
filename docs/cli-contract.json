@@ -370,17 +370,24 @@
     },
     "music": {
       "options": [
+        "--attack-ms",
         "--dry-run",
+        "--duck",
         "--file",
         "--hits",
         "--json",
+        "--min-gap-ms",
         "--offset",
         "--plan",
         "--project",
         "--prompt",
         "--regen",
+        "--release-ms",
+        "--track",
+        "--under-db",
         "--volume",
-        "--width"
+        "--width",
+        "--words"
       ],
       "transactional": true
     },

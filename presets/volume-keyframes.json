@@ -6,6 +6,8 @@
   "units": {
     "kind": "linear-amplitude",
     "note": "NOT decibels. value = 10 ** (dB / 20). Measured: 0 dB -> 1, -12 dB -> 0.25118863582611084 (float32 of 10**-0.6).",
+    "application": "absolute-gain",
+    "nonUnityProbe": "CapCut 9.4.0 on 2026-09-19: set clip volume to -20 dB, then author keys at -20/-32 dB. Key values were 0.10000000149011612 and 0.025118863210082054; segment.volume became the last edited value 0.025118863210082054. Keys replace the static gain; they are not multipliers on it.",
     "fullScale": 1,
     "silence": 0
   },
