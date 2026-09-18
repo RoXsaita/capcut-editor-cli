@@ -113,7 +113,7 @@ export function persistMaterialSourceMapping(projectDir, {
   if (!projectDir || !materialId || !localizedPath || !originalPath) return null;
   const localized = canonicalMediaPath(localizedPath);
   const original = canonicalMediaPath(originalPath);
-  if (localized === original) return null;
+  if (localized === original && origin !== 'derived') return null;
   const file = path.join(projectDir, MEDIA_MAP_RELATIVE);
   const map = readMediaMap(projectDir);
   map.version = 1;
@@ -153,7 +153,8 @@ export function recordMediaProvenance(context, record = {}) {
   if (!context?.projectDir || context.dryRun) return null;
   const source = record.originalPath || record.sourcePath;
   const localized = record.localizedPath || record.destination;
-  if (!record.materialId || !source || !localized || canonicalMediaPath(source) === canonicalMediaPath(localized)) return null;
+  if (!record.materialId || !source || !localized
+    || (canonicalMediaPath(source) === canonicalMediaPath(localized) && record.origin !== 'derived')) return null;
   const normalized = {
     ...record,
     projectDir: context.projectDir,

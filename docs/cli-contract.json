@@ -6,6 +6,7 @@
     "commands": [
       "add",
       "apply",
+      "blur-broll",
       "cursor",
       "endcard",
       "fade",
@@ -68,6 +69,15 @@
         "--no-backup",
         "--project",
         "--spec"
+      ],
+      "transactional": true
+    },
+    "blur-broll": {
+      "options": [
+        "--dry-run",
+        "--plan",
+        "--project",
+        "--segment"
       ],
       "transactional": true
     },

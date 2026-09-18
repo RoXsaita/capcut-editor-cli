@@ -39,7 +39,7 @@ const SUBCOMMAND_PARENTS = new Set(['layout', 'oracle']);
 export const TRANSACTIONAL_COMMANDS = Object.freeze([
   'add', 'apply', 'endcard', 'fade', 'grade', 'keyframe', 'layout', 'localize', 'logo', 'music',
   'new', 'pace', 'polish', 'punch', 'match', 'ramp', 'remove', 'replace-media', 'restore', 'rm', 'shift', 'sync',
-  'reframe', 'cursor', 'trim', 'volume', 'wrap', 'zoom', 'finish', 'loudness',
+  'blur-broll', 'reframe', 'cursor', 'trim', 'volume', 'wrap', 'zoom', 'finish', 'loudness',
 ]);
 
 const OPTION = /--[a-z][a-z0-9-]*/g;

@@ -278,7 +278,7 @@ export function annotateMediaSource(material, segment, originalPath, localizedPa
   if (localized !== original) material.original_path = original;
   else delete material.original_path;
   if (segment) segment.source_take_id = takeId;
-  if (localized !== original) {
+  if (localized !== original || origin?.kind === 'derived') {
     recordMediaProvenance(context, {
       materialId: material.id,
       originalPath: original,

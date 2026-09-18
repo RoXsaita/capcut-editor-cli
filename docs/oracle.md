@@ -161,3 +161,13 @@ headroom ≥3% on every sample; the estimate extends half a face height above th
 facial box to avoid treating eyebrows as the top of the head. Frame QA is still
 required. Existing camera animation, masked/rotated clips and non-1× speech
 are refused; 5 px synthetic wobble produces no keys.
+
+## Q06 derived motion blur evidence
+
+A disposable 8× recording slot produced a full-frame 640×360 derivative with
+30 frames at 30 fps and exactly one second duration. Both draft authorities
+retained the one-second slot, recorded the original source and offset, and reset
+native speed to 1 with no speed curve. Doctor reported zero errors and warnings.
+The implementation uses FFmpeg motion interpolation plus temporal mixing;
+`pace --auto` never enables it. Original media and the transaction snapshot remain
+available to recover the pre-blur edit.
