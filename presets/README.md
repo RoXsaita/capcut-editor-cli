@@ -10,6 +10,7 @@ JSON the CLI clones from instead of inventing CapCut objects.
 | `brands.json` | spoken aliases → path to a **local** transparent raster |
 | `adjust.json` | CapCut's Adjust-panel effect template that `grade` fills in (harvested, not invented) |
 | `adjust-layer.json` | harvested Custom adjustment lane that `grade --layer` clones |
+| `volume-keyframes.json` | harvested `KFTypeVolume` block + its units/time base, for `music --duck` |
 | `blank-draft.json` | the empty 1080×1920 draft `new --blank` starts from |
 | `suheil-vertical.json` | 1080×1920 house-style contract (documentation; not a renderer) |
 
