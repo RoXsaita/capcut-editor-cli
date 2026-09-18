@@ -171,3 +171,24 @@ native speed to 1 with no speed curve. Doctor reported zero errors and warnings.
 The implementation uses FFmpeg motion interpolation plus temporal mixing;
 `pace --auto` never enables it. Original media and the transaction snapshot remain
 available to recover the pre-blur edit.
+
+## Q07 voice cleanup evidence
+
+A four-second synthetic noisy take (speech represented by a two-second tone)
+measured a −51 dB pause floor in its energy10 index. The explicit `denoise` pass
+uses FFmpeg `afftdn` spectral noise reduction as the local equivalent of `arnndn`,
+with 12 dB reduction and noise-floor tracking. It applies no normalization or
+second voice grade. The resulting pause measured −53.6 dB; edited voice loudness
+was −26.3 LUFS before and −26.4 LUFS after. Compressed video stream SHA-256 hashes
+matched exactly. Source windows, native 1× speed, gains and fade references were
+unchanged by the transaction; plan/dry-run left all project file hashes unchanged.
+Doctor passed with zero errors and warnings before native save. CapCut opened the
+replacement and a repeated plan reported `already-denoised`. Native save strips
+custom fields, so the original path and zero offset also live in `media-map.json`.
+
+A second save used a frame-aligned 300,000 µs source start and 3,500,000 µs
+source/target duration. All three values and speed 1.0 survived native save
+exactly; the original path and offset survived in the sidecar. An initial
+250,000 µs test start (half a 30 fps frame) was normalized by CapCut to 266,666 µs.
+This is native frame snapping, not denoise retiming. Native doctor reported no
+errors; two generated-fixture B-roll sidecar checks were skipped.

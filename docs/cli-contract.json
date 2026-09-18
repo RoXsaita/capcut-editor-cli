@@ -8,6 +8,7 @@
       "apply",
       "blur-broll",
       "cursor",
+      "denoise",
       "endcard",
       "fade",
       "finish",
@@ -129,6 +130,14 @@
         "--trim-beat"
       ],
       "transactional": false
+    },
+    "denoise": {
+      "options": [
+        "--dry-run",
+        "--plan",
+        "--project"
+      ],
+      "transactional": true
     },
     "diff": {
       "options": [

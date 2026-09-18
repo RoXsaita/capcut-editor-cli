@@ -214,6 +214,8 @@ Usage:
                                 scorecard + ASCII. --plan is read-only. --music generates
                                 a Lyria bed timed to picture changes and beat-aligned.
                                 --polish runs motivated polish. Voice is never recut.
+  capcutctl denoise --project NAME [--plan] [--dry-run]
+
   capcutctl blur-broll --project NAME --segment ID [--plan] [--dry-run]
                       — opt-in motion-compensated mix for muted B-roll already at ≥8x.
   capcutctl reframe --project NAME --segment ID | --auto [--plan] [--dry-run]
@@ -904,7 +906,7 @@ export async function main(argv, dependencies = {}) {
 
   const NEEDS_PROJECT = new Set([
     'inspect', 'doctor', 'snapshot', 'history', 'restore', 'sync', 'scenes',
-    'blur-broll', 'reframe', 'cursor', 'pace', 'ramp', 'punch', 'match', 'verify-shots', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
+    'denoise', 'blur-broll', 'reframe', 'cursor', 'pace', 'ramp', 'punch', 'match', 'verify-shots', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
     'replace-media', 'localize', 'trim', 'shift', 'remove', 'volume', 'fade', 'keyframe',
     'preview', 'diff', 'apply', 'timeline', 'finish', 'music', 'grade', 'loudness'
   ]);
@@ -1408,6 +1410,11 @@ export async function main(argv, dependencies = {}) {
     const view = renderTimeline(doc, { width: args.width ? Number(args.width) : 64 });
     if (args.json) return print(view, true);
     return print(view.text);
+  }
+  if (command === 'denoise') {
+    const op={op:'denoise'};
+    if(args.plan){const {planDenoise}=await import('./denoise.mjs');return print(planDenoise(await loadWorking(projectDir),op,{projectDir}),true);}
+    return print(applySpec(projectDir,{version:1,name:'denoise',operations:[op]},options),true);
   }
   if (command === 'blur-broll') {
     const op={op:'blur-broll',segment:args.segment};
