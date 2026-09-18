@@ -416,7 +416,8 @@
         "--label",
         "--out",
         "--project",
-        "--resource-noop"
+        "--resource-noop",
+        "--values"
       ],
       "subcommands": [
         "capture",

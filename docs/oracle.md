@@ -70,6 +70,21 @@ segments, materials, masks — and every file.
 `authority-miss` or `resource-noop` record means the field is not production-safe. Do not
 ship it. Do not "fix" it by writing the field harder.**
 
+## Reading an unknown field off a real write
+
+Verdicts tell you whether a record survived. A **harvest** needs the record itself — the
+property name, the units, the `curveType`, whether a companion material came with it. Pass
+`--values` and each finding carries its own before/after JSON:
+
+```bash
+capcutctl oracle diff --before A --after B --values
+```
+
+That is how you learn what CapCut writes for a field we have never written. Capture before
+you touch the app, author the thing by hand in CapCut, capture again, and read the new
+records out of the diff. Clone what comes back into `presets/`; never retype it from a
+screenshot, and never fill in a field the diff did not show you.
+
 `resource-noop` is the one verdict JSON cannot see. If the record survives intact but the
 frame does not change, that is a `qa` finding, and you hand it in:
 

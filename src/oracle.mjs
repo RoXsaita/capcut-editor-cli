@@ -158,7 +158,7 @@ export function classifyRecord({ before, after, baseline = null, beforeText = nu
  * Compare two captures. `before` is what we wrote (B); `after` is what came back out of
  * CapCut (C). Everything here is read-only.
  */
-export function diffCaptures({ before, after, baseline = null, resourceNoop = [] } = {}) {
+export function diffCaptures({ before, after, baseline = null, resourceNoop = [], values = false } = {}) {
   const beforeDir = treeRoot(before), afterDir = treeRoot(after);
   const baselineDir = baseline ? treeRoot(baseline) : null;
   const beforeFiles = new Set(walkTree(beforeDir)), afterFiles = new Set(walkTree(afterDir));
@@ -201,7 +201,12 @@ export function diffCaptures({ before, after, baseline = null, resourceNoop = []
         beforeText: b && a ? beforeRaw : null, afterText: b && a ? afterRaw : null,
       });
       if (result.verdict === 'preserved') continue;        // the quiet, expected case
-      findings.push({ file: relative, id, kind: (a || b).kind, path: (a || b).path, ...result });
+      findings.push({
+        file: relative, id, kind: (a || b).kind, path: (a || b).path, ...result,
+        // A harvest wants the record itself, not a verdict about it: this is how the shape
+        // of an unknown field (its property name, units, curveType) actually gets read off.
+        ...(values ? { before: b ? b.value : null, after: a ? a.value : null } : {}),
+      });
     }
   }
 

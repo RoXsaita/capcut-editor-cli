@@ -170,6 +170,23 @@ test('capture copies the whole tree and skips our own bookkeeping', () => {
   assert.throws(() => captureProject(project, { label: 'before-open' }), { code: 'ORACLE_CAPTURE_EXISTS' });
 });
 
+test('--values carries the record JSON, which is the whole point of a harvest', () => {
+  const before = tmp(), after = tmp();
+  write(before, 'draft_info.json', draft({ keyframes: false }));
+  write(after, 'draft_info.json', draft());
+
+  const bare = findingFor(diffCaptures({ before, after }), 'kf-block-volume');
+  assert.equal(bare.verdict, 'materialized-cache');
+  assert.equal(bare.after, undefined, 'the default report is verdicts, not payloads');
+
+  const full = findingFor(diffCaptures({ before, after, values: true }), 'kf-block-volume');
+  assert.equal(full.before, null, 'the block did not exist before');
+  assert.equal(full.after.property_type, 'KFTypeVolume');
+  assert.equal(full.after.keyframe_list.length, 2);
+  assert.deepEqual(full.after.keyframe_list[1].values, [0.02],
+    'a harvest reads units off the record, so the values have to be in the report');
+});
+
 test('canonicalize separates reserialisation from a real change', () => {
   assert.equal(JSON.stringify(canonicalize({ b: 1, a: 2 })), JSON.stringify(canonicalize({ a: 2, b: 1 })));
   assert.equal(canonicalize(0.1 + 0.2), canonicalize(0.3), 'float noise is not a change');

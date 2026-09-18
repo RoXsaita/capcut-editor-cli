@@ -135,7 +135,7 @@ Usage:
   capcutctl contract [--json]                  — the machine-readable command/option surface
                                                  the skills repo validates its docs against
   capcutctl oracle capture --project NAME [--label SLUG] [--out DIR]
-  capcutctl oracle diff --before DIR --after DIR [--baseline DIR] [--resource-noop ID[,ID…]] [--json]
+  capcutctl oracle diff --before DIR --after DIR [--baseline DIR] [--values] [--resource-noop ID[,ID…]] [--json]
                     — dev-only round-trip sanitation harness. JSON that parses can still
                       no-op in CapCut: 'capture' copies a WHOLE project directory (root,
                       Timelines/**, draft_meta_info.json, template-2.tmp and any cache the
@@ -145,6 +145,8 @@ Usage:
                       exits non-zero otherwise. Neither writes into a draft, and neither
                       drives the CapCut UI — a human captures the directories. Run this on a
                       DISPOSABLE copy before claiming a new field is production-safe.
+                      --values includes each record's before/after JSON, which is how the
+                      shape of an unknown field gets read off a real CapCut write.
                       See docs/oracle.md.
 
   capcutctl scenes --project NAME_OR_PATH [--track N] [--transcript] [--name SUBSTR]
@@ -277,7 +279,7 @@ export function parseArgs(argv) {
          'noLocalize', 'motivated', 'regen', 'music', 'noMusic', 'polish', 'noInteractions',
          'waitForClose', 'force', 'reindex', 'noRepair', 'inPlace',
          'generated', 'allowEphemeral', 'measure', 'apply', 'native', 'noCache', 'noGrade',
-         'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'noEase', 'easePosition', 'stress', 'allowBoost',
+         'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'noEase', 'easePosition', 'stress', 'allowBoost', 'values',
          'faceDetail'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
@@ -732,6 +734,7 @@ export async function main(argv, dependencies = {}) {
       const report = oracle.diffCaptures({
         before: args.before, after: args.after, baseline: args.baseline || null,
         resourceNoop: args.resourceNoop ? String(args.resourceNoop).split(',').map(s => s.trim()).filter(Boolean) : [],
+        values: Boolean(args.values),
       });
       // A pruned / reset / authority-miss / resource-noop record is not a passing round
       // trip, and the exit code has to say so or the harness is decoration.
