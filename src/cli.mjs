@@ -134,6 +134,18 @@ Usage:
   capcutctl init-spec [--output FILE]
   capcutctl contract [--json]                  — the machine-readable command/option surface
                                                  the skills repo validates its docs against
+  capcutctl oracle capture --project NAME [--label SLUG] [--out DIR]
+  capcutctl oracle diff --before DIR --after DIR [--baseline DIR] [--resource-noop ID[,ID…]] [--json]
+                    — dev-only round-trip sanitation harness. JSON that parses can still
+                      no-op in CapCut: 'capture' copies a WHOLE project directory (root,
+                      Timelines/**, draft_meta_info.json, template-2.tmp and any cache the
+                      app materialises), 'diff' classifies what a CapCut open/save did to it
+                      as preserved | normalized | materialized-cache | pruned | reset |
+                      authority-miss | resource-noop. Only the first three are success; it
+                      exits non-zero otherwise. Neither writes into a draft, and neither
+                      drives the CapCut UI — a human captures the directories. Run this on a
+                      DISPOSABLE copy before claiming a new field is production-safe.
+                      See docs/oracle.md.
 
   capcutctl scenes --project NAME_OR_PATH [--track N] [--transcript] [--name SUBSTR]
   capcutctl layout split-screen --project NAME_OR_PATH --segments IDS|--at SECONDS [--track N] [--no-overlay] [--dry-run]
@@ -703,6 +715,31 @@ export async function main(argv, dependencies = {}) {
   if (!command || args.help || command === 'help') return print(HELP);
   await validateOptions(command, args);
   const root = args.root ? path.resolve(args.root) : DEFAULT_ROOT;
+
+  if (command === 'oracle') {
+    // Dev-only and non-transactional: `capture` copies a project tree somewhere else and
+    // `diff` only reads. Neither goes through applySpec, because neither edits a draft.
+    const oracle = await import('./oracle.mjs');
+    const sub = args._[1];
+    if (sub === 'capture') {
+      const projectDir = resolveProject(args.project, root);
+      return print(oracle.captureProject(projectDir, { out: args.out, label: args.label || 'capture' }), true);
+    }
+    if (sub === 'diff') {
+      if (!args.before || !args.after) {
+        throw new CapcutError('oracle diff requires --before DIR --after DIR.', { code: 'ORACLE_ARGS', exitCode: 2 });
+      }
+      const report = oracle.diffCaptures({
+        before: args.before, after: args.after, baseline: args.baseline || null,
+        resourceNoop: args.resourceNoop ? String(args.resourceNoop).split(',').map(s => s.trim()).filter(Boolean) : [],
+      });
+      // A pruned / reset / authority-miss / resource-noop record is not a passing round
+      // trip, and the exit code has to say so or the harness is decoration.
+      if (!report.ok) process.exitCode = 1;
+      return print(report, true);
+    }
+    throw new CapcutError('oracle takes `capture` or `diff`.', { code: 'ORACLE_ARGS', exitCode: 2 });
+  }
 
   if (command === 'layout' && args._[1] === 'list') {
     const { presets } = await import('./layouts.mjs');

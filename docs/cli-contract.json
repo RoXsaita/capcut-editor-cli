@@ -407,6 +407,23 @@
       ],
       "transactional": true
     },
+    "oracle": {
+      "options": [
+        "--after",
+        "--baseline",
+        "--before",
+        "--json",
+        "--label",
+        "--out",
+        "--project",
+        "--resource-noop"
+      ],
+      "subcommands": [
+        "capture",
+        "diff"
+      ],
+      "transactional": false
+    },
     "pace": {
       "options": [
         "--at",

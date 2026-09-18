@@ -22,8 +22,8 @@ import { HELP } from './cli.mjs';
  */
 export const CONTRACT_VERSION = 1;
 
-/** The only command that dispatches on a positional subcommand (`args._[1]`). */
-const SUBCOMMAND_PARENTS = new Set(['layout']);
+/** Commands that dispatch on a positional subcommand (`args._[1]`). */
+const SUBCOMMAND_PARENTS = new Set(['layout', 'oracle']);
 
 /**
  * Commands that mutate a project through the transaction machinery. These are the ones
