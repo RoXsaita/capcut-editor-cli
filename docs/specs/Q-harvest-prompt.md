@@ -52,9 +52,21 @@ which capcutctl || ls -l ~/.local/bin/capcutctl
 DRAFTS="$HOME/Movies/CapCut/User Data/Projects/com.lveditor.draft"
 ls "$DRAFTS" | head
 
-# 3. Report the CapCut version — we need to know which build these answers describe.
-defaults read /Applications/CapCut.app/Contents/Info.plist CFBundleShortVersionString
+# 3. Confirm the CapCut app itself is visible from where you are running. This is a GATE:
+#    if the app is not here, you are not on the machine that matters and cannot do this task.
+ls -d /Applications/CapCut.app || echo "MISSING — stop and report"
+
+# 4. Report the CapCut version. INFORMATIONAL ONLY — if all three of these fail, note that
+#    and carry on; it does not block the experiments.
+plutil -extract CFBundleShortVersionString raw /Applications/CapCut.app/Contents/Info.plist \
+  || defaults read /Applications/CapCut.app/Contents/Info CFBundleShortVersionString \
+  || plutil -p /Applications/CapCut.app/Contents/Info.plist | grep -i version
 ```
+
+**On stopping.** Rule 4 below means: never invent a value, and never work around a step in
+the *experiments*. It does not mean a failed setup diagnostic ends the session. If a setup
+command fails, try the alternatives given, note what happened, and continue — unless step 3
+fails, which is a real gate.
 
 **Finding the project you just made.** CapCut names new projects automatically (usually
 today's date, like `0918`) and renaming one in the UI does not reliably rename its folder
