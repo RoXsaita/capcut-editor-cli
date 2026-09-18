@@ -6,6 +6,7 @@
     "commands": [
       "add",
       "apply",
+      "cursor",
       "endcard",
       "fade",
       "finish",
@@ -85,6 +86,16 @@
         "--json"
       ],
       "transactional": false
+    },
+    "cursor": {
+      "options": [
+        "--auto",
+        "--dry-run",
+        "--plan",
+        "--project",
+        "--segment"
+      ],
+      "transactional": true
     },
     "cut": {
       "options": [

@@ -214,6 +214,8 @@ Usage:
                                 scorecard + ASCII. --plan is read-only. --music generates
                                 a Lyria bed timed to picture changes and beat-aligned.
                                 --polish runs motivated polish. Voice is never recut.
+  capcutctl cursor --project NAME --segment ID | --auto [--plan] [--dry-run]
+                      — native telemetry halo; missing pointer samples are skipped.
   capcutctl music               --project NAME [--plan] [--regen] [--volume 0.08] [--prompt TEXT] [--file FILE] [--hits S[,S...]] [--offset S] [--width 64] [--json]
                                 --duck [--under-db 12] [--attack-ms 120] [--release-ms 380] [--min-gap-ms 450]
                                 [--track N] [--words FILE] ducks an existing bed from speech indexes; --plan writes nothing.
@@ -898,7 +900,7 @@ export async function main(argv, dependencies = {}) {
 
   const NEEDS_PROJECT = new Set([
     'inspect', 'doctor', 'snapshot', 'history', 'restore', 'sync', 'scenes',
-    'pace', 'ramp', 'punch', 'match', 'verify-shots', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
+    'cursor', 'pace', 'ramp', 'punch', 'match', 'verify-shots', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
     'replace-media', 'localize', 'trim', 'shift', 'remove', 'volume', 'fade', 'keyframe',
     'preview', 'diff', 'apply', 'timeline', 'finish', 'music', 'grade', 'loudness'
   ]);
@@ -1402,6 +1404,14 @@ export async function main(argv, dependencies = {}) {
     const view = renderTimeline(doc, { width: args.width ? Number(args.width) : 64 });
     if (args.json) return print(view, true);
     return print(view.text);
+  }
+  if (command === 'cursor') {
+    const op = { op: 'cursor', segment: args.segment, auto: Boolean(args.auto) };
+    if (args.plan) {
+      const { planCursor } = await import('./cursor.mjs');
+      return print(planCursor(await loadWorking(projectDir), op, { projectDir }), true);
+    }
+    return print(applySpec(projectDir, { version: 1, name: 'cursor', operations: [op] }, options), true);
   }
   if (command === 'music' && !args.duck && ['underDb', 'attackMs', 'releaseMs', 'minGapMs', 'words'].some(key => args[key] != null)) {
     throw new CapcutError('Ducking controls require music --duck.', { code: 'MUSIC_OPTIONS', exitCode: 2 });

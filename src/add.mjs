@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import {
-  CapcutError, clone, seededId, allSegments, selectSegments, localizeMedia,
+  CapcutError, clone, seededId, loadPreset, allSegments, selectSegments, localizeMedia,
   isLocalMedia, isCapCutCachePath, PRESET_PARK_GAP_US, contentEndUs, maxSegmentEndUs,
 } from './core.mjs';
 import { insertOverlayTrack, renumberTracks, recordMediaProvenance, sourceTakeId } from './layouts.mjs';
@@ -898,4 +898,19 @@ export function opClipFade(doc, op) {
   fades.push(copied);
   entry.segment.extra_material_refs = [...(entry.segment.extra_material_refs || []), copied.id];
   return { changed: 1, id: entry.segment.id, fadeId: copied.id, in: r3(S(fadeIn)), out: r3(S(fadeOut)), updated: false };
+}
+
+/** Clone the harvested camera record, also used for the sampled face path. */
+export function writeCameraPath(segment, points, { seed, ease = false } = {}) {
+  const source = loadPreset('signature').logoSegmentTemplate.common_keyframes[0];
+  for (const [j, property] of ['KFTypeScaleX', 'KFTypeScaleY', 'KFTypePositionX', 'KFTypePositionY'].entries()) {
+    const block = clone(source);
+    block.property_type = property;
+    block.id = seededId(seed, `${segment.id}:${property}`);
+    const list = points.map(p => ({ ...clone(source.keyframe_list[0]),
+      id: seededId(seed, `${segment.id}:${property}:${p.t}`), curveType: 'Line', time_offset: US(p.t),
+      left_control: { x: 0, y: 0 }, right_control: { x: 0, y: 0 }, values: [p.v[j]], string_value: '', graphID: '' }));
+    block.keyframe_list = ease ? applyFreeCurve(list) : list;
+    segment.common_keyframes = [...(segment.common_keyframes || []).filter(b => b.property_type !== property), block];
+  }
 }

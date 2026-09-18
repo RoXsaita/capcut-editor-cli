@@ -11,6 +11,7 @@ import { opPolish, opCalloutSfx, opInteractions, principalTrack } from './polish
 import { opGradeApply, opGradeReset, opGradeLayer } from './grade.mjs';
 import { opPace } from './pace.mjs';
 import { opRamp } from './ramp.mjs';
+import { opCursor } from './cursor.mjs';
 import { opPunch } from './punch.mjs';
 import { opStressZoom } from './stress.mjs';
 import { opSignature } from './signature.mjs';
@@ -1801,7 +1802,7 @@ function cloneExtraRefs(doc, template, segmentId, seed) {
   return refs;
 }
 
-function removeUnreferencedMaterials(doc, ids) {
+export function removeUnreferencedMaterials(doc, ids) {
   const live = new Set();
   for (const { segment } of allSegments(doc)) {
     if (segment.material_id) live.add(segment.material_id);
@@ -2832,6 +2833,7 @@ export function applyOperations(doc, operations, context) {
     else if (op.op === 'polish.interactions') result = opInteractions(doc, op, context);
     else if (op.op === 'pace') result = opPace(doc, op, context);
     else if (op.op === 'ramp') result = opRamp(doc, op, context);
+    else if (op.op === 'cursor') result = opCursor(doc, op, context);
     else if (op.op === 'punch') result = opPunch(doc, op, context);
     else if (op.op === 'zoom.stress') result = opStressZoom(doc, op, context);
     else if (op.op === 'signature') result = opSignature(doc, op, context);

@@ -608,7 +608,7 @@ export function brollWindows(doc, { projectDir = null } = {}) {
       srcOut: (st.start + st.duration) / 1e6,
       tgtIn: tt.start / 1e6,
       speed: st.duration / tt.duration,
-      path: videos.get(segment.material_id)?.path || '',
+      path: resolveMediaPath(videos.get(segment.material_id)?.path, projectDir) || videos.get(segment.material_id)?.path || '',
       id: segment.id,
       takeId: segment.source_take_id || segment.rl2_take_id
         || videos.get(segment.material_id)?.source_take_id
@@ -633,7 +633,7 @@ function eventHost(ev) {
   return null;
 }
 
-function eventVt(ev, session, frames) {
+export function eventVt(ev, session, frames) {
   if (Number.isFinite(ev.vt)) return ev.vt;
   const host = eventHost(ev);
   if (host == null) return null;
@@ -690,7 +690,7 @@ export function findRl2Sessions(projectDir, doc) {
   return [...dirs];
 }
 
-function loadSession(dir) {
+export function loadSession(dir) {
   const sessionFile = path.join(dir, 'session.json');
   let session = {};
   if (fs.existsSync(sessionFile)) {
@@ -734,9 +734,13 @@ function sessionLocalizedPath(session) {
 }
 
 /** Associate a trace with its own chopped take before converting source time to timeline time. */
-function windowsForSession(windows, loaded) {
+export function windowsForSession(windows, loaded) {
   const { dir, session, sourceTakeId } = loaded;
-  if (sourceTakeId) return windows.filter(window => window.takeId === sourceTakeId);
+  if (sourceTakeId) {
+    // CapCut drops custom take ids on save; exact recorded paths remain authoritative.
+    const paths = [sessionSourcePath(session), sessionLocalizedPath(session)].filter(Boolean).map(p => path.resolve(p));
+    return windows.filter(w => w.takeId ? w.takeId === sourceTakeId : paths.includes(path.resolve(w.path || '')));
+  }
 
   // Once any material carries an explicit identity, an unmarked legacy session must not
   // attach to it by a human-readable basename. That is exactly how two `take/screen.mp4`

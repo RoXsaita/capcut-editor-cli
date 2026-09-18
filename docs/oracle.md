@@ -135,3 +135,18 @@ quitting, `cli-written` and `native-saved` captures had identical volume blocks
 records also matched exactly. Doctor reported zero errors; two B-roll checks were
 skipped because the generated test pattern has no change/transcript sidecars.
 This verifies the native controls and saved JSON; no export or listening claim.
+
+## Q03 cursor and easing evidence — CapCut 9.4.0
+
+A disposable 100%→150%→100% camera probe (keys at 1, 2, 3, 4 seconds)
+showed 144% at 1:08, 153% at 1:14 and 98% at 3:13 (30 fps). The native
+FreeCurveInOut controls are offsets from their own key, including overshoot.
+Both JS and frame QA now solve that cubic rather than interpolating linearly.
+
+A generated 640×360 pointer fixture with known 30 Hz telemetry produced six
+position keys from 240 samples. Native checks at rest, 4:01 and the 6:00 click
+kept the ring centered on the pointer; the click enlarged it. Camera blocks
+survived a copy/delete/save cycle, doctor reported zero errors, and rerunning
+from the native-saved document succeeded. CapCut discards custom take/owner
+fields: ownership uses surviving `desc`, and sidecars can reattach through an
+exact recorded media path (never a basename guess).

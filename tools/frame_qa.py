@@ -742,16 +742,19 @@ def _keyframe_value(points, source_us):
             continue
         ax, ay = float(a["time_offset"]), float(a["values"][0])
         bx, by = float(b["time_offset"]), float(b["values"][0])
-        # Straight line between keys, for BOTH curve types.
-        #
-        # A FreeCurveInOut key carries left_control/right_control handles, but the convention
-        # for their y component is not something this codebase has established — read as an
-        # offset from the key's own value, the one real harvested block (Higgsfield Refund)
-        # describes a curve that overshoots its endpoint, which may be that shot's actual
-        # easing or may be a misreading. CapCut reads its own format correctly either way, so
-        # the PROJECT is unaffected; only this preview is. Interpolating straight is honest:
-        # it is exact at every key, and it can never invent motion that is not in the file.
-        # What qa is for is geometry and placement, not easing character.
+        # Verified against CapCut 9.4.0: handles are offsets from their own key.
+        if a.get("curveType") == "FreeCurveInOut" or b.get("curveType") == "FreeCurveInOut":
+            ar, bl = a.get("right_control", {}), b.get("left_control", {})
+            def cubic(u, p, q, r, s):
+                return (1-u)**3*p + 3*(1-u)**2*u*q + 3*(1-u)*u*u*r + u**3*s
+            lo, hi = 0.0, 1.0
+            for _ in range(40):
+                u = (lo + hi) / 2
+                if cubic(u, ax, ax + ar.get("x", 0), bx + bl.get("x", 0), bx) < source_us:
+                    lo = u
+                else:
+                    hi = u
+            return cubic((lo + hi) / 2, ay, ay + ar.get("y", 0), by + bl.get("y", 0), by)
         span = bx - ax
         return ay if span <= 0 else ay + (by - ay) * (source_us - ax) / span
     return points[-1]["values"][0]
