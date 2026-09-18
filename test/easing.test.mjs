@@ -15,9 +15,12 @@ const doc = segment => ({ canvas_config: { width: 1080, height: 1920 },
 
 const publish = { text: 'Publish', conf: 0.9, x: 0.40, y: 0.80, w: 0.12, h: 0.05 };
 
-test('Line remains the default; control objects on Line do not mean easing', () => {
+test('--no-ease restores Line; control objects on Line do not mean easing', () => {
   const s = clip('face');
-  opScaleKeyframe(doc(s), { selector: { id: s.id }, at: 2, ramp: 0.25, hold: 1 });
+  const result = opScaleKeyframe(doc(s), { selector: { id: s.id }, at: 2, ramp: 0.25, hold: 1, ease: false });
+  assert.equal(result.ease, false);
+  assert.equal(result.easePosition, false);
+  assert.equal(result.verifiedIn, undefined);
   const keys = s.common_keyframes.find(k => k.property_type === 'KFTypeScaleX').keyframe_list;
   assert.ok(keys.every(k => k.curveType === 'Line'));
   assert.ok(keys.every(k => k.left_control && k.right_control),
@@ -25,11 +28,21 @@ test('Line remains the default; control objects on Line do not mean easing', () 
   assert.ok(keys.every(k => k.left_control.x === 0 && k.right_control.x === 0));
 });
 
+test('a bare camera move eases by default (Q01) — the flag is no longer the gate', () => {
+  const s = clip('face');
+  const result = opScaleKeyframe(doc(s), { selector: { id: s.id }, at: 2, ramp: 0.25, hold: 1 });
+  assert.equal(result.ease, true);
+  assert.equal(result.verifiedIn, 'CapCut 9.4.0');
+  const keys = s.common_keyframes.find(k => k.property_type === 'KFTypeScaleX').keyframe_list;
+  assert.ok(keys.every(k => k.curveType === 'FreeCurveInOut'));
+});
+
 test('--ease writes FreeCurveInOut on ScaleX with harvested handle shape', () => {
   const s = clip('face');
   const result = opScaleKeyframe(doc(s), { selector: { id: s.id }, at: 2, ramp: 0.25, hold: 1, ease: true });
   assert.equal(result.ease, true);
-  assert.equal(result.easePosition, false);
+  assert.equal(s.common_keyframes.some(k => k.property_type === 'KFTypePositionX'), false,
+    'a scale-only push writes no position keys at all, eased or not');
   const keys = s.common_keyframes.find(k => k.property_type === 'KFTypeScaleX').keyframe_list;
   assert.ok(keys.every(k => k.curveType === 'FreeCurveInOut'));
   const first = keys[0], second = keys[1];
@@ -40,27 +53,34 @@ test('--ease writes FreeCurveInOut on ScaleX with harvested handle shape', () =>
   assert.equal(second.left_control.x, Math.round(FREE_CURVE_HANDLES.inX * span));
 });
 
-test('--ease leaves PositionX/Y as Line; --ease-position writes the native round-tripped curve', () => {
+test('--focus eases PositionX/Y with scale by default; --no-ease returns both to Line', () => {
+  // Position is pinned to the scale on a focus move, so easing one without the other would
+  // slide the target mid-ramp. They travel together now.
   const s = clip('screen');
-  opScaleKeyframe(doc(s), {
-    selector: { id: s.id }, at: 1, hold: 1, ease: true,
+  const result = opScaleKeyframe(doc(s), {
+    selector: { id: s.id }, at: 1, hold: 1,
     focus: [600, 60, 300, 200],
   });
   const pos = s.common_keyframes.find(k => k.property_type === 'KFTypePositionX').keyframe_list;
   const scale = s.common_keyframes.find(k => k.property_type === 'KFTypeScaleX').keyframe_list;
+  assert.equal(result.ease, true);
+  assert.equal(result.easePosition, true);
   assert.ok(scale.every(k => k.curveType === 'FreeCurveInOut'));
-  assert.ok(pos.every(k => k.curveType === 'Line'));
-
-  const s2 = clip('screen2');
-  const result = opScaleKeyframe(doc(s2), {
-    selector: { id: s2.id }, at: 1, hold: 1, ease: true, easePosition: true,
-    focus: [600, 60, 300, 200],
-  });
-  const pos2 = s2.common_keyframes.find(k => k.property_type === 'KFTypePositionX').keyframe_list;
-  assert.ok(pos2.every(k => k.curveType === 'FreeCurveInOut'));
+  assert.ok(pos.every(k => k.curveType === 'FreeCurveInOut'));
   assert.equal(result.verifiedIn, 'CapCut 9.4.0');
   assert.equal(result.unverified, undefined);
-  assert.ok(pos2.every(k => k.graphID === ''));
+  assert.ok(pos.every(k => k.graphID === ''));
+
+  const s2 = clip('screen2');
+  const off = opScaleKeyframe(doc(s2), {
+    selector: { id: s2.id }, at: 1, hold: 1, ease: false,
+    focus: [600, 60, 300, 200],
+  });
+  assert.equal(off.easePosition, false, '--no-ease wins over the position default');
+  const pos2 = s2.common_keyframes.find(k => k.property_type === 'KFTypePositionX').keyframe_list;
+  const scale2 = s2.common_keyframes.find(k => k.property_type === 'KFTypeScaleX').keyframe_list;
+  assert.ok(pos2.every(k => k.curveType === 'Line'));
+  assert.ok(scale2.every(k => k.curveType === 'Line'));
 });
 
 test('applyFreeCurve matches freeCurveControls on neighbouring legs', () => {
@@ -77,7 +97,7 @@ test('applyFreeCurve matches freeCurveControls on neighbouring legs', () => {
   assert.ok(Math.abs(eased[0].right_control.y - expected.right_control.y) < 1e-9);
 });
 
-test('punch --ease eases scale and keeps position Line', () => {
+test('punch eases scale AND position without a flag; --no-ease restores Line', () => {
   const segment = {
     id: 'b0', material_id: 'FILE', desc: 'broll: screen',
     source_timerange: { start: 0, duration: U(10) },
@@ -90,12 +110,26 @@ test('punch --ease eases scale and keeps position Line', () => {
     materials: { videos: [{ id: 'FILE', type: 'video', path: '/tmp/capcutctl-ease.mp4', width: 1920, height: 1080 }] },
     tracks: [{ type: 'video', flag: 2, segments: [segment] }],
   };
-  opPunch(d, {
+  const punchArgs = {
     segment: 'b0', on: 'Publish', at: 5, kind: 'click', zoom: 1.6, ramp: 0.2, hold: 1,
-    ease: true, boxes: [publish], clicks: [], moments: [], __seed: 'ease-punch',
-  });
+    boxes: [publish], clicks: [], moments: [], __seed: 'ease-punch',
+  };
+  const written = opPunch(d, { ...punchArgs });
+  assert.equal(written.ease, true);
+  assert.equal(written.easePosition, true);
   const scale = segment.common_keyframes.find(k => k.property_type === 'KFTypeScaleX').keyframe_list;
   const pos = segment.common_keyframes.find(k => k.property_type === 'KFTypePositionX').keyframe_list;
   assert.ok(scale.every(k => k.curveType === 'FreeCurveInOut'));
-  assert.ok(pos.every(k => k.curveType === 'Line'));
+  assert.ok(pos.every(k => k.curveType === 'FreeCurveInOut'));
+
+  const plain = JSON.parse(JSON.stringify(d));
+  plain.tracks[0].segments[0].common_keyframes = [];
+  const off = opPunch(plain, { ...punchArgs, ease: false });
+  assert.equal(off.ease, false);
+  assert.equal(off.easePosition, false);
+  const seg2 = plain.tracks[0].segments[0];
+  for (const property of ['KFTypeScaleX', 'KFTypePositionX']) {
+    const keys = seg2.common_keyframes.find(k => k.property_type === property).keyframe_list;
+    assert.ok(keys.every(k => k.curveType === 'Line'), `${property} should be Line under --no-ease`);
+  }
 });

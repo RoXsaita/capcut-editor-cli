@@ -699,6 +699,15 @@ export function opScaleKeyframe(doc, op) {
   if (cameraValue(segment, 'KFTypeAlpha', c0, segment.clip?.alpha ?? 1) <= 0) {
     throw new CapcutError('Selected clip is invisible; select the visible face or recording.', { code: 'MOTION_HIDDEN', exitCode: 2 });
   }
+  // Acceleration, not amplitude, is what reads as a tween. The harvested FreeCurveInOut is
+  // the house curve on every camera move, so easing is the default and `--no-ease` (ease:false)
+  // is the opt-out. Position follows scale rather than defaulting to Line: position keys are
+  // written only where the frame is pinned to the scale — `--focus` (how `punch` writes), a
+  // split mask holding its seam, or a linked screen frame tracking its recording — and easing
+  // one of a coupled pair without the other slides the seam mid-ramp. A scale-only push writes
+  // no position keys at all, so it is unaffected either way.
+  const ease = op.ease !== false;
+  const easePosition = ease && op.easePosition !== false;
   const from = op.from ?? base.x;
   let to = op.to ?? from * 1.15, tx = base.tx, ty = base.ty;
   const cc = doc.canvas_config || {}, W = cc.width || 1080, H = cc.height || 1920;
@@ -786,7 +795,7 @@ export function opScaleKeyframe(doc, op) {
         time_offset: sourceTime(time), left_control: { x: 0, y: 0 }, right_control: { x: 0, y: 0 },
         values: [values[i]], string_value: '', graphID: '' }));
       const isPosition = property === 'KFTypePositionX' || property === 'KFTypePositionY';
-      const eased = isPosition ? Boolean(op.easePosition) : Boolean(op.ease);
+      const eased = isPosition ? easePosition : ease;
       // Native 9.4.0 keeps FreeCurveInOut and its handles, but clears graphID.
       const written = eased ? applyFreeCurve(list) : list;
       const previous = (s.common_keyframes || []).find(k => k.property_type === property);
@@ -800,9 +809,9 @@ export function opScaleKeyframe(doc, op) {
   return { changed: plans.length, id: segment.id, offsets: offsets.map(k => r3(S(k))), from, to,
     shape: release ? 'push-hold-release' : 'push', hold, shortenedHold: op.hold == null && hold < 1.6,
     focus: op.focus || null, transform: { x: tx, y: ty }, frameIds: frames.map(s => s.id),
-    ease: Boolean(op.ease),
-    easePosition: Boolean(op.easePosition),
-    ...(op.ease || op.easePosition ? { verifiedIn: 'CapCut 9.4.0' } : {}),
+    ease,
+    easePosition,
+    ...(ease || easePosition ? { verifiedIn: 'CapCut 9.4.0' } : {}),
   };
 }
 

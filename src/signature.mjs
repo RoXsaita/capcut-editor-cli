@@ -594,8 +594,9 @@ export function opSignature(doc, op, context = {}) {
       const move = opScaleKeyframe(doc, { selector: { id: seg.id }, at: z.at, ramp,
         to: z.to ?? (seg.clip?.scale?.x ?? 1) * rules.faceZoom.to,
         hold: z.hold ?? Math.min(rules.faceZoomHoldSeconds, Math.max(0, remaining - 2 * ramp)),
+        ...(op.ease != null ? { ease: op.ease } : {}),
         __seed: op.__seed });
-      result.zooms.push({ at: z.at, to: move.to, hold: move.hold, shape: move.shape,
+      result.zooms.push({ at: z.at, to: move.to, hold: move.hold, shape: move.shape, ease: move.ease,
         shortenedHold: z.hold == null && move.hold < rules.faceZoomHoldSeconds });
     }
   }

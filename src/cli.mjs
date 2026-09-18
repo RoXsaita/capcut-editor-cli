@@ -94,10 +94,12 @@ Usage:
   capcutctl fade --project NAME --at S --track NAME|N | --segments ID  [--in 0.08] [--out 0.12] [--plan]
   capcutctl keyframe --project NAME --at S --track NAME|N | --segments ID
                     [--from SCALE] [--to SCALE] [--hold 1.6] [--ramp 0.2] [--clear] [--plan]
-                    [--focus X,Y,W,H] [--viewport X,Y,W,H] [--ease] [--ease-position]
+                    [--focus X,Y,W,H] [--viewport X,Y,W,H] [--no-ease] [--ease] [--ease-position]
                     focus uses source pixels; viewport uses canvas pixels. Default: current scale ×1.15.
-                    --ease writes FreeCurveInOut on ScaleX/ScaleY (handles match logo pops).
-                    Position stays Line unless --ease-position. Scale and position curves
+                    Camera moves are EASED BY DEFAULT: harvested FreeCurveInOut on ScaleX/ScaleY,
+                    and on PositionX/Y wherever position keys are written (--focus, a split mask
+                    holding its seam, a linked screen frame). --no-ease restores Line; --ease and
+                    --ease-position are kept and now name the default. Scale and position curves
                     round-tripped in CapCut 9.4.0; check curveType, not just control objects.
   capcutctl match   --project NAME --screen FILE [--face FILE] [--out shots.json]
                     [--min-margin 0.15] [--shots shots.json] [--apply] [--dry-run] [--json]
@@ -117,7 +119,7 @@ Usage:
                       blocks the build; INSUFFICIENT flags only. Never writes the draft.
   capcutctl punch   --project NAME --on TEXT --segment ID|--at T [--word TEXT] [--track NAME|N]
                     [--kind click|result] [--zoom 1.6] [--hold auto|S] [--ramp 0.2]
-                    [--ease] [--ease-position] [--plan] [--dry-run]
+                    [--no-ease] [--ease] [--ease-position] [--plan] [--dry-run]
                     — name an on-screen element; the CLI locates it via OCR boxes and writes
                       a native camera move through the existing focus-rectangle path. The
                       model never outputs a coordinate. Click arrives 250 ms early and holds
@@ -152,13 +154,13 @@ Usage:
   capcutctl endcard             --project NAME_OR_PATH [--text Follow] [--at S] [--hold S] [--scale S] [--no-sfx]
   capcutctl zoom                --project NAME_OR_PATH --at S[,S...] | --auto | --stress
                                 [--min-length 2.5] [--to 1.15] [--hold 1.6] [--track N] [--plan]
-                                [--ease] [--words FILE]
+                                [--no-ease] [--ease] [--words FILE]
                                 --auto pushes in on every talking-head scene (unchanged).
                                 --stress replaces that: a 1.08× push on the word hit hardest
                                 (≥ +6 dB vs its sentence median, from energy10), at most once
                                 every 8 s. Full-face only; circle is refused; masked insets skip.
   capcutctl wrap                --project NAME_OR_PATH [--words TRANSCRIPT.json] [--text Follow] [--only BRANDS]
-                                [--zoom-at S[,S…]|--no-zoom] [--track N] [--glow] [--no-sfx] [--plan]
+                                [--zoom-at S[,S…]|--no-zoom] [--track N] [--glow] [--no-sfx] [--no-ease] [--plan]
                                 brand logos from what he says + the endcard + face push-ins, in one pass
   capcutctl pace                --project NAME_OR_PATH [--track N] [--max 100] [--min-gap 5.0]
                                 no flags = print the plan; --auto applies it
@@ -263,7 +265,7 @@ export function parseArgs(argv) {
          'noLocalize', 'motivated', 'regen', 'music', 'noMusic', 'polish', 'noInteractions',
          'waitForClose', 'force', 'reindex', 'noRepair', 'inPlace',
          'generated', 'allowEphemeral', 'measure', 'apply', 'native', 'noCache', 'noGrade',
-         'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'easePosition', 'stress', 'allowBoost',
+         'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'noEase', 'easePosition', 'stress', 'allowBoost',
          'faceDetail'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
@@ -1067,7 +1069,7 @@ export async function main(argv, dependencies = {}) {
       ...(args.at != null ? { at: Number(args.at) } : {}),
       ...(args.word != null ? { word: String(args.word) } : {}),
       ...(punchTrack != null ? { track: punchTrack } : {}),
-      ...(args.ease ? { ease: true } : {}),
+      ease: !args.noEase,
       ...(args.easePosition ? { easePosition: true } : {}),
     }] };
     return print(applySpec(projectDir, spec, { ...options, dryRun: Boolean(args.plan || args.dryRun) }), true);
@@ -1143,7 +1145,7 @@ export async function main(argv, dependencies = {}) {
   }
   if (command === 'logo' || command === 'endcard' || command === 'zoom' || command === 'wrap') {
     const sig = await import('./signature.mjs');
-    const op = { op: 'signature', ...(args.noSfx ? { noSfx: true } : {}) };
+    const op = { op: 'signature', ...(args.noSfx ? { noSfx: true } : {}), ease: !args.noEase };
     // `logo` is the "with everything" verb, so the glow reveal is its default; --plain is the
     // measured two-key pop. `wrap` and the rest keep the pop unless --glow is asked for.
     if (command === 'logo') op.glow = !args.plain;
@@ -1285,7 +1287,7 @@ export async function main(argv, dependencies = {}) {
           ...(args.to ? { to: Number(args.to) } : {}),
           ...(args.hold != null ? { hold: Number(args.hold) } : {}),
           ...(args.minLength ? { minLength: Number(args.minLength) } : {}),
-          ...(args.ease ? { ease: true } : {}),
+          ease: !args.noEase,
           ...(args.words ? { wordsFile: path.resolve(args.words) } : {}),
         };
         const stressTrack = await trackIndex(projectDir, args.track);
@@ -1628,7 +1630,8 @@ export async function main(argv, dependencies = {}) {
         to: args.to != null ? Number(args.to) : undefined, hold: args.hold != null ? Number(args.hold) : undefined,
         ramp: args.ramp != null ? Number(args.ramp) : undefined, track: args.track,
         focus: args.focus, viewport: args.viewport, clear: Boolean(args.clear),
-        ease: Boolean(args.ease), easePosition: Boolean(args.easePosition) };
+        // Easing is the default (Q01); the flags only ever turn it off or force position on.
+        ease: !args.noEase, easePosition: args.easePosition ? true : !args.noEase };
       return print(applySpec(projectDir, { version: 1, name: 'keyframe', operations: [op] },
         { ...options, dryRun: Boolean(args.plan || args.dryRun) }), true);
     }

@@ -38,9 +38,33 @@ test('focus keeps the split seam fixed throughout the push and return', () => {
   const seam = (scale,ty) => 960 - ty*960 + (324-540)*.5625*scale;
   const initial = seam(1.4,-.2);
   opScaleKeyframe(d, { selector:{id:s.id}, at:1, focus:[600,60,300,200], hold:1 });
+  // The seam is linear in (scale, ty), so it stays put between keys exactly when both channels
+  // traverse on ONE progress curve. `cameraValue` refuses to interpolate an eased curve (it will
+  // not fake CapCut's bezier), so check the two facts that imply the invariant instead: the seam
+  // is fixed AT every key, and scale and position share the same times, curve and handle shape.
+  const channelOf = p => s.common_keyframes.find(k => k.property_type === p).keyframe_list;
+  const sx = channelOf('KFTypeScaleX'), py = channelOf('KFTypePositionY');
+  assert.equal(sx.length, py.length);
+  sx.forEach((k, i) => {
+    assert.ok(Math.abs(seam(k.values[0], py[i].values[0]) - initial) < 1e-6, `seam moved at key ${i}`);
+    assert.equal(k.time_offset, py[i].time_offset);
+    assert.equal(k.curveType, 'FreeCurveInOut');
+    assert.equal(py[i].curveType, 'FreeCurveInOut');
+    const next = sx[i + 1];
+    if (!next) return;
+    const span = next.time_offset - k.time_offset;
+    const dvS = next.values[0] - k.values[0], dvP = py[i + 1].values[0] - py[i].values[0];
+    assert.equal(k.right_control.x / span, py[i].right_control.x / span);
+    if (dvS && dvP) assert.ok(Math.abs(k.right_control.y / dvS - py[i].right_control.y / dvP) < 1e-9);
+  });
+  // With --no-ease both channels are Line, so the old point sampling still proves it directly.
+  opScaleKeyframe(d, { selector:{id:s.id}, clear:true });
+  opScaleKeyframe(d, { selector:{id:s.id}, at:1, focus:[600,60,300,200], hold:1, ease:false });
   for (const t of [92,92.2,92.4,94,94.8]) {
     assert.ok(Math.abs(seam(value(s,'KFTypeScaleX',t),value(s,'KFTypePositionY',t))-initial)<1e-6);
   }
+  opScaleKeyframe(d, { selector:{id:s.id}, clear:true });
+  opScaleKeyframe(d, { selector:{id:s.id}, at:1, focus:[600,60,300,200], hold:1 });
   assert.throws(() => opScaleKeyframe(d, { selector:{id:s.id}, at:5, focus:[0,500,200,200] }), {code:'FOCUS_MASKED'});
   d.materials.common_mask[0].config.invert = true;
   assert.throws(() => opScaleKeyframe(d,{selector:{id:s.id},at:5}),{code:'MOTION_MASK_UNSUPPORTED'});
