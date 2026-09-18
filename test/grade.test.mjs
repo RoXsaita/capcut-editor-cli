@@ -5,12 +5,39 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import {
-  applyAdjust, gradeBuffer, scope, solveGrade, planGrade, measureSources, opGradeApply, opGradeReset,
+  applyAdjust, gradeBuffer, scope, solveGrade, planGrade, measureSources, opGradeApply, opGradeReset, opGradeLayer,
   resolveGradeSource, resolveMediaPath, ROLE_TARGETS
 } from '../src/grade.mjs';
 
 const US = s => Math.round(s * 1e6);
 const SLIDERS = ['brightness', 'contrast', 'saturation', 'highlight', 'shadow', 'white', 'black', 'temperature', 'tone'];
+
+test('native adjustment lane updates without duplication and resets only owned materials', () => {
+  const d = doc();
+  const op = { name: 'Finish', from: 1, to: 3, strength: 0.5, sliders: { contrast: 0.2 } };
+  const before = structuredClone(d);
+  assert.throws(() => opGradeLayer(d, { ...op, to: 99 }), { code: 'BAD_LAYER_RANGE' });
+  assert.deepEqual(d, before);
+  opGradeLayer(d, op);
+  const layer = d.tracks.at(-1);
+  assert.equal(layer.type, 'adjust');
+  assert.equal(layer.segments[0].source_timerange, null);
+  assert.equal(layer.segments[0].extra_material_refs.length, 1);
+  assert.equal(d.materials.effects.at(-1).value, 0.1);
+  opGradeLayer(d, op);
+  assert.equal(d.tracks.filter(t => t.type === 'adjust').length, 1);
+  assert.equal(d.materials.effects.length, 1);
+  assert.equal(layer.segments[0].extra_material_refs.length, 1);
+  layer.segments[0].extra_material_refs.push('foreign');
+  const manual = structuredClone(d);
+  assert.throws(() => opGradeLayer(d, { name: 'Finish', reset: true }), { code: 'LAYER_MANUAL_EDITS' });
+  assert.deepEqual(d, manual);
+  layer.segments[0].extra_material_refs.pop();
+  opGradeLayer(d, { name: 'Finish', reset: true });
+  assert.equal(d.tracks.length, before.tracks.length);
+  assert.equal(d.materials.effects.length, 0);
+  assert.equal(d.materials.placeholders.length, 0);
+});
 
 function solidVideo(dir, name, color) {
   const file = path.join(dir, name);

@@ -9,6 +9,30 @@ import { generateLyria, musicCachePaths, musicPrompt, opMusic, prepareMusic, pro
 
 const US = seconds => Math.round(seconds * 1e6);
 
+test('read-only music analysis uses native source beats and selected emphasis with residuals', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'music-hits-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const project = dryRunProject(root), d = readDraft(project);
+  const file = path.join(root, 'music.wav'), cache = path.join(root, 'music.beat');
+  fs.writeFileSync(file, 'fake');
+  fs.writeFileSync(cache, JSON.stringify({ time: [500, 1500, 2500] }));
+  d.materials.audios.push({ id: 'MUSIC', path: file });
+  d.materials.beats = [{ id: 'BEATS', ai_beats: { beats_path: cache } }];
+  d.tracks.push({ type: 'audio', segments: [{ material_id: 'MUSIC', extra_material_refs: ['BEATS'] }] });
+  const before = structuredClone(d);
+  const options = { file, dryRun: true, probe: () => 8, detect: () => { throw Error('must reuse native'); }, hits: '1.6,2.6', offset: 0.1 };
+  const plan = await prepareMusic(project, d, options);
+  assert.equal(plan.beatSource, 'capcut-cache');
+  assert.deepEqual(plan.beats, [0.5, 1.5, 2.5]);
+  assert.deepEqual(plan.align.pairs.map(p => p.remaining), [0, 0]);
+  assert.deepEqual(d, before);
+  assert.equal(fs.existsSync(musicCachePaths(project).meta), false);
+  for (const hits of ['NaN', '8', '-1', '1,']) {
+    await assert.rejects(prepareMusic(project, d, { ...options, hits }), { code: 'BAD_MUSIC_HITS' });
+  }
+  await assert.rejects(prepareMusic(project, d, { ...options, offset: 2 }), { code: 'BAD_MUSIC_OFFSET' });
+});
+
 test('music request timeout remains active while reading the response body', async t => {
   const previous = process.env.GEMINI_API_KEY;
   process.env.GEMINI_API_KEY = 'test-placeholder';
@@ -215,7 +239,7 @@ test('prepareMusic exposes a selected local track and opMusic keeps local identi
   const local = path.join(temp, 'chosen-track.mp3');
   fs.writeFileSync(local, 'chosen-track-bytes');
   try {
-    const plan = await prepareMusic(project, doc, { file: local, dryRun: true });
+    const plan = await prepareMusic(project, doc, { file: local, dryRun: true, probe: () => 8, detect: () => [0.5] });
     await assert.rejects(prepareMusic(project, doc, { file: local, regen: true, dryRun: true }), { code: 'MUSIC_OPTIONS' });
     await assert.rejects(prepareMusic(project, doc, { file: local, volume: NaN, dryRun: true }), { code: 'BAD_VOLUME' });
     assert.equal(plan.local, true);
@@ -232,7 +256,7 @@ test('prepareMusic exposes a selected local track and opMusic keeps local identi
     assert.equal(saved.mode, 'local');
     assert.equal(saved.file, path.resolve(local));
 
-    const reused = await prepareMusic(project, doc, { dryRun: true });
+    const reused = await prepareMusic(project, doc, { dryRun: true, probe: () => 8, detect: () => [0.5] });
     assert.equal(reused.mode, 'local');
     assert.equal(reused.file, path.resolve(local));
     assert.equal(reused.wouldGenerate, false);

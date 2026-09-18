@@ -385,11 +385,6 @@ def _text_relation(a, b):
     return None
 
 
-def _same_scene(a, b):
-    """Whether the transcript text is similar; evidence is checked separately."""
-    return _text_relation(a, b) is not None
-
-
 def _retry_marker(beat):
     """Read explicit retry annotations without treating ordinary words as evidence."""
     for key in ("retry", "redo", "retake", "is_retry", "is_redo", "is_retake", "duplicate"):

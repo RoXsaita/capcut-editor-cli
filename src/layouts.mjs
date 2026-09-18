@@ -327,13 +327,6 @@ function buildOverlaySegment(doc, subject, spec, projectDir) {
   return segment;
 }
 
-function overlapsAny(track, range) {
-  return (track.segments || []).some(s => {
-    const a = s.target_timerange;
-    return a.start < range.start + range.duration && range.start < a.start + a.duration;
-  });
-}
-
 /**
  * Find (or create) a track ABOVE `subjectTrackIndex` that can hold overlays for
  * `range` without colliding. Returns { track, index, created }.

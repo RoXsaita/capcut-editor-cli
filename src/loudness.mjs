@@ -1,8 +1,8 @@
 /**
  * Loudness match via clip `volume` — `capcutctl loudness`.
  *
- * Measure integrated LUFS per source with ffmpeg ebur128, then set each speech/SFX
- * segment's `volume` so playback lands at −14 LUFS (configurable). Music beds are
+ * Measure edited ranges and the mix with ffmpeg ebur128, then set speech/SFX
+ * clip volume toward −14 LUFS, constrained by true-peak headroom. Music beds are
  * out of scope (F23 / F20). Only attenuation (volume < 1.0) is round-tripped;
  * a needed boost is VOLUME_BOOST_UNVERIFIED unless --allow-boost.
  *
@@ -18,12 +18,27 @@ import os from 'node:os';
 import path from 'node:path';
 import { CapcutError, requireBinary, resolveMediaPath } from './core.mjs';
 import { isBrollSegment } from './broll-lint.mjs';
+import { pythonForTool, PACKAGE_ROOT } from './python.mjs';
 
 const r3 = n => Math.round(n * 1000) / 1000;
 const r6 = n => Math.round(n * 1e6) / 1e6;
 
 export const DEFAULT_TARGET_LUFS = -14;
 export const LUFS_CACHE_VERSION = 1;
+
+export function analyzeAudio(doc, projectDir, { mixOnly = false } = {}) {
+  const python = pythonForTool('audio_levels.py');
+  const result = spawnSync(python.executable, [path.join(PACKAGE_ROOT, 'tools/audio_levels.py')], {
+    input: JSON.stringify({ doc, projectDir: projectDir || '.', mixOnly }),
+    encoding: 'utf8', timeout: 300_000, maxBuffer: 16 * 1024 * 1024,
+  });
+  if (result.error || result.status !== 0) {
+    throw new CapcutError(`Edited audio measurement failed: ${result.error?.message || result.stderr?.trim()}`, {
+      code: 'AUDIO_MEASURE_FAILED', exitCode: 2,
+    });
+  }
+  return JSON.parse(result.stdout);
+}
 
 export function volumeForLufs(measuredLufs, targetLufs = DEFAULT_TARGET_LUFS) {
   if (!Number.isFinite(measuredLufs) || !Number.isFinite(targetLufs)) {
@@ -211,6 +226,10 @@ export function opLoudness(doc, op = {}, context = {}) {
     });
   }
   const allowBoost = Boolean(op.allowBoost);
+  const peak = op.peak == null ? -1 : Number(op.peak);
+  if (!Number.isFinite(peak) || peak > 0 || peak < -24) {
+    throw new CapcutError('loudness --peak must be between -24 and 0 dBTP.', { code: 'BAD_PEAK', exitCode: 2 });
+  }
   const selected = op.segments == null ? null : new Set(
     (Array.isArray(op.segments) ? op.segments : String(op.segments).split(','))
       .map(id => String(id).trim()).filter(Boolean),
@@ -222,6 +241,8 @@ export function opLoudness(doc, op = {}, context = {}) {
     }
   }
   const loudnessesBefore = doc.loudnesses ? JSON.stringify(doc.loudnesses) : null;
+  const analysis = op.measurements == null ? analyzeAudio(doc, context.projectDir) : null;
+  const before = analysis ? structuredClone(doc) : null;
   const segments = [];
   const skipped = [];
   const refused = [];
@@ -237,16 +258,18 @@ export function opLoudness(doc, op = {}, context = {}) {
         continue;
       }
       if (role === 'skip') continue;
+      if (segment.volume === 0) {
+        skipped.push({ id: segment.id, reason: 'muted' });
+        continue;
+      }
 
       const mediaPath = resolveMediaPath(material?.path, context.projectDir) || material?.path || '';
-      let measured = lookupMeasurement(op.measurements, { path: mediaPath, id: material?.id });
-      if (measured == null && mediaPath && op.measurements == null) {
-        if (!fs.existsSync(mediaPath)) {
-          skipped.push({ id: segment.id, reason: 'no media', path: mediaPath });
-          continue;
-        }
-        measured = measureIntegratedLufs(mediaPath, { cacheDir: op.cacheDir });
+      const level = analysis?.segments[segment.id];
+      if (analysis && !level) {
+        skipped.push({ id: segment.id, reason: 'no audio stream' });
+        continue;
       }
+      const measured = level?.lufs ?? lookupMeasurement(op.measurements, { path: mediaPath, id: material?.id });
       if (!Number.isFinite(measured)) {
         throw new CapcutError(
           `loudness has no LUFS measurement for ${path.basename(mediaPath) || segment.id}. Inject op.measurements in tests, or keep ffmpeg on PATH.`,
@@ -255,14 +278,16 @@ export function opLoudness(doc, op = {}, context = {}) {
       }
       // ebur128 reports its -70 LUFS floor for silence and sub-gate short SFX.
       // That is not a usable measurement and must never become a 631x boost.
-      if (measured <= -69.9) {
+      if (measured <= -69.9 || (level && level.truePeak == null)) {
         refused.push({ id: segment.id, code: 'LUFS_UNMEASURABLE', measuredLufs: measured,
           message: 'No gated loudness measurement; keep this silent or short clip at its reviewed volume.' });
         continue;
       }
 
       const previousVolume = segment.volume == null ? 1 : Number(segment.volume);
-      const needed = volumeForLufs(measured, target);
+      const desired = volumeForLufs(measured, target);
+      const needed = level?.truePeak != null
+        ? Math.min(desired, volumeForLufs(level.truePeak, peak)) : desired;
       const fades = snapshotFades(doc, segment);
       const row = {
         id: segment.id,
@@ -273,6 +298,11 @@ export function opLoudness(doc, op = {}, context = {}) {
         previousVolume: r6(previousVolume),
         volume: r6(needed),
         afterLufs: r3(playbackLufs(measured, needed)),
+        ...(level ? {
+          beforeTruePeak: level.truePeak == null ? null : r3(playbackLufs(level.truePeak, previousVolume)),
+          afterTruePeak: level.truePeak == null ? null : r3(playbackLufs(level.truePeak, needed)),
+          peakLimited: needed < desired,
+        } : {}),
       };
 
       if (needed > 1) {
@@ -314,8 +344,22 @@ export function opLoudness(doc, op = {}, context = {}) {
     });
   }
 
+  const after = analysis ? analyzeAudio(doc, context.projectDir, { mixOnly: true }).mix : null;
+  if (after?.truePeak != null && after.truePeak > peak + 0.05) {
+    // Clip headroom cannot guarantee mix headroom when music/SFX overlap.
+    if (before) {
+      for (const key of Object.keys(doc)) delete doc[key];
+      Object.assign(doc, before);
+    }
+    throw new CapcutError('The combined mix exceeds the peak ceiling. Lower overlapping music/SFX or choose a lower loudness target.', {
+      code: 'MIX_PEAK_EXCEEDED', exitCode: 2, details: { peak, before: analysis.mix, proposed: after },
+    });
+  }
+
   return {
     target,
+    peak,
+    ...(analysis ? { beforeMix: analysis.mix, afterMix: after, measurementScope: analysis.scope } : {}),
     changed,
     segments,
     refused,

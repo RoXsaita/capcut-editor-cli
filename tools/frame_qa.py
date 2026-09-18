@@ -52,7 +52,7 @@ DRAFTS = os.path.expanduser("~/Movies/CapCut/User Data/Projects/com.lveditor.dra
 _FRAME_EPS = 1.0 / 24
 _DEFAULT_FRAME_PERIOD = 1.0 / 30.0
 _SEEK_PREROLL = 2.0
-_PREVIEW_COMPOSITOR_VERSION = "preview-v5"
+_PREVIEW_COMPOSITOR_VERSION = "preview-v6"
 _DEFAULT_PREVIEW_BOUNDS = (360, 640)
 _DEFAULT_CUT_OFFSET = None  # one timeline frame, resolved from the draft FPS
 _PREVIEW_HWACCEL = None
@@ -914,19 +914,26 @@ def render(proj, tl, t, z="track", frame_reports=None, allow_missing=False, no_g
                 if isinstance(m, dict) and "id" in m:
                     idx.setdefault(m["id"], (k, m))
     us = int(t * 1e6)
-    act = [(ti, s) for ti, tr in enumerate(tl["tracks"]) if tr["type"] == "video"
+    act = [(ti, s) for ti, tr in enumerate(tl["tracks"]) if tr["type"] in ("video", "adjust")
            for s in tr.get("segments", [])
+           if s.get("visible", True)
            if s["target_timerange"]["start"] <= us < s["target_timerange"]["start"] + s["target_timerange"]["duration"]]
     act.sort(key=lambda p: (p[0], p[1].get("render_index", 0)) if z == "track"
              else (p[1].get("render_index", 0), p[0]))
     materials = {material_id: material for material_id, (_kind, material) in idx.items()}
-    issues = [_media_issue(proj, segment, materials) for _track, segment in act]
+    issues = [_media_issue(proj, segment, materials) for ti, segment in act if tl["tracks"][ti]["type"] == "video"]
     issues = [issue for issue in issues if issue]
     if issues and not allow_missing:
         raise _missing_media_error(f"render t={float(t):g}s", issues)
     canvas = Image.new("RGBA", (W, H), (0, 0, 0, 255))
     rows = []
     for ti, s in act:
+        if tl["tracks"][ti]["type"] == "adjust":
+            adjust = {} if no_grade else segment_grade(s, idx)
+            if adjust:
+                canvas = grade_image(canvas, adjust)
+            rows.append((ti, s["id"][:8], "adjustment layer (approximate)", None))
+            continue
         material_entry = idx.get(s.get("material_id"))
         if not material_entry:
             rows.append((ti, str(s.get("id") or "<unnamed>")[:8],
@@ -1818,7 +1825,7 @@ def simple_aroll_segments(project_dir, tl, start, end):
                    if entry[0] != principal and entry[4] > start and entry[3] < end]
     if not principal_entries or other_video:
         return None
-    if any(track.get("type") == "audio" and track.get("segments")
+    if any(track.get("type") in ("audio", "adjust") and track.get("segments")
            for track in tl.get("tracks") or []):
         return None
     materials = _material_index(tl)
@@ -2428,7 +2435,8 @@ def write_preview(proj, tl, out_path, fps=6, z="track", start=None, end=None,
     return out_path
 
 
-def _timeline_audio(proj, tl, tmp, duration_s, range_start=0.0):
+def _timeline_audio(proj, tl, tmp, duration_s, range_start=0.0, *, sources=None,
+                    strict=False, slices_out=None):
     """Principal-video-track audio PLUS every `audio` track, mixed onto silence.
 
     The whole point of --preview is hearing the seams, and the music and SFX live on
@@ -2436,16 +2444,17 @@ def _timeline_audio(proj, tl, tmp, duration_s, range_start=0.0):
     13.5s of sound in GrokBuild-20260825 and made the seams silent.
     """
     idx = _material_index(tl)
-    _content_start, content_end = content_edit_range(proj, tl)
-    principal_index = _content_track_index(tl, content_end)
-    if principal_index is not None:
-        sources = list((tl.get("tracks") or [])[principal_index].get("segments") or [])
-    else:
-        _, _track, segs = principal_video_track(tl)
-        sources = list(segs)
-    for tr in tl.get("tracks") or []:
-        if tr.get("type") == "audio":
-            sources += tr.get("segments") or []
+    if sources is None:
+        _content_start, content_end = content_edit_range(proj, tl)
+        principal_index = _content_track_index(tl, content_end)
+        if principal_index is not None:
+            sources = list((tl.get("tracks") or [])[principal_index].get("segments") or [])
+        else:
+            _, _track, segs = principal_video_track(tl)
+            sources = list(segs)
+        for tr in tl.get("tracks") or []:
+            if tr.get("type") == "audio":
+                sources += tr.get("segments") or []
     if not sources:
         return None
     slices = []
@@ -2453,9 +2462,13 @@ def _timeline_audio(proj, tl, tmp, duration_s, range_start=0.0):
     for n, s in enumerate(sources):
         mat = idx.get(s.get("material_id"))
         if not mat:
+            if strict:
+                raise FrameExtractionError(f"missing audio material: {s.get('material_id')}")
             continue
         p = resolve(proj, mat.get("path", ""))
         if not p or not os.path.exists(p):
+            if strict:
+                raise FrameExtractionError(f"missing audio source: {p}")
             continue
         tt = s["target_timerange"]
         target_start = tt["start"] / 1e6
@@ -2486,7 +2499,11 @@ def _timeline_audio(proj, tl, tmp, duration_s, range_start=0.0):
         try:
             _run_command(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
             slices.append((overlap_start - range_start, wav))
+            if slices_out is not None:
+                slices_out.append((s, wav))
         except subprocess.CalledProcessError:
+            if strict:
+                raise
             continue
     if not slices:
         return None

@@ -123,12 +123,15 @@ the mirrors, and rolls back if the post-write doctor fails.
 | Blind-verify placed B-roll (before/action/after strip) | `capcutctl verify-shots --project NAME [--shots shots.json]` |
 | Punch-in on stressed words (full-face, 1.08×, energy10) | `capcutctl zoom --project NAME --stress --plan` |
 | Match speech/SFX loudness via clip volume (−14 LUFS) | `capcutctl loudness --project NAME --dry-run` |
+| Measure edited audio and the combined mix | `capcutctl loudness --project NAME --measure` |
+| Review selected music emphasis points | `capcutctl music --project NAME --file music.mp3 --hits 2.4,8.1 --plan --json` |
+| Preview an editable shared color layer | `capcutctl grade --project NAME --layer Finish --set 'contrast=0.1,saturation=0.05' --plan` |
 | Eased scale push-in (`FreeCurveInOut`; position stays Line) | `capcutctl keyframe --project NAME --segments ID --at S --ease --dry-run` |
 | Export through CapCut on macOS (explicit request) | `capcutctl export --project NAME --out final.mp4 --grid grid.png` |
 | Inspect an existing export without opening CapCut | `capcutctl export-grid --media final.mp4 --out grid.png --times 0,8,15` |
 | Render a lightweight proxy | `capcutctl preview --project NAME --out preview.mp4` |
 | Measure or apply colour matching | `capcutctl grade --project NAME --measure` |
-| Sharpen + clarity + light vignette on the face (UNVERIFIED) | `capcutctl grade --project NAME --face-detail --apply --dry-run` |
+| Sharpen + clarity on the face | `capcutctl grade --project NAME --face-detail --apply --dry-run` |
 | View or restore snapshots | `capcutctl history --project NAME` |
 | Show the full command surface | `capcutctl help` |
 

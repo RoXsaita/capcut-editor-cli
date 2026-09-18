@@ -39,7 +39,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { CapcutError, clone, seededId, allSegments, loadPreset, resolveMediaPath } from './core.mjs';
+import { CapcutError, clone, seededId, allSegments, loadPreset, resolveMediaPath, contentEndUs } from './core.mjs';
 import { principalTrack } from './polish.mjs';
 import { isBrollSegment } from './broll-lint.mjs';
 
@@ -943,4 +943,69 @@ export function opGradeReset(doc, op = {}, context = {}) {
     materials: cleared.removedMaterials,
     sources: selected.map(entry => entry.source),
   };
+}
+
+/** One named, editable native adjustment lane, above the picture tracks. */
+export function opGradeLayer(doc, op, context = {}) {
+  if (typeof op.name !== 'string' || !op.name.trim() || op.name.length > 80) {
+    throw new CapcutError('grade --layer needs a name of 1–80 characters.', { code: 'BAD_LAYER', exitCode: 2 });
+  }
+  const name = `capcutctl:grade:${op.name.trim()}`;
+  const matches = (doc.tracks || []).filter(t => t.type === 'adjust' && t.name === name);
+  if (matches.length > 1 || (matches[0]?.segments?.length || 0) > 1) {
+    throw new CapcutError('Named adjustment lane is ambiguous; preserve it and choose another name.', { code: 'BAD_LAYER', exitCode: 2 });
+  }
+  const track = matches[0];
+  const old = track?.segments[0];
+  const endUs = contentEndUs(doc, context.projectDir);
+  const fromUs = op.from == null ? 0 : Math.round(Number(op.from) * 1e6);
+  const toUs = op.to == null ? endUs : Math.round(Number(op.to) * 1e6);
+  const strength = Number(op.strength ?? 1);
+  if (!op.reset && (!Number.isFinite(fromUs) || !Number.isFinite(toUs) || fromUs < 0 || toUs <= fromUs
+    || toUs > endUs || !Number.isFinite(strength) || strength < 0 || strength > 1)) {
+    throw new CapcutError('Layer range must be inside the content; strength must be between 0 and 1.', { code: 'BAD_LAYER_RANGE', exitCode: 2 });
+  }
+  const sliders = op.reset ? {} : normalizedSliders(op.sliders);
+  if (!op.reset && !Object.keys(sliders).length) throw new CapcutError('Layer needs explicit sliders.', { code: 'EMPTY_GRADE', exitCode: 2 });
+  if (old && (old.common_keyframes?.length || old.keyframe_refs?.length || (op.reset
+    && old.extra_material_refs?.some(ref => !isGradeOwned((doc.materials.effects || []).find(m => m.id === ref)))))) {
+    throw new CapcutError('Layer has manual effects or animation; edit it in CapCut.', { code: 'LAYER_MANUAL_EDITS', exitCode: 2 });
+  }
+  if (old) clearOwnedEffects(doc, [{ segment: old }]);
+  if (op.reset) {
+    if (!track) return { changed: 0 };
+    doc.tracks = doc.tracks.filter(t => t !== track);
+    const used = new Set(allSegments(doc).map(({ segment }) => segment.material_id));
+    doc.materials.placeholders = (doc.materials.placeholders || []).filter(m => m.id !== old?.material_id || used.has(m.id));
+    return { changed: 1, removed: name };
+  }
+  const template = loadPreset('adjust-layer');
+  SEED = op.__seed || name;
+  const lane = track || { ...clone(template.track), id: mint(`${name}:track`), name, is_default_name: false };
+  const segment = old || { ...clone(template.segment), id: mint(`${name}:segment`), desc: name };
+  if (!old) {
+    const material = { ...clone(template.material), id: mint(`${name}:material`), name: op.name.trim() };
+    (doc.materials.placeholders ||= []).push(material);
+    segment.material_id = material.id;
+  }
+  segment.target_timerange = { start: fromUs, duration: toUs - fromUs };
+  const preset = loadPreset('adjust');
+  const ids = [];
+  for (const [type, value] of Object.entries(sliders)) {
+    const written = value * strength;
+    if (!written || Math.abs(written) < 1e-4) continue;
+    const material = makeAdjustMaterial(preset, type, written, op.name.trim());
+    (doc.materials.effects ||= []).push(material);
+    ids.push(material.id);
+  }
+  if (!ids.length) throw new CapcutError('Layer needs explicit sliders.', { code: 'EMPTY_GRADE', exitCode: 2 });
+  const leftover = (segment.extra_material_refs || []).filter(ref =>
+    !isGradeOwned((doc.materials.effects || []).find(m => m.id === ref)));
+  segment.extra_material_refs = leftover.concat(ids);
+  segment.enable_adjust = true;
+  lane.segments = [segment];
+  if (!track) doc.tracks.push(lane);
+  segment.track_render_index = doc.tracks.indexOf(lane);
+  return { changed: 1, layer: op.name.trim(), from: fromUs / 1e6, to: toUs / 1e6, strength, sliders,
+    scope: 'Shared adjustment above all existing picture tracks; compare in native CapCut.' };
 }

@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { CapcutError, clone, seededId, requireBinary, contentEndUs, LOCAL_MEDIA_DIR } from './core.mjs';
+import { CapcutError, clone, seededId, requireBinary, contentEndUs, LOCAL_MEDIA_DIR, resolveMediaPath } from './core.mjs';
 import { geminiApiKey, loadEnv } from './env.mjs';
 import { audioSegment, ensureAudioTrack, pictureChanges, sfxPresets } from './polish.mjs';
 
@@ -234,7 +234,7 @@ export function detectBeats(file, { minGap = 0.32 } = {}) {
   const beats = [];
   let last = -gapHops;
   for (let i = 1; i < flux.length - 1; i++) {
-    if (flux[i] < thr) continue;
+    if (flux[i] <= thr) continue;
     if (flux[i] < flux[i - 1] || flux[i] < flux[i + 1]) continue;
     if (i - last < gapHops) continue;
     beats.push(r3(i * hop / sr));
@@ -243,9 +243,27 @@ export function detectBeats(file, { minGap = 0.32 } = {}) {
   return beats;
 }
 
+/** CapCut's music cache stores beat times in milliseconds of the original source. */
+export function nativeBeats(doc, file, projectDir) {
+  const materialIds = new Set((doc.materials?.audios || []).filter(m =>
+    resolveMediaPath(m.path, projectDir) === path.resolve(file)).map(m => m.id));
+  const refs = new Set((doc.tracks || []).flatMap(t => t.segments || [])
+    .filter(s => materialIds.has(s.material_id)).flatMap(s => s.extra_material_refs || []));
+  for (const material of doc.materials?.beats || []) {
+    if (!refs.has(material.id) || !material.ai_beats?.beats_path) continue;
+    try {
+      const data = JSON.parse(fs.readFileSync(resolveMediaPath(material.ai_beats.beats_path, projectDir), 'utf8'));
+      if (Array.isArray(data.time) && data.time.length && data.time.every(t => typeof t === 'number' && Number.isFinite(t) && t >= 0)) {
+        return [...new Set(data.time.map(t => t / 1000))].sort((a, b) => a - b);
+      }
+    } catch { /* Missing cache: use local onset detection. */ }
+  }
+  return null;
+}
+
 /** Shift that puts musical beats onto picture-change times. Never moves the VO. */
-export function beatOffset(beats, hits, { clamp = 0.4 } = {}) {
-  if (!beats?.length || !hits?.length) return { offset: 0, pairs: [] };
+export function beatOffset(beats, hits, { clamp = 0.4, offset = null } = {}) {
+  if (!beats?.length || !hits?.length) return { offset: offset ?? 0, pairs: [] };
   const pairs = [];
   for (const h of hits) {
     const t = typeof h === 'number' ? h : h.t;
@@ -258,8 +276,10 @@ export function beatOffset(beats, hits, { clamp = 0.4 } = {}) {
   }
   const deltas = pairs.map(p => p.delta).sort((a, b) => a - b);
   const mid = deltas[Math.floor(deltas.length / 2)];
-  const offset = Math.max(-clamp, Math.min(clamp, mid));
-  return { offset: r3(offset), pairs, median: r3(mid) };
+  const shift = offset ?? Math.max(-clamp, Math.min(clamp, mid));
+  return { offset: r3(shift), pairs: pairs.map(pair => ({ ...pair,
+    timelineBeat: r3(pair.beat + shift), remaining: r3(pair.delta - shift),
+  })), median: r3(mid) };
 }
 
 function cacheDir(projectDir) {
@@ -419,6 +439,8 @@ function buildMusicState(projectDir, doc, {
   volume = DEFAULT_MUSIC_VOLUME,
   prompt: override,
   file: selectedFile = null,
+  hits = null,
+  offset = null,
 } = {}) {
   const paths = musicCachePaths(projectDir);
   if (selectedFile && (cleanBrief(override) || regen)) {
@@ -429,6 +451,18 @@ function buildMusicState(projectDir, doc, {
   }
   const prev = readMusicMeta(paths.meta);
   const timing = timingContext(doc, { projectDir });
+  if (hits != null) {
+    const values = Array.isArray(hits) ? hits : String(hits).split(',');
+    if (!values.length || values.some(t => String(t).trim() === '' || !Number.isFinite(Number(t))
+      || Number(t) < 0 || Number(t) >= timing.duration)) {
+      throw new CapcutError('music --hits requires comma-separated times inside the content range.', { code: 'BAD_MUSIC_HITS', exitCode: 2 });
+    }
+    timing.hits = [...new Set(values.map(Number))].sort((a, b) => a - b)
+      .map(t => ({ t, kind: 'selected', to: 'agent-selected emphasis' }));
+  }
+  if (offset != null && (!Number.isFinite(Number(offset)) || Math.abs(Number(offset)) > 0.4)) {
+    throw new CapcutError('music --offset must be between -0.4 and 0.4 seconds.', { code: 'BAD_MUSIC_OFFSET', exitCode: 2 });
+  }
   const resolved = resolveBrief(override, prev);
   const generationRequested = Boolean(cleanBrief(override) || regen);
   const savedLocal = !generationRequested && prev.mode === 'local' ? cleanBrief(prev.file) : null;
@@ -453,6 +487,7 @@ function buildMusicState(projectDir, doc, {
     mode: selected ? 'local' : 'generated',
     timing,
     hits: timing.hits,
+    offset: offset == null ? null : Number(offset),
     brief: resolved.brief,
     briefHash,
     briefSource: resolved.source,
@@ -478,9 +513,11 @@ export async function prepareMusic(projectDir, doc, {
   generate = generateLyria,
   probe = probeAudioDuration,
   detect = detectBeats,
+  hits = null,
+  offset = null,
 } = {}) {
   const state = buildMusicState(projectDir, doc, {
-    regen, volume, prompt: override, file: selectedFile,
+    regen, volume, prompt: override, file: selectedFile, hits, offset,
   });
   const base = {
     hash: state.hash,
@@ -523,20 +560,9 @@ export async function prepareMusic(projectDir, doc, {
   }
 
   if (state.selected) {
-    if (dryRun) {
-      return {
-        ...base,
-        local: true,
-        generated: false,
-        wouldGenerate: false,
-        duration: null,
-        beats: [],
-        align: beatOffset([], state.hits),
-        dryRun: true,
-      };
-    }
     const duration = probe(state.selected);
-    const beats = detect(state.selected);
+    const native = nativeBeats(doc, state.selected, projectDir);
+    const beats = native || detect(state.selected);
     const meta = {
       version: 2,
       ...base,
@@ -546,9 +572,11 @@ export async function prepareMusic(projectDir, doc, {
       wouldGenerate: false,
       duration,
       beats,
-      align: beatOffset(beats, state.hits),
-      dryRun: false,
+      beatSource: native ? 'capcut-cache' : 'onset-detection',
+      align: beatOffset(beats, state.hits, { offset: state.offset }),
+      dryRun,
     };
+    if (dryRun) return meta;
     fs.mkdirSync(state.paths.dir, { recursive: true });
     fs.writeFileSync(state.paths.meta, JSON.stringify(meta, null, 2) + '\n');
     return meta;
@@ -566,7 +594,7 @@ export async function prepareMusic(projectDir, doc, {
       wouldGenerate: state.wouldGenerate,
       duration,
       beats,
-      align: beatOffset(beats, state.hits),
+      align: beatOffset(beats, state.hits, { offset: state.offset }),
       dryRun: true,
     };
   }
@@ -581,14 +609,14 @@ export async function prepareMusic(projectDir, doc, {
   }
   const duration = probe(paths.file);
   const beats = detect(paths.file);
-  const align = beatOffset(beats, state.hits);
+  const align = beatOffset(beats, state.hits, { offset: state.offset });
   const meta = {
     version: 2,
     ...base,
     generated,
     wouldGenerate: state.wouldGenerate,
     duration,
-    beats: beats.slice(0, 80),
+    beats,
     align,
     file: paths.file,
     model: MUSIC_MODEL,

@@ -176,8 +176,9 @@ Usage:
                         Also clicks every rectangle/arrow/circle callout (Enter / click / select).
                         rl2 click/typing events on the chopped B-roll (Mouse click / Typing).
                         --no-interactions skips that pass.
-  capcutctl loudness            --project NAME [--target -14] [--segments ID[,ID...]] [--allow-boost] [--plan]
-                                — match speech/SFX clip volume to −14 LUFS (ffmpeg ebur128).
+  capcutctl loudness            --project NAME [--target -14] [--segments ID[,ID...]] [--allow-boost] [--plan] [--measure] [--peak -1]
+                                — measure edited ranges and mix; match speech/SFX to −14 LUFS with peak headroom.
+                                  --measure is read-only. --peak limits true peak (dBTP); unsafe mixed peaks refuse.
                                   Attenuation < 1.0 is round-tripped. A needed boost is
                                   VOLUME_BOOST_UNVERIFIED unless --allow-boost (UNVERIFIED).
                                   Music beds are left alone. Does not touch loudnesses.enable.
@@ -185,18 +186,22 @@ Usage:
                                 [--apply] [--dry-run] [--target JSON] [--reference FILE] [--reference-at S]
                                 [--set 'FILE:brightness=0.05,white=0.2'] [--reset [--source FILE]]
                                 [--face-detail] [--sharpen 0.15] [--clarity 0.1] [--vignette 0]
+                                [--layer NAME --set 'contrast=0.1,saturation=0.05' --from S --to S]
+                                --layer creates/updates a shared native adjustment lane; --reset --layer removes it.
                                 preserve colour by default; an explicit target/reference enables the approximate solver.
                                 --reset removes CLI-owned grades (all sources unless --source is supplied).
                                 --face-detail writes native sharpen/clarity/vignette on FACE clips only.
                                 Verified in CapCut 9.4.0. Vignette is opt-in after native calibration.
   capcutctl timeline            --project NAME [--width 64] [--json]   — ASCII dump of the stacked timeline
   capcutctl finish              --project NAME [--plan] [--music] [--polish] [--regen]
-                                [--volume 0.08] [--prompt TEXT] [--file FILE] [--track N] [--width 64] [--json]
+                                [--volume 0.08] [--prompt TEXT] [--file FILE] [--hits S[,S...]] [--offset S] [--track N] [--width 64] [--json]
                                 scorecard + ASCII. --plan is read-only. --music generates
                                 a Lyria bed timed to picture changes and beat-aligned.
                                 --polish runs motivated polish. Voice is never recut.
-  capcutctl music               --project NAME [--plan] [--regen] [--volume 0.08] [--prompt TEXT] [--file FILE] [--width 64] [--json]
+  capcutctl music               --project NAME [--plan] [--regen] [--volume 0.08] [--prompt TEXT] [--file FILE] [--hits S[,S...]] [--offset S] [--width 64] [--json]
                                 supply a video-specific brief or local music; saved briefs survive later runs
+                                --hits selects emphasis times; --offset overrides music shift (−0.4..0.4s).
+                                --plan --json measures a local file and reports beats/alignment without writes.
   capcutctl layout auto         --project NAME_OR_PATH [--plan]   — split-screen where B-roll covers, full face where it does not
   capcutctl layout audit        --project NAME_OR_PATH            — what each clip is vs what it should be
   capcutctl layout list
@@ -902,9 +907,14 @@ export async function main(argv, dependencies = {}) {
     return print(rows, true);
   }
   if (command === 'loudness') {
+    if (args.measure) {
+      const { analyzeAudio } = await import('./loudness.mjs');
+      return print(analyzeAudio(await loadWorking(projectDir), projectDir), true);
+    }
     const op = {
       op: 'loudness',
       target: args.target != null ? Number(args.target) : -14,
+      peak: args.peak != null ? Number(args.peak) : -1,
       ...(args.allowBoost ? { allowBoost: true } : {}),
       ...(args.segments ? { segments: String(args.segments).split(',').map(s => s.trim()).filter(Boolean) } : {}),
     };
@@ -914,6 +924,23 @@ export async function main(argv, dependencies = {}) {
   if (command === 'grade') {
     const g = await import('./grade.mjs');
     const doc = await loadWorking(projectDir);
+    if (args.layer != null) {
+      if (args.target || args.reference || args.measure || args.faceDetail || args.source
+        || args.sharpen != null || args.clarity != null || args.vignette != null) {
+        throw new CapcutError('--layer uses explicit --set sliders, not source correction flags.', { exitCode: 2 });
+      }
+      const sliders = {};
+      for (const pair of [].concat(args.set || []).flatMap(value => String(value).split(','))) {
+        if (!pair.trim()) continue;
+        const parts = pair.split('=');
+        if (parts.length !== 2 || !parts[1].trim()) throw new CapcutError('--layer --set needs slider=value pairs.', { exitCode: 2 });
+        sliders[parts[0].trim()] = Number(parts[1]);
+      }
+      const op = { op: 'grade.layer', name: args.layer, sliders, reset: Boolean(args.reset),
+        from: args.from, to: args.to, strength: args.strength };
+      return print(applySpec(projectDir, { version: 1, name: 'grade-layer', operations: [op] },
+        { ...options, dryRun: Boolean(args.plan || args.dryRun || (!args.apply && !args.reset)) }), true);
+    }
     if (args.reset) {
       if (args.set || args.target || args.reference || args.measure || args.faceDetail) throw new CapcutError('--reset cannot be combined with correction or measurement flags.', { exitCode: 2 });
       const op = { op: 'grade.reset', ...(args.source ? { sources: [args.source] } : { all: true }) };
@@ -1344,6 +1371,7 @@ export async function main(argv, dependencies = {}) {
         const { prepareMusic } = await import('./music.mjs');
         score.musicPrepared = await prepareMusic(projectDir, doc, {
           dryRun: true, prompt: args.prompt, file: args.file, regen: Boolean(args.regen),
+          hits: args.hits, offset: args.offset,
           ...(args.volume != null ? { volume: Number(args.volume) } : {}),
         });
         score.musicPrompt = score.musicPrepared.prompt;
@@ -1360,6 +1388,7 @@ export async function main(argv, dependencies = {}) {
         volume: args.volume != null ? Number(args.volume) : DEFAULT_MUSIC_VOLUME,
         prompt: args.prompt || undefined,
         file: args.file || undefined,
+        hits: args.hits, offset: args.offset,
         dryRun: Boolean(args.dryRun),
       });
       const off = prepared.align?.offset || 0;
@@ -1369,7 +1398,7 @@ export async function main(argv, dependencies = {}) {
         wouldGenerate: prepared.wouldGenerate,
         dryRun: Boolean(args.dryRun),
         file: prepared.file,
-        beats: prepared.beats.length,
+        beats: prepared.beats,
         align: prepared.align,
       };
       score.musicPrompt = prepared.prompt;

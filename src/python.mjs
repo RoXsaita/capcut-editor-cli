@@ -41,6 +41,7 @@ export const MIN_PYTHON_TEXT = MIN_PYTHON.join('.');
 export const TOOL_IMPORTS = Object.freeze({
   'aroll.py': Object.freeze([]),
   'audio_index.py': Object.freeze([]),
+  'audio_levels.py': Object.freeze(['numpy', 'PIL']),
   'find.py': Object.freeze([]),
   'frame_qa.py': Object.freeze(['numpy', 'PIL']),
   'rasterize.py': Object.freeze(['PIL']),

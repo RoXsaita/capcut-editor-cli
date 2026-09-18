@@ -36,6 +36,30 @@ def segment(segment_id, start, duration, material="VIDEO", desc=""):
 
 
 class FrameAccuracyTests(unittest.TestCase):
+    def test_adjustment_layer_range_visibility_and_before_view(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            image = os.path.join(tmp, "red.png")
+            Image.new("RGBA", (32, 32), (160, 40, 40, 255)).save(image)
+            picture = {"id": "picture", "material_id": "video", "clip": {},
+                       "source_timerange": {"start": 0, "duration": 4000000},
+                       "target_timerange": {"start": 0, "duration": 4000000}}
+            layer = {"id": "layer", "material_id": "adjust", "enable_adjust": True,
+                     "target_timerange": {"start": 1000000, "duration": 2000000},
+                     "extra_material_refs": ["desaturate"]}
+            doc = {"canvas_config": {"width": 32, "height": 32}, "tracks": [
+                {"type": "video", "segments": [picture]}, {"type": "adjust", "segments": [layer]}],
+                "materials": {"videos": [{"id": "video", "path": image, "type": "photo"}],
+                              "placeholders": [{"id": "adjust", "type": "adjust"}],
+                              "effects": [{"id": "desaturate", "type": "saturation", "value": -1}]}}
+            def pixel(at, **kwargs):
+                return frame_qa.render(tmp, doc, at, **kwargs)[0].getpixel((16, 16))
+            self.assertEqual(pixel(0), pixel(3))
+            gray = pixel(2)
+            self.assertEqual(gray[0], gray[1])
+            self.assertNotEqual(gray, pixel(2, no_grade=True))
+            layer["visible"] = False
+            self.assertEqual(pixel(2), pixel(0))
+
     def test_rectangle_mask_hides_surrounding_content(self):
         canvas = Image.new("RGBA", (100, 100), "black")
         frame_qa.place(canvas, Image.new("RGBA", (100, 100), "white"), {}, 100, 100,

@@ -1,11 +1,51 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import {
   volumeForLufs, playbackLufs, parseEbur128, classifyLoudnessRole, isMusicSegment,
-  opLoudness, DEFAULT_TARGET_LUFS,
+  opLoudness, DEFAULT_TARGET_LUFS, analyzeAudio,
 } from '../src/loudness.mjs';
 
 const US = s => Math.round(s * 1e6);
+
+test('edited-range measurement, peak-limited gain, mixed clipping and mute preservation', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'audio-levels-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const file = path.join(root, 'levels.wav');
+  execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i',
+    'sine=frequency=440:duration=8:sample_rate=48000', '-af',
+    "volume='if(lt(t,4),0.1,4)':eval=frame", '-c:a', 'pcm_f32le', file]);
+  const d = { duration: US(4), materials: { audios: [{ id: 'A', type: 'extract', path: file }] },
+    tracks: [{ type: 'audio', segments: [{ id: 'a', material_id: 'A', volume: 1,
+      source_timerange: { start: 0, duration: US(4) }, target_timerange: { start: 0, duration: US(4) }, extra_material_refs: [] }] }] };
+  const quiet = analyzeAudio(d, root);
+  const automated = structuredClone(d);
+  automated.tracks[0].segments[0].common_keyframes = [{ property_type: 'KFTypeVolume' }];
+  assert.throws(() => analyzeAudio(automated, root), { code: 'AUDIO_MEASURE_FAILED' });
+  d.tracks[0].segments[0].source_timerange.start = US(4);
+  const loud = analyzeAudio(d, root);
+  assert.ok(loud.mix.lufs - quiet.mix.lufs > 25);
+  const normalized = opLoudness(d, { target: -8, peak: -12 }, { projectDir: root });
+  assert.equal(normalized.segments[0].peakLimited, true);
+  assert.ok(normalized.afterMix.truePeak <= -11.95);
+  const muted = structuredClone(d.tracks[0].segments[0]);
+  muted.id = 'muted'; muted.volume = 0;
+  d.tracks[0].segments.push(muted);
+  const repeat = opLoudness(d, { target: -8, peak: -12 }, { projectDir: root });
+  assert.ok(repeat.skipped.some(s => s.id === 'muted' && s.reason === 'muted'));
+  assert.equal(muted.volume, 0);
+  const bed = structuredClone(d.tracks[0].segments[0]);
+  bed.id = 'music'; bed.volume = 4; bed.desc = 'finish:music';
+  d.tracks.push({ type: 'audio', name: 'finish-music', segments: [bed] });
+  const before = structuredClone(d);
+  assert.throws(() => opLoudness(d, { target: -14 }, { projectDir: root }), { code: 'MIX_PEAK_EXCEEDED' });
+  assert.deepEqual(d, before);
+  d.materials.audios[0].path = path.join(root, 'missing.wav');
+  assert.throws(() => analyzeAudio(d, root), { code: 'AUDIO_MEASURE_FAILED' });
+});
 
 function doc() {
   return {

@@ -189,8 +189,10 @@
       "options": [
         "--dry-run",
         "--file",
+        "--hits",
         "--json",
         "--music",
+        "--offset",
         "--plan",
         "--polish",
         "--project",
@@ -208,6 +210,8 @@
         "--clarity",
         "--dry-run",
         "--face-detail",
+        "--from",
+        "--layer",
         "--measure",
         "--plan",
         "--project",
@@ -220,6 +224,7 @@
         "--source",
         "--strength",
         "--target",
+        "--to",
         "--vignette"
       ],
       "transactional": true
@@ -339,6 +344,8 @@
       "options": [
         "--allow-boost",
         "--dry-run",
+        "--measure",
+        "--peak",
         "--plan",
         "--project",
         "--segments",
@@ -364,7 +371,9 @@
       "options": [
         "--dry-run",
         "--file",
+        "--hits",
         "--json",
+        "--offset",
         "--plan",
         "--project",
         "--prompt",

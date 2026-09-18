@@ -8,7 +8,7 @@ import {
   opLayoutApply, opLayoutBackground, opLayoutBroll, opLayoutScreen, SCREEN_LAYOUT_OPERATION, renumberTracks
 } from './layouts.mjs';
 import { opPolish, opCalloutSfx, opInteractions, principalTrack } from './polish.mjs';
-import { opGradeApply, opGradeReset } from './grade.mjs';
+import { opGradeApply, opGradeReset, opGradeLayer } from './grade.mjs';
 import { opPace } from './pace.mjs';
 import { opRamp } from './ramp.mjs';
 import { opPunch } from './punch.mjs';
@@ -2494,21 +2494,6 @@ function recutSetSpeed(doc, segment, speed) {
   }
 }
 
-function recutDetachSpeedMaterials(doc, original, segment, seed) {
-  const index = materialIndex(doc);
-  const refs = clone(segment.extra_material_refs || []);
-  for (const [position, ref] of refs.entries()) {
-    const found = index.get(ref);
-    if (!found || found.value?.type !== 'speed') continue;
-    const copied = clone(found.value);
-    // Do not key this by the old ref: the first recut replaces that ref, and a retry must
-    // resolve to the same detached material instead of accumulating one speed per retry.
-    copied.id = seededId(seed, 'cut:speed:' + segment.id + ':' + position);
-    refs[position] = recutPushMaterial(doc, found.kind, copied).id;
-  }
-  segment.extra_material_refs = refs;
-}
-
 function recutFilterRebaseKeyframes(segment, oldSource, newSource, keepSource = null) {
   segment.keyframe_refs = clone(segment.keyframe_refs || []);
   if (!oldSource || !newSource || !(oldSource.duration > 0)) {
@@ -2861,6 +2846,7 @@ export function applyOperations(doc, operations, context) {
     else if (op.op === 'loudness') result = opLoudness(doc, op, context);
     else if (op.op === 'grade.apply') result = opGradeApply(doc, op, context);
     else if (op.op === 'grade.reset') result = opGradeReset(doc, op, context);
+    else if (op.op === 'grade.layer') result = opGradeLayer(doc, op, context);
     else throw new CapcutError(`Unsupported operation: ${op.op}`, { code: 'UNSUPPORTED_OPERATION' });
     results.push({ index, op: op.op, ...result });
   }
