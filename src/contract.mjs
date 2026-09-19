@@ -37,7 +37,7 @@ const SUBCOMMAND_PARENTS = new Set(['layout']);
  * not more. See test/cli-contract.test.mjs.
  */
 export const TRANSACTIONAL_COMMANDS = Object.freeze([
-  'add', 'apply', 'endcard', 'fade', 'grade', 'keyframe', 'layout', 'localize', 'logo', 'music',
+  'add', 'animate', 'apply', 'endcard', 'fade', 'grade', 'keyframe', 'layout', 'localize', 'logo', 'music',
   'new', 'pace', 'polish', 'punch', 'match', 'ramp', 'remove', 'replace-media', 'restore', 'rm', 'shift', 'sync',
   'trim', 'volume', 'wrap', 'zoom', 'finish', 'loudness',
 ]);
