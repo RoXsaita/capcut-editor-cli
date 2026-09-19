@@ -99,6 +99,12 @@ Usage:
                     --ease writes FreeCurveInOut on ScaleX/ScaleY (handles match logo pops).
                     Position stays Line unless --ease-position. Scale and position curves
                     round-tripped in CapCut 9.4.0; check curveType, not just control objects.
+  capcutctl animate  --project NAME --at S --track NAME|N | --segments ID
+                    [--intro fade-in [--intro-dur S]] [--outro fade-out [--outro-dur S]]
+                    [--replace-existing] [--plan] [--dry-run]
+                    — attach CapCut-native editable clip animations through material_animations.
+                      Starter catalogue: fade-in, flash-in, pulsing-zooms, scroll-up, stripe-merge,
+                      zoom-out, fade-out, blur-out, smoke.
   capcutctl match   --project NAME --screen FILE [--face FILE] [--out shots.json]
                     [--min-margin 0.15] [--shots shots.json] [--apply] [--dry-run] [--json]
                     — sentence → moment matcher. Default writes nothing: emits a shot list
@@ -264,7 +270,7 @@ export function parseArgs(argv) {
          'waitForClose', 'force', 'reindex', 'noRepair', 'inPlace',
          'generated', 'allowEphemeral', 'measure', 'apply', 'native', 'noCache', 'noGrade',
          'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'easePosition', 'stress', 'allowBoost',
-         'faceDetail'].includes(key)) result[key] = true;
+         'faceDetail', 'replaceExisting'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
       const value = argv[++i];
@@ -855,7 +861,7 @@ export async function main(argv, dependencies = {}) {
   const NEEDS_PROJECT = new Set([
     'inspect', 'doctor', 'snapshot', 'history', 'restore', 'sync', 'scenes',
     'pace', 'ramp', 'punch', 'match', 'verify-shots', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
-    'replace-media', 'localize', 'trim', 'shift', 'remove', 'volume', 'fade', 'keyframe',
+    'replace-media', 'localize', 'trim', 'shift', 'remove', 'volume', 'fade', 'keyframe', 'animate',
     'preview', 'diff', 'apply', 'timeline', 'finish', 'music', 'grade', 'loudness'
   ]);
   if (!NEEDS_PROJECT.has(command)) throw new CapcutError(`Unknown command: ${command}\n\n${HELP}`, { exitCode: 2 });
@@ -1582,13 +1588,28 @@ export async function main(argv, dependencies = {}) {
   if (command === 'localize') {
     return print(applySpec(projectDir, { version: 1, name: 'localize', operations: [{ op: 'media.localize' }] }, options), true);
   }
-  if (command === 'trim' || command === 'shift' || command === 'remove' || command === 'volume' || command === 'keyframe' || command === 'fade') {
+  if (command === 'trim' || command === 'shift' || command === 'remove' || command === 'volume' || command === 'keyframe' || command === 'fade' || command === 'animate') {
     const { loadProject } = await import('./core.mjs');
     const { resolveClip } = await import('./add.mjs');
     const doc = loadProject(projectDir).groups.find(g => g.name === 'root').doc;
     const selector = args.segments
       ? { id: String(args.segments).split(',')[0].trim() }
       : { id: resolveClip(doc, { at: args.at != null ? Number(args.at) : undefined, track: args.track }).segment.id };
+    if (command === 'animate') {
+      if (!args.intro && !args.outro) throw new CapcutError('animate requires --intro SLUG and/or --outro SLUG.', { exitCode: 2 });
+      const op = {
+        op: 'animation.apply',
+        selector,
+        ...(args.intro ? { intro: String(args.intro) } : {}),
+        ...(args.outro ? { outro: String(args.outro) } : {}),
+        ...(args.introDur != null ? { introDuration: Number(args.introDur) } : {}),
+        ...(args.outroDur != null ? { outroDuration: Number(args.outroDur) } : {}),
+        ...(args.replaceExisting ? { replace: true } : {}),
+      };
+      if (args.plan) return print(op, true);
+      return print(applySpec(projectDir, { version: 1, name: 'animate', operations: [op] },
+        { ...options, dryRun: Boolean(args.dryRun) }), true);
+    }
     if (command === 'remove') {
       return print(applySpec(projectDir, { version: 1, name: 'remove', operations: [{ op: 'segment.remove', selector }] }, options), true);
     }
