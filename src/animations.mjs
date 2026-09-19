@@ -1,7 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 
-import { CapcutError, clone, seededId, selectSegments } from './core.mjs';
+import { CapcutError, seededId, selectSegments } from './core.mjs';
 
 const US = seconds => Math.round(Number(seconds) * 1e6);
 const S = microseconds => Number(microseconds) / 1e6;
@@ -187,6 +187,11 @@ function animationFor(slug, expectedType, duration, segmentDuration) {
 
 function addOne(container, segment, slug, type, duration, replace) {
   if (!slug) return null;
+  if ((container.animations || []).some(animation => animation?.type === 'group')) {
+    throw new CapcutError(`Segment ${segment.id} has a combo/group animation; CapCut does not allow intro/outro animations alongside it.`, {
+      code: 'ANIMATION_GROUP_CONFLICT', exitCode: 2
+    });
+  }
   const existingIndex = (container.animations || []).findIndex(animation => animation?.type === type);
   if (existingIndex >= 0 && !replace) {
     throw new CapcutError(`Segment ${segment.id} already has a ${type === 'in' ? 'intro' : 'outro'} animation. Pass --replace-existing to replace it.`, {
