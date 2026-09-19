@@ -127,6 +127,7 @@ the mirrors, and rolls back if the post-write doctor fails.
 | Review selected music emphasis points | `capcutctl music --project NAME --file music.mp3 --hits 2.4,8.1 --plan --json` |
 | Preview an editable shared color layer | `capcutctl grade --project NAME --layer Finish --set 'contrast=0.1,saturation=0.05' --plan` |
 | Eased scale push-in (`FreeCurveInOut`; position stays Line) | `capcutctl keyframe --project NAME --segments ID --at S --ease --dry-run` |
+| Add a native intro/outro animation | `capcutctl animate --project NAME --segments ID --intro fade-in --outro fade-out --dry-run` |
 | Export through CapCut on macOS (explicit request) | `capcutctl export --project NAME --out final.mp4 --grid grid.png` |
 | Inspect an existing export without opening CapCut | `capcutctl export-grid --media final.mp4 --out grid.png --times 0,8,15` |
 | Render a lightweight proxy | `capcutctl preview --project NAME --out preview.mp4` |
