@@ -85,6 +85,21 @@ test('opAnimation refuses a second animation of the same type unless replace is 
   assert.equal(d.materials.material_animations[0].animations[0].name, 'Flash In');
 });
 
+test('opAnimation refuses intro/outro when a combo animation already owns the container', () => {
+  const d = doc();
+  d.materials.material_animations.push({
+    id: 'GROUP',
+    type: 'sticker_animation',
+    multi_language_current: 'none',
+    animations: [{ type: 'group', id: 'GROUP-EFFECT' }],
+  });
+  d.tracks[0].segments[0].extra_material_refs.push('GROUP');
+  assert.throws(
+    () => opAnimation(d, { selector: { id: 'SEG' }, intro: 'fade-in' }),
+    error => error.code === 'ANIMATION_GROUP_CONFLICT'
+  );
+});
+
 test('opAnimation validates animation type, duration, and track type', () => {
   const d = doc();
   assert.throws(
