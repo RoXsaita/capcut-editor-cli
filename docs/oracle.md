@@ -1,0 +1,235 @@
+# The round-trip oracle
+
+`doctor` proves a draft is structurally valid. `qa` proves what the picture looks like.
+Neither answers the question a **new** CapCut field actually poses:
+
+> When CapCut opens this project and saves it again, does our record still exist, still
+> carry our values, and still do anything?
+
+JSON that parses can still be a no-op. A field can survive our write, survive `doctor`,
+and be thrown away — or kept with its values quietly put back — the first time the app
+touches the draft. Shipping on "the JSON is there" is shipping theatre.
+
+This harness is how a new field earns the right to ship. It is **dev-only**. It writes
+nothing into a draft, and it does not drive the CapCut UI. You drive CapCut; it compares
+the directories you captured.
+
+## The manual loop
+
+Use a **disposable copy** of a project, never a production draft. CapCut must be closed
+whenever you capture.
+
+```bash
+# A — before we write anything
+capcutctl oracle capture --project DISPOSABLE --label a-before-write
+
+# write the thing you are testing (any capcutctl command, or a hand-built --spec)
+capcutctl music --project DISPOSABLE --duck
+
+# B — what we wrote
+capcutctl oracle capture --project DISPOSABLE --label b-written
+
+# now open DISPOSABLE in CapCut. Nudge something harmless — drag a clip a frame and put it
+# back, or just click into the timeline. Save. Quit and wait for the process to exit.
+
+# C — what came back out
+capcutctl oracle capture --project DISPOSABLE --label c-round-tripped
+
+capcutctl oracle diff \
+  --before .capcutctl/oracle/b-written \
+  --after  .capcutctl/oracle/c-round-tripped \
+  --baseline .capcutctl/oracle/a-before-write
+```
+
+The baseline is optional. It only sharpens a `reset`: with it, the report can say the value
+was put back to what was there before we wrote, rather than merely that ours did not
+survive.
+
+`capture` copies the **whole project directory** — root `draft_info.json`, `Timelines/**`,
+`draft_meta_info.json`, `template-2.tmp`, and any analysis cache the app materialises on
+open. It is deliberately not `capcutctl snapshot`: that copies the curated set of files the
+CLI manages, and the interesting part of a round trip is exactly the files it does not.
+Our own `.capcutctl/` bookkeeping is skipped, so captures do not capture each other.
+
+## The verdicts
+
+`oracle diff` classifies every id-bearing record — keyframe points, keyframe blocks,
+segments, materials, masks — and every file.
+
+| Verdict | Meaning | Success? |
+|---|---|---|
+| `preserved` | structure survived byte-for-byte | **yes** |
+| `normalized` | rewritten — key order, float spelling — behaviour survived | **yes** |
+| `materialized-cache` | the app added analysis files we never wrote | **yes** |
+| `pruned` | record discarded | no |
+| `reset` | record kept, our values did not survive | no |
+| `authority-miss` | documents disagree — we wrote a mirror, not the authority | no |
+| `resource-noop` | structure survived, pixels did not change | no |
+
+`oracle diff` exits non-zero when any non-success verdict appears. **A `pruned`, `reset`,
+`authority-miss` or `resource-noop` record means the field is not production-safe. Do not
+ship it. Do not "fix" it by writing the field harder.**
+
+## Reading an unknown field off a real write
+
+Verdicts tell you whether a record survived. A **harvest** needs the record itself — the
+property name, the units, the `curveType`, whether a companion material came with it. Pass
+`--values` and each finding carries its own before/after JSON:
+
+```bash
+capcutctl oracle diff --before A --after B --values
+```
+
+That is how you learn what CapCut writes for a field we have never written. Capture before
+you touch the app, author the thing by hand in CapCut, capture again, and read the new
+records out of the diff. Clone what comes back into `presets/`; never retype it from a
+screenshot, and never fill in a field the diff did not show you.
+
+`resource-noop` is the one verdict JSON cannot see. If the record survives intact but the
+frame does not change, that is a `qa` finding, and you hand it in:
+
+```bash
+capcutctl oracle diff --before B --after C --resource-noop kf-block-volume
+```
+
+`authority-miss` is inferred from disagreement: a record that survives in one document and
+is dropped from another that used to hold it means one of the two was not the authority.
+That is the failure `documentGroups` exists to prevent, so seeing it is a signal the write
+path missed a group, not a reason to add a third mirror.
+
+## What this does not do
+
+- **No CapCut automation.** Nothing here clicks the app, and no unit test opens it. The
+  harness compares two directories a human (or a later native-bridge session) captured.
+- **No pixel opinion.** `resource-noop` is asserted, never inferred.
+- **No verdict on fields we did not write.** The diff reports what moved between the two
+  captures; a record CapCut rewrites on every save will show up every time, which is
+  information about CapCut, not about your change.
+
+## Q02 volume automation evidence — CapCut 9.4.0
+
+Native UI authoring on 2026-09-19 resolved the static-gain interaction:
+
+| UI action | Saved `KFTypeVolume` value |
+|---|---|
+| Set clip to −20 dB, add first key | `0.10000000149011612` |
+| Set second key to −32 dB | `0.025118863210082054` |
+
+`segment.volume` became the last edited value. Key values are **absolute linear
+amplitudes**, not multipliers on that field. Source microseconds and the harvested
+`Line` curve are preserved in `presets/volume-keyframes.json`.
+
+A separate eight-second disposable project used an existing 0.08 music bed with
+0.4/1.2-second fades and synthetic speech intervals 1–2, 2.2–3, and 5–6 seconds.
+`music --duck --words` generated ten keys. Native UI readings were:
+
+| Timeline time | Volume shown |
+|---|---|
+| 0 seconds | −21.9 dB |
+| 1.5 seconds, inside speech | −33.9 dB |
+| 4.033 seconds, pause | −21.9 dB |
+
+After copying/deleting a temporary second clip to dirty the project, saving, and
+quitting, `cli-written` and `native-saved` captures had identical volume blocks
+(including ids, times, and values) in both root and active timeline. Original fade
+records also matched exactly. Doctor reported zero errors; two B-roll checks were
+skipped because the generated test pattern has no change/transcript sidecars.
+This verifies the native controls and saved JSON; no export or listening claim.
+
+## Q03 cursor and easing evidence — CapCut 9.4.0
+
+A disposable 100%→150%→100% camera probe (keys at 1, 2, 3, 4 seconds)
+showed 144% at 1:08, 153% at 1:14 and 98% at 3:13 (30 fps). The native
+FreeCurveInOut controls are offsets from their own key, including overshoot.
+Both JS and frame QA now solve that cubic rather than interpolating linearly.
+
+A generated 640×360 pointer fixture with known 30 Hz telemetry produced six
+position keys from 240 samples. Native checks at rest, 4:01 and the 6:00 click
+kept the ring centered on the pointer; the click enlarged it. Camera blocks
+survived a copy/delete/save cycle, doctor reported zero errors, and rerunning
+from the native-saved document succeeded. CapCut discards custom take/owner
+fields: ownership uses surviving `desc`, and sidecars can reattach through an
+exact recorded media path (never a basename guess).
+
+## Q05 face reframe evidence
+
+The on-device helper uses Vision's normalized top-left box convention, matching
+OCR (`y = 1 - maxY`). A disposable four-second square face fixture was sampled
+at 10 fps, reframed with constant scale and eased position keys, then rendered
+at 0, 1.5 and 3 seconds. Planning checks face visibility ≥95% and estimated
+headroom ≥3% on every sample; the estimate extends half a face height above the
+facial box to avoid treating eyebrows as the top of the head. Frame QA is still
+required. Existing camera animation, masked/rotated clips and non-1× speech
+are refused; 5 px synthetic wobble produces no keys.
+
+## Q06 derived motion blur evidence
+
+A disposable 8× recording slot produced a full-frame 640×360 derivative with
+30 frames at 30 fps and exactly one second duration. Both draft authorities
+retained the one-second slot, recorded the original source and offset, and reset
+native speed to 1 with no speed curve. Doctor reported zero errors and warnings.
+The implementation uses FFmpeg motion interpolation plus temporal mixing;
+`pace --auto` never enables it. Original media and the transaction snapshot remain
+available to recover the pre-blur edit.
+
+## Q07 voice cleanup evidence
+
+A four-second synthetic noisy take (speech represented by a two-second tone)
+measured a −51 dB pause floor in its energy10 index. The explicit `denoise` pass
+uses FFmpeg `afftdn` spectral noise reduction as the local equivalent of `arnndn`,
+with 12 dB reduction and noise-floor tracking. It applies no normalization or
+second voice grade. The resulting pause measured −53.6 dB; edited voice loudness
+was −26.3 LUFS before and −26.4 LUFS after. Compressed video stream SHA-256 hashes
+matched exactly. Source windows, native 1× speed, gains and fade references were
+unchanged by the transaction; plan/dry-run left all project file hashes unchanged.
+Doctor passed with zero errors and warnings before native save. CapCut opened the
+replacement and a repeated plan reported `already-denoised`. Native save strips
+custom fields, so the original path and zero offset also live in `media-map.json`.
+
+A second save used a frame-aligned 300,000 µs source start and 3,500,000 µs
+source/target duration. All three values and speed 1.0 survived native save
+exactly; the original path and offset survived in the sidecar. An initial
+250,000 µs test start (half a 30 fps frame) was normalized by CapCut to 266,666 µs.
+This is native frame snapping, not denoise retiming. Native doctor reported no
+errors; two generated-fixture B-roll sidecar checks were skipped.
+
+Q06 also opened in CapCut 9.4.0: the moving test pointer showed a visible blur
+trail while the stationary frame remained sharp. After copy/delete/save, its
+source and target remained exactly 0–1,000,000 µs at native speed 1.0, and
+recovery metadata survived in the sidecar.
+
+## Q04 rectangle measurements — harvest incomplete
+
+Disposable native project `0919`, CapCut 9.4.0, 640×360 video. Each setting below
+was read in the UI immediately after entry, then saved/quit and captured. The
+record is `materials.common_mask`, `resource_type: rectangle`.
+
+| Capture | UI setting | Saved field | Exact saved value |
+|---|---|---|---|
+| `b-rect-default` | Feather 0, default | `config.feather` | `0.0` |
+| `c-feather-0` | Feather 0 | `config.feather` | `0.0` |
+| `c-feather-25` | Feather 25 | `config.feather` | `0.25` |
+| `c-feather-50` | Feather 50 | `config.feather` | `0.5` |
+| `c-feather-100` | Feather 100 | `config.feather` | `1.0` |
+| `d-corner-0` | Round corners 0 | `config.roundCorner` | `0.0` |
+| `d-corner-max` | Round corners 100, slider maximum | `config.roundCorner` | `1.0` |
+
+Corner passes retained feather 100. The untouched geometry controls showed
+X 0, Y 0, width 179, height 180 and rotation 0; saved values were `centerX: 0.0`,
+`centerY: 0.0`, `width: 0.28`, `height: 0.5`, `rotation: 0.0`. `invert` is boolean
+`false`. An unlabelled invert-style icon was visible, but its action has not been
+verified. Width/height/position controls exist and were not changed.
+
+On reopening, the feather/corner numeric controls sometimes displayed zero even
+though the saved values and softened preview persisted. The table uses the
+readings immediately after setting the controls, not those stale reopen readings.
+
+**Q04 does not ship yet.** A nonzero position/size pass is needed to establish the
+source-pixel conversion. The older harvest brief forbids changing those controls;
+automatic approval review rejected that pass. The requested disposable pass is
+X=64, Y=36, width=320, height=180, feather=4, corners=20. Until explicitly approved,
+no geometry writer or guessed coordinate conversion is installed.
+
+The raw captures remain in the disposable project. Desktop diffs are
+`oracle-mask-created.json`, `oracle-mask-c-feather-{0,25,50,100}.json`,
+`oracle-mask-d-corner-0.json` and `oracle-mask-d-corner-max.json`.

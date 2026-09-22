@@ -7,6 +7,9 @@
       "add",
       "animate",
       "apply",
+      "blur-broll",
+      "cursor",
+      "denoise",
       "endcard",
       "fade",
       "finish",
@@ -24,6 +27,7 @@
       "polish",
       "punch",
       "ramp",
+      "reframe",
       "remove",
       "replace-media",
       "restore",
@@ -87,6 +91,15 @@
       ],
       "transactional": true
     },
+    "blur-broll": {
+      "options": [
+        "--dry-run",
+        "--plan",
+        "--project",
+        "--segment"
+      ],
+      "transactional": true
+    },
     "brands": {
       "options": [],
       "transactional": false
@@ -103,6 +116,16 @@
         "--json"
       ],
       "transactional": false
+    },
+    "cursor": {
+      "options": [
+        "--auto",
+        "--dry-run",
+        "--plan",
+        "--project",
+        "--segment"
+      ],
+      "transactional": true
     },
     "cut": {
       "options": [
@@ -125,6 +148,14 @@
         "--trim-beat"
       ],
       "transactional": false
+    },
+    "denoise": {
+      "options": [
+        "--dry-run",
+        "--plan",
+        "--project"
+      ],
+      "transactional": true
     },
     "diff": {
       "options": [
@@ -290,6 +321,7 @@
         "--focus",
         "--from",
         "--hold",
+        "--no-ease",
         "--plan",
         "--project",
         "--ramp",
@@ -409,17 +441,24 @@
     },
     "music": {
       "options": [
+        "--attack-ms",
         "--dry-run",
+        "--duck",
         "--file",
         "--hits",
         "--json",
+        "--min-gap-ms",
         "--offset",
         "--plan",
         "--project",
         "--prompt",
         "--regen",
+        "--release-ms",
+        "--track",
+        "--under-db",
         "--volume",
-        "--width"
+        "--width",
+        "--words"
       ],
       "transactional": true
     },
@@ -445,6 +484,24 @@
         "--width"
       ],
       "transactional": true
+    },
+    "oracle": {
+      "options": [
+        "--after",
+        "--baseline",
+        "--before",
+        "--json",
+        "--label",
+        "--out",
+        "--project",
+        "--resource-noop",
+        "--values"
+      ],
+      "subcommands": [
+        "capture",
+        "diff"
+      ],
+      "transactional": false
     },
     "pace": {
       "options": [
@@ -509,6 +566,7 @@
         "--ease-position",
         "--hold",
         "--kind",
+        "--no-ease",
         "--on",
         "--plan",
         "--project",
@@ -561,6 +619,16 @@
         "--settle",
         "--speed",
         "--track"
+      ],
+      "transactional": true
+    },
+    "reframe": {
+      "options": [
+        "--auto",
+        "--dry-run",
+        "--plan",
+        "--project",
+        "--segment"
       ],
       "transactional": true
     },
@@ -716,6 +784,7 @@
       "options": [
         "--dry-run",
         "--glow",
+        "--no-ease",
         "--no-sfx",
         "--no-zoom",
         "--only",
@@ -736,6 +805,7 @@
         "--ease",
         "--hold",
         "--min-length",
+        "--no-ease",
         "--plan",
         "--project",
         "--stress",

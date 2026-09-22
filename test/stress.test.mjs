@@ -144,7 +144,7 @@ test('8 s spacing keeps the louder word and drops a neighbour', () => {
   assert.ok(plan.punches[1].at - plan.punches[0].at >= STRESS_SPACING_S);
 });
 
-test('opStressZoom writes a 1.08× Line push on the stressed word', () => {
+test('opStressZoom writes a 1.08× eased push on the stressed word; --no-ease restores Line', () => {
   const d = faceDoc();
   const energy = energySeries({ peaks: [{ start: 1.0, end: 1.3, db: -18 }] });
   const out = opStressZoom(d, {
@@ -161,9 +161,22 @@ test('opStressZoom writes a 1.08× Line push on the stressed word', () => {
   const keys = d.tracks[1].segments[0].common_keyframes
     .find(block => block.property_type === 'KFTypeScaleX').keyframe_list;
   assert.ok(keys.length >= 4);
-  assert.ok(keys.every(key => key.curveType === 'Line'));
+  assert.equal(out.punches[0].ease, true, 'Q01: stress pushes ease without a flag');
+  assert.ok(keys.every(key => key.curveType === 'FreeCurveInOut'));
   assert.ok(Math.abs(keys[1].values[0] - STRESS_SCALE) < 1e-9);
   assert.equal(keys[1].time_offset, US(out.punches[0].at), 'peak lands on the word, not one ramp later');
+  assert.equal(d.tracks[1].segments[0].common_keyframes
+    .some(block => /Position/.test(block.property_type)), false,
+  'a scale-only stress push writes no position keys, so nothing there to ease');
+
+  const plain = faceDoc();
+  const off = opStressZoom(plain, {
+    transcript: loudWordTranscript(), energy, hold: 1.2, ramp: 0.2, ease: false, __seed: 'stress-happy',
+  });
+  assert.equal(off.punches[0].ease, false);
+  assert.ok(plain.tracks[1].segments[0].common_keyframes
+    .find(block => block.property_type === 'KFTypeScaleX').keyframe_list
+    .every(key => key.curveType === 'Line'));
 });
 
 test('--ease writes FreeCurveInOut on ScaleX/Y only', () => {

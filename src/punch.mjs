@@ -498,8 +498,8 @@ export function opPunch(doc, op = {}, context = {}) {
     ramp,
     focus,
     track: clip.trackIndex,
-    ...(op.ease ? { ease: true } : {}),
-    ...(op.easePosition ? { easePosition: true } : {}),
+    ...(op.ease != null ? { ease: op.ease } : {}),
+    ...(op.easePosition != null ? { easePosition: op.easePosition } : {}),
     ...(op.__seed ? { __seed: op.__seed } : {}),
   };
 

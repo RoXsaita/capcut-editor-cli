@@ -94,10 +94,12 @@ Usage:
   capcutctl fade --project NAME --at S --track NAME|N | --segments ID  [--in 0.08] [--out 0.12] [--plan]
   capcutctl keyframe --project NAME --at S --track NAME|N | --segments ID
                     [--from SCALE] [--to SCALE] [--hold 1.6] [--ramp 0.2] [--clear] [--plan]
-                    [--focus X,Y,W,H] [--viewport X,Y,W,H] [--ease] [--ease-position]
+                    [--focus X,Y,W,H] [--viewport X,Y,W,H] [--no-ease] [--ease] [--ease-position]
                     focus uses source pixels; viewport uses canvas pixels. Default: current scale ×1.15.
-                    --ease writes FreeCurveInOut on ScaleX/ScaleY (handles match logo pops).
-                    Position stays Line unless --ease-position. Scale and position curves
+                    Camera moves are EASED BY DEFAULT: harvested FreeCurveInOut on ScaleX/ScaleY,
+                    and on PositionX/Y wherever position keys are written (--focus, a split mask
+                    holding its seam, a linked screen frame). --no-ease restores Line; --ease and
+                    --ease-position are kept and now name the default. Scale and position curves
                     round-tripped in CapCut 9.4.0; check curveType, not just control objects.
   capcutctl animate  --project NAME --at S --track NAME|N | --segments ID
                     [--intro fade-in [--intro-dur S]] [--outro fade-out [--outro-dur S]]
@@ -123,7 +125,7 @@ Usage:
                       blocks the build; INSUFFICIENT flags only. Never writes the draft.
   capcutctl punch   --project NAME --on TEXT --segment ID|--at T [--word TEXT] [--track NAME|N]
                     [--kind click|result] [--zoom 1.6] [--hold auto|S] [--ramp 0.2]
-                    [--ease] [--ease-position] [--plan] [--dry-run]
+                    [--no-ease] [--ease] [--ease-position] [--plan] [--dry-run]
                     — name an on-screen element; the CLI locates it via OCR boxes and writes
                       a native camera move through the existing focus-rectangle path. The
                       model never outputs a coordinate. Click arrives 250 ms early and holds
@@ -138,6 +140,20 @@ Usage:
   capcutctl init-spec [--output FILE]
   capcutctl contract [--json]                  — the machine-readable command/option surface
                                                  the skills repo validates its docs against
+  capcutctl oracle capture --project NAME [--label SLUG] [--out DIR]
+  capcutctl oracle diff --before DIR --after DIR [--baseline DIR] [--values] [--resource-noop ID[,ID…]] [--json]
+                    — dev-only round-trip sanitation harness. JSON that parses can still
+                      no-op in CapCut: 'capture' copies a WHOLE project directory (root,
+                      Timelines/**, draft_meta_info.json, template-2.tmp and any cache the
+                      app materialises), 'diff' classifies what a CapCut open/save did to it
+                      as preserved | normalized | materialized-cache | pruned | reset |
+                      authority-miss | resource-noop. Only the first three are success; it
+                      exits non-zero otherwise. Neither writes into a draft, and neither
+                      drives the CapCut UI — a human captures the directories. Run this on a
+                      DISPOSABLE copy before claiming a new field is production-safe.
+                      --values includes each record's before/after JSON, which is how the
+                      shape of an unknown field gets read off a real CapCut write.
+                      See docs/oracle.md.
 
   capcutctl scenes --project NAME_OR_PATH [--track N] [--transcript] [--name SUBSTR]
   capcutctl layout split-screen --project NAME_OR_PATH --segments IDS|--at SECONDS [--track N] [--no-overlay] [--dry-run]
@@ -164,13 +180,13 @@ Usage:
   capcutctl endcard             --project NAME_OR_PATH [--text Follow] [--at S] [--hold S] [--scale S] [--no-sfx]
   capcutctl zoom                --project NAME_OR_PATH --at S[,S...] | --auto | --stress
                                 [--min-length 2.5] [--to 1.15] [--hold 1.6] [--track N] [--plan]
-                                [--ease] [--words FILE]
+                                [--no-ease] [--ease] [--words FILE]
                                 --auto pushes in on every talking-head scene (unchanged).
                                 --stress replaces that: a 1.08× push on the word hit hardest
                                 (≥ +6 dB vs its sentence median, from energy10), at most once
                                 every 8 s. Full-face only; circle is refused; masked insets skip.
   capcutctl wrap                --project NAME_OR_PATH [--words TRANSCRIPT.json] [--text Follow] [--only BRANDS]
-                                [--zoom-at S[,S…]|--no-zoom] [--track N] [--glow] [--no-sfx] [--plan]
+                                [--zoom-at S[,S…]|--no-zoom] [--track N] [--glow] [--no-sfx] [--no-ease] [--plan]
                                 brand logos from what he says + the endcard + face push-ins, in one pass
   capcutctl pace                --project NAME_OR_PATH [--track N] [--max 100] [--min-gap 5.0]
                                 no flags = print the plan; --auto applies it
@@ -210,7 +226,17 @@ Usage:
                                 scorecard + ASCII. --plan is read-only. --music generates
                                 a Lyria bed timed to picture changes and beat-aligned.
                                 --polish runs motivated polish. Voice is never recut.
+  capcutctl denoise --project NAME [--plan] [--dry-run]
+
+  capcutctl blur-broll --project NAME --segment ID [--plan] [--dry-run]
+                      — opt-in motion-compensated mix for muted B-roll already at ≥8x.
+  capcutctl reframe --project NAME --segment ID | --auto [--plan] [--dry-run]
+                      — on-device face camera path; masked/existing moves are excluded.
+  capcutctl cursor --project NAME --segment ID | --auto [--plan] [--dry-run]
+                      — native telemetry halo; missing pointer samples are skipped.
   capcutctl music               --project NAME [--plan] [--regen] [--volume 0.08] [--prompt TEXT] [--file FILE] [--hits S[,S...]] [--offset S] [--width 64] [--json]
+                                --duck [--under-db 12] [--attack-ms 120] [--release-ms 380] [--min-gap-ms 450]
+                                [--track N] [--words FILE] ducks an existing bed from speech indexes; --plan writes nothing.
                                 supply a video-specific brief or local music; saved briefs survive later runs
                                 --hits selects emphasis times; --offset overrides music shift (−0.4..0.4s).
                                 --plan --json measures a local file and reports beats/alignment without writes.
@@ -272,10 +298,10 @@ export function parseArgs(argv) {
     const key = token.slice(2).replace(/-([a-z])/g, (_, char) => char.toUpperCase());
     if (['json', 'dryRun', 'forceRunning', 'noBackup', 'help', 'noOverlay', 'blank', 'includeTemplate', 'newTimelineId',
          'transcript', 'noTransitions', 'noSeam', 'auto', 'plan', 'noSfx', 'noZoom', 'retime', 'localize',
-         'noLocalize', 'motivated', 'regen', 'music', 'noMusic', 'polish', 'noInteractions',
+         'noLocalize', 'motivated', 'regen', 'music', 'noMusic', 'polish', 'noInteractions', 'duck',
          'waitForClose', 'force', 'reindex', 'noRepair', 'inPlace',
          'generated', 'allowEphemeral', 'measure', 'apply', 'native', 'noCache', 'noGrade',
-         'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'easePosition', 'stress', 'allowBoost',
+         'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'noEase', 'easePosition', 'stress', 'allowBoost', 'values',
          'faceDetail', 'replaceExisting'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
@@ -724,6 +750,32 @@ export async function main(argv, dependencies = {}) {
         : name === 'gradient' ? 'Static two-color text treatment.' : 'Rotating masked blurred underlay.',
     })), creates: 'editable CapCut layers; no automatic export' }, true);
   }
+  if (command === 'oracle') {
+    // Dev-only and non-transactional: `capture` copies a project tree somewhere else and
+    // `diff` only reads. Neither goes through applySpec, because neither edits a draft.
+    const oracle = await import('./oracle.mjs');
+    const sub = args._[1];
+    if (sub === 'capture') {
+      const projectDir = resolveProject(args.project, root);
+      return print(oracle.captureProject(projectDir, { out: args.out, label: args.label || 'capture' }), true);
+    }
+    if (sub === 'diff') {
+      if (!args.before || !args.after) {
+        throw new CapcutError('oracle diff requires --before DIR --after DIR.', { code: 'ORACLE_ARGS', exitCode: 2 });
+      }
+      const report = oracle.diffCaptures({
+        before: args.before, after: args.after, baseline: args.baseline || null,
+        resourceNoop: args.resourceNoop ? String(args.resourceNoop).split(',').map(s => s.trim()).filter(Boolean) : [],
+        values: Boolean(args.values),
+      });
+      // A pruned / reset / authority-miss / resource-noop record is not a passing round
+      // trip, and the exit code has to say so or the harness is decoration.
+      if (!report.ok) process.exitCode = 1;
+      return print(report, true);
+    }
+    throw new CapcutError('oracle takes `capture` or `diff`.', { code: 'ORACLE_ARGS', exitCode: 2 });
+  }
+
   if (command === 'layout' && args._[1] === 'list') {
     const { presets } = await import('./layouts.mjs');
     const p = presets();
@@ -876,7 +928,7 @@ export async function main(argv, dependencies = {}) {
 
   const NEEDS_PROJECT = new Set([
     'inspect', 'doctor', 'snapshot', 'history', 'restore', 'sync', 'scenes',
-    'pace', 'ramp', 'punch', 'match', 'verify-shots', 'motion', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
+    'denoise', 'blur-broll', 'reframe', 'cursor', 'pace', 'ramp', 'punch', 'match', 'verify-shots', 'motion', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
     'replace-media', 'localize', 'trim', 'shift', 'remove', 'volume', 'fade', 'keyframe', 'animate',
     'preview', 'diff', 'apply', 'timeline', 'finish', 'music', 'grade', 'loudness'
   ]);
@@ -1089,7 +1141,7 @@ export async function main(argv, dependencies = {}) {
       ...(args.at != null ? { at: Number(args.at) } : {}),
       ...(args.word != null ? { word: String(args.word) } : {}),
       ...(punchTrack != null ? { track: punchTrack } : {}),
-      ...(args.ease ? { ease: true } : {}),
+      ease: !args.noEase,
       ...(args.easePosition ? { easePosition: true } : {}),
     }] };
     return print(applySpec(projectDir, spec, { ...options, dryRun: Boolean(args.plan || args.dryRun) }), true);
@@ -1165,7 +1217,7 @@ export async function main(argv, dependencies = {}) {
   }
   if (command === 'logo' || command === 'endcard' || command === 'zoom' || command === 'wrap') {
     const sig = await import('./signature.mjs');
-    const op = { op: 'signature', ...(args.noSfx ? { noSfx: true } : {}) };
+    const op = { op: 'signature', ...(args.noSfx ? { noSfx: true } : {}), ease: !args.noEase };
     // `logo` is the "with everything" verb, so the glow reveal is its default; --plain is the
     // measured two-key pop. `wrap` and the rest keep the pop unless --glow is asked for.
     if (command === 'logo') op.glow = !args.plain;
@@ -1307,7 +1359,7 @@ export async function main(argv, dependencies = {}) {
           ...(args.to ? { to: Number(args.to) } : {}),
           ...(args.hold != null ? { hold: Number(args.hold) } : {}),
           ...(args.minLength ? { minLength: Number(args.minLength) } : {}),
-          ...(args.ease ? { ease: true } : {}),
+          ease: !args.noEase,
           ...(args.words ? { wordsFile: path.resolve(args.words) } : {}),
         };
         const stressTrack = await trackIndex(projectDir, args.track);
@@ -1380,6 +1432,48 @@ export async function main(argv, dependencies = {}) {
     const view = renderTimeline(doc, { width: args.width ? Number(args.width) : 64 });
     if (args.json) return print(view, true);
     return print(view.text);
+  }
+  if (command === 'denoise') {
+    const op={op:'denoise'};
+    if(args.plan){const {planDenoise}=await import('./denoise.mjs');return print(planDenoise(await loadWorking(projectDir),op,{projectDir}),true);}
+    return print(applySpec(projectDir,{version:1,name:'denoise',operations:[op]},options),true);
+  }
+  if (command === 'blur-broll') {
+    const op={op:'blur-broll',segment:args.segment};
+    if(args.plan){const {planBlurBroll}=await import('./derived-media.mjs');return print(planBlurBroll(await loadWorking(projectDir),op,{projectDir}),true);}
+    return print(applySpec(projectDir,{version:1,name:'blur-broll',operations:[op]},options),true);
+  }
+  if (command === 'reframe') {
+    const op = { op:'reframe',segment:args.segment,auto:Boolean(args.auto) };
+    if (args.plan) {
+      const { planReframe } = await import('./reframe.mjs');
+      return print(planReframe(await loadWorking(projectDir),op,{projectDir}),true);
+    }
+    return print(applySpec(projectDir,{version:1,name:'reframe',operations:[op]},options),true);
+  }
+  if (command === 'cursor') {
+    const op = { op: 'cursor', segment: args.segment, auto: Boolean(args.auto) };
+    if (args.plan) {
+      const { planCursor } = await import('./cursor.mjs');
+      return print(planCursor(await loadWorking(projectDir), op, { projectDir }), true);
+    }
+    return print(applySpec(projectDir, { version: 1, name: 'cursor', operations: [op] }, options), true);
+  }
+  if (command === 'music' && !args.duck && ['underDb', 'attackMs', 'releaseMs', 'minGapMs', 'words'].some(key => args[key] != null)) {
+    throw new CapcutError('Ducking controls require music --duck.', { code: 'MUSIC_OPTIONS', exitCode: 2 });
+  }
+  if (command === 'music' && args.duck) {
+    if (['file', 'prompt', 'regen', 'volume', 'hits', 'offset'].some(key => args[key] != null)) {
+      throw new CapcutError('Use music --duck on the existing bed separately from music generation/placement flags.', { code: 'MUSIC_OPTIONS', exitCode: 2 });
+    }
+    const op = { op: 'music', duck: true, track: await trackIndex(projectDir, args.track),
+      ...(args.words ? { wordsFile: path.resolve(args.words) } : {}) };
+    for (const key of ['underDb', 'attackMs', 'releaseMs', 'minGapMs']) if (args[key] != null) op[key] = Number(args[key]);
+    if (args.plan) {
+      const { planDuckMusic } = await import('./duck.mjs');
+      return print(planDuckMusic(await loadWorking(projectDir), op, { projectDir }), true);
+    }
+    return print(applySpec(projectDir, { version: 1, name: 'music-duck', operations: [op] }, options), true);
   }
   if (command === 'finish' || command === 'music') {
     const { assertFirstPictureProof, finishScorecard, finishText } = await import('./finish.mjs');
@@ -1665,7 +1759,8 @@ export async function main(argv, dependencies = {}) {
         to: args.to != null ? Number(args.to) : undefined, hold: args.hold != null ? Number(args.hold) : undefined,
         ramp: args.ramp != null ? Number(args.ramp) : undefined, track: args.track,
         focus: args.focus, viewport: args.viewport, clear: Boolean(args.clear),
-        ease: Boolean(args.ease), easePosition: Boolean(args.easePosition) };
+        // Easing is the default (Q01); the flags only ever turn it off or force position on.
+        ease: !args.noEase, easePosition: args.easePosition ? true : !args.noEase };
       return print(applySpec(projectDir, { version: 1, name: 'keyframe', operations: [op] },
         { ...options, dryRun: Boolean(args.plan || args.dryRun) }), true);
     }

@@ -22,8 +22,8 @@ import { HELP } from './cli.mjs';
  */
 export const CONTRACT_VERSION = 1;
 
-/** The only command that dispatches on a positional subcommand (`args._[1]`). */
-const SUBCOMMAND_PARENTS = new Set(['layout']);
+/** Commands that dispatch on a positional subcommand (`args._[1]`). */
+const SUBCOMMAND_PARENTS = new Set(['layout', 'oracle']);
 
 /**
  * Commands that mutate a project through the transaction machinery. These are the ones
@@ -39,7 +39,7 @@ const SUBCOMMAND_PARENTS = new Set(['layout']);
 export const TRANSACTIONAL_COMMANDS = Object.freeze([
   'add', 'animate', 'apply', 'endcard', 'fade', 'grade', 'keyframe', 'layout', 'localize', 'logo', 'motion', 'music',
   'new', 'pace', 'polish', 'punch', 'match', 'ramp', 'remove', 'replace-media', 'restore', 'rm', 'shift', 'sync',
-  'trim', 'volume', 'wrap', 'zoom', 'finish', 'loudness',
+  'denoise', 'blur-broll', 'reframe', 'cursor', 'trim', 'volume', 'wrap', 'zoom', 'finish', 'loudness',
 ]);
 
 const OPTION = /--[a-z][a-z0-9-]*/g;

@@ -34,3 +34,4 @@ outputs/
 # presets/brands.json names each logo by an absolute ~/ path; a local copy kept
 # inside the clone under Logos/ must stay out of the repository.
 Logos/
+tools/vision/face

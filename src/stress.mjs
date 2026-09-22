@@ -392,7 +392,7 @@ export function opStressZoom(doc, op = {}, context = {}) {
       to,
       hold,
       track: trackIndex,
-      ...(op.ease ? { ease: true } : {}),
+      ...(op.ease != null ? { ease: op.ease } : {}),
       ...(op.__seed ? { __seed: op.__seed } : {}),
     });
     punches.push({
@@ -403,7 +403,7 @@ export function opStressZoom(doc, op = {}, context = {}) {
       to: written.to,
       hold: written.hold,
       shape: written.shape,
-      ease: Boolean(op.ease),
+      ease: written.ease,
     });
   }
 

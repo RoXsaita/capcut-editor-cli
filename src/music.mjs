@@ -5,6 +5,7 @@ import path from 'node:path';
 import { CapcutError, clone, seededId, requireBinary, contentEndUs, LOCAL_MEDIA_DIR, resolveMediaPath } from './core.mjs';
 import { geminiApiKey, loadEnv } from './env.mjs';
 import { audioSegment, ensureAudioTrack, pictureChanges, sfxPresets } from './polish.mjs';
+import { opDuckMusic } from './duck.mjs';
 
 const US = s => Math.round(s * 1e6);
 const S = us => us / 1e6;
@@ -368,6 +369,7 @@ function detachLibraryIdentity(material) {
  * The bed stops at the CTA (endcard) so the fade lands before he asks for the comment.
  */
 export function opMusic(doc, op, context = {}) {
+  if (op.duck) return opDuckMusic(doc, op, context);
   SEED = op.__seed || null;
   const file = op.file;
   if (!file || !fs.existsSync(file)) {

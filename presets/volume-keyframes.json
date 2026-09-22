@@ -1,0 +1,94 @@
+{
+  "provenance": "Harvested from CapCut 9.4.0 (build 285) on 2026-09-18. Three volume keyframes were authored BY HAND in the CapCut UI on a disposable project's audio clip at 0 dB / -12 dB / 0 dB; capcutctl oracle diff read the record back out of the saved draft. Nothing here was invented or retyped from a screenshot.",
+  "appVersion": "9.4.0",
+  "schema": 1,
+  "propertyType": "KFTypeVolume",
+  "units": {
+    "kind": "linear-amplitude",
+    "note": "NOT decibels. value = 10 ** (dB / 20). Measured: 0 dB -> 1, -12 dB -> 0.25118863582611084 (float32 of 10**-0.6).",
+    "application": "absolute-gain",
+    "nonUnityProbe": "CapCut 9.4.0 on 2026-09-19: set clip volume to -20 dB, then author keys at -20/-32 dB. Key values were 0.10000000149011612 and 0.025118863210082054; segment.volume became the last edited value 0.025118863210082054. Keys replace the static gain; they are not multipliers on it.",
+    "fullScale": 1,
+    "silence": 0
+  },
+  "timeBase": {
+    "kind": "source-microseconds",
+    "note": "Same base as the camera keyframe channels, so sourceTime() in opScaleKeyframe applies unchanged. Verified against the authoring UI at 30 fps: timecodes 00:00:00:00 / 00:01:20:24 / 00:02:39:26 stored as 0 / 80800000 / 159866666."
+  },
+  "companionMaterial": null,
+  "writtenTo": [
+    "draft_info.json",
+    "draft_info.json.bak",
+    "template-2.tmp",
+    "Timelines/<id>/draft_info.json",
+    "Timelines/<id>/draft_info.json.bak",
+    "Timelines/<id>/template-2.tmp"
+  ],
+  "doNotWrite": {
+    "Timelines/<id>/attachment/patch/mini_draft.json": "CapCut materialises its own copy here with a DIFFERENT encoding \u2014 curveType as the integer 0 and a `graph: null` field instead of `graphID: \"\"`. App cache. Never write it."
+  },
+  "sideEffects": {
+    "materials.sound_channel_mappings[].type": "CapCut rewrote '' -> 'none' on the mapped audio material when the clip gained keyframes. Preserve whatever is there; do not normalise it either way."
+  },
+  "block": {
+    "id": "054250E8-0640-40D1-B672-14C8E119B1DD",
+    "material_id": "",
+    "property_type": "KFTypeVolume",
+    "keyframe_list": [
+      {
+        "id": "51E0D76B-DC85-475A-86B6-377DE53ABDC6",
+        "curveType": "Line",
+        "time_offset": 0,
+        "left_control": {
+          "x": 0,
+          "y": 0
+        },
+        "right_control": {
+          "x": 0,
+          "y": 0
+        },
+        "values": [
+          1
+        ],
+        "string_value": "",
+        "graphID": ""
+      },
+      {
+        "id": "A517CB8E-E37F-4387-BAD9-8C60AE2ED033",
+        "curveType": "Line",
+        "time_offset": 80800000,
+        "left_control": {
+          "x": 0,
+          "y": 0
+        },
+        "right_control": {
+          "x": 0,
+          "y": 0
+        },
+        "values": [
+          0.25118863582611084
+        ],
+        "string_value": "",
+        "graphID": ""
+      },
+      {
+        "id": "E4956CEB-CF8E-400C-81A7-E1FC6660B5ED",
+        "curveType": "Line",
+        "time_offset": 159866666,
+        "left_control": {
+          "x": 0,
+          "y": 0
+        },
+        "right_control": {
+          "x": 0,
+          "y": 0
+        },
+        "values": [
+          1
+        ],
+        "string_value": "",
+        "graphID": ""
+      }
+    ]
+  }
+}

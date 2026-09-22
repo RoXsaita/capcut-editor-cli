@@ -88,7 +88,7 @@ test('a zoom that would start mid-scroll shifts to the next quiet frame', () => 
   assert.equal(plan.shiftedFrom, 5.0 - CLICK_LEAD);
 });
 
-test('opPunch writes Line Scale+Position keys timed around the named element', () => {
+test('opPunch writes eased Scale+Position keys timed around the named element', () => {
   const d = doc();
   const out = opPunch(d, {
     segment: 'b0', on: 'Publish', at: 5, kind: 'click', zoom: DEFAULT_ZOOM, ramp: 0.2,
@@ -102,12 +102,16 @@ test('opPunch writes Line Scale+Position keys timed around the named element', (
   const posX = seg.common_keyframes.find(k => k.property_type === 'KFTypePositionX');
   const posY = seg.common_keyframes.find(k => k.property_type === 'KFTypePositionY');
   assert.ok(scale.length >= 4, 'push-hold-release');
-  assert.ok(scale.every(k => k.curveType === 'Line'));
+  // Q01: a punch eases by default, scale and position together.
+  assert.ok(scale.every(k => k.curveType === 'FreeCurveInOut'));
   assert.ok(posX && posY, 'focus path writes PositionX/Y');
-  assert.equal(scale[0].curveType, 'Line');
+  assert.ok(posX.keyframe_list.every(k => k.curveType === 'FreeCurveInOut'));
   assert.ok(Math.abs(out.arrive - 4.75) < 1e-9);
-  assert.ok(Math.abs(value(seg, 'KFTypeScaleX', 4.75) - 1) < 1e-6);
-  assert.ok(Math.abs(value(seg, 'KFTypeScaleX', 4.95) - out.to) < 1e-6);
+  // `cameraValue` refuses to interpolate an eased curve, so read the keys themselves.
+  assert.ok(Math.abs(scale[0].values[0] - 1) < 1e-6);
+  assert.ok(Math.abs(scale[1].values[0] - out.to) < 1e-6);
+  assert.equal(scale[0].time_offset, US(4.75));
+  assert.equal(scale[1].time_offset, US(4.95));
   assert.ok(out.to > 1.4 && out.to < 1.8, out.to);
   assert.ok(out.upscale < UPSCALE_REFUSE);
   assert.equal(out.focus.length, 4);

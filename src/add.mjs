@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import {
-  CapcutError, clone, seededId, allSegments, selectSegments, localizeMedia,
+  CapcutError, clone, seededId, loadPreset, allSegments, selectSegments, localizeMedia,
   isLocalMedia, isCapCutCachePath, PRESET_PARK_GAP_US, contentEndUs, maxSegmentEndUs,
 } from './core.mjs';
 import { insertOverlayTrack, renumberTracks, recordMediaProvenance, sourceTakeId } from './layouts.mjs';
@@ -278,7 +278,7 @@ export function annotateMediaSource(material, segment, originalPath, localizedPa
   if (localized !== original) material.original_path = original;
   else delete material.original_path;
   if (segment) segment.source_take_id = takeId;
-  if (localized !== original) {
+  if (localized !== original || origin?.kind === 'derived') {
     recordMediaProvenance(context, {
       materialId: material.id,
       originalPath: original,
@@ -659,6 +659,20 @@ export function opScaleKeyframe(doc, op) {
   const segment = entry?.segment;
   if (!segment) throw new CapcutError('keyframe: no segment matched.', { code: 'SELECTOR_EMPTY', exitCode: 2 });
   if (entry.track.type !== 'video') throw new CapcutError('Camera keyframes require a video overlay.', { code: 'NOT_VIDEO', exitCode: 2 });
+  if (op.path) {
+    if (segment.reverse || (doc.materials.common_mask||[]).some(m=>(segment.extra_material_refs||[]).includes(m.id))
+      || (doc.materials.speeds||[]).some(m=>(segment.extra_material_refs||[]).includes(m.id)&&m.curve_speed)) {
+      throw new CapcutError('Sampled camera paths require an unmasked forward constant-speed clip.', {code:'MOTION_MASK_UNSUPPORTED',exitCode:2});
+    }
+    const st = segment.source_timerange;
+    if (!Array.isArray(op.path) || !op.path.length || op.path.some((p,i)=>!Number.isFinite(p.t)
+      || !Array.isArray(p.v) || p.v.length!==4 || !p.v.every(Number.isFinite) || p.v[0]<=0 || p.v[1]<=0
+      || US(p.t)<st.start || US(p.t)>st.start+st.duration || (i && US(p.t)<=US(op.path[i-1].t)))) {
+      throw new CapcutError('Invalid sampled camera path.', {code:'BAD_MOTION_PATH',exitCode:2});
+    }
+    writeCameraPath(segment,op.path,{seed:op.__seed,ease:op.ease!==false});
+    return {changed:1,id:segment.id,keys:op.path.length};
+  }
   const owner = segment.screen_recording_id || segment.screenRecordingId || segment.id;
   const frames = allSegments(doc).map(e => e.segment).filter(s => segment.desc === 'layout:screen-recording' && s.desc === 'layout:screen-frame'
     && (s.screen_recording_id || s.screenRecordingId || s.layout_owner_id) === owner);
@@ -699,6 +713,15 @@ export function opScaleKeyframe(doc, op) {
   if (cameraValue(segment, 'KFTypeAlpha', c0, segment.clip?.alpha ?? 1) <= 0) {
     throw new CapcutError('Selected clip is invisible; select the visible face or recording.', { code: 'MOTION_HIDDEN', exitCode: 2 });
   }
+  // Acceleration, not amplitude, is what reads as a tween. The harvested FreeCurveInOut is
+  // the house curve on every camera move, so easing is the default and `--no-ease` (ease:false)
+  // is the opt-out. Position follows scale rather than defaulting to Line: position keys are
+  // written only where the frame is pinned to the scale — `--focus` (how `punch` writes), a
+  // split mask holding its seam, or a linked screen frame tracking its recording — and easing
+  // one of a coupled pair without the other slides the seam mid-ramp. A scale-only push writes
+  // no position keys at all, so it is unaffected either way.
+  const ease = op.ease !== false;
+  const easePosition = ease && op.easePosition !== false;
   const from = op.from ?? base.x;
   let to = op.to ?? from * 1.15, tx = base.tx, ty = base.ty;
   const cc = doc.canvas_config || {}, W = cc.width || 1080, H = cc.height || 1920;
@@ -786,7 +809,7 @@ export function opScaleKeyframe(doc, op) {
         time_offset: sourceTime(time), left_control: { x: 0, y: 0 }, right_control: { x: 0, y: 0 },
         values: [values[i]], string_value: '', graphID: '' }));
       const isPosition = property === 'KFTypePositionX' || property === 'KFTypePositionY';
-      const eased = isPosition ? Boolean(op.easePosition) : Boolean(op.ease);
+      const eased = isPosition ? easePosition : ease;
       // Native 9.4.0 keeps FreeCurveInOut and its handles, but clears graphID.
       const written = eased ? applyFreeCurve(list) : list;
       const previous = (s.common_keyframes || []).find(k => k.property_type === property);
@@ -800,9 +823,9 @@ export function opScaleKeyframe(doc, op) {
   return { changed: plans.length, id: segment.id, offsets: offsets.map(k => r3(S(k))), from, to,
     shape: release ? 'push-hold-release' : 'push', hold, shortenedHold: op.hold == null && hold < 1.6,
     focus: op.focus || null, transform: { x: tx, y: ty }, frameIds: frames.map(s => s.id),
-    ease: Boolean(op.ease),
-    easePosition: Boolean(op.easePosition),
-    ...(op.ease || op.easePosition ? { verifiedIn: 'CapCut 9.4.0' } : {}),
+    ease,
+    easePosition,
+    ...(ease || easePosition ? { verifiedIn: 'CapCut 9.4.0' } : {}),
   };
 }
 
@@ -889,4 +912,19 @@ export function opClipFade(doc, op) {
   fades.push(copied);
   entry.segment.extra_material_refs = [...(entry.segment.extra_material_refs || []), copied.id];
   return { changed: 1, id: entry.segment.id, fadeId: copied.id, in: r3(S(fadeIn)), out: r3(S(fadeOut)), updated: false };
+}
+
+/** Clone the harvested camera record, also used for the sampled face path. */
+export function writeCameraPath(segment, points, { seed, ease = false } = {}) {
+  const source = loadPreset('signature').logoSegmentTemplate.common_keyframes[0];
+  for (const [j, property] of ['KFTypeScaleX', 'KFTypeScaleY', 'KFTypePositionX', 'KFTypePositionY'].entries()) {
+    const block = clone(source);
+    block.property_type = property;
+    block.id = seededId(seed, `${segment.id}:${property}`);
+    const list = points.map(p => ({ ...clone(source.keyframe_list[0]),
+      id: seededId(seed, `${segment.id}:${property}:${p.t}`), curveType: 'Line', time_offset: US(p.t),
+      left_control: { x: 0, y: 0 }, right_control: { x: 0, y: 0 }, values: [p.v[j]], string_value: '', graphID: '' }));
+    block.keyframe_list = ease ? applyFreeCurve(list) : list;
+    segment.common_keyframes = [...(segment.common_keyframes || []).filter(b => b.property_type !== property), block];
+  }
 }

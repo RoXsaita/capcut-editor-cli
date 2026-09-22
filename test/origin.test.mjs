@@ -190,6 +190,17 @@ test('--derived-from records the real source and satisfies the contract', () => 
   assert.equal(material.derived_from_offset, 220);
 });
 
+test('already-local derivatives retain recovery metadata outside native JSON', () => {
+  const p = project();
+  const original = path.join(p.temp, 'original.mp4');
+  fs.writeFileSync(original, 'original');
+  applySpec(p.dir, {version: 1, operations: [add(p, {localize: false, derivedFrom: original, derivedOffset: 2})]}, {forceRunning: true});
+  const map = readJson(path.join(p.dir, '.capcutctl', 'media-map.json'));
+  const row = Object.values(map.materials).find(m => m.origin === 'derived');
+  assert.equal(row.derived_from_path, fs.realpathSync.native(original));
+  assert.equal(row.derived_from_offset, 2);
+});
+
 test('doctor reports pre-framed media and an origin that no longer exists', () => {
   const p = project();
   const gone = path.join(p.temp, 'deleted-source.mp4');

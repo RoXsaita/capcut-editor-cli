@@ -5,7 +5,7 @@ Two repositories make the toolkit. Start here; each repo's own README goes deepe
 | Repo | Gives you |
 |---|---|
 | `capcut-editor-cli` (this one) | `capcutctl` — reads and writes CapCut's `draft_info.json` transactionally |
-| `capcut-skills` | the four agent skills that teach an agent how to use `capcutctl` |
+| `capcut-skills` | the agent skills that teach editing and motion graphics with `capcutctl` |
 
 Requirements: **macOS**, **Node.js 20+**, **Python 3.11+**, **ffmpeg**
 (`brew install ffmpeg`), **Xcode command line tools** (for Swift), and **CapCut**
@@ -47,6 +47,18 @@ python3.11 -m venv .venv
 .venv/bin/python -m pip install -e .  # declared NumPy and Pillow versions
 capcutctl preflight           # deps, Python runtime, artwork, SFX palette, drafts folder
 ```
+
+### Local Vision helpers
+
+Build both helpers on the Mac where the CLI runs (no model download):
+
+```bash
+swiftc -O tools/vision/ocr.swift -o tools/vision/ocr
+swiftc -O tools/vision/face.swift -o tools/vision/face
+```
+
+`find` uses OCR; opt-in `reframe` uses the face helper. The binaries are local
+build artifacts. `scripts/check.sh --strict` requires both on macOS.
 
 ### The Python runtime
 

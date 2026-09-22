@@ -62,6 +62,9 @@ export function rescaleKeyframes(seg, oldStart, oldDur, newStart, newDur) {
       const rel = kf.time_offset - oldStart;
       const next = newStart + Math.round(rel * factor);
       kf.time_offset = Math.max(newStart, Math.min(newStart + newDur, next));
+      for (const handle of ['left_control','right_control']) if (Number.isFinite(kf[handle]?.x)) {
+        kf[handle].x = Math.round(kf[handle].x * factor);
+      }
     }
   }
 }
