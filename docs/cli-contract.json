@@ -371,6 +371,7 @@
     "motion": {
       "options": [
         "--accent",
+        "--asset",
         "--at",
         "--color",
         "--dry-run",

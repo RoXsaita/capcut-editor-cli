@@ -1,6 +1,10 @@
 # Native motion implementation checkpoint
 
-**Experimental, not a completed reproduction of hEV-gkypeV8. No showcase MP4 has been produced.**
+**Reusable demo treatments, not a completed reproduction of hEV-gkypeV8. The user reviewed the text demo in CapCut and approved preserving it. No complete native showcase MP4 has been verified.**
+
+The installed `capcutctl motion` command accepts `--text`, `--asset` (alias `--logo`), optional `--name` (defaults to recipe-start), and `motion list` without a project. See [usage](../native-motion.md). The user-reviewed scope is the text demo; image variants remain experimental.
+
+Latest persistence checks: 477 tests pass, syntax checks pass. A tiny inherited native `config.export_range` was found during export diagnosis. The new opt-in `timeline.set` field `exportRange:null` clears it through the transaction engine; this does not complete native export verification.
 
 ## Implemented surface
 

@@ -149,9 +149,12 @@ Usage:
                                 [--track N] [--plain] [--no-sfx] [--plan]
                                 the artwork is the primitive: any image pops; --brand/--auto time
                                 themselves off the transcript. Glow reveal by default, --plain for the pop.
-  capcutctl motion RECIPE       --project NAME_OR_PATH --name ID --text TEXT|--logo FILE
+  capcutctl motion list         list native recipes, accepted inputs, and limitations; no project needed
+  capcutctl motion RECIPE       --project NAME_OR_PATH --text TEXT|--asset FILE|--logo FILE [--name ID]
                                 [--at S] [--duration S] [--scale N] [--x N] [--y N] [--color HEX] [--accent HEX]
-                                experimental native gradient, shimmer, spotlight, orbit-glow; --dry-run validates without writing
+                                native gradient, shimmer, spotlight, orbit-glow; name defaults to RECIPE-AT
+                                --asset aliases --logo; gradient is text-only; image variants remain experimental
+                                --dry-run validates without writing; creates editable layers, not an MP4
   capcutctl endcard             --project NAME_OR_PATH [--text Follow] [--at S] [--hold S] [--scale S] [--no-sfx]
   capcutctl zoom                --project NAME_OR_PATH --at S[,S...] | --auto | --stress
                                 [--min-length 2.5] [--to 1.15] [--hold 1.6] [--track N] [--plan]
@@ -705,6 +708,16 @@ export async function main(argv, dependencies = {}) {
   await validateOptions(command, args);
   const root = args.root ? path.resolve(args.root) : DEFAULT_ROOT;
 
+  if (command === 'motion' && args._[1] === 'list') {
+    const { MOTION_RECIPES } = await import('./motion.mjs');
+    return print({ recipes: MOTION_RECIPES.map(name => ({
+      name, inputs: name === 'gradient' ? ['text'] : ['text', 'asset'],
+      native: true, imageVariantsExperimental: name !== 'gradient',
+      note: name === 'shimmer' ? 'Text sweep; logo brightening is not implemented.'
+        : name === 'spotlight' ? 'Traveling circle mask; uses Blur, not tutorial text glow.'
+        : name === 'gradient' ? 'Static two-color text treatment.' : 'Rotating masked blurred underlay.',
+    })), creates: 'editable CapCut layers; no automatic export' }, true);
+  }
   if (command === 'layout' && args._[1] === 'list') {
     const { presets } = await import('./layouts.mjs');
     const p = presets();
@@ -1672,8 +1685,11 @@ export async function main(argv, dependencies = {}) {
     return print(diffSummaries(summarizeProject(otherDir), summarizeProject(projectDir)), true);
   }
   if (command === 'motion') {
-    const op = {op:'motion', recipe:argv[1]};
+    if (args.asset != null && args.logo != null) throw new CapcutError('Use either --asset or --logo, not both.', { code: 'MOTION_INPUT' });
+    const op = {op:'motion', recipe:args._[1]};
     for (const key of ['name','text','logo','at','duration','scale','x','y','color','accent']) if(args[key] != null) op[key]=args[key];
+    if (args.asset != null) op.logo = args.asset;
+    op.name ??= `${op.recipe}-${Number(op.at ?? 0)}`;
     return print(applySpec(projectDir,{version:1,operations:[op]},options),true);
   }
   if (command === 'apply') {

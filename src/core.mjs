@@ -2022,6 +2022,11 @@ function opTrackClone(doc, op) {
 }
 
 function opTimelineSet(doc, op) {
+  if (Object.hasOwn(op, 'exportRange')) {
+    if (op.exportRange !== null) throw new CapcutError('timeline.set exportRange only supports null (clear selection).', { code: 'BAD_EXPORT_RANGE' });
+    doc.config ||= {};
+    doc.config.export_range = null;
+  }
   if (op.duration != null) doc.duration = normalizeUs(op.duration, 'duration');
   if (op.fps != null) doc.fps = op.fps;
   if (op.canvas) doc.canvas_config = clone(op.canvas);
