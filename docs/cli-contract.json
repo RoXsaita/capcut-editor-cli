@@ -5,6 +5,7 @@
     "guarantee": "Every transactional edit command takes --dry-run.",
     "commands": [
       "add",
+      "animate",
       "apply",
       "endcard",
       "fade",
@@ -56,6 +57,22 @@
         "--track",
         "--volume",
         "--width"
+      ],
+      "transactional": true
+    },
+    "animate": {
+      "options": [
+        "--at",
+        "--dry-run",
+        "--intro",
+        "--intro-dur",
+        "--outro",
+        "--outro-dur",
+        "--plan",
+        "--project",
+        "--replace-existing",
+        "--segments",
+        "--track"
       ],
       "transactional": true
     },
@@ -236,6 +253,10 @@
         "--projects",
         "--root"
       ],
+      "transactional": false
+    },
+    "help": {
+      "options": [],
       "transactional": false
     },
     "history": {
@@ -704,10 +725,6 @@
         "--words"
       ],
       "transactional": true
-    },
-    "help": {
-      "options": [],
-      "transactional": false
     }
   }
 }

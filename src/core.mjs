@@ -21,6 +21,7 @@ import {
 import { opMusic } from './music.mjs';
 import { opLoudness } from './loudness.mjs';
 import { opCaption } from './captions.mjs';
+import { opAnimation } from './animations.mjs';
 import { isPreframed } from './origin.mjs';
 import { preflightPython } from './python.mjs';
 
@@ -2846,6 +2847,7 @@ export function applyOperations(doc, operations, context) {
     else if (op.op === 'music') result = opMusic(doc, op, context);
     else if (op.op === 'loudness') result = opLoudness(doc, op, context);
     else if (op.op === 'caption') result = opCaption(doc, op, context);
+    else if (op.op === 'animation.apply') result = opAnimation(doc, op, context);
     else if (op.op === 'grade.apply') result = opGradeApply(doc, op, context);
     else if (op.op === 'grade.reset') result = opGradeReset(doc, op, context);
     else if (op.op === 'grade.layer') result = opGradeLayer(doc, op, context);
