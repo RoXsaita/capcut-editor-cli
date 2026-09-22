@@ -1,7 +1,7 @@
 # Native motion recipes: source analysis and acceptance contract
 
-Status: **source analysis complete; implementation and native verification pending**.
-No commands or effects described below have been added by this document.
+Status: **source analysis complete; four experimental native recipe primitives implemented, full reproduction and export verification pending**.
+See [the implementation checkpoint](native-motion-progress.md) for the actual command surface, test evidence, missing work, and current blocker. This document defines the full acceptance target, not a completion claim.
 
 ## Source
 

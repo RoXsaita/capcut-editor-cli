@@ -16,6 +16,7 @@
       "logo",
       "loudness",
       "match",
+      "motion",
       "music",
       "new",
       "pace",
@@ -364,6 +365,23 @@
         "--project",
         "--screen",
         "--shots"
+      ],
+      "transactional": true
+    },
+    "motion": {
+      "options": [
+        "--accent",
+        "--at",
+        "--color",
+        "--dry-run",
+        "--duration",
+        "--logo",
+        "--name",
+        "--project",
+        "--scale",
+        "--text",
+        "--x",
+        "--y"
       ],
       "transactional": true
     },

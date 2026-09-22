@@ -14,6 +14,7 @@ import { opRamp } from './ramp.mjs';
 import { opPunch } from './punch.mjs';
 import { opStressZoom } from './stress.mjs';
 import { opSignature } from './signature.mjs';
+import { opMotion } from './motion.mjs';
 import {
   opClipAdd, opReplaceMedia, opScaleKeyframe,
   opClipShift, opClipTrim, opClipFade, opLocalizeAll
@@ -2835,6 +2836,7 @@ export function applyOperations(doc, operations, context) {
     else if (op.op === 'punch') result = opPunch(doc, op, context);
     else if (op.op === 'zoom.stress') result = opStressZoom(doc, op, context);
     else if (op.op === 'signature') result = opSignature(doc, op, context);
+    else if (op.op === 'motion') result = opMotion(doc, op, context);
     else if (op.op === 'clip.add') result = opClipAdd(doc, op, context);
     else if (op.op === 'replace.media') result = opReplaceMedia(doc, op, context);
     else if (op.op === 'media.localize') result = opLocalizeAll(doc, op, context);
