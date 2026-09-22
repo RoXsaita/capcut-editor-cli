@@ -75,6 +75,15 @@ test('missing resource refuses before document mutation',()=>{
  try{const d=blank(),before=structuredClone(d);assert.throws(()=>opMotion(d,{op:'motion',recipe:'gradient',name:'missing',text:'X'},{seed:'test'}),/MOTION_RESOURCE_MISSING/);assert.deepEqual(d,before);}
  finally{if(old===undefined)delete process.env.CAPCUTCTL_PRESET_DIR;else process.env.CAPCUTCTL_PRESET_DIR=old;fs.rmSync(dir,{recursive:true,force:true});}
 });
+test('arabic copy uses CapCut Noto Sans Arabic when that face is installed',()=>{
+ const face='/Applications/CapCut.app/Contents/Resources/Font/SystemFont/NotoSansArabic-Regular.ttf';
+ if(!fs.existsSync(face)) return;
+ const doc=run('shimmer',{text:'وصلت',name:'ar'});
+ const raw=JSON.stringify(doc.materials.drafts);
+ assert.match(raw,/NotoSansArabic-Regular\.ttf/);
+ assert.match(raw,/وصلت/);
+ assert.equal(run('shimmer').materials.drafts.some(d=>JSON.stringify(d).includes('NotoSansArabic')),false);
+});
 test('same name with different input refuses rather than deleting manual work',()=>{
  const d=run('gradient');assert.throws(()=>opMotion(d,{op:'motion',recipe:'gradient',name:'demo',text:'CHANGED',at:0,duration:4},{seed:'test',checkResources:false}),/MOTION_NAME_CONFLICT/);
 });

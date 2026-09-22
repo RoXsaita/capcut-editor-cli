@@ -1155,6 +1155,28 @@ test('cut.recut leaves unrelated audio anchored but maps explicitly tied audio',
   }
 });
 
+test('material.patch splits one conflicting speed record by its speed value', () => {
+  const doc = {
+    materials: {
+      speeds: [
+        { id: 'SAME', type: 'speed', speed: 0.4, mode: 0, curve_speed: null },
+        { id: 'SAME', type: 'speed', speed: 0.5, mode: 0, curve_speed: null },
+      ],
+    },
+    tracks: [],
+  };
+  applyOperations(doc, [{
+    op: 'material.patch',
+    selector: { id: 'SAME', speed: 0.5 },
+    set: { id: 'NEW' },
+  }], { group: 'root' });
+  assert.deepEqual(doc.materials.speeds.map(row => [row.id, row.speed]), [['SAME', 0.4], ['NEW', 0.5]]);
+  assert.throws(
+    () => applyOperations(doc, [{ op: 'material.patch', selector: { id: 'MISSING' }, set: { speed: 1 } }], { group: 'root' }),
+    error => error instanceof CapcutError && error.code === 'SELECTOR_EMPTY'
+  );
+});
+
 test('a live lock is never reclaimed after a stale preflight check', () => {
   const f = fixture({ drift: false });
   const lock = path.join(f.project, '.capcutctl', 'write.lock');

@@ -46,6 +46,11 @@ def analyze(payload):
             if track["type"] == "video" and material.get("type") in ("photo", "image"):
                 continue
             file = resolve(project, material.get("path", ""))
+            # Compound motion layers are nested drafts, not media files. They carry no audio.
+            if not file:
+                if track["type"] == "audio":
+                    raise ValueError(f"audio track has no media path: {segment['id']}")
+                continue
             if file not in probes:
                 result = subprocess.run(["ffprobe", "-v", "error", "-show_streams",
                                          "-show_format", "-of", "json", file],

@@ -1992,6 +1992,17 @@ function opMaterialRelink(doc, op, context) {
   return { changed: selected.length, logicalMaterials: equivalentMaterialMatches(found) ? 1 : selected.length, path: destination };
 }
 
+function opMaterialPatch(doc, op) {
+  let found = selectMaterials(doc, op.selector || {});
+  if (op.selector?.speed != null) found = found.filter(entry => entry.value.speed === op.selector.speed);
+  if (!found.length) throw new CapcutError(`${op.op}: no materials matched ${JSON.stringify(op.selector || {})}.`, { code: 'SELECTOR_EMPTY' });
+  if (found.length > 1) throw new CapcutError(`${op.op}: selector matched ${found.length} materials.`, { code: 'SELECTOR_AMBIGUOUS' });
+  const { value } = found[0];
+  if (op.set) deepMerge(value, op.set);
+  for (const key of op.unset || []) unsetPath(value, key);
+  return { changed: 1, id: value.id, kind: found[0].kind };
+}
+
 function opMaterialClone(doc, op, context) {
   const found = selectMaterials(doc, op.from || {});
   if (!found.length && op.optional === true) return { changed: 0, skipped: true };
@@ -2827,6 +2838,7 @@ export function applyOperations(doc, operations, context) {
     }
     let result;
     if (op.op === 'segment.patch') result = opSegmentPatch(doc, op);
+    else if (op.op === 'material.patch') result = opMaterialPatch(doc, op);
     else if (op.op === 'segment.remove') result = opSegmentRemove(doc, op);
     else if (op.op === 'segment.clone') result = opSegmentClone(doc, op);
     else if (op.op === 'mask.patch') result = opMaskPatch(doc, op);

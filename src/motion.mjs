@@ -73,7 +73,14 @@ export function opMotion(doc, op, context = {}) {
       nested.materials.videos=[mat];nested.materials.texts=[];textSeg.material_id=mat.id;textSeg.extra_material_refs=[];textSeg.source_timerange={start:0,duration:durationUs};nested.tracks.find(t=>t.segments.length).type='video';nested.tracks.find(t=>t.segments.length).flag=2;
     }else{
       const mat=nested.materials.texts[0],content=JSON.parse(mat.content);
-      content.text=op.text;content.styles[0].range=[0,op.text.length];content.styles[0].fill.content.solid.color=rgb(tint);mat.content=JSON.stringify(content);
+      content.text=op.text;content.styles[0].range=[0,op.text.length];content.styles[0].fill.content.solid.color=rgb(tint);
+      // The harvested face is Latin-only. Arabic copy would otherwise draw as boxes.
+      if(/[\u0600-\u06FF]/.test(op.text)){
+        const face=path.join(path.dirname(content.styles[0].font.path),'NotoSansArabic-Regular.ttf');
+        if(!fs.existsSync(face))fail('MOTION_FONT',`Arabic text needs CapCut's Noto Sans Arabic at ${face}`);
+        content.styles[0].font.path=face;mat.font_path=face;mat.font_title='Noto Sans Arabic';
+      }
+      mat.content=JSON.stringify(content);
     }
     const outer=tpl.tracks.flatMap(t=>t.segments)[0];outer.id=mint('segment');outer.target_timerange={start:atUs,duration:durationUs};outer.source_timerange={start:0,duration:durationUs};outer.common_keyframes=[];outer.desc=prefix+fingerprint;outer.clip.transform={x,y};outer.clip.scale={x:1,y:1};
     const video=tpl.materials.videos[0];video.duration=durationUs;video.width=doc.canvas_config.width;video.height=doc.canvas_config.height;video.material_name=prefix+label;
