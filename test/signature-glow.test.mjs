@@ -193,7 +193,8 @@ test('logo places artwork given by path, with no brand registered anywhere', () 
   assert.equal(plan.logos.length, 1);
   assert.equal(plan.logos[0].logo, file);
   assert.equal(plan.logos[0].brand, 'totally-unregistered', 'name falls back to the filename');
-  assert.equal(plan.reveal, 'glow', 'the whole reveal is the default');
+  assert.equal(plan.reveal, 'orbit-glow', 'logo entrance defaults to the native motion recipe');
+  assert.equal(plan.blur, true);
 });
 
 test('logo takes several paths with a time each, and lays them out side by side', () => {

@@ -287,10 +287,6 @@
       ],
       "transactional": false
     },
-    "help": {
-      "options": [],
-      "transactional": false
-    },
     "history": {
       "options": [
         "--project"
@@ -380,8 +376,10 @@
         "--auto",
         "--brand",
         "--dry-run",
+        "--glow",
         "--hold",
         "--logo",
+        "--motion",
         "--name",
         "--no-sfx",
         "--plain",
@@ -814,6 +812,10 @@
         "--words"
       ],
       "transactional": true
+    },
+    "help": {
+      "options": [],
+      "transactional": false
     }
   }
 }

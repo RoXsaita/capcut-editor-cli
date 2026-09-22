@@ -168,13 +168,17 @@ Usage:
   capcutctl brands              list known brands, their spoken aliases, and which have a logo
   capcutctl logo                --project NAME_OR_PATH --logo FILE[,FILE…]|DIR | --brand NAME[,NAME…] | --auto
                                 [--at S[,S…]] [--name N[,N…]] [--scale] [--hold] [--pos x,y] [--words FILE]
-                                [--track N] [--plain] [--no-sfx] [--plan]
+                                [--track N] [--motion RECIPE] [--glow] [--plain] [--no-sfx] [--plan]
                                 the artwork is the primitive: any image pops; --brand/--auto time
-                                themselves off the transcript. Glow reveal by default, --plain for the pop.
+                                themselves off the transcript. Default entrance is motion orbit-glow
+                                (harvested Blur underlay plus the moving mask). --motion RECIPE picks
+                                gradient, shimmer, spotlight, or orbit-glow. --glow is the old halo pop,
+                                --plain the two-key pop.
   capcutctl motion list         list native recipes, accepted inputs, and limitations; no project needed
-  capcutctl motion RECIPE       --project NAME_OR_PATH --text TEXT|--asset FILE|--logo FILE [--name ID]
+  capcutctl motion [RECIPE]    --project NAME_OR_PATH --text TEXT|--asset FILE|--logo FILE [--name ID]
                                 [--at S] [--duration S] [--scale N] [--x N] [--y N] [--color HEX] [--accent HEX]
-                                native gradient, shimmer, spotlight, orbit-glow; name defaults to RECIPE-AT
+                                text and logo entrances. RECIPE defaults to orbit-glow (Blur underlay + motion).
+                                gradient, shimmer, spotlight, orbit-glow. Name defaults to RECIPE-AT.
                                 --asset aliases --logo; gradient is text-only; image variants remain experimental
                                 --dry-run validates without writing; creates editable layers, not an MP4
   capcutctl endcard             --project NAME_OR_PATH [--text Follow] [--at S] [--hold S] [--scale S] [--no-sfx]
@@ -1218,10 +1222,14 @@ export async function main(argv, dependencies = {}) {
   if (command === 'logo' || command === 'endcard' || command === 'zoom' || command === 'wrap') {
     const sig = await import('./signature.mjs');
     const op = { op: 'signature', ...(args.noSfx ? { noSfx: true } : {}), ease: !args.noEase };
-    // `logo` is the "with everything" verb, so the glow reveal is its default; --plain is the
-    // measured two-key pop. `wrap` and the rest keep the pop unless --glow is asked for.
-    if (command === 'logo') op.glow = !args.plain;
-    else if (args.glow) op.glow = true;
+    // Logo and text entrances default to a native motion recipe whose underlay is the
+    // harvested Blur. --glow keeps the older halo pop; --plain keeps the two-key pop.
+    // wrap still uses the pop unless --glow is asked for.
+    if (command === 'logo') {
+      if (args.plain) op.glow = false;
+      else if (args.glow) op.glow = true;
+      else op.motion = args.motion || 'orbit-glow';
+    } else if (args.glow) op.glow = true;
 
     if (command === 'logo') {
       // The ARTWORK is the primitive. A "brand" is only a named lookup for one, so anything
@@ -1342,7 +1350,26 @@ export async function main(argv, dependencies = {}) {
       if (!pos) sig.spreadOverlapping(op.logos, sigRules(sig));
       if (args.plan) {
         return print({ logos: op.logos, skippedNoArtwork: noArt.map(l => l.brand),
-                       reveal: args.plain ? 'pop' : 'glow' }, true);
+                       reveal: op.motion || (op.glow ? 'glow' : 'pop'),
+                       blur: Boolean(op.motion) }, true);
+      }
+      if (op.motion) {
+        const { MOTION_RECIPES } = await import('./motion.mjs');
+        if (!MOTION_RECIPES.includes(op.motion)) {
+          throw new CapcutError(`unknown motion "${op.motion}". Use ${MOTION_RECIPES.join(', ')}.`, { code: 'MOTION_RECIPE', exitCode: 2 });
+        }
+        const slug = value => String(value || 'logo').replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'logo';
+        const operations = op.logos.map((logo, index) => ({
+          op: 'motion',
+          recipe: op.motion,
+          name: slug(`${logo.brand}-${index}`),
+          logo: logo.logo,
+          at: logo.at,
+          duration: logo.hold ?? 2.5,
+          ...(logo.scale != null ? { scale: logo.scale } : { scale: 0.36 }),
+          ...(logo.pos ? { x: logo.pos[0], y: logo.pos[1] } : {}),
+        }));
+        return print(applySpec(projectDir, { version: 1, name: 'logo-motion', operations }, options), true);
       }
     }
 
@@ -1802,7 +1829,7 @@ export async function main(argv, dependencies = {}) {
   }
   if (command === 'motion') {
     if (args.asset != null && args.logo != null) throw new CapcutError('Use either --asset or --logo, not both.', { code: 'MOTION_INPUT' });
-    const op = {op:'motion', recipe:args._[1]};
+    const op = {op:'motion', recipe:args._[1] || 'orbit-glow'};
     for (const key of ['name','text','logo','at','duration','scale','x','y','color','accent']) if(args[key] != null) op[key]=args[key];
     if (args.asset != null) op.logo = args.asset;
     op.name ??= `${op.recipe}-${Number(op.at ?? 0)}`;
