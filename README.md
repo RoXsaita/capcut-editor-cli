@@ -39,6 +39,21 @@ CapCut's draft format is undocumented and may change. Use a copy of an important
 until you trust the workflow on your version of CapCut. The transaction system reduces
 risk; it cannot make an unofficial file format stable.
 
+## Reusable native motion
+
+Create the demonstrated text treatments with one command in an existing project:
+
+```sh
+capcutctl motion shimmer --project "My Edit" --text "SUHEIL AI" --at 4 --duration 4
+capcutctl motion spotlight --project "My Edit" --asset /absolute/path/logo.png --duration 5
+capcutctl motion list
+```
+
+Includes `gradient`, `shimmer`, `orbit-glow`, and `spotlight`. These create editable
+native layers, not flattened animation videos. Close CapCut before writes; add
+`--dry-run` to validate first. Image variants remain experimental, and gradient is
+text-only. See [commands, defaults, and limitations](docs/native-motion.md).
+
 ## Requirements
 
 - macOS with CapCut Desktop installed and launched at least once;

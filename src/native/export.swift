@@ -18,8 +18,9 @@ func click(_ e: AXUIElement, count: Int = 1) {
     var p = CGPoint.zero; var s = CGSize.zero
     AXValueGetValue(pv as! AXValue, .cgPoint, &p); AXValueGetValue(sv as! AXValue, .cgSize, &s)
     p.x += s.width / 2; p.y += s.height / 2
+    CGWarpMouseCursorPosition(p)
     CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left)!.post(tap: .cghidEventTap)
-    Thread.sleep(forTimeInterval: 0.08)
+    Thread.sleep(forTimeInterval: 0.5)
     for n in 1...count {
         for type in [CGEventType.leftMouseDown, .leftMouseUp] {
             let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: p, mouseButton: .left)!
@@ -42,6 +43,8 @@ func typeName(_ value: String) {
 }
 guard CommandLine.arguments.count == 3 else { fail("usage: export.swift PROJECT STAGING_NAME") }
 let project = CommandLine.arguments[1], staging = CommandLine.arguments[2]
+let session = CGSessionCopyCurrentDictionary() as? [String: Any] ?? [:]
+guard (session["CGSSessionScreenIsLocked"] as? Bool) != true else { fail("EXPORT_SESSION_LOCKED: unlock the Mac before native export") }
 guard AXIsProcessTrusted() else { fail("EXPORT_ACCESSIBILITY_REQUIRED: grant accessibility to the invoking terminal/app") }
 guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: "com.lemon.lvoverseas").first else { fail("EXPORT_APP_CLOSED: open CapCut on Home or the requested project") }
 app.activate(options: [])
@@ -60,7 +63,25 @@ if let close = find("automationcloseBtn") {
     dismiss.arguments = ["-e", "tell application \"System Events\" to key code 53"]
     try dismiss.run(); dismiss.waitUntilExit(); Thread.sleep(forTimeInterval: 0.3)
 }
-if let home = find("HomePageDraftTitle:" + project) { click(home, count: 2); Thread.sleep(forTimeInterval: 1) }
+// Opening the exact, verified Home card establishes project identity without
+// Screen Recording access to CGWindow titles. Never infer identity from filename.
+if find("HomePageDraftTitle:" + project) == nil {
+    if find("ExportDialog") != nil { keyboard("tell application \"System Events\" to key code 53") }
+    guard let back = find("Back to home page") else { fail("EXPORT_HOME_UNAVAILABLE") }
+    guard AXUIElementPerformAction(back, kAXPressAction as CFString) == .success else { fail("EXPORT_HOME_FAILED") }
+}
+let home = waitFor("HomePageDraftTitle:" + project)
+guard let hp = attr(home, kAXPositionAttribute) else { fail("EXPORT_HOME_GEOMETRY") }
+var homePoint = CGPoint.zero; AXValueGetValue(hp as! AXValue, .cgPoint, &homePoint)
+let cards = all(root).filter { text($0,kAXDescriptionAttribute) == "HomePageDraft" }
+guard let card = cards.first(where: { e in
+    guard let pv=attr(e,kAXPositionAttribute), let sv=attr(e,kAXSizeAttribute) else {return false}
+    var p=CGPoint.zero;var s=CGSize.zero
+    AXValueGetValue(pv as! AXValue,.cgPoint,&p);AXValueGetValue(sv as! AXValue,.cgSize,&s)
+    return CGRect(origin:p,size:s).contains(homePoint)
+}) else { fail("EXPORT_HOME_CARD_MISSING") }
+click(card)
+_ = waitFor("MainWindowTitleBarExportBtn")
 if find("ExportDialog") == nil {
     _ = waitFor("MainWindowTitleBarExportBtn")
     keyboard("tell application \"System Events\" to keystroke \"e\" using command down")
@@ -69,9 +90,12 @@ _ = waitFor("ExportDialog")
 func exportPath() -> String? {
     all(root).map { text($0, kAXValueAttribute) }.first { $0.hasPrefix("/") && $0.hasSuffix(".mp4") }
 }
-guard exportPath() != nil else { fail("EXPORT_PATH_UNREADABLE") }
-let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
-guard windows.contains(where: { ($0[kCGWindowOwnerPID as String] as? Int32) == app.processIdentifier && ($0[kCGWindowName as String] as? String) == "Export-" + project }) else { fail("EXPORT_WRONG_PROJECT: native export window title differs") }
+if exportPath() == nil {
+    click(waitFor("ExportFormatInput"))
+    click(waitFor("mp4", seconds: 3))
+    Thread.sleep(forTimeInterval: 0.3)
+}
+guard exportPath() != nil else { fail("EXPORT_PATH_UNREADABLE: select MP4") }
 click(waitFor("ExportFileNameInput")); Thread.sleep(forTimeInterval: 0.2); typeName(staging)
 guard let output = exportPath(), URL(fileURLWithPath: output).deletingPathExtension().lastPathComponent == staging else { fail("EXPORT_NAME_NOT_SET: " + (exportPath() ?? "none")) }
 if FileManager.default.fileExists(atPath: output) { fail("EXPORT_STAGE_EXISTS") }
