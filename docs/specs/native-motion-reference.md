@@ -94,6 +94,13 @@ Proof: text starts hidden, local portions appear under a traveling spotlight, th
 
 ## Current machine gate
 
-At the initial probe, the local app reported CapCut 9.3.0 and opened to its **Terms of Service and Privacy Policy** consent prompt. User consent is required before proceeding through that screen. The probed default and sandbox draft roots had no usable draft projects. The bundled SFX/resource paths were unavailable on this machine. Do not use old repository claims about CapCut 9.4.0 as local round-trip evidence.
+At the initial probe, the local app reported CapCut 9.3.0 and opened to its **Terms of Service and Privacy Policy** consent prompt. The user subsequently explicitly authorized acceptance; the prompt was accepted and the Home/editor screens were verified. A disposable native reference project `0922` was created, and its native text structure was captured outside the repository.
+
+Further native work is blocked by two independently observed machine prerequisites:
+
+- Quartz reports `CGSSessionScreenIsLocked = 1`; the frontmost process is `loginwindow`. Captures and some posted inputs worked, but the tool cannot verify foreground focus or show the needed context-menu workflow. Do not attempt to bypass the session lock.
+- An actual `capcutctl export` probe on that reference project exited 2 with `EXPORT_ACCESSIBILITY_REQUIRED: grant accessibility to the invoking terminal/app`. No probe video was produced.
+
+The initially probed default and sandbox draft roots had no usable draft projects, and bundled SFX/resource paths were unavailable. Do not use old repository claims about CapCut 9.4.0 as local round-trip evidence. Unlock and permissions must be resolved before claiming native playback/export is verified.
 
 Baseline at CLI `ca8cb97`: `npm test` passed **453 tests**, zero failures/skips. This is a pre-change baseline, **not** evidence that these five features exist or pass.
