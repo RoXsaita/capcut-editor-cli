@@ -1,0 +1,135 @@
+{
+  "version": 1,
+  "name": "suheil-house",
+  "_about": [
+    "The one source of taste. Code reads its numbers from here; skills point here instead of restating them.",
+    "Library measurements (88 drafts) are kept under `provenance` as evidence. The targets below are what a finished,",
+    "ready-to-post edit should look like now: highly animated, but rhythm is contrast, not quantity.",
+    "Override per machine with CAPCUTCTL_PRESET_DIR/profile.json; a partial file merges over this one."
+  ],
+  "canvas": { "width": 1080, "height": 1920, "fps": 30 },
+
+  "tokens": {
+    "color": {
+      "indigo": "#4040FE",
+      "ring": "#FFFFFF",
+      "ink": "#0B0B14",
+      "text": "#FFFFFF",
+      "accent": "#FFD84D",
+      "_note": "indigo is the measured fill of assets/suheilai-rect-indigo-1080x1920 (2).png. One accent only, for the key word."
+    },
+    "font": {
+      "family": "IBM Plex Sans Arabic",
+      "files": {
+        "600": ["ibm-plex-sans-arabic-arabic-600-normal.woff2", "ibm-plex-sans-arabic-latin-600-normal.woff2"],
+        "700": ["ibm-plex-sans-arabic-arabic-700-normal.woff2", "ibm-plex-sans-arabic-latin-700-normal.woff2"]
+      },
+      "display": 700,
+      "body": 600,
+      "digits": "latin"
+    },
+    "type": { "hook": 120, "numeral": 200, "numeralLabel": 48, "super": 84, "list": 56, "chip": 44, "micro": 36, "maxLines": 2, "maxCharsPerLine": 16 },
+    "ease": {
+      "enter": [0.16, 1, 0.3, 1],
+      "exit": [0.7, 0, 0.84, 0],
+      "popOvershoot": 0.06,
+      "_note": "Linear only for counters and progress. Camera keeps the harvested FreeCurveInOut."
+    },
+    "frames": { "micro": 4, "in": 8, "out": 6, "stagger": 3, "minHold": 30, "perWordHold": 10, "lead": 3 },
+    "radius": { "chip": 999, "card": 36, "box": 18 },
+    "stroke": { "callout": 8 }
+  },
+
+  "safeZones": {
+    "_note": "Canvas pixels, y down. Platform UI covers the top bar, the caption/CTA band and the right action rail.",
+    "forbidden": [
+      { "name": "top-bar", "x": 0, "y": 0, "w": 1080, "h": 220 },
+      { "name": "bottom-ui", "x": 0, "y": 1500, "w": 1080, "h": 420 },
+      { "name": "right-rail", "x": 940, "y": 700, "w": 140, "h": 900 }
+    ],
+    "textBands": {
+      "full-face": { "x": 72, "y": 1150, "w": 848, "h": 300 },
+      "card": { "x": 400, "y": 230, "w": 520, "h": 90 },
+      "split-screen": { "x": 72, "y": 860, "w": 848, "h": 200 }
+    }
+  },
+
+  "camera": {
+    "push": { "scale": 1.15, "rampSeconds": 0.23, "holdSeconds": 1.6 },
+    "stress": { "scale": 1.08, "marginDb": 6, "spacingSeconds": 8, "rampSeconds": 0.23, "holdSeconds": 1.6 },
+    "punchMax": 2.0,
+    "ease": true
+  },
+
+  "logo": {
+    "reveal": "pop",
+    "_note": "The measured 0.13s pop with its pop cue. `--motion RECIPE` and `--glow` are opt-in; native motion recipes are experimental."
+  },
+
+  "motion": { "color": "4040FE", "accent": "FFD84D" },
+
+  "seams": { "motivatedOnly": true, "maxShare": 0.4, "hardCutsByDefault": false },
+
+  "sound": {
+    "musicVolume": 0.08,
+    "duck": true,
+    "graphicSfxWindowSeconds": 0.3,
+    "loudnessTarget": -14,
+    "peak": -1
+  },
+
+  "captions": { "mode": "keywords", "_note": "No full subtitles by default. 1-3 word keyword supers are part of the grammar." },
+
+  "density": {
+    "hookEventBy": 0.5,
+    "proofBy": 1.5,
+    "openingSeconds": 6,
+    "openingMaxGap": 1.0,
+    "maxStatic": 3.0,
+    "graphicEvery": [5, 8],
+    "restWindowSeconds": 2.0,
+    "restPer": 15,
+    "maxSimultaneous": 2,
+    "templateRepeatGap": 10,
+    "entranceMinGapFrames": 6,
+    "brandChipLogoGap": 1.0
+  },
+
+  "grammar": {
+    "hook":        { "camera": "snap-punch",          "graphic": "hook-title",    "sfx": "impact" },
+    "claim":       { "camera": "stress",              "graphic": "keyword-super", "sfx": "pop" },
+    "number":      { "camera": "hold",                "graphic": "number-pop",    "sfx": "pop" },
+    "brand":       { "camera": null,                  "graphic": "logo-pop|brand-chip", "sfx": "pop" },
+    "instruction": { "camera": "punch",               "graphic": "callout-box",   "sfx": "enter" },
+    "demo":        { "camera": "1x-on-subject, ramp waiting", "graphic": null,    "sfx": "click" },
+    "result":      { "camera": "punch-hold-release",  "graphic": null,            "sfx": "idea" },
+    "reaction":    { "camera": "face-1x",             "graphic": null,            "sfx": null },
+    "cta":         { "camera": "full-face",           "graphic": "cta-card",      "sfx": "select" }
+  },
+
+  "never": [
+    "anything that spins or loops forever",
+    "linear easing on an entrance",
+    "letter-by-letter Arabic, or Arabic set in a Latin fallback face",
+    "more than one font family",
+    "rotation",
+    "text that repeats the whole spoken sentence",
+    "a graphic without a sound, or a sound without a reason on screen",
+    "two entrances within 6 frames",
+    "the same template twice within 10 seconds",
+    "camera motion on the circle layout",
+    "anything inside the platform UI zones",
+    "a punch and a callout on the same target",
+    "an endcard longer than 3 seconds with nothing new on it"
+  ],
+
+  "provenance": {
+    "_note": "Measured from the author's hand edits across 88 drafts (2026-08-26). Evidence, not targets.",
+    "cutRhythmMedianSeconds": 1.92,
+    "seamSfxLeadSeconds": 0.14,
+    "transitionsAcrossLibrary": 342,
+    "facePushScale": "1.15 in 25/43 measured push-ins",
+    "logoPop": "scale 0.01 -> 0.20-0.57 over 0.07-0.17s, pop cue 0.1s ahead",
+    "animationsInLibrary": "3 of 1493 material_animations were real (hand edits were hard-cut); the target is now highly animated"
+  }
+}

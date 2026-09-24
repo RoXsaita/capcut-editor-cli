@@ -1966,9 +1966,12 @@ def _probe_video_info(path):
             fps = float(numerator) / float(denominator)
         except (TypeError, ValueError, ZeroDivisionError):
             fps = None
+    # Rendered mograph graphics are ProRes 4444 with alpha; decoding them as rgb24 would
+    # composite a black box over the picture instead of the graphic.
+    pix_fmt = str(video.get("pix_fmt") or "")
     return {"width": width, "height": height, "fps": fps, "audio": any(
         stream.get("codec_type") == "audio" for stream in streams
-    )}
+    ), "alpha": pix_fmt.startswith(("yuva", "rgba", "argb", "bgra", "abgr", "gbrap", "ya"))}
 
 
 def _preview_decode_options():
@@ -2064,10 +2067,11 @@ def _decode_batch(path, requests, output_size, timeline_fps):
         "-ss", f"{seek_start:.9f}", "-i", path, "-t",
         f"{ordered[-1] - seek_start + half + period:.9f}",
         "-vf", vf, "-an", "-sn", "-fps_mode", "vfr", "-f", "rawvideo",
-        "-pix_fmt", "rgb24", "-",
+        "-pix_fmt", "rgba" if info.get("alpha") else "rgb24", "-",
     ]
+    mode, channels = ("RGBA", 4) if info.get("alpha") else ("RGB", 3)
     # A file keeps showinfo from filling a stderr pipe while stdout streams raw frames.
-    frame_bytes = source_size[0] * source_size[1] * 3
+    frame_bytes = source_size[0] * source_size[1] * channels
     images = []
     with tempfile.TemporaryFile() as log:
         process = _start_process(command, stdout=subprocess.PIPE, stderr=log)
@@ -2084,7 +2088,7 @@ def _decode_batch(path, requests, output_size, timeline_fps):
                     data += rest
                 if len(data) != frame_bytes:
                     break
-                images.append(Image.frombytes("RGB", source_size, data).convert("RGBA"))
+                images.append(Image.frombytes(mode, source_size, data).convert("RGBA"))
             return_code = process.wait()
             log.seek(0)
             timing = _batch_timing(log.read().decode(errors="replace"), ordered, seek_start, source_fps)

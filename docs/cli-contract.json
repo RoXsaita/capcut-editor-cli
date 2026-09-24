@@ -1,5 +1,5 @@
 {
-  "contractVersion": 1,
+  "contractVersion": 2,
   "cliVersion": "0.1.1",
   "dryRun": {
     "guarantee": "Every transactional edit command takes --dry-run.",
@@ -8,6 +8,7 @@
       "animate",
       "apply",
       "blur-broll",
+      "build",
       "cursor",
       "denoise",
       "endcard",
@@ -20,6 +21,7 @@
       "logo",
       "loudness",
       "match",
+      "mograph",
       "motion",
       "music",
       "new",
@@ -42,6 +44,9 @@
   },
   "commands": {
     "add": {
+      "group": "broll",
+      "summary": "Place full-frame source media on an overlay track.",
+      "example": "capcutctl add --project NAME --media screen.mp4 --at 5 --dur 3 --track broll --dry-run",
       "options": [
         "--allow-ephemeral",
         "--at",
@@ -66,6 +71,9 @@
       "transactional": true
     },
     "animate": {
+      "group": "graphics",
+      "summary": "Native CapCut intro/outro animation on a clip.",
+      "example": "capcutctl animate --project NAME --segments ID --intro fade-in --dry-run",
       "options": [
         "--at",
         "--dry-run",
@@ -82,6 +90,9 @@
       "transactional": true
     },
     "apply": {
+      "group": "safety",
+      "summary": "Apply a v1 spec of operations transactionally.",
+      "example": "capcutctl apply --project NAME --spec spec.json --dry-run",
       "options": [
         "--dry-run",
         "--force-running",
@@ -92,6 +103,9 @@
       "transactional": true
     },
     "blur-broll": {
+      "group": "look",
+      "summary": "Opt-in motion blur for B-roll already ramped past 8x.",
+      "example": "capcutctl blur-broll --project NAME --segment ID --plan",
       "options": [
         "--dry-run",
         "--plan",
@@ -101,10 +115,29 @@
       "transactional": true
     },
     "brands": {
+      "group": "graphics",
+      "summary": "Known brands, spoken aliases, and which have artwork.",
+      "example": "capcutctl brands",
       "options": [],
       "transactional": false
     },
+    "build": {
+      "group": "build",
+      "summary": "After A-roll sign-off: one edit plan → shots, layout, camera, graphics, sound, gate.",
+      "example": "capcutctl build --project NAME --edit edit.json --dry-run",
+      "options": [
+        "--dry-run",
+        "--edit",
+        "--force",
+        "--json",
+        "--project"
+      ],
+      "transactional": true
+    },
     "close": {
+      "group": "start",
+      "summary": "Quit CapCut and wait: writes are refused while it runs.",
+      "example": "capcutctl close",
       "options": [
         "--json",
         "--timeout"
@@ -112,12 +145,19 @@
       "transactional": false
     },
     "contract": {
+      "group": "start",
+      "summary": "The machine-readable command surface; --markdown renders the skill reference.",
+      "example": "capcutctl contract --markdown",
       "options": [
-        "--json"
+        "--json",
+        "--markdown"
       ],
       "transactional": false
     },
     "cursor": {
+      "group": "camera",
+      "summary": "Native halo that follows recorded pointer telemetry.",
+      "example": "capcutctl cursor --project NAME --auto --plan",
       "options": [
         "--auto",
         "--dry-run",
@@ -128,6 +168,9 @@
       "transactional": true
     },
     "cut": {
+      "group": "aroll",
+      "summary": "Analyse a face take (transcript, energy, beats), then build the reviewed keep/order.",
+      "example": "capcutctl cut VIDEO --keep 0,2-9 --order 0,2,3,4,5,6,7,8,9 --dry-run",
       "options": [
         "--drop",
         "--dry-run",
@@ -150,6 +193,9 @@
       "transactional": false
     },
     "denoise": {
+      "group": "sound",
+      "summary": "Measure-first voice cleanup; video and timing untouched.",
+      "example": "capcutctl denoise --project NAME --plan",
       "options": [
         "--dry-run",
         "--plan",
@@ -158,6 +204,9 @@
       "transactional": true
     },
     "diff": {
+      "group": "check",
+      "summary": "What changed since a snapshot or another project.",
+      "example": "capcutctl diff --project NAME --snapshot NAME",
       "options": [
         "--against",
         "--project",
@@ -166,6 +215,9 @@
       "transactional": false
     },
     "doctor": {
+      "group": "check",
+      "summary": "Structural integrity; must be error-free before hand-off.",
+      "example": "capcutctl doctor --project NAME",
       "options": [
         "--json",
         "--project",
@@ -174,6 +226,9 @@
       "transactional": false
     },
     "endcard": {
+      "group": "graphics",
+      "summary": "The CTA card on the talking head near the end.",
+      "example": "capcutctl endcard --project NAME --text Follow --dry-run",
       "options": [
         "--at",
         "--dry-run",
@@ -186,6 +241,9 @@
       "transactional": true
     },
     "export": {
+      "group": "export",
+      "summary": "Native CapCut export through the macOS bridge; explicit request only.",
+      "example": "capcutctl export --project NAME --out final.mp4 --grid grid.png",
       "options": [
         "--grid",
         "--out",
@@ -196,6 +254,9 @@
       "transactional": false
     },
     "export-grid": {
+      "group": "export",
+      "summary": "Labelled frame grid from an existing video.",
+      "example": "capcutctl export-grid --media final.mp4 --out grid.png --times 0,8,15",
       "options": [
         "--media",
         "--out",
@@ -204,6 +265,9 @@
       "transactional": false
     },
     "fade": {
+      "group": "broll",
+      "summary": "Native audio fade in/out on a clip.",
+      "example": "capcutctl fade --project NAME --at 5 --track broll --in 0.08 --out 0.12 --dry-run",
       "options": [
         "--at",
         "--dry-run",
@@ -217,6 +281,9 @@
       "transactional": true
     },
     "find": {
+      "group": "broll",
+      "summary": "When is it on screen (--shows), said (--says) or did anything happen (--moments).",
+      "example": "capcutctl find \"publish\" --media screen.mp4 --shows --strip",
       "options": [
         "--boxes",
         "--context",
@@ -235,6 +302,9 @@
       "transactional": false
     },
     "finish": {
+      "group": "sound",
+      "summary": "Scorecard + ASCII (read-only), or --music / --polish writes.",
+      "example": "capcutctl finish --project NAME",
       "options": [
         "--dry-run",
         "--file",
@@ -253,7 +323,22 @@
       ],
       "transactional": true
     },
+    "gate": {
+      "group": "check",
+      "summary": "Blocking ready-to-post check from the profile's motion grammar.",
+      "example": "capcutctl gate --project NAME",
+      "options": [
+        "--json",
+        "--profile",
+        "--project",
+        "--record"
+      ],
+      "transactional": false
+    },
     "grade": {
+      "group": "look",
+      "summary": "Measure colour; explicit corrections; shared adjust layer; face detail.",
+      "example": "capcutctl grade --project NAME --measure",
       "options": [
         "--apply",
         "--clarity",
@@ -279,27 +364,40 @@
       "transactional": true
     },
     "harvest": {
+      "group": "dev",
+      "summary": "Catalogue transitions/SFX/masks/keyframes from real drafts.",
+      "example": "capcutctl harvest --plan",
       "options": [
         "--out",
         "--plan",
+        "--profile",
         "--projects",
         "--root"
       ],
       "transactional": false
     },
     "history": {
+      "group": "safety",
+      "summary": "List snapshots.",
+      "example": "capcutctl history --project NAME",
       "options": [
         "--project"
       ],
       "transactional": false
     },
     "init-spec": {
+      "group": "safety",
+      "summary": "A blank v1 spec to fill in.",
+      "example": "capcutctl init-spec --output spec.json",
       "options": [
         "--output"
       ],
       "transactional": false
     },
     "inspect": {
+      "group": "start",
+      "summary": "Tracks, canvas and active timeline as JSON.",
+      "example": "capcutctl inspect --project NAME",
       "options": [
         "--json",
         "--project",
@@ -308,6 +406,9 @@
       "transactional": false
     },
     "keyframe": {
+      "group": "camera",
+      "summary": "Eased camera move: --to scale or --focus a source rectangle.",
+      "example": "capcutctl keyframe --project NAME --segments ID --at 12 --to 1.3 --hold 1.2 --plan",
       "options": [
         "--at",
         "--clear",
@@ -329,6 +430,9 @@
       "transactional": true
     },
     "layout": {
+      "group": "look",
+      "summary": "Locked layouts: auto, split-screen, circle, full-face, background, broll, screen; audit.",
+      "example": "capcutctl layout auto --project NAME --plan",
       "options": [
         "--at",
         "--dry-run",
@@ -364,6 +468,9 @@
       "transactional": true
     },
     "localize": {
+      "group": "broll",
+      "summary": "Copy outside media into the draft (fixes \"Link media\").",
+      "example": "capcutctl localize --project NAME",
       "options": [
         "--dry-run",
         "--project"
@@ -371,6 +478,9 @@
       "transactional": true
     },
     "logo": {
+      "group": "graphics",
+      "summary": "Brand mark pop with its cue, timed off the transcript or --at.",
+      "example": "capcutctl logo --project NAME --auto --plan",
       "options": [
         "--at",
         "--auto",
@@ -393,6 +503,9 @@
       "transactional": true
     },
     "loudness": {
+      "group": "sound",
+      "summary": "Measure the edited mix; match speech/SFX to target LUFS with peak headroom.",
+      "example": "capcutctl loudness --project NAME --measure",
       "options": [
         "--allow-boost",
         "--dry-run",
@@ -406,6 +519,9 @@
       "transactional": true
     },
     "match": {
+      "group": "broll",
+      "summary": "Sentence → screen-moment shot list; weak matches stay on the face; --apply writes.",
+      "example": "capcutctl match --project NAME --screen screen.mp4 --out shots.json",
       "options": [
         "--apply",
         "--dry-run",
@@ -419,7 +535,42 @@
       ],
       "transactional": true
     },
+    "mograph": {
+      "group": "graphics",
+      "summary": "Rendered HTML/JS motion graphics: list, preview, render, add on a word, rerender.",
+      "example": "capcutctl mograph add --project NAME --template keyword-super --params '{\"text\":\"أسرع\"}' --say \"أسرع\" --dry-run",
+      "options": [
+        "--allow-unsafe",
+        "--at",
+        "--background",
+        "--dry-run",
+        "--format",
+        "--id",
+        "--no-sfx",
+        "--occurrence",
+        "--out",
+        "--params",
+        "--params-file",
+        "--project",
+        "--say",
+        "--scale",
+        "--template",
+        "--times",
+        "--words"
+      ],
+      "subcommands": [
+        "add",
+        "list",
+        "preview",
+        "render",
+        "rerender"
+      ],
+      "transactional": true
+    },
     "motion": {
+      "group": "graphics",
+      "summary": "EXPERIMENTAL native text/logo recipes; prefer mograph.",
+      "example": "capcutctl motion list",
       "options": [
         "--accent",
         "--asset",
@@ -438,6 +589,9 @@
       "transactional": true
     },
     "music": {
+      "group": "sound",
+      "summary": "Music bed from a file or brief, aligned to hits; --duck under speech.",
+      "example": "capcutctl music --project NAME --file bed.mp3 --hits 2.4,8.1 --plan --json",
       "options": [
         "--attack-ms",
         "--dry-run",
@@ -461,6 +615,9 @@
       "transactional": true
     },
     "new": {
+      "group": "start",
+      "summary": "Create a project (clone of Preset 3, --blank, or --from a draft).",
+      "example": "capcutctl new --project NAME --blank --dry-run",
       "options": [
         "--allow-ephemeral",
         "--blank",
@@ -484,6 +641,9 @@
       "transactional": true
     },
     "oracle": {
+      "group": "dev",
+      "summary": "Dev-only round-trip capture/diff of a disposable project.",
+      "example": "capcutctl oracle diff --before A --after B",
       "options": [
         "--after",
         "--baseline",
@@ -502,6 +662,9 @@
       "transactional": false
     },
     "pace": {
+      "group": "camera",
+      "summary": "Speed as arithmetic: compress waiting B-roll, never the face.",
+      "example": "capcutctl pace --project NAME",
       "options": [
         "--at",
         "--auto",
@@ -516,6 +679,9 @@
       "transactional": true
     },
     "polish": {
+      "group": "sound",
+      "summary": "Transitions + paired SFX on picture changes (--motivated).",
+      "example": "capcutctl polish --project NAME --motivated --dry-run",
       "options": [
         "--dry-run",
         "--lead",
@@ -529,6 +695,9 @@
       "transactional": true
     },
     "preflight": {
+      "group": "start",
+      "summary": "Will this machine work: deps, artwork, SFX palette, drafts folder.",
+      "example": "capcutctl preflight",
       "options": [
         "--json",
         "--root"
@@ -536,6 +705,9 @@
       "transactional": false
     },
     "preview": {
+      "group": "check",
+      "summary": "Lightweight proxy with audio.",
+      "example": "capcutctl preview --project NAME --out preview.mp4",
       "options": [
         "--fps",
         "--from",
@@ -549,7 +721,20 @@
       ],
       "transactional": false
     },
+    "profile": {
+      "group": "start",
+      "summary": "The effective style profile (tokens, camera, sound, density, grammar).",
+      "example": "capcutctl profile",
+      "options": [
+        "--json",
+        "--profile"
+      ],
+      "transactional": false
+    },
     "projects": {
+      "group": "start",
+      "summary": "List CapCut drafts.",
+      "example": "capcutctl projects --json",
       "options": [
         "--json",
         "--root"
@@ -557,6 +742,9 @@
       "transactional": false
     },
     "punch": {
+      "group": "camera",
+      "summary": "Eased push onto a named on-screen element (OCR locates it).",
+      "example": "capcutctl punch --project NAME --on Publish --segment ID --dry-run",
       "options": [
         "--at",
         "--dry-run",
@@ -577,6 +765,9 @@
       "transactional": true
     },
     "qa": {
+      "group": "check",
+      "summary": "Composite real frames (incl. keyframes, grades, mograph clips); --expect gates text.",
+      "example": "capcutctl qa --project NAME --times 3,9,15 --sheet",
       "options": [
         "--allow-missing",
         "--at-broll",
@@ -608,6 +799,9 @@
       "transactional": false
     },
     "ramp": {
+      "group": "camera",
+      "summary": "Split a B-roll clip at its result: ramp the wait, land the result at 1x.",
+      "example": "capcutctl ramp --project NAME --segment ID --speed 20 --dry-run",
       "options": [
         "--at",
         "--dry-run",
@@ -621,6 +815,9 @@
       "transactional": true
     },
     "reframe": {
+      "group": "look",
+      "summary": "Keep a moving face framed with native camera keys (Vision).",
+      "example": "capcutctl reframe --project NAME --auto --plan",
       "options": [
         "--auto",
         "--dry-run",
@@ -631,6 +828,9 @@
       "transactional": true
     },
     "remove": {
+      "group": "broll",
+      "summary": "Remove a clip.",
+      "example": "capcutctl remove --project NAME --at 5 --track broll --dry-run",
       "options": [
         "--at",
         "--dry-run",
@@ -641,6 +841,9 @@
       "transactional": true
     },
     "replace-media": {
+      "group": "broll",
+      "summary": "Relink a clip to another file, keeping its keyframes.",
+      "example": "capcutctl replace-media --project NAME --file new.mp4 --at 5 --track broll --dry-run",
       "options": [
         "--allow-ephemeral",
         "--at",
@@ -662,6 +865,9 @@
       "transactional": true
     },
     "restore": {
+      "group": "safety",
+      "summary": "Restore a snapshot.",
+      "example": "capcutctl restore --project NAME --snapshot NAME --dry-run",
       "options": [
         "--dry-run",
         "--force-running",
@@ -672,6 +878,9 @@
       "transactional": true
     },
     "review": {
+      "group": "check",
+      "summary": "Proxy + EDL + contact sheet into outputs/.",
+      "example": "capcutctl review --project NAME",
       "options": [
         "--fps",
         "--id",
@@ -682,6 +891,9 @@
       "transactional": false
     },
     "rm": {
+      "group": "safety",
+      "summary": "Move a project to the recycle bin (recoverable).",
+      "example": "capcutctl rm --project NAME --dry-run",
       "options": [
         "--dry-run",
         "--force-running",
@@ -690,6 +902,9 @@
       "transactional": true
     },
     "scenes": {
+      "group": "start",
+      "summary": "Every clip: time, track, desc, media, source; --transcript adds what is said.",
+      "example": "capcutctl scenes --project NAME --transcript",
       "options": [
         "--name",
         "--project",
@@ -699,6 +914,9 @@
       "transactional": false
     },
     "shift": {
+      "group": "broll",
+      "summary": "Move a clip in time.",
+      "example": "capcutctl shift --project NAME --at 5 --track broll --by 0.2 --dry-run",
       "options": [
         "--at",
         "--by",
@@ -710,6 +928,9 @@
       "transactional": true
     },
     "snapshot": {
+      "group": "safety",
+      "summary": "Snapshot the project.",
+      "example": "capcutctl snapshot --project NAME --label before-build",
       "options": [
         "--label",
         "--project"
@@ -717,6 +938,9 @@
       "transactional": false
     },
     "status": {
+      "group": "start",
+      "summary": "Is CapCut running; optionally wait for it to close.",
+      "example": "capcutctl status --json",
       "options": [
         "--json",
         "--timeout",
@@ -725,6 +949,9 @@
       "transactional": false
     },
     "sync": {
+      "group": "safety",
+      "summary": "Repair mirror drift and duplicate material ids.",
+      "example": "capcutctl sync --project NAME --dry-run",
       "options": [
         "--dry-run",
         "--force-running",
@@ -734,6 +961,9 @@
       "transactional": true
     },
     "timeline": {
+      "group": "start",
+      "summary": "ASCII stacked timeline.",
+      "example": "capcutctl timeline --project NAME",
       "options": [
         "--json",
         "--project",
@@ -742,6 +972,9 @@
       "transactional": false
     },
     "trim": {
+      "group": "broll",
+      "summary": "Change a clip's source window.",
+      "example": "capcutctl trim --project NAME --at 5 --track broll --src 90-94 --dry-run",
       "options": [
         "--at",
         "--dry-run",
@@ -755,6 +988,9 @@
       "transactional": true
     },
     "verify-shots": {
+      "group": "broll",
+      "summary": "Blind before/action/after check of placed shots; CONTRADICTED blocks.",
+      "example": "capcutctl verify-shots --project NAME --shots shots.json",
       "options": [
         "--json",
         "--out",
@@ -764,10 +1000,16 @@
       "transactional": false
     },
     "version": {
+      "group": "start",
+      "summary": "Installed CLI version.",
+      "example": "capcutctl version",
       "options": [],
       "transactional": false
     },
     "volume": {
+      "group": "broll",
+      "summary": "Set a clip's volume.",
+      "example": "capcutctl volume --project NAME --at 5 --track broll --level 0 --dry-run",
       "options": [
         "--at",
         "--dry-run",
@@ -779,6 +1021,9 @@
       "transactional": true
     },
     "wrap": {
+      "group": "graphics",
+      "summary": "Logos from what is said + the endcard in one pass.",
+      "example": "capcutctl wrap --project NAME --plan",
       "options": [
         "--dry-run",
         "--glow",
@@ -788,6 +1033,7 @@
         "--only",
         "--plan",
         "--project",
+        "--stress",
         "--text",
         "--track",
         "--words",
@@ -796,6 +1042,9 @@
       "transactional": true
     },
     "zoom": {
+      "group": "camera",
+      "summary": "Face pushes on stressed words (--stress), or at explicit times.",
+      "example": "capcutctl zoom --project NAME --stress --plan",
       "options": [
         "--at",
         "--auto",
@@ -814,6 +1063,9 @@
       "transactional": true
     },
     "help": {
+      "group": "start",
+      "summary": "The full help text.",
+      "example": "capcutctl help",
       "options": [],
       "transactional": false
     }

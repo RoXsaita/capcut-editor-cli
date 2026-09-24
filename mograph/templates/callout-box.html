@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="ar">
+<head>
+<meta charset="utf-8">
+<title>callout-box</title>
+<script src="../runtime.js"></script>
+<style>
+  svg.frame { position: absolute; overflow: visible; }
+  .chip { position: absolute; white-space: nowrap; line-height: 1.25; font-weight: 700;
+          padding: 0.14em 0.6em 0.2em; border-radius: var(--mg-radius-chip);
+          box-shadow: 0 8px 24px rgba(var(--mg-ink-rgb), 0.4); }
+  .chip .mg-word { padding: 0 0.03em; }
+</style>
+</head>
+<body>
+<script>
+/*
+ * callout-box — a rounded stroke that draws itself around a target on a screen recording, with one ping and an optional label chip.
+ * params: { box: [x, y, w, h] canvas px (the target; the stroke's inner edge sits exactly on it), label?, color?: accent|indigo, gap?: px (default 0), hold?: seconds }
+ * Timing (frames @30): the stroke draws from the top centre around both sides at once and closes
+ * at the bottom over 8f (enter ease); a ghost ring pings outward once (14f) as it closes; the
+ * label chip pops from its anchor corner at 6f with the 6% overshoot (8f). Hold 46f by default;
+ * 6f out: the stroke retracts along its path and the chip drops.
+ * Stroke is tokens.stroke.callout over a thin ink under-stroke so it reads on white UI too.
+ */
+const DRAW = 8, OUT = 6, PING = 14, RING = 18;
+const hold = (params, mg) => (params.hold != null ? mg.holdFrames(params, 0) : 46);
+const NS = 'http://www.w3.org/2000/svg';
+
+MG.define({
+  name: 'callout-box',
+  sfx: 'enter',
+  motion: 'rich',
+  pad: 24,
+  build(root, params, tokens, mg) {
+    const b = params.box;
+    if (!Array.isArray(b) || b.length !== 4 || b.some(v => !Number.isFinite(Number(v))) || b[2] <= 0 || b[3] <= 0) {
+      throw new Error('MOGRAPH_PARAM: callout-box needs params.box = [x, y, w, h] in canvas px');
+    }
+    const [bx, by, bw, bh] = b.map(Number);
+    mg.cssVars(root);
+    const tone = params.color === 'indigo' ? 'indigo' : 'accent';
+    const sw = tokens.stroke.callout;
+    const gap = Number(params.gap || 0);
+    // Path runs on the stroke's centre line: half a stroke (plus gap) outside the target.
+    const o = gap + sw / 2;
+    const x0 = bx - o, y0 = by - o, w = bw + 2 * o, h = bh + 2 * o;
+    const r = Math.min(tokens.radius.box + o, w / 2, h / 2);
+    const ext = sw + RING + 4;                         // svg viewport margin around the path
+    const svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('class', 'frame');
+    Object.assign(svg.style, { left: `${x0 - ext}px`, top: `${y0 - ext}px`, width: `${w + 2 * ext}px`, height: `${h + 2 * ext}px` });
+    svg.setAttribute('viewBox', `${x0 - ext} ${y0 - ext} ${w + 2 * ext} ${h + 2 * ext}`);
+    root.appendChild(svg);
+    const cx = x0 + w / 2, x1 = x0 + w, y1 = y0 + h;
+    // Two halves from the top centre, meeting at the bottom centre.
+    const right = `M${cx} ${y0} H${x1 - r} A${r} ${r} 0 0 1 ${x1} ${y0 + r} V${y1 - r} A${r} ${r} 0 0 1 ${x1 - r} ${y1} H${cx}`;
+    const left = `M${cx} ${y0} H${x0 + r} A${r} ${r} 0 0 0 ${x0} ${y0 + r} V${y1 - r} A${r} ${r} 0 0 0 ${x0 + r} ${y1} H${cx}`;
+    // The under-stroke halves live in one group with the alpha on the group, so the round caps
+    // where the halves meet never double up into dark dots.
+    const underGroup = document.createElementNS(NS, 'g');
+    underGroup.setAttribute('opacity', '0.32');
+    const path = (d, stroke, width, parent = svg) => {
+      const p = document.createElementNS(NS, 'path');
+      p.setAttribute('d', d);
+      p.setAttribute('fill', 'none');
+      p.setAttribute('stroke', stroke);
+      p.setAttribute('stroke-width', String(width));
+      p.setAttribute('stroke-linecap', 'round');
+      p.setAttribute('pathLength', '1');
+      p.setAttribute('stroke-dasharray', '1 1');
+      parent.appendChild(p);
+      return p;
+    };
+    const ring = document.createElementNS(NS, 'rect');
+    for (const [k, v] of Object.entries({ x: x0, y: y0, width: w, height: h, rx: r, fill: 'none',
+      stroke: mg.color(tone), 'stroke-width': sw * 0.45 })) ring.setAttribute(k, String(v));
+    svg.appendChild(ring);
+    svg.appendChild(underGroup);
+    const under = [path(right, mg.color('ink'), sw + 5, underGroup), path(left, mg.color('ink'), sw + 5, underGroup)];
+    const main = [path(right, mg.color(tone), sw), path(left, mg.color(tone), sw)];
+    svg.style.filter = `drop-shadow(0 0 10px ${mg.rgba(tone, 0.35)})`;
+
+    let chip = null;
+    let spans = [];
+    if (params.label) {
+      chip = document.createElement('div');
+      chip.className = 'chip';
+      chip.style.fontSize = `${tokens.type.micro}px`;
+      chip.style.background = mg.color(tone);
+      chip.style.color = mg.color(tone === 'accent' ? 'ink' : 'text');
+      root.appendChild(chip);
+      spans = mg.words(chip, String(params.label));
+      const cr = chip.getBoundingClientRect();
+      // Anchor to the reading-start corner (right for Arabic), sitting on the stroke like a tab;
+      // flip below the box when the top-bar zone is too close.
+      const rtl = mg.isArabic(params.label);
+      const zones = (mg.input.zones && mg.input.zones.forbidden) || [];
+      const topLimit = Math.max(0, ...zones.filter(z => z.y === 0).map(z => z.y + z.h)) + 24 + 12;
+      const above = y0 - sw / 2 - cr.height * 0.55 >= topLimit;
+      const inset = Math.max(r, 20);
+      const left = rtl ? x1 - inset - cr.width : x0 + inset;
+      const top = above ? y0 - cr.height * 0.55 - sw / 2 : y1 + sw / 2 - cr.height * 0.45;
+      Object.assign(chip.style, { left: `${left}px`, top: `${top}px`,
+        transformOrigin: `${rtl ? 'right' : 'left'} ${above ? 'bottom' : 'top'}` });
+    }
+    return { svg, ring, under, main, chip, spans, box: { x0, y0, w, h }, sw,
+      total: (DRAW + hold(params, mg) + OUT) / mg.fps };
+  },
+  duration(params, tokens, mg) {
+    return (DRAW + hold(params, mg) + OUT) / mg.fps;
+  },
+  still(params, tokens, mg) {
+    return (DRAW + PING) / mg.fps;
+  },
+  seek(t, s, mg) {
+    const { F, ease, win } = mg;
+    const q = ease.exit(win(t, s.total - F(OUT), F(OUT)));
+    const d = ease.enter(win(t, 0, F(DRAW)));
+    const len = d * (1 - q);                          // retract along the same path on the way out
+    for (const p of [...s.under, ...s.main]) {
+      p.setAttribute('stroke-dashoffset', String(1 - len));
+      p.style.visibility = len > 0.002 ? 'visible' : 'hidden';
+    }
+    // One ping as the stroke closes: a thinner ring grows outward and fades. Never repeats.
+    const g = win(t, F(DRAW - 2), F(PING));
+    const grow = ease.enter(g) * RING;
+    const { x0, y0, w, h } = s.box;
+    s.ring.setAttribute('x', String(x0 - grow));
+    s.ring.setAttribute('y', String(y0 - grow));
+    s.ring.setAttribute('width', String(w + 2 * grow));
+    s.ring.setAttribute('height', String(h + 2 * grow));
+    s.ring.setAttribute('stroke-opacity', String(g > 0 && g < 1 ? 0.55 * Math.min(1, g * 4) * (1 - g) ** 2 : 0));
+    s.svg.style.visibility = len > 0.002 ? 'visible' : 'hidden';
+    if (s.chip) {
+      const c = win(t, F(6), F(8));
+      const k = 0.55 + 0.45 * ease.pop(c);
+      s.chip.style.transform = `translateY(${q * 10}px) scale(${k * (1 - 0.1 * q)})`;
+      mg.show(s.chip, ease.enter(Math.min(1, c * 2)) * (1 - q));
+    }
+  },
+});
+</script>
+</body>
+</html>

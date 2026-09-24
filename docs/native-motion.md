@@ -1,5 +1,12 @@
 # Reusable native motion
 
+> **Status (2026-09-24): frozen, experimental.** Per the Z-wave plan
+> ([specs/Z-production-grade.md](specs/Z-production-grade.md)) these recipes stay available and
+> untouched, but receive no further investment: their keys are `Line`, their looks are not
+> visually accepted, and `qa` cannot render compound text. Typography, counters, callouts and the
+> CTA card are rendered with [mograph](mograph.md) instead; logo entrances default to the measured
+> pop (`logo --motion RECIPE` still opts in).
+
 The text treatments demonstrated in `Native-Motion-Lab` were reviewed on the Mac by the user. Preserve that look rather than replacing it with a pixel-rendered imitation. These commands create **editable CapCut layers in an existing project**, not an exported MP4. The original reference's layered 3D effect is not implemented.
 
 Close CapCut before a real write. List the surface without opening a project:

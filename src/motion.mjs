@@ -3,6 +3,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { CapcutError, loadPreset, seededId, localizeMedia } from './core.mjs';
 import { imageSize } from './signature.mjs';
+import { profileValue } from './profile.mjs';
 
 export const MOTION_RECIPES = ['gradient', 'shimmer', 'spotlight', 'orbit-glow'];
 const copy = structuredClone;
@@ -27,7 +28,7 @@ export function opMotion(doc, op, context = {}) {
   const at = Number(op.at ?? 0), duration = Number(op.duration ?? 4), scale = Number(op.scale ?? (op.logo ? .5 : 2));
   const x = Number(op.x ?? 0), y = Number(op.y ?? 0);
   if (![at,duration,scale,x,y].every(Number.isFinite) || at<0 || duration<.3 || duration>120 || scale<=0 || scale>10) fail('MOTION_RANGE','invalid timing, scale or position');
-  const color = op.color ?? '7257FF', accent = op.accent ?? 'FFE76B';
+  const color = op.color ?? profileValue('motion.color'), accent = op.accent ?? profileValue('motion.accent');
   if (![color,accent].every(v=>typeof v==='string' && /^[0-9a-f]{6}$/i.test(v))) fail('MOTION_COLOR','use six hex digits without #');
   if (op.recipe==='gradient' && op.logo) fail('MOTION_INPUT','gradient requires native text');
   const dims = op.logo ? imageSize(op.logo) : null;

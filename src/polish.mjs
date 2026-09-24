@@ -20,6 +20,9 @@ const SCREEN_RECORDING_DESC = 'layout:screen-recording';
 /** Generated screen decorations are not independent footage or callout plates. */
 function isScreenHelper(segment) {
   const desc = String(segment?.desc || '');
+  // A rendered graphic entering is not a scene cut: no transition or seam sound belongs there
+  // (the graphic carries its own cue).
+  if (desc.startsWith('mograph:')) return true;
   return desc.startsWith('layout:') && desc !== SCREEN_RECORDING_DESC;
 }
 
@@ -216,7 +219,7 @@ export function unavailableSfx() { return [...UNAVAILABLE].sort(); }
  * Ensure a named SFX material exists; return its id, or `null` when the sound is not on this
  * machine. Every caller must treat null as "place no sound here".
  */
-function ensureAudio(doc, name) {
+export function ensureAudio(doc, name, mintFn = mint) {
   const p = sfxPresets();
   const tpl = p.audioTemplates[name];
   if (!tpl) throw new CapcutError(`unknown sfx "${name}". Known: ${Object.keys(p.audioTemplates).join(', ')}`, { code: 'UNKNOWN_SFX', exitCode: 2 });
@@ -224,7 +227,7 @@ function ensureAudio(doc, name) {
   if (found) return found.id;
   if (!templateIsAvailable(tpl)) { UNAVAILABLE.add(name); return null; }
   const m = clone(tpl);
-  m.id = mint(`audio:${name}`);
+  m.id = mintFn(`audio:${name}`);
   arr(doc, 'audios').push(m);
   return m.id;
 }

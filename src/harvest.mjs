@@ -157,3 +157,64 @@ export function writeHarvest(catalogue, dest = DEFAULT_HARVEST) {
   fs.writeFileSync(dest, stableJson(catalogue));
   return dest;
 }
+
+const median = values => {
+  const v = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!v.length) return null;
+  return v.length % 2 ? v[(v.length - 1) / 2] : (v[v.length / 2 - 1] + v[v.length / 2]) / 2;
+};
+const r3 = n => (n == null ? null : Math.round(n * 1000) / 1000);
+
+/**
+ * A profile override measured from the user's own drafts — the "harvest their edits" answer to
+ * the first-run style question. Only what the drafts actually show is written; everything else
+ * falls back to the bundled profile when this file is used as CAPCUTCTL_PRESET_DIR/profile.json
+ * or `--profile FILE`. Measurements go under `provenance`, so a human can see what drove it.
+ */
+export function profileFromDrafts(root = DEFAULT_ROOT, names = defaultSources(root)) {
+  const pushes = [];
+  const clipLengths = [];
+  const transitionsPerProject = [];
+  const transitionNames = Object.create(null);
+  const scanned = [];
+  for (const name of names) {
+    let doc = null;
+    try { doc = loadLatest(path.join(root, name)); } catch { doc = null; }
+    if (!doc) continue;
+    scanned.push(name);
+    transitionsPerProject.push((doc.materials?.transitions || []).length);
+    for (const t of doc.materials?.transitions || []) count(transitionNames, t.name || t.resource_id || 'transition');
+    const video = (doc.tracks || []).filter(t => t.type === 'video' && (t.segments || []).length);
+    const principal = video.sort((a, b) => (b.segments || []).length - (a.segments || []).length)[0];
+    for (const s of principal?.segments || []) clipLengths.push((s.target_timerange?.duration || 0) / 1e6);
+    for (const track of video) {
+      for (const seg of track.segments || []) {
+        const scale = (seg.common_keyframes || []).find(k => k.property_type === 'KFTypeScaleX');
+        const values = (scale?.keyframe_list || []).map(k => k.values?.[0]).filter(Number.isFinite);
+        if (values.length >= 2 && Math.min(...values) > 0.5) {
+          const ratio = Math.max(...values) / Math.min(...values);
+          if (ratio > 1.01 && ratio < 3) pushes.push(ratio);
+        }
+      }
+    }
+  }
+  const withTransitions = transitionsPerProject.filter(n => n > 0).length;
+  const totalTransitions = Object.values(transitionNames).reduce((a, b) => a + b, 0);
+  const top = Object.entries(transitionNames).sort((a, b) => b[1] - a[1])[0];
+  const out = {
+    version: 1,
+    name: `harvested-${new Date().toISOString().slice(0, 10)}`,
+    provenance: {
+      _note: 'Measured by `capcutctl harvest --profile` from the drafts listed. Evidence, not targets.',
+      drafts: scanned,
+      medianCutSeconds: r3(median(clipLengths)),
+      facePushRatios: pushes.length,
+      projectsWithTransitions: `${withTransitions}/${scanned.length}`,
+      topTransition: top ? { name: top[0], share: r3(top[1] / totalTransitions) } : null,
+    },
+  };
+  const push = median(pushes);
+  if (push) out.camera = { push: { scale: r3(push) } };
+  if (scanned.length) out.seams = { hardCutsByDefault: withTransitions / scanned.length < 0.25 };
+  return out;
+}

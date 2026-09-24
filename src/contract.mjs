@@ -14,16 +14,17 @@
  * the command dispatch in cli.mjs.
  */
 import { HELP } from './cli.mjs';
+import { COMMAND_DOCS, TRANSACTIONAL_FROM_DOCS } from './command-docs.mjs';
 
 /**
  * The contract revision. Bump this when the *shape* of the emitted document changes —
  * a new field, a renamed key, a different nesting. Consumers pin it; the CLI version
  * moves independently every release and is not a compatibility signal on its own.
  */
-export const CONTRACT_VERSION = 1;
+export const CONTRACT_VERSION = 2;
 
 /** Commands that dispatch on a positional subcommand (`args._[1]`). */
-const SUBCOMMAND_PARENTS = new Set(['layout', 'oracle']);
+const SUBCOMMAND_PARENTS = new Set(['layout', 'oracle', 'mograph']);
 
 /**
  * Commands that mutate a project through the transaction machinery. These are the ones
@@ -36,11 +37,7 @@ const SUBCOMMAND_PARENTS = new Set(['layout', 'oracle']);
  * project, and giving them a no-op `--dry-run` for symmetry would make the flag mean less,
  * not more. See test/cli-contract.test.mjs.
  */
-export const TRANSACTIONAL_COMMANDS = Object.freeze([
-  'add', 'animate', 'apply', 'endcard', 'fade', 'grade', 'keyframe', 'layout', 'localize', 'logo', 'motion', 'music',
-  'new', 'pace', 'polish', 'punch', 'match', 'ramp', 'remove', 'replace-media', 'restore', 'rm', 'shift', 'sync',
-  'denoise', 'blur-broll', 'reframe', 'cursor', 'trim', 'volume', 'wrap', 'zoom', 'finish', 'loudness',
-]);
+export const TRANSACTIONAL_COMMANDS = TRANSACTIONAL_FROM_DOCS;
 
 const OPTION = /--[a-z][a-z0-9-]*/g;
 
@@ -128,14 +125,21 @@ export function buildContract({ help = HELP, version } = {}) {
     // surface; cut/qa/find are pass-throughs and take argparse's.
     const fromTool = TOOL_OPTIONS[name] || [];
     const transactional = TRANSACTIONAL_COMMANDS.includes(name);
+    const docs = COMMAND_DOCS[name] || {};
     commands[name] = {
+      group: docs.group ?? null,
+      summary: docs.summary ?? null,
+      example: docs.example ?? null,
       options: [...new Set([...entry.options, ...fromTool, ...(transactional ? ['--dry-run'] : [])])].sort(),
       ...(entry.subcommands.size ? { subcommands: [...entry.subcommands].sort() } : {}),
       transactional,
     };
   }
   // `help` is dispatched but never listed as an entry in its own help text.
-  if (!commands.help) commands.help = { options: [], transactional: false };
+  if (!commands.help) {
+    const docs = COMMAND_DOCS.help;
+    commands.help = { group: docs.group, summary: docs.summary, example: docs.example, options: [], transactional: false };
+  }
   return {
     contractVersion: CONTRACT_VERSION,
     cliVersion: version ?? null,

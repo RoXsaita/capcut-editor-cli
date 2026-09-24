@@ -1,7 +1,7 @@
 /**
  * Punch-in on stressed words — `zoom --stress`.
  *
- * A full-face talking-head scene gets at most one 1.08× push every 8 s, landing on
+ * A full-face talking-head scene gets at most one small push (profile camera.stress) per spacing window, landing on
  * the word whose energy10 peak is ≥ +6 dB above its sentence median. Writes through
  * the existing keyframe path (`opScaleKeyframe`) and honours `DOUBLE_PUNCH`.
  *
@@ -18,16 +18,18 @@ import { assertNoDoublePunch } from './punch.mjs';
 import { principalTrack } from './polish.mjs';
 import { isBrollSegment } from './broll-lint.mjs';
 import { sourceToTimeline, talkingHeadScenes } from './signature.mjs';
+import { profileValue } from './profile.mjs';
 
 const US = s => Math.round(s * 1e6);
 const S = us => (us || 0) / 1e6;
 const r3 = n => Math.round(n * 1000) / 1000;
 
-export const STRESS_SCALE = 1.08;
-export const STRESS_MARGIN_DB = 6;
-export const STRESS_SPACING_S = 8;
-export const STRESS_RAMP = 0.23;
-export const STRESS_HOLD = 1.6;
+// Style numbers come from the profile (presets/profile.json → camera.stress).
+export const STRESS_SCALE = profileValue('camera.stress.scale');
+export const STRESS_MARGIN_DB = profileValue('camera.stress.marginDb');
+export const STRESS_SPACING_S = profileValue('camera.stress.spacingSeconds');
+export const STRESS_RAMP = profileValue('camera.stress.rampSeconds');
+export const STRESS_HOLD = profileValue('camera.stress.holdSeconds');
 export const DEFAULT_ENERGY_BIN = 0.01;
 
 function materialFor(doc, id) {

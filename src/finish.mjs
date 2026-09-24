@@ -143,7 +143,8 @@ export function finishScorecard(doc, { projectDir = null, width = 64 } = {}) {
     laws: [
       'Transition only on a picture change (B-roll shot or layout class), never on an A-roll splice over the same screen.',
       'Do not recut speech to a beat. Generate and offset the bed so beats land on picture changes.',
-      'Music is background: ~0.08, fade in, out before the CTA. Captions happen outside CapCut.',
+      'Music sits under the voice (profile sound.musicVolume), fades in, and is out before the CTA.',
+      'Keyword supers (1-3 words), not subtitles: the profile captions.mode decides.',
       'The first picture is proof. A 5s+ full-face open with nothing on screen is a miss.',
     ],
   };

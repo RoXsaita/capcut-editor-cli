@@ -19,27 +19,56 @@
         "capcut_effects_and_callouts"
       ],
       "pixelGeometry": {
-        "screen": { "left": 108, "top": 330, "width": 864, "height": 1260 },
-        "indigoFrame": { "left": -27, "top": 208, "width": 1134, "height": 1504 },
-        "whiteRing": { "left": 94, "top": 86, "width": 292, "height": 519 },
-        "avatar": { "left": 138, "top": 251, "width": 205, "height": 205, "borderRadius": 103 },
-        "avatarSourceFrame": { "left": 138, "top": 195, "width": 205, "height": 364 }
+        "screen": {
+          "left": 108,
+          "top": 330,
+          "width": 864,
+          "height": 1260
+        },
+        "indigoFrame": {
+          "left": -27,
+          "top": 208,
+          "width": 1134,
+          "height": 1504
+        },
+        "whiteRing": {
+          "left": 94,
+          "top": 86,
+          "width": 292,
+          "height": 519
+        },
+        "avatar": {
+          "left": 138,
+          "top": 251,
+          "width": 205,
+          "height": 205,
+          "borderRadius": 103
+        },
+        "avatarSourceFrame": {
+          "left": 138,
+          "top": 195,
+          "width": 205,
+          "height": 364
+        }
       }
     },
     "fullFace": {
-      "remove": ["card", "blur_duplicate", "pip", "ring"],
+      "remove": [
+        "card",
+        "blur_duplicate",
+        "pip",
+        "ring"
+      ],
       "reason": "Fallback when the spoken claim has no directly matching screen event."
     },
     "split": {
-      "recommendedFor": ["landscape desktop", "gameplay", "wide browser recording"],
+      "recommendedFor": [
+        "landscape desktop",
+        "gameplay",
+        "wide browser recording"
+      ],
       "rule": "Use native CapCut clip transforms and masks; never pre-render the layout."
     }
   },
-  "editingRules": {
-    "rawMediaOnly": true,
-    "hardCutsByDefault": true,
-    "captionsByDefault": false,
-    "mapsRequired": ["screen_map_current", "spoken_map_current", "visual_map_current", "EDL_current"],
-    "qa": ["handoff_frames", "zoom_holds", "one_second_grid", "final_frame"]
-  }
+  "_editingRules": "Moved to presets/profile.json: seams.hardCutsByDefault, captions.mode, density, grammar. This file keeps the measured card geometry only."
 }
