@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadEnv } from './env.mjs';
+import { profileValue } from './profile.mjs';
 import { pythonForTool } from './python.mjs';
 import {
   CapcutError,
@@ -136,10 +137,12 @@ Usage:
                       — lightweight streamed proxy; defaults to 360x640 and never writes
                         one PNG per frame. Use qa for bounded seam/pixel evidence.
   capcutctl diff --project NAME --against NAME|--snapshot NAME
-  capcutctl harvest [--root PATH] [--projects A,B] [--out FILE] [--plan]
+  capcutctl harvest [--root PATH] [--projects A,B] [--out FILE] [--profile FILE] [--plan]
+                      — catalogue real structures; --profile FILE writes a style-profile override measured from the drafts
   capcutctl init-spec [--output FILE]
-  capcutctl contract [--json]                  — the machine-readable command/option surface
-                                                 the skills repo validates its docs against
+  capcutctl contract [--json] [--markdown]     — the machine-readable command/option surface
+                                                 the skills repo validates its docs against;
+                                                 --markdown renders the generated skill reference
   capcutctl oracle capture --project NAME [--label SLUG] [--out DIR]
   capcutctl oracle diff --before DIR --after DIR [--baseline DIR] [--values] [--resource-noop ID[,ID…]] [--json]
                     — dev-only round-trip sanitation harness. JSON that parses can still
@@ -170,14 +173,14 @@ Usage:
                                 [--at S[,S…]] [--name N[,N…]] [--scale] [--hold] [--pos x,y] [--words FILE]
                                 [--track N] [--motion RECIPE] [--glow] [--plain] [--no-sfx] [--plan]
                                 the artwork is the primitive: any image pops; --brand/--auto time
-                                themselves off the transcript. Default entrance is motion orbit-glow
-                                (harvested Blur underlay plus the moving mask). --motion RECIPE picks
-                                gradient, shimmer, spotlight, or orbit-glow. --glow is the old halo pop,
-                                --plain the two-key pop.
+                                themselves off the transcript. Default entrance is the profile's
+                                logo.reveal: the measured 0.13s pop with its pop cue. --glow is the
+                                halo pop; --motion RECIPE (experimental native recipe) is opt-in.
   capcutctl motion list         list native recipes, accepted inputs, and limitations; no project needed
   capcutctl motion [RECIPE]    --project NAME_OR_PATH --text TEXT|--asset FILE|--logo FILE [--name ID]
                                 [--at S] [--duration S] [--scale N] [--x N] [--y N] [--color HEX] [--accent HEX]
-                                text and logo entrances. RECIPE defaults to orbit-glow (Blur underlay + motion).
+                                EXPERIMENTAL native recipes (Line keys, not visually accepted); prefer mograph.
+                                RECIPE defaults to orbit-glow.
                                 gradient, shimmer, spotlight, orbit-glow. Name defaults to RECIPE-AT.
                                 --asset aliases --logo; gradient is text-only; image variants remain experimental
                                 --dry-run validates without writing; creates editable layers, not an MP4
@@ -185,13 +188,37 @@ Usage:
   capcutctl zoom                --project NAME_OR_PATH --at S[,S...] | --auto | --stress
                                 [--min-length 2.5] [--to 1.15] [--hold 1.6] [--track N] [--plan]
                                 [--no-ease] [--ease] [--words FILE]
-                                --auto pushes in on every talking-head scene (unchanged).
-                                --stress replaces that: a 1.08× push on the word hit hardest
-                                (≥ +6 dB vs its sentence median, from energy10), at most once
-                                every 8 s. Full-face only; circle is refused; masked insets skip.
+                                --stress: a small push (profile camera.stress) on the word hit hardest
+                                (energy10 peak vs its sentence median), at most once per spacing
+                                window. Full-face only; circle is refused; masked insets skip.
+                                --auto (a push on every scene) is deprecated: it reads as clockwork.
   capcutctl wrap                --project NAME_OR_PATH [--words TRANSCRIPT.json] [--text Follow] [--only BRANDS]
                                 [--zoom-at S[,S…]|--no-zoom] [--track N] [--glow] [--no-sfx] [--no-ease] [--plan]
-                                brand logos from what he says + the endcard + face push-ins, in one pass
+                                brand logos from what is said + the endcard, in one pass. Face pushes
+                                are zoom --stress (or build); --zoom-at S places explicit ones.
+  capcutctl build               --project NAME --edit edit.json [--dry-run] [--force] [--json]
+                      — after A-roll sign-off, one edit plan becomes the finished project:
+                        shots (once), layout auto, stress pushes, mograph graphics on their
+                        words, logo pops (brand-chip when art is missing), endcard, motivated
+                        seams, music aligned to the graphics, duck, loudness, then the gate.
+                        Graphics anchor to SOURCE words, so a recut rebuilds exactly; an
+                        unchanged plan on an unchanged cut is a no-op. Exit 1 when the gate fails.
+  capcutctl gate                --project NAME [--profile FILE] [--record] [--json]
+                      — the blocking ready-to-post check: hook, proof, longest static stretch,
+                        crowding, template repeats, safe zones, graphics without a sound, seams.
+                        Thresholds come from the profile. Exit 1 on FAIL; WARNs go in the hand-off.
+  capcutctl profile             [--profile FILE] [--json]   — the effective style profile (tokens, camera, sound, density, grammar)
+  capcutctl mograph list        templates, their params and paired sound; no project needed
+  capcutctl mograph preview     --template ID --params JSON|--params-file FILE --out SHEET.png [--times S,S] [--background IMG]
+                      — frames on a dark canvas with the platform-UI zones tinted, for review.
+  capcutctl mograph render      --template ID --params JSON|--params-file FILE --out PATH [--format prores|png-still|webm] [--scale 2]
+                      — deterministic HTML/JS graphic → tight-bbox ProRes 4444 alpha clip (or a PNG hold frame).
+  capcutctl mograph add         --project NAME --template ID --params JSON|--params-file FILE --at S | --say WORDS [--occurrence N]
+                                [--id ID] [--format prores|png-still] [--words FILE] [--no-sfx] [--allow-unsafe] [--dry-run]
+                      — render into <project>/mograph/ and place it above the picture, with its sound,
+                        on the exact canvas pixels the template drew. --say anchors to source words.
+  capcutctl mograph rerender    --project NAME --id ID [--params JSON|--params-file FILE] [--dry-run]
+                      — fix text or a value; timing, anchor and placement are kept.
   capcutctl pace                --project NAME_OR_PATH [--track N] [--max 100] [--min-gap 5.0]
                                 no flags = print the plan; --auto applies it
                                 --at T --speed X | --at T --cover IN-OUT for one clip
@@ -306,7 +333,7 @@ export function parseArgs(argv) {
          'waitForClose', 'force', 'reindex', 'noRepair', 'inPlace',
          'generated', 'allowEphemeral', 'measure', 'apply', 'native', 'noCache', 'noGrade',
          'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'noEase', 'easePosition', 'stress', 'allowBoost', 'values',
-         'faceDetail', 'replaceExisting'].includes(key)) result[key] = true;
+         'faceDetail', 'replaceExisting', 'record', 'allowUnsafe', 'markdown'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
       const value = argv[++i];
@@ -388,53 +415,7 @@ async function loadWorking(projectDir) {
 const r3 = n => Math.round(n * 1000) / 1000;
 const sigRules = sig => sig.sigPresets().rules;
 
-async function findWhisperCache(doc, principalIndex = null) {
-  const cache = path.join(os.homedir(), 'Downloads', '.video-index');
-  if (!fs.existsSync(cache)) return null;
-  const names = fs.readdirSync(cache).filter(n => n.includes('.whisper'));
-  if (!names.length) return null;
-
-  // An index file is only the right one if its stem IS the media's stem — `startsWith` alone
-  // matched `screen.whisper-*.json` for every `…__screen.mp4`, so a project's B-roll answered
-  // for the talking head and detection ran against a transcript with no speech in it.
-  const exact = stem => names.filter(n => n.startsWith(`${stem}.`)).sort()[0] || null;
-  const stemsFor = file => {
-    const base = path.basename(file).replace(/\.[^.]+$/, '');
-    const out = [base];
-    // `localizeMedia` prefixes the parent folder ("Downloads__F7ED1ECA-…") and may append an
-    // 8-hex collision tag; the index is keyed on the ORIGINAL stem.
-    const unprefixed = base.replace(/^[^_]+__/, '');
-    if (unprefixed !== base && unprefixed.length >= 8) out.push(unprefixed);
-    for (const v of [...out]) {
-      const bare = v.replace(/__[0-9a-f]{8}$/, '');
-      if (bare !== v) out.push(bare);
-    }
-    return out;
-  };
-
-  // The talking head first, always. Brand detection maps HIS words onto the timeline, so a
-  // screen recording's transcript is never the right answer even when one exists.
-  const ordered = [];
-  try {
-    const { principalTrack } = await import('./polish.mjs');
-    const { track } = principalTrack(doc, principalIndex);
-    const byId = new Map((doc.materials?.videos || []).map(m => [m.id, m]));
-    for (const seg of track.segments || []) {
-      const m = byId.get(seg.material_id);
-      if (m?.path) ordered.push(m);
-    }
-  } catch { /* no principal track — fall through to every video */ }
-  for (const m of doc.materials?.videos || []) if (m.path) ordered.push(m);
-
-  for (const m of ordered) {
-    if (m.type && m.type !== 'video') continue;
-    for (const stem of stemsFor(m.path)) {
-      const hit = exact(stem);
-      if (hit) return path.join(cache, hit);
-    }
-  }
-  return null;
-}
+const findWhisperCache = async (doc, principalIndex = null) => (await import('./anchors.mjs')).findWordsFile(doc, principalIndex);
 
 async function trackIndex(projectDir, spec) {
   if (spec == null || spec === '') return null;
@@ -713,6 +694,14 @@ async function runInPlaceCut(args, root, apply = applySpec) {
   }) }, true);
 }
 
+function mographParams(args) {
+  if (args.params && args.paramsFile) throw new CapcutError('Use --params JSON or --params-file FILE, not both.', { code: 'MOGRAPH_PARAM', exitCode: 2 });
+  if (args.paramsFile) return readJson(path.resolve(args.paramsFile));
+  if (!args.params) return {};
+  try { return JSON.parse(args.params); }
+  catch (error) { throw new CapcutError(`--params is not JSON: ${error.message}`, { code: 'MOGRAPH_PARAM', exitCode: 2 }); }
+}
+
 export async function main(argv, dependencies = {}) {
   loadEnv();
   const command = argv[0];
@@ -744,6 +733,29 @@ export async function main(argv, dependencies = {}) {
   await validateOptions(command, args);
   const root = args.root ? path.resolve(args.root) : DEFAULT_ROOT;
 
+  if (command === 'profile') {
+    const { loadProfile } = await import('./profile.mjs');
+    return print(loadProfile({ file: args.profile || null }), true);
+  }
+  if (command === 'mograph' && ['list', 'render', 'preview'].includes(args._[1])) {
+    const mograph = await import('./mograph.mjs');
+    const sub = args._[1];
+    if (sub === 'list') {
+      return print({ templates: mograph.listTemplates(), formats: mograph.FORMATS,
+        importVerified: mograph.IMPORT_VERIFIED, contract: 'mograph/runtime.js' }, true);
+    }
+    if (!args.template) throw new CapcutError(`mograph ${sub} needs --template ID (see mograph list).`, { code: 'MOGRAPH_TEMPLATE', exitCode: 2 });
+    if (!args.out) throw new CapcutError(`mograph ${sub} needs --out PATH.`, { code: 'MOGRAPH_OUT', exitCode: 2 });
+    const params = mographParams(args);
+    if (sub === 'preview') {
+      return print(await mograph.previewSheet({ template: args.template, params, out: path.resolve(args.out),
+        times: args.times ? String(args.times).split(',').map(Number) : null,
+        background: args.background || null }), true);
+    }
+    const out = path.resolve(args.out).replace(/\.(mov|png|webm)$/i, '');
+    return print(await mograph.renderMograph({ template: args.template, params, out,
+      format: args.format || 'prores', scale: args.scale ? Number(args.scale) : 1 }), true);
+  }
   if (command === 'motion' && args._[1] === 'list') {
     const { MOTION_RECIPES } = await import('./motion.mjs');
     return print({ recipes: MOTION_RECIPES.map(name => ({
@@ -794,11 +806,27 @@ export async function main(argv, dependencies = {}) {
     // else that documents this CLI. Always JSON: it exists to be parsed, not read.
     const { buildContract } = await import('./contract.mjs');
     const pkg = readJson(path.join(HERE, '..', 'package.json'));
-    return print(buildContract({ version: pkg.version }), true);
+    const contract = buildContract({ version: pkg.version });
+    if (args.markdown) {
+      const { renderReference } = await import('./command-docs.mjs');
+      return print(renderReference(contract));
+    }
+    return print(contract, true);
   }
   if (command === 'harvest') {
     const { harvestDrafts, writeHarvest, DEFAULT_HARVEST } = await import('./harvest.mjs');
     const names = args.projects ? String(args.projects).split(',').map(s => s.trim()).filter(Boolean) : undefined;
+    if (args.profile) {
+      const { profileFromDrafts } = await import('./harvest.mjs');
+      const profile = profileFromDrafts(root, names);
+      if (!args.plan) {
+        const dest = path.resolve(args.profile);
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        fs.writeFileSync(dest, `${JSON.stringify(profile, null, 2)}\n`);
+        return print({ wrote: dest, profile }, true);
+      }
+      return print({ wrote: null, profile }, true);
+    }
     const catalogue = harvestDrafts(root, names);
     const dest = args.out ? path.resolve(args.out) : DEFAULT_HARVEST;
     if (!args.plan) writeHarvest(catalogue, dest);
@@ -934,7 +962,7 @@ export async function main(argv, dependencies = {}) {
     'inspect', 'doctor', 'snapshot', 'history', 'restore', 'sync', 'scenes',
     'denoise', 'blur-broll', 'reframe', 'cursor', 'pace', 'ramp', 'punch', 'match', 'verify-shots', 'motion', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
     'replace-media', 'localize', 'trim', 'shift', 'remove', 'volume', 'fade', 'keyframe', 'animate',
-    'preview', 'diff', 'apply', 'timeline', 'finish', 'music', 'grade', 'loudness'
+    'preview', 'diff', 'apply', 'timeline', 'finish', 'music', 'grade', 'loudness', 'gate', 'build', 'mograph'
   ]);
   if (!NEEDS_PROJECT.has(command)) throw new CapcutError(`Unknown command: ${command}\n\n${HELP}`, { exitCode: 2 });
   const projectDir = resolveProject(args.project, root);
@@ -1222,13 +1250,15 @@ export async function main(argv, dependencies = {}) {
   if (command === 'logo' || command === 'endcard' || command === 'zoom' || command === 'wrap') {
     const sig = await import('./signature.mjs');
     const op = { op: 'signature', ...(args.noSfx ? { noSfx: true } : {}), ease: !args.noEase };
-    // Logo and text entrances default to a native motion recipe whose underlay is the
-    // harvested Blur. --glow keeps the older halo pop; --plain keeps the two-key pop.
-    // wrap still uses the pop unless --glow is asked for.
+    // The entrance comes from the profile (logo.reveal), and the house default is the measured
+    // 0.13s pop with its pop cue. The orbit-glow motion recipe as a default spun a blurred halo
+    // 720° on Line keys, dropped the pop and its SFX, and made `finish` count zero logos, so
+    // recipes are opt-in (--motion) and experimental. --glow is the halo pop, --plain the pop.
     if (command === 'logo') {
-      if (args.plain) op.glow = false;
-      else if (args.glow) op.glow = true;
-      else op.motion = args.motion || 'orbit-glow';
+      const reveal = args.plain ? 'pop' : args.glow ? 'glow' : args.motion || profileValue('logo.reveal', 'pop');
+      if (reveal === 'glow') op.glow = true;
+      else if (reveal === 'pop') op.glow = false;
+      else op.motion = reveal;
     } else if (args.glow) op.glow = true;
 
     if (command === 'logo') {
@@ -1395,6 +1425,9 @@ export async function main(argv, dependencies = {}) {
           { ...options, dryRun: Boolean(args.plan || args.dryRun) }), true);
       }
       if (args.auto) {
+        // Deprecated: a push on every full-face scene is clockwork, the loudest "a machine made
+        // this" tell. --stress picks the words that carry weight instead.
+        process.stderr.write('warning: zoom --auto is deprecated (a push on every scene reads as clockwork); use zoom --stress.\n');
         const doc = await loadWorking(projectDir);
         const scenes = sig.talkingHeadScenes(doc, await trackIndex(projectDir, args.track),
                                              args.minLength ? Number(args.minLength) : 2.5);
@@ -1431,14 +1464,97 @@ export async function main(argv, dependencies = {}) {
       hits = hits.filter(h => h.logo && fs.existsSync(h.logo));
       op.logos = hits;
       op.endcard = { ...(args.text ? { text: args.text } : {}) };
-      if (args.noZoom) op.zooms = [];
-      else if (args.zoomAt) op.zooms = String(args.zoomAt).split(',').map(Number).map(at => ({ at }));
-      else op.zooms = sig.talkingHeadScenes(doc, await trackIndex(projectDir, args.track)).map(s => ({ at: r2(s.start + 0.4) }));
+      // Face pushes are not wrap's job any more: one on every scene was clockwork. Emphasis
+      // pushes come from `zoom --stress` (or `build`), which picks the stressed words.
+      if (args.zoomAt) op.zooms = String(args.zoomAt).split(',').map(Number).map(at => ({ at }));
+      else op.zooms = [];
       if (args.plan) return print({ detected: hits, skippedNoLogo: missing.map(m => m.brand),
                                     endcard: op.endcard, zooms: op.zooms || [] }, true);
       if (missing.length) process.stderr.write(`note: no logo asset for ${missing.map(m => m.brand).join(', ')} — skipped\n`);
     }
     return print(applySpec(projectDir, { version: 1, name: command, operations: [op] }, options), true);
+  }
+  if (command === 'gate') {
+    const { gateReport, gateText, writeGateRecord } = await import('./gate.mjs');
+    const { loadProfile } = await import('./profile.mjs');
+    const report = gateReport(await loadWorking(projectDir), { projectDir, profile: loadProfile({ file: args.profile || null }) });
+    if (args.record) report.recorded = writeGateRecord(projectDir, report);
+    if (report.verdict === 'FAIL') process.exitCode = 1;
+    return args.json ? print(report, true) : print(gateText(report));
+  }
+  if (command === 'build') {
+    if (!args.edit) throw new CapcutError('build needs --edit edit.json (see the capcut-editing skill for the format).', { code: 'PLAN_MISSING', exitCode: 2 });
+    const { readEditPlan, runBuild } = await import('./build.mjs');
+    const plan = readEditPlan(args.edit);
+    if (!args.dryRun) assertCapcutClosed({ forceRunning: Boolean(args.forceRunning) });
+    const result = await runBuild(projectDir, plan, { dryRun: Boolean(args.dryRun), force: Boolean(args.force),
+      forceRunning: Boolean(args.forceRunning), backup: !args.noBackup });
+    if (result.gate?.verdict === 'FAIL') process.exitCode = 1;
+    if (args.json) return print(result, true);
+    const { gateText } = await import('./gate.mjs');
+    const head = result.upToDate ? `build: up to date (${result.hash})` : `build: ${result.dryRun ? 'dry run' : 'applied'} (${result.hash})`;
+    const stages = result.stages ? `\n${JSON.stringify(result.stages, null, 2)}` : '';
+    return print(`${head}${stages}\n${gateText(result.gate)}`);
+  }
+  if (command === 'mograph') {
+    const sub = args._[1];
+    if (!['add', 'rerender'].includes(sub)) {
+      throw new CapcutError('mograph takes list | preview | render | add | rerender.', { code: 'MOGRAPH_SUBCOMMAND', exitCode: 2 });
+    }
+    const mograph = await import('./mograph.mjs');
+    const { loadProfile } = await import('./profile.mjs');
+    const profile = loadProfile();
+    const dir = path.join(projectDir, 'mograph');
+    let item;
+    if (sub === 'rerender') {
+      if (!args.id) throw new CapcutError('mograph rerender needs --id.', { code: 'MOGRAPH_PLACE', exitCode: 2 });
+      const sidecar = path.join(dir, `${args.id}.json`);
+      if (!fs.existsSync(sidecar)) throw new CapcutError(`no rendered graphic "${args.id}" in ${dir}.`, { code: 'MOGRAPH_MISSING', exitCode: 2 });
+      const prev = readJson(sidecar);
+      const params = args.params || args.paramsFile ? { ...prev.params, ...mographParams(args) } : prev.params;
+      item = { id: prev.id, template: prev.template, params, format: prev.format, at: prev.at, anchor: prev.anchor };
+    } else {
+      if (!args.template) throw new CapcutError('mograph add needs --template ID.', { code: 'MOGRAPH_TEMPLATE', exitCode: 2 });
+      if (args.at == null && !args.say) throw new CapcutError('mograph add needs --at SECONDS or --say WORDS.', { code: 'MOGRAPH_PLACE', exitCode: 2 });
+      const doc = await loadWorking(projectDir);
+      let at = args.at != null ? Number(args.at) : null;
+      let anchor = null;
+      if (args.say) {
+        const { resolveAnchors } = await import('./anchors.mjs');
+        const [hit] = resolveAnchors([{ id: args.id || args.template, say: args.say, occurrence: args.occurrence ? Number(args.occurrence) : 1 }],
+          { doc, wordsFile: args.words ? path.resolve(args.words) : null });
+        at = Math.max(0, hit.at - profile.tokens.frames.lead / profile.canvas.fps);
+        anchor = hit.anchor;
+      }
+      const params = mographParams(args);
+      if (!params.center && !params.box && !params.layout) {
+        const { layoutAt } = await import('./mograph-place.mjs');
+        params.layout = layoutAt(doc, at);
+      }
+      const motion = mograph.listTemplates().find(t => t.id === args.template)?.motion || 'rich';
+      item = { id: args.id || `${args.template}-${Math.round(at * 1000)}`, template: args.template, params,
+        format: args.format || (motion === 'rich' ? 'prores' : 'png-still'), at: Math.round(at * 1000) / 1000, anchor };
+    }
+    const fingerprint = mograph.fingerprint(item.template, item.params, profile);
+    const rendered = args.dryRun
+      ? { ...(await mograph.probeMograph({ template: item.template, params: item.params, profile })),
+        file: path.join(dir, `${item.id}.${item.format === 'png-still' ? 'png' : 'mov'}`) }
+      : await mograph.renderMograph({ template: item.template, params: item.params, out: path.join(dir, item.id), format: item.format, profile });
+    const unsafe = mograph.safeZoneViolations(rendered.box, profile);
+    if (unsafe.length && !args.allowUnsafe) {
+      throw new CapcutError(`${item.id} sits in the platform UI (${unsafe.join(', ')}); move it (params center/layout) or pass --allow-unsafe.`,
+        { code: 'MOGRAPH_SAFE_ZONE', exitCode: 2 });
+    }
+    const op = { op: 'mograph.place', id: item.id, template: item.template, file: rendered.file, format: item.format,
+      at: item.at, duration: rendered.meta.duration, box: rendered.box, fingerprint,
+      sfx: args.noSfx ? null : rendered.meta.sfx, sfxLead: 0, importVerified: item.format === 'png-still' };
+    if (args.dryRun) return print({ dryRun: true, placement: op, box: rendered.box, meta: rendered.meta }, true);
+    const result = applySpec(projectDir, { version: 1, name: `mograph-${sub}`, operations: [op] }, options);
+    fs.writeFileSync(path.join(dir, `${item.id}.json`), `${JSON.stringify({
+      version: 1, id: item.id, template: item.template, params: item.params, format: item.format, file: rendered.file,
+      box: rendered.box, meta: rendered.meta, fingerprint, anchor: item.anchor || null, at: item.at,
+      duration: rendered.meta.duration, importVerified: item.format === 'png-still' }, null, 2)}\n`);
+    return print(result, true);
   }
   if (command === 'polish') {
     const { assertFirstPictureProof } = await import('./finish.mjs');

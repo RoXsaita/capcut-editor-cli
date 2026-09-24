@@ -4,6 +4,8 @@ JSON the CLI clones from instead of inventing CapCut objects.
 
 | File | Role |
 |---|---|
+| `profile.json` | **the style profile** — tokens, camera, seams, sound, density targets, motion grammar. The one source of taste; `CAPCUTCTL_PRESET_DIR/profile.json` merges over it |
+| `motion.json` | harvested native structures for the experimental `motion` recipes |
 | `layouts.json` | split-screen / circle / full-face / background / screenRecording geometry + native mask templates |
 | `sfx.json` | transition ↔ sound pairing for `polish` |
 | `signature.json` | logo pop, endcard, talking-head push-in |
@@ -12,7 +14,7 @@ JSON the CLI clones from instead of inventing CapCut objects.
 | `adjust-layer.json` | harvested Custom adjustment lane that `grade --layer` clones |
 | `volume-keyframes.json` | harvested `KFTypeVolume` block + its units/time base, for `music --duck` |
 | `blank-draft.json` | the empty 1080×1920 draft `new --blank` starts from |
-| `suheil-vertical.json` | 1080×1920 house-style contract (documentation; not a renderer) |
+| `suheil-vertical.json` | measured card-layout geometry (documentation; its editing rules now live in `profile.json`) |
 
 Paths are written `~/…` and expanded at load. CapCut still needs a real
 absolute path inside `draft_info.json`.

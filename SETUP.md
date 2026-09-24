@@ -48,6 +48,19 @@ python3.11 -m venv .venv
 capcutctl preflight           # deps, Python runtime, artwork, SFX palette, drafts folder
 ```
 
+### Motion graphics browser (mograph)
+
+`mograph` and `build` render HTML/JS graphics in headless Chromium. Install Playwright once;
+everything else works without it, and `preflight` reports it as a non-blocking check.
+
+```bash
+npm install -g playwright && npx playwright install chromium
+# or, to use an installed Chrome instead of Playwright's download:
+export CAPCUTCTL_CHROMIUM="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+```
+
+Run the one-time import checklist in [docs/mograph.md](docs/mograph.md) on your CapCut build.
+
 ### Local Vision helpers
 
 Build both helpers on the Mac where the CLI runs (no model download):

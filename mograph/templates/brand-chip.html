@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="ar">
+<head>
+<meta charset="utf-8">
+<title>brand-chip</title>
+<script src="../runtime.js"></script>
+<style>
+  .chip { position: absolute; display: flex; align-items: center; gap: 0.3em; white-space: nowrap;
+          background: var(--mg-ring); color: var(--mg-ink); border-radius: var(--mg-radius-chip);
+          padding: 0.26em 0.66em 0.3em; font-weight: 700; line-height: 1.2;
+          box-shadow: 0 14px 34px rgba(var(--mg-ink-rgb), 0.38), 0 2px 6px rgba(var(--mg-ink-rgb), 0.22); }
+  .chip.has-logo { padding-inline-start: 0.28em; }
+  .logo { flex: none; height: 1.16em; width: 1.16em; border-radius: 50%; overflow: hidden;
+          display: flex; align-items: center; justify-content: center; }
+  .logo img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
+  .name .mg-word { padding: 0 0.02em; }
+</style>
+</head>
+<body>
+<script>
+/*
+ * brand-chip — a white pill naming the tool on screen, with its logo when one is given.
+ * params: { name, logo?: absolute path or file:// URL, from?: right|left (default right, the Arabic reading side), layout?: full-face|card|split-screen, center?: [x, y] canvas px, hold?: seconds }
+ * Timing (frames @30): slides 56px in from the reading-direction side and fades up over 8f
+ * (enter ease); holds 46f by default (params.hold); 6f out, sliding back 28px as it fades.
+ * Motion is slide-only, so a png-still with native CapCut keys is allowed.
+ */
+const IN = 8, OUT = 6, TRAVEL = 56;
+const hold = (params, mg) => (params.hold != null ? mg.holdFrames(params, 0) : 46);
+
+MG.define({
+  name: 'brand-chip',
+  sfx: 'pop',
+  motion: 'slide',
+  pad: 40,
+  build(root, params, tokens, mg) {
+    const name = String(params.name || '').trim();
+    if (!name) throw new Error('MOGRAPH_PARAM: brand-chip needs params.name');
+    mg.cssVars(root);
+    const chip = document.createElement('div');
+    chip.className = 'chip';
+    chip.style.fontSize = `${tokens.type.chip}px`;
+    // Logo on the start side of the name's own script: left of a Latin name, right of an Arabic one.
+    chip.dir = mg.isArabic(name) ? 'rtl' : 'ltr';
+    root.appendChild(chip);
+    if (params.logo) {
+      chip.classList.add('has-logo');
+      const holder = document.createElement('div');
+      holder.className = 'logo';
+      holder.appendChild(mg.image(params.logo));
+      chip.appendChild(holder);
+    }
+    const label = document.createElement('div');
+    label.className = 'name';
+    chip.appendChild(label);
+    mg.words(label, name);
+    const lay = mg.layout(params, { margin: 40 + TRAVEL });
+    mg.fitFont(chip, tokens.type.chip, lay.safe.w, Infinity, tokens.type.micro);
+    mg.place(chip, lay);
+    const side = params.from === 'left' ? -1 : 1;     // +1: enters from the right
+    return { chip, side, total: (IN + hold(params, mg) + OUT) / mg.fps };
+  },
+  duration(params, tokens, mg) {
+    return (IN + hold(params, mg) + OUT) / mg.fps;
+  },
+  still(params, tokens, mg) {
+    return (IN + 6) / mg.fps;
+  },
+  seek(t, s, mg) {
+    const { F, ease, win } = mg;
+    const p = ease.enter(win(t, 0, F(IN)));
+    const q = ease.exit(win(t, s.total - F(OUT), F(OUT)));
+    s.chip.style.transform = `translateX(${s.side * ((1 - p) * TRAVEL + q * TRAVEL * 0.5)}px)`;
+    mg.show(s.chip, Math.min(1, p * 1.4) * (1 - q));
+  },
+});
+</script>
+</body>
+</html>

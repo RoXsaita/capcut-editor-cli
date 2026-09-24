@@ -123,7 +123,7 @@ export function sourceToTimeline(doc, trackIndex = null) {
 
 // Whisper transliterates inconsistently — جروك and قروك in the same file — so fold the
 // Arabic letters that differ only by dots or hamza before comparing.
-function normalise(s) {
+export function normalise(s) {
   return (s || '').toLowerCase()
     .replace(/[ً-ْـ]/g, '')          // diacritics, tatweel
     .replace(/[إأآا]/g, 'ا').replace(/[ىي]/g, 'ي').replace(/[ةه]/g, 'ه')
@@ -320,6 +320,46 @@ function instantiateExtras(doc, templates, key) {
     refs.push(m.id);
   }
   return refs;
+}
+
+/**
+ * Place a still image (a mograph `png-still`) as a native photo clip on its own top track, with
+ * an eased pop: from → 1+overshoot → 1 of the resting scale, built with the harvested
+ * FreeCurveInOut handles. The resting clip values are the settled state, so readers that ignore
+ * keyframes still see the graphic. Returns the new segment.
+ */
+export function placeStill(doc, { key, seed, file, width, height, at, hold, scale, pos = [0, 0], desc,
+  trackName, from = 0.6, rampSeconds = 0.2, overshoot = 0.06 }) {
+  SEED = seed || null;
+  const p = sigPresets();
+  const mat = clone(p.logoMaterialTemplate);
+  mat.id = mint(`mat:${key}`);
+  mat.path = file;
+  mat.material_name = path.basename(file);
+  mat.local_material_id = mint(`lm:${key}`);
+  mat.width = width;
+  mat.height = height;
+  arr(doc, 'videos').push(mat);
+  const seg = clone(p.logoSegmentTemplate);
+  seg.id = mint(`seg:${key}`);
+  seg.material_id = mat.id;
+  seg.extra_material_refs = instantiateExtras(doc, p.logoExtraTemplates, key);
+  seg.target_timerange = { start: US(at), duration: US(hold) };
+  if (seg.source_timerange) seg.source_timerange = { start: 0, duration: US(hold) };
+  seg.clip = clone(seg.clip);
+  seg.clip.scale = { x: scale, y: scale };
+  seg.clip.alpha = 1;
+  seg.clip.transform = { ...seg.clip.transform, x: pos[0], y: pos[1] };
+  const h = p.rules.logoGlow.handles;
+  seg.common_keyframes = [
+    easedBlock('KFTypeScaleX', [[0, scale * from], [rampSeconds, scale * (1 + overshoot)], [rampSeconds + 0.1, scale]], key, hold, h),
+    easedBlock('KFTypeAlpha', [[0, 0], [rampSeconds * 0.6, 1]], key, hold, h),
+  ].filter(Boolean);
+  seg.desc = desc;
+  let track = doc.tracks.find(t => t.name === trackName);
+  if (!track) track = addTrack(doc, p.logoTrackTemplate, trackName);
+  track.segments = [...(track.segments || []), seg].sort((a, b) => a.target_timerange.start - b.target_timerange.start);
+  return seg;
 }
 
 /** A new top track, so a plate never lands under the picture it is meant to sit on. */

@@ -6,11 +6,12 @@ import { CapcutError, clone, seededId, requireBinary, contentEndUs, LOCAL_MEDIA_
 import { geminiApiKey, loadEnv } from './env.mjs';
 import { audioSegment, ensureAudioTrack, pictureChanges, sfxPresets } from './polish.mjs';
 import { opDuckMusic } from './duck.mjs';
+import { profileValue } from './profile.mjs';
 
 const US = s => Math.round(s * 1e6);
 const S = us => us / 1e6;
 const r3 = n => Math.round(n * 1000) / 1000;
-export const DEFAULT_MUSIC_VOLUME = 0.08;
+export const DEFAULT_MUSIC_VOLUME = profileValue('sound.musicVolume');
 const MUSIC_MODEL = 'lyria-3-pro-preview';
 const MUSIC_BRIEF_REQUIRED = 'music needs a video-specific creative brief: pass --prompt TEXT or choose a local track with --file FILE.';
 

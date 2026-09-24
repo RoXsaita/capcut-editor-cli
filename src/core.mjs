@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import {
   opLayoutApply, opLayoutBackground, opLayoutBroll, opLayoutScreen, SCREEN_LAYOUT_OPERATION, renumberTracks
 } from './layouts.mjs';
@@ -26,6 +27,7 @@ import {
 import { opMusic } from './music.mjs';
 import { opLoudness } from './loudness.mjs';
 import { opCaption } from './captions.mjs';
+import { opMographPlace, opMographPrune } from './mograph-place.mjs';
 import { opAnimation } from './animations.mjs';
 import { isPreframed } from './origin.mjs';
 import { preflightPython } from './python.mjs';
@@ -1393,6 +1395,26 @@ function auditMediaOrigins(projectDir, state) {
  * validation with 12 error(s)` at the end of a polish. Report all of it up front, with the
  * command that fixes each one.
  */
+/** Can mograph find Playwright and a Chromium to drive? Resolution mirrors src/mograph.mjs. */
+export function preflightMographBrowser() {
+  if (process.env.CAPCUTCTL_CHROMIUM) {
+    return fs.existsSync(process.env.CAPCUTCTL_CHROMIUM)
+      ? { ok: true, detail: `CAPCUTCTL_CHROMIUM=${process.env.CAPCUTCTL_CHROMIUM}` }
+      : { ok: false, detail: `CAPCUTCTL_CHROMIUM does not exist: ${process.env.CAPCUTCTL_CHROMIUM}` };
+  }
+  const require = createRequire(import.meta.url);
+  for (const name of ['playwright', 'playwright-core']) {
+    try { return { ok: true, detail: `${name} at ${path.dirname(require.resolve(`${name}/package.json`))}` }; } catch { /* next */ }
+  }
+  try {
+    const root = execFileSync('npm', ['root', '-g'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 }).trim();
+    for (const name of ['playwright', 'playwright-core']) {
+      if (fs.existsSync(path.join(root, name))) return { ok: true, detail: `${name} (global) at ${path.join(root, name)}` };
+    }
+  } catch { /* npm missing */ }
+  return { ok: false, detail: 'Playwright not found; mograph graphics cannot render' };
+}
+
 export function preflight({
   root = DEFAULT_ROOT,
   binaryCheck = name => hasBinary(name, { refresh: true }),
@@ -1401,6 +1423,7 @@ export function preflight({
   writeProbe = null,
   pythonCheck = preflightPython,
   minimumFreeBytes = process.env.CAPCUTCTL_MIN_FREE_BYTES || PREFLIGHT_MIN_FREE_BYTES,
+  mographCheck = preflightMographBrowser,
 } = {}) {
   const checks = [];
   const add = (name, ok, detail, fix = null, { blocking = true, ...extra } = {}) => checks.push({
@@ -1493,6 +1516,13 @@ export function preflight({
   });
   add('Whisper/MLX transcription', whisper.ok, whisper.detail, whisper.fix,
       { mlxReady: whisper.mlxReady, whisperReady: whisper.whisperReady });
+
+  // mograph renders its HTML/JS graphics in headless Chromium. Optional: every other command
+  // works without it, so a missing browser is reported, never blocking.
+  const browser = mographCheck();
+  add('mograph browser', browser.ok, browser.detail, browser.ok ? null
+    : 'npm i -g playwright && npx playwright install chromium (or set CAPCUTCTL_CHROMIUM to a Chrome binary)',
+  { blocking: false });
 
   const ocr = preflightOcr({
     binaryCheck: available,
@@ -2874,6 +2904,8 @@ export function applyOperations(doc, operations, context) {
     else if (op.op === 'music') result = opMusic(doc, op, context);
     else if (op.op === 'loudness') result = opLoudness(doc, op, context);
     else if (op.op === 'caption') result = opCaption(doc, op, context);
+    else if (op.op === 'mograph.place') result = opMographPlace(doc, op, context);
+    else if (op.op === 'mograph.prune') result = opMographPrune(doc, op, context);
     else if (op.op === 'animation.apply') result = opAnimation(doc, op, context);
     else if (op.op === 'grade.apply') result = opGradeApply(doc, op, context);
     else if (op.op === 'grade.reset') result = opGradeReset(doc, op, context);
@@ -3414,6 +3446,11 @@ export function applySpec(projectDir, spec, options = {}) {
       } else if (op.op === 'cut.recut') {
         op.__seed = ['cut.recut.v1', op.media,
           (op.plan?.timeline || []).map(item => [item.beat, item.tl_in, item.tl_out, item.src_in, item.dur].join(':')).join('|')].join('|');
+      } else if (op.op === 'mograph.place') {
+        // Placing the same graphic again must mint the same ids, so an unchanged rebuild
+        // rewrites identical JSON rather than churning every graphic's ids.
+        op.__seed = ['mograph.place.v1', op.id, op.fingerprint, op.format, op.at, op.duration,
+          JSON.stringify(op.box), op.sfx || '', op.sfxLead ?? ''].join('|');
       } else op.__seed = uuid();
     }
   }

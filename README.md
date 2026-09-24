@@ -39,27 +39,61 @@ CapCut's draft format is undocumented and may change. Use a copy of an important
 until you trust the workflow on your version of CapCut. The transaction system reduces
 risk; it cannot make an unofficial file format stable.
 
-## Reusable native motion
+## From a signed-off cut to a ready-to-post project
 
-Create the demonstrated text treatments with one command in an existing project:
+After the talking head is cut and signed off, the rest of the edit is one plan and one command.
+The agent writes only the judgement — which words get a graphic, which brands, the CTA, the music
+brief — and `build` does the mechanics in a fixed order, with the style profile filling every gap:
 
-```sh
-capcutctl motion shimmer --project "My Edit" --text "SUHEIL AI" --at 4 --duration 4
-capcutctl motion spotlight --project "My Edit" --asset /absolute/path/logo.png --duration 5
-capcutctl motion list
+```json
+{
+  "version": 1,
+  "shots": "shots.json",
+  "graphics": [
+    { "template": "hook-title",    "say": "بنيت موقع",  "params": { "text": "موقع كامل بدقيقة" } },
+    { "template": "number-pop",    "say": "تسعين",      "params": { "value": 90, "suffix": "%", "label": "أسرع" } },
+    { "template": "cta-card",      "say": "اكتب",       "params": { "keyword": "AI" } }
+  ],
+  "endcard": { "text": "Follow" },
+  "sound": { "music": { "prompt": "tense minimal synth pulse that opens up at the reveal" } }
+}
 ```
 
-Includes `gradient`, `shimmer`, `orbit-glow`, and `spotlight`. These create editable
-native layers, not flattened animation videos. Close CapCut before writes; add
-`--dry-run` to validate first. Image variants remain experimental, and gradient is
-text-only. See [commands, defaults, and limitations](docs/native-motion.md).
+```sh
+capcutctl build --project "My Edit" --edit edit.json --dry-run
+capcutctl build --project "My Edit" --edit edit.json      # exit 1 if the gate fails
+capcutctl gate  --project "My Edit"                       # the ready-to-post check on its own
+```
+
+Graphics are anchored to **source words**, so a recut rebuilds exactly; an unchanged plan on an
+unchanged cut is a no-op. The gate checks the hook, proof on screen, dead stretches, crowding,
+repeats, platform-UI safe zones, graphics without a sound and seam variety, with thresholds from
+[`presets/profile.json`](presets/profile.json) — the one file that holds the style.
+
+## Motion graphics
+
+Kinetic type, counters, callouts and the CTA card are deterministic HTML/JS templates rendered in
+headless Chromium to a tight ProRes 4444 alpha clip (or a PNG hold frame animated with native eased
+keys) and placed above the picture on the exact pixels they were designed for, with their sound.
+Footage, cuts, layouts and camera moves stay native and editable.
+
+```sh
+capcutctl mograph list
+capcutctl mograph preview --template number-pop --params '{"value":90,"suffix":"%"}' --out sheet.png
+capcutctl mograph add --project "My Edit" --template keyword-super --params '{"text":"أسرع"}' --say "أسرع"
+```
+
+See [docs/mograph.md](docs/mograph.md), including the one-time CapCut import checklist.
+The older native `motion` recipes remain available but experimental; see
+[docs/native-motion.md](docs/native-motion.md).
 
 ## Requirements
 
 - macOS with CapCut Desktop installed and launched at least once;
 - Node.js 20 or newer;
 - Python 3.11 or newer;
-- ffmpeg and ffprobe.
+- ffmpeg and ffprobe;
+- optional: Playwright + Chromium for motion graphics (`npm i -g playwright && npx playwright install chromium`).
 
 Install the system dependencies with Homebrew:
 
@@ -149,6 +183,10 @@ the mirrors, and rolls back if the post-write doctor fails.
 | Measure or apply colour matching | `capcutctl grade --project NAME --measure` |
 | Sharpen + clarity on the face | `capcutctl grade --project NAME --face-detail --apply --dry-run` |
 | View or restore snapshots | `capcutctl history --project NAME` |
+| Build the finished edit from a plan | `capcutctl build --project NAME --edit edit.json --dry-run` |
+| Is it ready to post? | `capcutctl gate --project NAME` |
+| Render or place a motion graphic | `capcutctl mograph add --project NAME --template keyword-super --params '{"text":"…"}' --say "…"` |
+| Show the effective style profile | `capcutctl profile` |
 | Show the full command surface | `capcutctl help` |
 
 The checked-in [CLI contract](docs/cli-contract.json) is generated from

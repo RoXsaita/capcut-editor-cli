@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="ar">
+<head>
+<meta charset="utf-8">
+<title>keyword-super</title>
+<script src="../runtime.js"></script>
+<style>
+  .kw { position: absolute; white-space: nowrap; text-align: center; line-height: 1.3; font-weight: 700;
+        color: var(--mg-text);
+        text-shadow: 0 2px 3px rgba(var(--mg-ink-rgb), 0.45), 0 8px 30px rgba(var(--mg-ink-rgb), 0.5); }
+  .kw .slot { display: inline-block; clip-path: inset(-0.6em -0.5em 0 -0.5em); padding: 0 0.04em; }
+  .kw .mg-word.key { color: var(--mg-accent); }
+  .kw .base { display: inline-block; width: 0; height: 0; vertical-align: baseline; }
+  .bar { position: absolute; border-radius: 999px; background: var(--mg-accent);
+         box-shadow: 0 4px 16px rgba(var(--mg-ink-rgb), 0.4); }
+</style>
+</head>
+<body>
+<script>
+/*
+ * keyword-super — a 1–3 word emphasis super for a claim beat; the key word is set in the accent.
+ * params: { text, key?: word|index (default: last word in reading order), layout?: full-face|card|split-screen, center?: [x, y] canvas px, hold?: seconds }
+ * Timing (frames @30): each word rises out of its own baseline mask over 6f (enter ease), 3f
+ * stagger in reading order; the key word's underline draws in the reading direction over 8f as
+ * the last word lands; hold max(minHold, perWordHold × words); 4f out (words lift and fade,
+ * the underline retracts toward the end of the line), faster than the entrance.
+ */
+const IN = 6, OUT = 4, RISE = 0.5;            // frames, frames, travel in em
+const countWords = p => String(p.text || '').trim().split(/\s+/).filter(Boolean).length;
+
+MG.define({
+  name: 'keyword-super',
+  sfx: 'pop',
+  motion: 'rich',
+  pad: 28,
+  build(root, params, tokens, mg) {
+    const text = String(params.text || '').trim();
+    if (!text) throw new Error('MOGRAPH_PARAM: keyword-super needs params.text');
+    if (countWords(params) > 3) throw new Error('MOGRAPH_PARAM: keyword-super takes 1-3 words; the profile forbids repeating the sentence');
+    mg.cssVars(root);
+    const size = tokens.type.super;
+    const lay = mg.layout(params, { margin: 28 + RISE * size });
+    const line = document.createElement('div');
+    line.className = 'kw';
+    root.appendChild(line);
+    const spans = mg.words(line, text);
+    // Each word sits in its own mask whose bottom edge is the line box: the word rises out of it.
+    for (const span of spans) {
+      const slot = document.createElement('span');
+      slot.className = 'slot';
+      span.replaceWith(slot);
+      slot.appendChild(span);
+    }
+    const keyIndex = typeof params.key === 'number' ? mg.clamp(params.key, 0, spans.length - 1)
+      : params.key ? Math.max(0, spans.findIndex(s => s.textContent === params.key)) : spans.length - 1;
+    const key = spans[keyIndex];
+    key.classList.add('key');
+    const probe = document.createElement('span');
+    probe.className = 'base';
+    key.appendChild(probe);
+    const px = mg.fitFont(line, size, lay.safe.w);
+    mg.place(line, lay);
+    // Underline sits just under the baseline, a touch narrower than the word, behind nothing.
+    const k = key.getBoundingClientRect();
+    const baseline = probe.getBoundingClientRect().top;
+    const bar = document.createElement('div');
+    bar.className = 'bar';
+    const thick = Math.max(6, Math.round(px * 0.11));
+    Object.assign(bar.style, { left: `${k.left + k.width * 0.06}px`, width: `${k.width * 0.88}px`,
+      top: `${baseline + px * 0.2}px`, height: `${thick}px` });
+    root.insertBefore(bar, line);
+    const f = tokens.frames;
+    const inEnd = (spans.length - 1) * f.stagger + IN;
+    const hold = mg.holdFrames(params, spans.length);
+    return { spans, line, bar, f, px, inEnd, rtl: mg.isArabic(text), total: (inEnd + hold + OUT) / mg.fps };
+  },
+  duration(params, tokens, mg) {
+    const n = countWords(params);
+    return ((n - 1) * tokens.frames.stagger + IN + mg.holdFrames(params, n) + OUT) / mg.fps;
+  },
+  still(params, tokens, mg) {
+    return ((countWords(params) - 1) * tokens.frames.stagger + IN + 10) / mg.fps;
+  },
+  seek(t, s, mg) {
+    const { F, ease, win } = mg;
+    const q = ease.exit(win(t, s.total - F(OUT), F(OUT)));
+    s.spans.forEach((span, i) => {
+      const p = ease.enter(win(t, F(i * s.f.stagger), F(IN)));
+      mg.show(span, Math.min(1, p * 1.6) * (1 - q));
+      span.style.transform = `translateY(${((1 - p) * RISE - q * 0.12) * s.px}px)`;
+    });
+    // Draw in the reading direction; retract toward the end of the line on the way out.
+    const b = ease.enter(win(t, F(s.inEnd - 3), F(8)));
+    const start = s.rtl ? 'right' : 'left', end = s.rtl ? 'left' : 'right';
+    s.bar.style.transformOrigin = `${q > 0 ? end : start} center`;
+    s.bar.style.transform = `scaleX(${b * (1 - q)})`;
+    mg.show(s.bar, b > 0 && q < 1 ? 1 : 0);
+  },
+});
+</script>
+</body>
+</html>

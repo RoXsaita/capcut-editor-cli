@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="ar">
+<head>
+<meta charset="utf-8">
+<title>hook-title</title>
+<script src="../runtime.js"></script>
+<style>
+  .group { position: absolute; }
+  .hook { position: relative; white-space: nowrap; text-align: center; line-height: 1.18; font-weight: 700;
+          color: var(--mg-text); letter-spacing: 0;
+          text-shadow: 0 3px 4px rgba(var(--mg-ink-rgb), 0.4), 0 12px 40px rgba(var(--mg-ink-rgb), 0.55); }
+  .hook .mg-word { padding: 0 0.05em; transform-origin: 50% 60%; }
+  .hl { position: absolute; background: var(--mg-indigo); border-radius: var(--mg-radius-box);
+        box-shadow: 0 10px 34px rgba(var(--mg-indigo-rgb), 0.45), 0 4px 10px rgba(var(--mg-ink-rgb), 0.35); }
+</style>
+</head>
+<body>
+<script>
+/*
+ * hook-title — the first-second hook: 2–5 words slammed onto the frame, the key word wiped under an indigo block.
+ * params: { text, key?: word|index|false (default: last word in reading order), layout?: full-face|card|split-screen, center?: [x, y] canvas px, hold?: seconds }
+ * Timing (frames @30): each word slams in over 4f (micro) — scale 1.16 → 1 with the pop overshoot,
+ * blur 10 → 0 — on a 3f stagger in reading order; the indigo block wipes behind the key word in
+ * the reading direction over 6f as the last word lands, with a 1-beat settle of the whole line.
+ * Total 45–75f by default (hold = max(minHold, perWordHold × words)); 6f out.
+ * Type is tokens.type.hook (120px), broken into at most two balanced lines, shrunk only to fit the band.
+ */
+const OUT = 6, S0 = 1.16, WIPE = 6;
+const countWords = p => String(p.text || '').trim().split(/\s+/).filter(Boolean).length;
+function timing(n, params, tokens, mg) {
+  const f = tokens.frames;
+  const inEnd = (n - 1) * f.stagger + f.micro;
+  const auto = params.hold == null;
+  const hold = mg.holdFrames(params, n);
+  const total = auto ? mg.clamp(inEnd + hold + OUT, 45, 75) : inEnd + hold + OUT;
+  return { inEnd, total };
+}
+
+MG.define({
+  name: 'hook-title',
+  sfx: 'impact',
+  motion: 'rich',
+  pad: 32,
+  build(root, params, tokens, mg) {
+    const text = String(params.text || '').trim();
+    if (!text) throw new Error('MOGRAPH_PARAM: hook-title needs params.text');
+    const n = countWords(params);
+    if (n > 5) throw new Error('MOGRAPH_PARAM: hook-title takes 2-5 words; a hook is a slam, not a sentence');
+    mg.cssVars(root);
+    const size = tokens.type.hook;
+    const group = document.createElement('div');
+    group.className = 'group';
+    root.appendChild(group);
+    const hl = document.createElement('div');
+    hl.className = 'hl';
+    group.appendChild(hl);
+    const line = document.createElement('div');
+    line.className = 'hook';
+    line.style.fontSize = `${size}px`;
+    group.appendChild(line);
+    const spans = mg.words(line, text);
+    // Margin: crop pad + the slam's overshoot around the widest word.
+    const widest = Math.max(...spans.map(s => s.getBoundingClientRect().width));
+    const lay = mg.layout(params, { margin: 32 + widest * (S0 - 1) / 2 + 8 });
+    // Two balanced lines when one line would not fit (profile: maxLines 2).
+    const full = line.getBoundingClientRect().width;
+    if (full > lay.safe.w && spans.length > 1) {
+      const widths = spans.map(s => s.getBoundingClientRect().width);
+      const space = (full - widths.reduce((a, b) => a + b, 0)) / Math.max(1, spans.length - 1);
+      let best = 1, bestW = Infinity;
+      for (let k = 1; k < spans.length; k++) {
+        const a = widths.slice(0, k).reduce((x, y) => x + y, 0) + space * (k - 1);
+        const b = widths.slice(k).reduce((x, y) => x + y, 0) + space * (spans.length - k - 1);
+        // Prefer the shorter first line (a pyramid reads better) when the split is near-even.
+        const score = Math.max(a, b) + (a > b ? 1 : 0);
+        if (score < bestW) { bestW = score; best = k; }
+      }
+      const gap = spans[best - 1].nextSibling;
+      gap.replaceWith(document.createElement('br'));
+    }
+    mg.fitFont(line, size, lay.safe.w, size * 1.18 * tokens.type.maxLines + 4);
+    mg.place(group, lay);
+    const px = parseFloat(line.style.fontSize);
+    const keyIndex = params.key === false ? -1
+      : typeof params.key === 'number' ? mg.clamp(params.key, 0, spans.length - 1)
+        : params.key ? Math.max(0, spans.findIndex(s => s.textContent === params.key)) : spans.length - 1;
+    // The block hugs the key word's glyph body (not its full line box) with a little air.
+    if (keyIndex >= 0) {
+      const g = group.getBoundingClientRect();
+      const k = spans[keyIndex].getBoundingClientRect();
+      Object.assign(hl.style, { left: `${k.left - g.left - px * 0.12}px`, width: `${k.width + px * 0.24}px`,
+        top: `${k.top - g.top + px * 0.07}px`, height: `${k.height - px * 0.04}px` });
+    } else hl.remove();
+    const { inEnd, total } = timing(n, params, tokens, mg);
+    return { spans, group, line, hl: keyIndex >= 0 ? hl : null, keyIndex, f: tokens.frames, px, inEnd,
+      rtl: mg.isArabic(text), total: total / mg.fps };
+  },
+  duration(params, tokens, mg) {
+    return timing(countWords(params), params, tokens, mg).total / mg.fps;
+  },
+  still(params, tokens, mg) {
+    return (timing(countWords(params), params, tokens, mg).inEnd + WIPE + 6) / mg.fps;
+  },
+  seek(t, s, mg) {
+    const { F, ease, win } = mg;
+    const q = ease.exit(win(t, s.total - F(OUT), F(OUT)));
+    s.spans.forEach((span, i) => {
+      const w = win(t, F(i * s.f.stagger), F(s.f.micro));
+      const p = ease.pop(w);                       // lands with the 6% overshoot: a slam, not a fade
+      const o = ease.enter(Math.min(1, w * 2));
+      mg.show(span, o);
+      span.style.transform = `scale(${S0 + (1 - S0) * p})`;
+      span.style.filter = `blur(${(1 - ease.enter(w)) * 10}px)`;
+    });
+    // One settle beat for the whole line as the last word lands, then the exit lift.
+    const land = mg.pulse(t, F(s.inEnd - 1), F(6));
+    s.group.style.transform = `translateY(${-q * 18}px) scale(${1 + 0.018 * land})`;
+    s.group.style.filter = q > 0 ? `blur(${q * 6}px)` : 'none';
+    mg.show(s.group, 1 - q);
+    if (s.hl) {
+      const h = ease.enter(win(t, F(s.inEnd - 1), F(WIPE)));
+      const cut = `${(1 - h) * 100}%`;
+      s.hl.style.clipPath = s.rtl ? `inset(0 0 0 ${cut} round var(--mg-radius-box))` : `inset(0 ${cut} 0 0 round var(--mg-radius-box))`;
+      mg.show(s.hl, h > 0 ? 1 : 0);
+    }
+  },
+});
+</script>
+</body>
+</html>

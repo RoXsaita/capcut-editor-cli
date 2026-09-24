@@ -11,6 +11,7 @@ import { assertOrigin, stampOrigin } from './origin.mjs';
 import { rescaleKeyframes } from './pace.mjs';
 import { principalTrack } from './polish.mjs';
 import { applyFreeCurve } from './easing.mjs';
+import { profileValue } from './profile.mjs';
 
 const US = s => {
   const value = Math.round(s * 1e6);
@@ -723,7 +724,7 @@ export function opScaleKeyframe(doc, op) {
   const ease = op.ease !== false;
   const easePosition = ease && op.easePosition !== false;
   const from = op.from ?? base.x;
-  let to = op.to ?? from * 1.15, tx = base.tx, ty = base.ty;
+  let to = op.to ?? from * profileValue('camera.push.scale'), tx = base.tx, ty = base.ty;
   const cc = doc.canvas_config || {}, W = cc.width || 1080, H = cc.height || 1920;
   const mat = (doc.materials?.videos || []).find(m => m.id === segment.material_id);
   const mask = segment.enable_video_mask !== false && (doc.materials?.common_mask || []).find(m => (segment.extra_material_refs || []).includes(m.id));

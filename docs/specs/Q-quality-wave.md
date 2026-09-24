@@ -1,6 +1,6 @@
 # Q-wave: features that change how agent videos look and sound
 
-**Status:** implemented except Q04 harvest gate · **Updated:** 2026-09-19 · **Repos:** `cli` (this one) + companion `capcut-skills`
+**Status:** implemented except Q04 harvest gate · superseded as the build order by [Z-production-grade.md](Z-production-grade.md) · **Updated:** 2026-09-19 · **Repos:** `cli` (this one) + companion `capcut-skills`
 **Audience:** subsequent agents implementing one feature at a time.
 
 This spec is the filtered remainder of a CapCut-v9 deep-research report, crossed with

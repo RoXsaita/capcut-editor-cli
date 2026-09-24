@@ -56,6 +56,11 @@ jobs:
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
 
+      # mograph renders HTML/JS graphics in headless Chromium; its tests skip without a
+      # browser, and this job allows no skips, so install one.
+      - name: Install Playwright Chromium
+        run: npm install -g playwright@1.56.1 && npx -y playwright@1.56.1 install --with-deps chromium
+
       - name: Check JavaScript syntax
         run: npm run check
 
