@@ -66,6 +66,17 @@ Usage:
                       — explicitly requested native macOS export, verified before replacing output.
   capcutctl export-grid --media FILE --out GRID.png [--times 3,9,15]
                       — fast labelled grid from an existing exported video; no CapCut UI.
+  capcutctl check-export --media FILE.mp4 [--project NAME] [--target -14] [--peak -1] [--sheet FILE.png] [--json]
+                      — QA the RENDER, not the draft: black inside the edit, a black open/tail, 1-2 frame
+                        flashes, frozen picture past maxStatic, late first sound, dead air, loudness,
+                        true peak, and (with --project) canvas, fps and length against the edit.
+                        Exit 1 on FAIL. Every flagged moment is listed for export-grid --times.
+  capcutctl reference --media REEL.mp4 [--project NAME] [--profile FILE] [--sheet FILE.png]
+                      [--profile-out FILE] [--overwrite] [--cut-threshold 0.3] [--build-threshold 0.06] [--json]
+                      — measure a reference reel in the gate's terms: cuts and in-shot builds per second
+                        by section, first visual event, longest static stretch, median shot, speech ratio,
+                        loudness; side by side with the profile (and the project with --project).
+                        --profile-out writes the density override; --sheet the first frame of every shot.
   capcutctl review --project NAME [--out DIR] [--id NAME] [--fps 6] [--width 240]
                       — write outputs/<id>/proxy.mp4, edl.json, and contact-sheet.png (never CapCut export)
   capcutctl new --project NAME [--media FILE] [--scenes 0:6,6:12,12:18]
@@ -76,6 +87,11 @@ Usage:
   capcutctl doctor --project NAME_OR_PATH [--root PATH] [--json]
   capcutctl snapshot --project NAME_OR_PATH [--label NAME]
   capcutctl history --project NAME_OR_PATH
+  capcutctl notes --project NAME [--reject TEXT --why TEXT | --accept TEXT --why TEXT | --decide TEXT [--why TEXT]
+                  | --todo TEXT | --done N] [--brief] [--json]
+                      — the project's creative log: rejected looks and why, the accepted look, decisions,
+                        outstanding notes. Kept in <project>/.capcutctl/notes.json, outside snapshots,
+                        so it survives restore, compaction and new sessions. Read --brief first each round.
   capcutctl restore --project NAME_OR_PATH --snapshot NAME [--force-running] [--no-backup]
   capcutctl sync --project NAME_OR_PATH [--dry-run] [--force-running] [--no-backup]
   capcutctl apply --project NAME_OR_PATH --spec FILE [--dry-run] [--force-running] [--no-backup]
@@ -136,7 +152,10 @@ Usage:
                     [--resolution 360x640|--native] [--no-cache] [--no-grade]
                       — lightweight streamed proxy; defaults to 360x640 and never writes
                         one PNG per frame. Use qa for bounded seam/pixel evidence.
-  capcutctl diff --project NAME --against NAME|--snapshot NAME
+  capcutctl diff --project NAME --against NAME|--snapshot NAME [--allow ID|track:NAME[,…]]
+                      — what changed. --allow proves a scoped revision stayed in scope: every
+                        change outside those segment ids / tracks is listed with both values
+                        under scope.outOfScope, and the command exits 1.
   capcutctl harvest [--root PATH] [--projects A,B] [--out FILE] [--profile FILE] [--plan]
                       — catalogue real structures; --profile FILE writes a style-profile override measured from the drafts
   capcutctl init-spec [--output FILE]
@@ -322,7 +341,7 @@ const r2 = n => Math.round(n * 100) / 100;
 
 export function parseArgs(argv) {
   const result = { _: [] };
-  const repeatValueKeys = new Set(['trimBeat', 'recoverBeat', 'set']);
+  const repeatValueKeys = new Set(['trimBeat', 'recoverBeat', 'set', 'allow']);
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i];
     if (!token.startsWith('--')) { result._.push(token); continue; }
@@ -333,7 +352,7 @@ export function parseArgs(argv) {
          'waitForClose', 'force', 'reindex', 'noRepair', 'inPlace',
          'generated', 'allowEphemeral', 'measure', 'apply', 'native', 'noCache', 'noGrade',
          'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'noEase', 'easePosition', 'stress', 'allowBoost', 'values',
-         'faceDetail', 'replaceExisting', 'record', 'allowUnsafe', 'markdown'].includes(key)) result[key] = true;
+         'faceDetail', 'replaceExisting', 'record', 'allowUnsafe', 'markdown', 'brief'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
       const value = argv[++i];
@@ -895,6 +914,49 @@ export async function main(argv, dependencies = {}) {
     const { exportGrid } = await import('./export.mjs');
     return print(exportGrid(args.media, args.out, args.times), true);
   }
+  if (command === 'check-export' || command === 'reference') {
+    if (!args.media) throw new CapcutError(`${command} requires --media FILE.`, { exitCode: 2 });
+    const media = path.resolve(args.media);
+    if (!fs.existsSync(media)) throw new CapcutError(`no such media: ${media}`, { code: 'MEDIA_MISSING', exitCode: 2 });
+    const check = await import('./media-check.mjs');
+    const { loadProfile } = await import('./profile.mjs');
+    const profile = loadProfile({ file: args.profile || null });
+    const projectDir = args.project ? resolveProject(args.project, root) : null;
+    const number = (key, flag) => {
+      if (args[key] == null) return null;
+      const value = Number(args[key]);
+      if (!Number.isFinite(value)) throw new CapcutError(`${flag} must be a number.`, { exitCode: 2 });
+      return value;
+    };
+    if (command === 'check-export') {
+      const scan = check.scanMedia(media, { sheet: args.sheet || null });
+      const report = check.checkExportReport(scan, {
+        profile, expected: await check.expectedDelivery(projectDir, profile),
+        target: number('target', '--target'), peak: number('peak', '--peak'),
+      });
+      if (!report.ok) process.exitCode = 1;
+      return args.json ? print(report, true) : print(check.checkExportText(report));
+    }
+    if (args.profileOut && fs.existsSync(path.resolve(args.profileOut)) && !args.overwrite) {
+      throw new CapcutError(`${path.resolve(args.profileOut)} exists; pass --overwrite to replace it.`, { code: 'REFERENCE_EXISTS', exitCode: 2 });
+    }
+    const scan = check.scanMedia(media, {
+      sheet: args.sheet || null,
+      cutThreshold: number('cutThreshold', '--cut-threshold'),
+      buildThreshold: number('buildThreshold', '--build-threshold'),
+    });
+    const report = check.referenceReport(scan, {
+      profile, project: projectDir ? await check.projectPacing(projectDir, profile) : null,
+    });
+    if (args.profileOut) {
+      if (!report.override) throw new CapcutError('no visual events were detected, so there is no density to write.', { code: 'REFERENCE_EMPTY', exitCode: 2 });
+      const out = path.resolve(args.profileOut);
+      fs.mkdirSync(path.dirname(out), { recursive: true });
+      fs.writeFileSync(out, `${JSON.stringify(report.override, null, 2)}\n`);
+      report.profileOut = out;
+    }
+    return print(report, true);
+  }
   if (command === 'export') {
     if (!args.project) throw new CapcutError('export requires --project NAME', { exitCode: 2 });
     const { exportProject } = await import('./export.mjs');
@@ -962,7 +1024,7 @@ export async function main(argv, dependencies = {}) {
     'inspect', 'doctor', 'snapshot', 'history', 'restore', 'sync', 'scenes',
     'denoise', 'blur-broll', 'reframe', 'cursor', 'pace', 'ramp', 'punch', 'match', 'verify-shots', 'motion', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
     'replace-media', 'localize', 'trim', 'shift', 'remove', 'volume', 'fade', 'keyframe', 'animate',
-    'preview', 'diff', 'apply', 'timeline', 'finish', 'music', 'grade', 'loudness', 'gate', 'build', 'mograph'
+    'preview', 'diff', 'apply', 'timeline', 'finish', 'music', 'grade', 'loudness', 'gate', 'build', 'mograph', 'notes'
   ]);
   if (!NEEDS_PROJECT.has(command)) throw new CapcutError(`Unknown command: ${command}\n\n${HELP}`, { exitCode: 2 });
   const projectDir = resolveProject(args.project, root);
@@ -989,6 +1051,14 @@ export async function main(argv, dependencies = {}) {
   }
   if (command === 'snapshot') return print({ snapshot: createSnapshot(projectDir, args.label || 'manual') }, true);
   if (command === 'history') return print(listSnapshots(projectDir), true);
+  if (command === 'notes') {
+    const { notesBrief, readNotes, updateNotes } = await import('./notes.mjs');
+    const change = ['reject', 'accept', 'decide', 'todo', 'done'].some(key => args[key] != null);
+    if (!change && args.why != null) throw new CapcutError('--why goes with --reject, --accept or --decide.', { code: 'NOTES_ARGS', exitCode: 2 });
+    const notes = change ? updateNotes(projectDir, args) : readNotes(projectDir);
+    if (args.brief && !args.json) return print(notesBrief(notes, path.basename(projectDir)).trimEnd());
+    return print(notes, true);
+  }
   const options = {
     dryRun: Boolean(args.dryRun),
     forceRunning: Boolean(args.forceRunning),
@@ -1941,7 +2011,18 @@ export async function main(argv, dependencies = {}) {
       otherDir = hit.path || hit;
     }
     if (!otherDir) throw new CapcutError('diff requires --against NAME or --snapshot NAME', { exitCode: 2 });
-    return print(diffSummaries(summarizeProject(otherDir), summarizeProject(projectDir)), true);
+    const before = summarizeProject(otherDir);
+    const after = summarizeProject(projectDir);
+    const report = diffSummaries(before, after);
+    if (args.allow != null) {
+      const { parseAllow, scopeCheck, materialUsers } = await import('./diff.mjs');
+      let allow;
+      try { allow = parseAllow(args.allow); }
+      catch (error) { throw new CapcutError(error.message, { code: 'DIFF_ALLOW', exitCode: 2 }); }
+      report.scope = scopeCheck(report, allow, materialUsers(before, after));
+      if (!report.scope.ok) process.exitCode = 1;
+    }
+    return print(report, true);
   }
   if (command === 'motion') {
     if (args.asset != null && args.logo != null) throw new CapcutError('Use either --asset or --logo, not both.', { code: 'MOTION_INPUT' });

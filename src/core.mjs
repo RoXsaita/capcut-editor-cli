@@ -1008,7 +1008,7 @@ export function activeTimelineId(projectDir) {
 }
 
 /** Managed draft files must never follow a project-supplied symlink outside the draft. */
-function managedFile(root, relative) {
+export function managedFile(root, relative) {
   const base = path.resolve(root);
   const file = path.resolve(base, relative);
   if (!relative || path.isAbsolute(relative) || path.win32.isAbsolute(relative)

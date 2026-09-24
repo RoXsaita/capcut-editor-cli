@@ -87,10 +87,11 @@ export const COMMAND_DOCS = Object.freeze({
   qa: doc('check', 'Composite real frames (incl. keyframes, grades, mograph clips); --expect gates text.', 'capcutctl qa --project NAME --times 3,9,15 --sheet'),
   preview: doc('check', 'Lightweight proxy with audio.', 'capcutctl preview --project NAME --out preview.mp4'),
   review: doc('check', 'Proxy + EDL + contact sheet into outputs/.', 'capcutctl review --project NAME'),
-  diff: doc('check', 'What changed since a snapshot or another project.', 'capcutctl diff --project NAME --snapshot NAME'),
+  diff: doc('check', 'What changed since a snapshot or another project; --allow proves a scoped edit stayed in scope.', 'capcutctl diff --project NAME --snapshot NAME --allow SEGMENT-ID,track:broll'),
 
   snapshot: doc('safety', 'Snapshot the project.', 'capcutctl snapshot --project NAME --label before-build'),
   history: doc('safety', 'List snapshots.', 'capcutctl history --project NAME'),
+  notes: doc('safety', 'Creative log: rejected looks and why, accepted look, decisions, outstanding; survives restore.', 'capcutctl notes --project NAME --reject "orange captions" --why "fights the indigo frame"'),
   restore: doc('safety', 'Restore a snapshot.', 'capcutctl restore --project NAME --snapshot NAME --dry-run', true),
   sync: doc('safety', 'Repair mirror drift and duplicate material ids.', 'capcutctl sync --project NAME --dry-run', true),
   apply: doc('safety', 'Apply a v1 spec of operations transactionally.', 'capcutctl apply --project NAME --spec spec.json --dry-run', true),
@@ -98,6 +99,8 @@ export const COMMAND_DOCS = Object.freeze({
   rm: doc('safety', 'Move a project to the recycle bin (recoverable).', 'capcutctl rm --project NAME --dry-run', true),
 
   export: doc('export', 'Native CapCut export through the macOS bridge; explicit request only.', 'capcutctl export --project NAME --out final.mp4 --grid grid.png'),
+  'check-export': doc('check', 'QA the rendered file: black, flash frames, freezes, dead air, loudness, true peak, canvas and length.', 'capcutctl check-export --media final.mp4 --project NAME'),
+  reference: doc('check', 'Measure a reference reel\'s pacing in the gate\'s terms; --profile-out writes the density override.', 'capcutctl reference --media reel.mp4 --project NAME --sheet shots.png'),
   'export-grid': doc('export', 'Labelled frame grid from an existing video.', 'capcutctl export-grid --media final.mp4 --out grid.png --times 0,8,15'),
 
   harvest: doc('dev', 'Catalogue transitions/SFX/masks/keyframes from real drafts.', 'capcutctl harvest --plan'),

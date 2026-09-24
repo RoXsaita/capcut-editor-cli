@@ -47,6 +47,7 @@ export const TOOL_IMPORTS = Object.freeze({
   'rasterize.py': Object.freeze(['PIL']),
   'export_grid.py': Object.freeze(['numpy', 'PIL']),
   'verify_shots.py': Object.freeze(['numpy', 'PIL']),
+  'media_scan.py': Object.freeze([]),
 });
 
 /**
@@ -60,6 +61,9 @@ export const TOOL_IMPORTS = Object.freeze({
 export const CONDITIONAL_TOOL_IMPORTS = Object.freeze({
   'find.py': Object.freeze([
     Object.freeze({ flag: '--strip', imports: Object.freeze(['numpy', 'PIL']) }),
+  ]),
+  'media_scan.py': Object.freeze([
+    Object.freeze({ flag: '--sheet', imports: Object.freeze(['numpy', 'PIL']) }),
   ]),
 });
 

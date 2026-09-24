@@ -87,6 +87,15 @@ See [docs/mograph.md](docs/mograph.md), including the one-time CapCut import che
 The older native `motion` recipes remain available but experimental; see
 [docs/native-motion.md](docs/native-motion.md).
 
+## Learning from other agent editors
+
+A September 2026 survey of open-source agent video editors (browser-use/video-use, VEED
+open-edit, krusemedia video-editor-agent, Diffusion Studio, agentic-video-editor and others)
+is in [docs/specs/agent-editor-survey-2026-09.md](docs/specs/agent-editor-survey-2026-09.md).
+Four of their best ideas are now commands here: QA on the rendered file (`check-export`),
+a reference reel measured into the profile's density numbers (`reference`), a scoped-edit
+proof (`diff --allow`), and a creative log that outlives a session (`notes`).
+
 ## Requirements
 
 - macOS with CapCut Desktop installed and launched at least once;
@@ -179,6 +188,10 @@ the mirrors, and rolls back if the post-write doctor fails.
 | Add a native intro/outro animation | `capcutctl animate --project NAME --segments ID --intro fade-in --outro fade-out --dry-run` |
 | Export through CapCut on macOS (explicit request) | `capcutctl export --project NAME --out final.mp4 --grid grid.png` |
 | Inspect an existing export without opening CapCut | `capcutctl export-grid --media final.mp4 --out grid.png --times 0,8,15` |
+| Check the rendered file before posting (black, stray frames, dead air, LUFS, peak, length) | `capcutctl check-export --media final.mp4 --project NAME` |
+| Measure a reference reel's pacing in the gate's terms | `capcutctl reference --media reel.mp4 --project NAME --profile-out ref-profile.json` |
+| Prove a scoped revision stayed in scope | `capcutctl diff --project NAME --snapshot NAME --allow SEGMENT-ID,track:broll` |
+| Record what was rejected and why; read it back each round | `capcutctl notes --project NAME --reject "orange captions" --why "fights the frame"` then `notes --brief` |
 | Render a lightweight proxy | `capcutctl preview --project NAME --out preview.mp4` |
 | Measure or apply colour matching | `capcutctl grade --project NAME --measure` |
 | Sharpen + clarity on the face | `capcutctl grade --project NAME --face-detail --apply --dry-run` |

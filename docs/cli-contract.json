@@ -134,6 +134,21 @@
       ],
       "transactional": true
     },
+    "check-export": {
+      "group": "check",
+      "summary": "QA the rendered file: black, flash frames, freezes, dead air, loudness, true peak, canvas and length.",
+      "example": "capcutctl check-export --media final.mp4 --project NAME",
+      "options": [
+        "--json",
+        "--media",
+        "--peak",
+        "--project",
+        "--sheet",
+        "--target",
+        "--times"
+      ],
+      "transactional": false
+    },
     "close": {
       "group": "start",
       "summary": "Quit CapCut and wait: writes are refused while it runs.",
@@ -205,10 +220,11 @@
     },
     "diff": {
       "group": "check",
-      "summary": "What changed since a snapshot or another project.",
-      "example": "capcutctl diff --project NAME --snapshot NAME",
+      "summary": "What changed since a snapshot or another project; --allow proves a scoped edit stayed in scope.",
+      "example": "capcutctl diff --project NAME --snapshot NAME --allow SEGMENT-ID,track:broll",
       "options": [
         "--against",
+        "--allow",
         "--project",
         "--snapshot"
       ],
@@ -640,6 +656,23 @@
       ],
       "transactional": true
     },
+    "notes": {
+      "group": "safety",
+      "summary": "Creative log: rejected looks and why, accepted look, decisions, outstanding; survives restore.",
+      "example": "capcutctl notes --project NAME --reject \"orange captions\" --why \"fights the indigo frame\"",
+      "options": [
+        "--accept",
+        "--brief",
+        "--decide",
+        "--done",
+        "--json",
+        "--project",
+        "--reject",
+        "--todo",
+        "--why"
+      ],
+      "transactional": false
+    },
     "oracle": {
       "group": "dev",
       "summary": "Dev-only round-trip capture/diff of a disposable project.",
@@ -813,6 +846,23 @@
         "--track"
       ],
       "transactional": true
+    },
+    "reference": {
+      "group": "check",
+      "summary": "Measure a reference reel's pacing in the gate's terms; --profile-out writes the density override.",
+      "example": "capcutctl reference --media reel.mp4 --project NAME --sheet shots.png",
+      "options": [
+        "--build-threshold",
+        "--cut-threshold",
+        "--json",
+        "--media",
+        "--overwrite",
+        "--profile",
+        "--profile-out",
+        "--project",
+        "--sheet"
+      ],
+      "transactional": false
     },
     "reframe": {
       "group": "look",

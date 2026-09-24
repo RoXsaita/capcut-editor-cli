@@ -122,3 +122,117 @@ export function diffSummaries(before, after) {
     materials
   };
 }
+
+/**
+ * Parse `--allow` into selectors. A bare token is a segment id; `track:NAME` or `track:N`
+ * admits every segment on that track, including ones the edit adds, whose ids nobody could
+ * have named beforehand.
+ */
+export function parseAllow(values) {
+  const tokens = (Array.isArray(values) ? values : [values])
+    .flatMap(value => String(value ?? '').split(','))
+    .map(token => token.trim())
+    .filter(Boolean);
+  const segments = new Set();
+  const tracks = new Set();
+  for (const token of tokens) {
+    if (token.startsWith('track:')) {
+      const name = token.slice('track:'.length).trim();
+      if (!name) throw new Error(`empty track selector in --allow: ${token}`);
+      tracks.add(name);
+    } else segments.add(token);
+  }
+  if (!segments.size && !tracks.size) throw new Error('--allow needs at least one segment id or track:NAME');
+  return { segments, tracks, tokens };
+}
+
+const onAllowedTrack = (entry, tracks) => entry != null && (
+  (entry.trackName != null && tracks.has(entry.trackName)) || (entry.track != null && tracks.has(String(entry.track))));
+
+const trackAllowed = (track, tracks) => track != null && (
+  (track.name != null && tracks.has(track.name)) || tracks.has(String(track.index)));
+
+/** Which summary fields differ between two versions of one item, with both values. */
+function changedFields(before, after, ignore = []) {
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  const out = {};
+  for (const key of keys) {
+    if (ignore.includes(key)) continue;
+    if (JSON.stringify(before[key] ?? null) !== JSON.stringify(after[key] ?? null)) {
+      out[key] = { from: before[key] ?? null, to: after[key] ?? null };
+    }
+  }
+  return out;
+}
+
+/**
+ * Prove an edit stayed inside what it was asked to touch.
+ *
+ * "Change only the second graphic" is the commonest revision note, and a diff that lists
+ * every change still leaves the agent to notice that one of forty rows is a face clip it
+ * was never meant to move. This names every difference OUTSIDE the allowed selectors, with
+ * both values, and `ok` is false when there is one. Track index shifts (`moved`) are not
+ * findings: inserting an overlay track shifts every index below it without touching them.
+ * A material is in scope when an allowed segment uses it or no segment uses it at all.
+ */
+export function scopeCheck(diff, allow, users = null) {
+  const { segments: ids, tracks, tokens } = allow;
+  const segAllowed = (...entries) => entries.some(e => e && (ids.has(e.id) || onAllowedTrack(e, tracks)));
+  const outOfScope = [];
+  const touched = new Set();
+  for (const s of diff.segments.added) {
+    if (segAllowed(s)) touched.add(s.id);
+    else outOfScope.push({ kind: 'segment', change: 'added', id: s.id, track: s.track, trackName: s.trackName, value: s });
+  }
+  for (const s of diff.segments.removed) {
+    if (segAllowed(s)) touched.add(s.id);
+    else outOfScope.push({ kind: 'segment', change: 'removed', id: s.id, track: s.track, trackName: s.trackName, value: s });
+  }
+  for (const { before, after } of diff.segments.changed) {
+    if (segAllowed(before, after)) { touched.add(after.id); continue; }
+    outOfScope.push({ kind: 'segment', change: 'changed', id: after.id, track: after.track, trackName: after.trackName,
+      fields: changedFields(before, after, ['track']) });
+  }
+  for (const t of diff.tracks.added) {
+    if (!trackAllowed(t, tracks) && t.segments > 0 && !diff.segments.added.some(s => s.track === t.index && segAllowed(s))) {
+      outOfScope.push({ kind: 'track', change: 'added', index: t.index, name: t.name, value: t });
+    }
+  }
+  for (const t of diff.tracks.removed) {
+    if (!trackAllowed(t, tracks) && t.segments > 0 && !diff.segments.removed.some(s => s.track === t.index && segAllowed(s))) {
+      outOfScope.push({ kind: 'track', change: 'removed', index: t.index, name: t.name, value: t });
+    }
+  }
+  for (const { before, after } of diff.tracks.changed) {
+    const fields = changedFields(before, after, ['index', 'segments']);
+    if (!Object.keys(fields).length || trackAllowed(before, tracks) || trackAllowed(after, tracks)) continue;
+    outOfScope.push({ kind: 'track', change: 'changed', index: after.index, name: after.name, fields });
+  }
+  const materialInScope = id => {
+    if (!users) return true;
+    const using = users.get(id) || [];
+    return !using.length || using.some(entry => segAllowed(entry));
+  };
+  for (const change of ['added', 'removed']) {
+    for (const m of diff.materials[change]) {
+      if (!materialInScope(m.id)) outOfScope.push({ kind: 'material', change, id: m.id, path: m.path });
+    }
+  }
+  for (const { before, after } of diff.materials.changed) {
+    if (!materialInScope(after.id)) {
+      outOfScope.push({ kind: 'material', change: 'changed', id: after.id, fields: changedFields(before, after, ['material_name']) });
+    }
+  }
+  return { allow: tokens, ok: outOfScope.length === 0, touched: [...touched], outOfScope };
+}
+
+/** Every segment (before or after) that references each material id. */
+export function materialUsers(before, after) {
+  const users = new Map();
+  for (const s of [...(before.segments || []), ...(after.segments || [])]) {
+    if (!s.material) continue;
+    if (!users.has(s.material)) users.set(s.material, []);
+    users.get(s.material).push(s);
+  }
+  return users;
+}
