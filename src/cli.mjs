@@ -232,8 +232,17 @@ Usage:
                       — frames on a dark canvas with the platform-UI zones tinted, for review.
   capcutctl mograph render      --template ID --params JSON|--params-file FILE --out PATH [--format prores|png-still|webm] [--scale 2]
                       — deterministic HTML/JS graphic → tight-bbox ProRes 4444 alpha clip (or a PNG hold frame).
+  capcutctl mograph scenes      full-frame motion-design scenes (inserts, transitions, openers, name cards):
+                                params, length in beats, hand-off; no project needed
+  capcutctl mograph scene-preview --scene ID --params JSON|--params-file FILE --out SHEET.png [--times S,S] [--samples N]
+                      — motion-blurred frames with the platform-UI zones outlined; lists unsafe text.
+  capcutctl mograph scene-render --scene ID --params JSON|--params-file FILE --out PATH [--format prores|mp4]
+                                [--samples N] [--workers N] [--allow-unsafe]
+                      — full 1080×1920 clip with motion blur, grain and its synthesised sound:
+                        ProRes 4444 + PCM (alpha where the scene reveals footage) or an H.264 mp4 to watch.
   capcutctl mograph add         --project NAME --template ID --params JSON|--params-file FILE --at S | --say WORDS [--occurrence N]
                                 [--id ID] [--format prores|png-still] [--words FILE] [--no-sfx] [--allow-unsafe] [--dry-run]
+                                [--scene ID] instead of --template places a full-frame scene with its own sound
                       — render into <project>/mograph/ and place it above the picture, with its sound,
                         on the exact canvas pixels the template drew. --say anchors to source words.
   capcutctl mograph rerender    --project NAME --id ID [--params JSON|--params-file FILE] [--dry-run]
@@ -755,6 +764,26 @@ export async function main(argv, dependencies = {}) {
   if (command === 'profile') {
     const { loadProfile } = await import('./profile.mjs');
     return print(loadProfile({ file: args.profile || null }), true);
+  }
+  if (command === 'mograph' && ['scenes', 'scene-preview', 'scene-render'].includes(args._[1])) {
+    const scenes = await import('./mograph-scene.mjs');
+    const sub = args._[1];
+    if (sub === 'scenes') {
+      return print({ scenes: scenes.listScenes(), formats: scenes.SCENE_FORMATS, contract: 'mograph/scenes/runtime.js',
+        importVerified: false }, true);
+    }
+    if (!args.scene) throw new CapcutError(`mograph ${sub} needs --scene ID (see mograph scenes).`, { code: 'SCENE_ID', exitCode: 2 });
+    if (!args.out) throw new CapcutError(`mograph ${sub} needs --out PATH.`, { code: 'SCENE_OUT', exitCode: 2 });
+    const params = mographParams(args);
+    if (sub === 'scene-preview') {
+      return print(await scenes.previewScene({ scene: args.scene, params, out: path.resolve(args.out),
+        times: args.times ? String(args.times).split(',').map(Number) : null,
+        ...(args.samples ? { samples: Number(args.samples) } : {}) }), true);
+    }
+    const out = path.resolve(args.out).replace(/\.(mov|mp4)$/i, '');
+    return print(await scenes.renderScene({ scene: args.scene, params, out, format: args.format || 'prores',
+      samples: args.samples ? Number(args.samples) : null, workers: args.workers ? Number(args.workers) : null,
+      allowUnsafe: Boolean(args.allowUnsafe) }), true);
   }
   if (command === 'mograph' && ['list', 'render', 'preview'].includes(args._[1])) {
     const mograph = await import('./mograph.mjs');
@@ -1569,7 +1598,7 @@ export async function main(argv, dependencies = {}) {
   if (command === 'mograph') {
     const sub = args._[1];
     if (!['add', 'rerender'].includes(sub)) {
-      throw new CapcutError('mograph takes list | preview | render | add | rerender.', { code: 'MOGRAPH_SUBCOMMAND', exitCode: 2 });
+      throw new CapcutError('mograph takes list | preview | render | scenes | scene-preview | scene-render | add | rerender.', { code: 'MOGRAPH_SUBCOMMAND', exitCode: 2 });
     }
     const mograph = await import('./mograph.mjs');
     const { loadProfile } = await import('./profile.mjs');
@@ -1582,28 +1611,60 @@ export async function main(argv, dependencies = {}) {
       if (!fs.existsSync(sidecar)) throw new CapcutError(`no rendered graphic "${args.id}" in ${dir}.`, { code: 'MOGRAPH_MISSING', exitCode: 2 });
       const prev = readJson(sidecar);
       const params = args.params || args.paramsFile ? { ...prev.params, ...mographParams(args) } : prev.params;
-      item = { id: prev.id, template: prev.template, params, format: prev.format, at: prev.at, anchor: prev.anchor };
+      item = { id: prev.id, template: prev.template, scene: prev.scene || null, params, format: prev.format, at: prev.at, anchor: prev.anchor };
     } else {
-      if (!args.template) throw new CapcutError('mograph add needs --template ID.', { code: 'MOGRAPH_TEMPLATE', exitCode: 2 });
+      if (!args.template && !args.scene) throw new CapcutError('mograph add needs --template ID or --scene ID.', { code: 'MOGRAPH_TEMPLATE', exitCode: 2 });
+      if (args.template && args.scene) throw new CapcutError('mograph add takes --template or --scene, not both.', { code: 'MOGRAPH_TEMPLATE', exitCode: 2 });
       if (args.at == null && !args.say) throw new CapcutError('mograph add needs --at SECONDS or --say WORDS.', { code: 'MOGRAPH_PLACE', exitCode: 2 });
       const doc = await loadWorking(projectDir);
       let at = args.at != null ? Number(args.at) : null;
       let anchor = null;
       if (args.say) {
         const { resolveAnchors } = await import('./anchors.mjs');
-        const [hit] = resolveAnchors([{ id: args.id || args.template, say: args.say, occurrence: args.occurrence ? Number(args.occurrence) : 1 }],
+        const [hit] = resolveAnchors([{ id: args.id || args.template || args.scene, say: args.say, occurrence: args.occurrence ? Number(args.occurrence) : 1 }],
           { doc, wordsFile: args.words ? path.resolve(args.words) : null });
         at = Math.max(0, hit.at - profile.tokens.frames.lead / profile.canvas.fps);
         anchor = hit.anchor;
       }
       const params = mographParams(args);
-      if (!params.center && !params.box && !params.layout) {
-        const { layoutAt } = await import('./mograph-place.mjs');
-        params.layout = layoutAt(doc, at);
+      if (args.scene) {
+        item = { id: args.id || `${args.scene}-${Math.round(at * 1000)}`, template: null, scene: args.scene, params,
+          format: 'prores', at: Math.round(at * 1000) / 1000, anchor };
+      } else {
+        if (!params.center && !params.box && !params.layout) {
+          const { layoutAt } = await import('./mograph-place.mjs');
+          params.layout = layoutAt(doc, at);
+        }
+        const motion = mograph.listTemplates().find(t => t.id === args.template)?.motion || 'rich';
+        item = { id: args.id || `${args.template}-${Math.round(at * 1000)}`, template: args.template, params,
+          format: args.format || (motion === 'rich' ? 'prores' : 'png-still'), at: Math.round(at * 1000) / 1000, anchor };
       }
-      const motion = mograph.listTemplates().find(t => t.id === args.template)?.motion || 'rich';
-      item = { id: args.id || `${args.template}-${Math.round(at * 1000)}`, template: args.template, params,
-        format: args.format || (motion === 'rich' ? 'prores' : 'png-still'), at: Math.round(at * 1000) / 1000, anchor };
+    }
+    if (item.scene) {
+      // A scene is the whole frame: its readable text is proven safe by the renderer, it carries
+      // its own synthesised sound, and it lands at canvas scale 1 on a mograph lane.
+      const scenes = await import('./mograph-scene.mjs');
+      const fingerprint = scenes.sceneFingerprint(item.scene, item.params, profile);
+      const rendered = args.dryRun
+        ? { ...(await scenes.probeScene({ scene: item.scene, params: item.params, profile })), file: path.join(dir, `${item.id}.mov`) }
+        : await scenes.renderScene({ scene: item.scene, params: item.params, out: path.join(dir, item.id), format: 'prores', profile,
+          allowUnsafe: Boolean(args.allowUnsafe) });
+      if (args.dryRun && rendered.unsafe.length && !args.allowUnsafe) {
+        const u = rendered.unsafe[0];
+        throw new CapcutError(`${item.id}: "${u.text}" is in the ${u.zone} zone at ${u.t}s; shorten it or pass --allow-unsafe.`,
+          { code: 'SCENE_SAFE_ZONE', exitCode: 2 });
+      }
+      const box = { x: 0, y: 0, w: profile.canvas.width, h: profile.canvas.height };
+      const op = { op: 'mograph.place', id: item.id, template: `scene:${item.scene}`, file: rendered.file, format: 'prores',
+        at: item.at, duration: rendered.meta.duration, box, fingerprint, sfx: null, clipVolume: args.noSfx ? 0 : 1,
+        importVerified: false };
+      if (args.dryRun) return print({ dryRun: true, placement: op, meta: rendered.meta, unsafe: rendered.unsafe }, true);
+      const result = applySpec(projectDir, { version: 1, name: `mograph-${sub}`, operations: [op] }, options);
+      fs.writeFileSync(path.join(dir, `${item.id}.json`), `${JSON.stringify({
+        version: 1, id: item.id, scene: item.scene, template: null, params: item.params, format: 'prores', file: rendered.file,
+        box, meta: rendered.meta, fingerprint, anchor: item.anchor || null, at: item.at,
+        duration: rendered.meta.duration, importVerified: false }, null, 2)}\n`);
+      return print(result, true);
     }
     const fingerprint = mograph.fingerprint(item.template, item.params, profile);
     const rendered = args.dryRun

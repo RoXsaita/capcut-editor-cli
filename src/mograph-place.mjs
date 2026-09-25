@@ -6,6 +6,9 @@
  * by desc: `mograph:<id>` for the picture and `mograph:sfx:<id>` for its paired cue, so placing
  * the same id again replaces it instead of stacking a second copy.
  *
+ * A scene (mograph/scenes) is placed the same way with a full-canvas box and `clipVolume: 1`:
+ * its synthesised sound is inside the clip, so it has no separate cue on `mograph-sfx`.
+ *
  * Picture: a ProRes 4444 clip goes through `clip.add` with the `--generated` origin (a graphic
  * has no editable original to relink), scaled and positioned so the rendered box lands on the
  * exact canvas pixels the template drew it at. A `png-still` becomes a native photo clip with an
@@ -113,7 +116,7 @@ export function opMographPlace(doc, op, context = {}) {
   } else if (op.format === 'prores') {
     const added = opClipAdd(doc, {
       op: 'clip.add', media: path.resolve(op.file), at, duration, track: lane, generated: true,
-      width: geo.width, height: geo.height, mediaDuration: durUs, volume: 0, desc: mographDesc(op.id),
+      width: geo.width, height: geo.height, mediaDuration: durUs, volume: op.clipVolume ?? 0, desc: mographDesc(op.id),
       forceNewMaterial: true, materialId: mint('material'), id: mint('segment'), __seed: seed,
     }, context);
     segment = doc.tracks.flatMap(t => t.segments || []).find(s => s.id === added.id);
@@ -122,7 +125,8 @@ export function opMographPlace(doc, op, context = {}) {
     const material = (doc.materials.videos || []).find(m => m.id === segment.material_id);
     if (material) {
       material.capcutctl_mograph = { template: op.template || null, fingerprint: op.fingerprint || null,
-        importVerified: op.importVerified === true, box };
+        importVerified: op.importVerified === true, box,
+        ...(String(op.template || '').startsWith('scene:') ? { scene: true } : {}) };
     }
   } else {
     throw new CapcutError(`mograph.place: format ${op.format} cannot be placed in CapCut (use prores or png-still).`,

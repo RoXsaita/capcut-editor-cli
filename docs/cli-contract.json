@@ -568,18 +568,24 @@
         "--params",
         "--params-file",
         "--project",
+        "--samples",
         "--say",
         "--scale",
+        "--scene",
         "--template",
         "--times",
-        "--words"
+        "--words",
+        "--workers"
       ],
       "subcommands": [
         "add",
         "list",
         "preview",
         "render",
-        "rerender"
+        "rerender",
+        "scene-preview",
+        "scene-render",
+        "scenes"
       ],
       "transactional": true
     },
