@@ -57,7 +57,8 @@ export function graphicEvents(doc) {
     if (seen.has(`${kind}:${key}`)) continue;          // a glow underlay is the same entrance
     seen.add(`${kind}:${key}`);
     out.push({ t: r2(t), end: r2(endOf(segment)), kind, desc, template: mograph?.template || null,
-      box: mograph?.box || null, importVerified: mograph ? mograph.importVerified !== false : true });
+      box: mograph?.box || null, importVerified: mograph ? mograph.importVerified !== false : true,
+      ...(mograph?.scene ? { scene: true } : {}) });
   }
   return out.sort((a, b) => a.t - b.t);
 }
@@ -196,10 +197,12 @@ export function gateReport(doc, { projectDir = null, profile = loadProfile() } =
   add('template-repeat', 'FAIL', !repeats.length, repeats.length ? `same template within ${d.templateRepeatGap}s: ${repeats.join('; ')}` : 'no template repeats too soon');
 
   // Placement and pairing.
-  const unsafe = graphics.filter(g => g.box).map(g => ({ g, zones: safeZoneViolations(g.box, profile) })).filter(x => x.zones.length);
+  // A scene is the whole frame by design; its readable text was proven clear of the UI when it
+  // rendered (mograph scene-render refuses otherwise), and its sound is inside the clip.
+  const unsafe = graphics.filter(g => g.box && !g.scene).map(g => ({ g, zones: safeZoneViolations(g.box, profile) })).filter(x => x.zones.length);
   add('safe-zones', 'FAIL', !unsafe.length, unsafe.length ? unsafe.map(x => `${x.g.template || x.g.kind} at ${x.g.t}s in ${x.zones.join('+')}`).join('; ') : 'graphics clear of platform UI');
   const win = profile.sound.graphicSfxWindowSeconds;
-  const unpaired = graphics.filter(g => g.kind !== 'text' && !sfx.some(s => Math.abs(s.t - g.t) <= win + 0.15));
+  const unpaired = graphics.filter(g => g.kind !== 'text' && !g.scene && !sfx.some(s => Math.abs(s.t - g.t) <= win + 0.15));
   add('graphic-sfx', 'FAIL', !unpaired.length, unpaired.length ? `graphics without a sound: ${unpaired.map(g => `${g.template || g.kind}@${g.t}s`).join(', ')}` : 'every graphic has a sound');
   const logos = graphics.filter(g => g.kind === 'logo').map(g => g.t);
   const chipClash = graphics.filter(g => g.template === 'brand-chip' && logos.some(t => Math.abs(t - g.t) <= d.brandChipLogoGap));

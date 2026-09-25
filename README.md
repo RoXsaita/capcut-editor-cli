@@ -83,6 +83,16 @@ capcutctl mograph preview --template number-pop --params '{"value":90,"suffix":"
 capcutctl mograph add --project "My Edit" --template keyword-super --params '{"text":"أسرع"}' --say "أسرع"
 ```
 
+Between shots, **scenes** take the whole frame for a beat or three: an opener, a hook that slams,
+glitches and dives into the next shot, a particle reveal, a style-frame stinger, and a name card.
+Each has real motion blur, film grain and synthesised sound locked to a 120 BPM grid. They chain
+end to end and take their colours from the same profile ([docs/mograph.md#scenes](docs/mograph.md#scenes)).
+
+```sh
+capcutctl mograph scenes
+capcutctl mograph scene-render --scene particle-word --params '{"text":"Opus 5.5"}' --out reveal.mp4 --format mp4
+```
+
 See [docs/mograph.md](docs/mograph.md), including the one-time CapCut import checklist.
 The older native `motion` recipes remain available but experimental; see
 [docs/native-motion.md](docs/native-motion.md).

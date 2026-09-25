@@ -86,3 +86,51 @@ Rules (from the profile's motion grammar):
 - Default placement inside `mg.input.zones.textBands[params.layout]`.
 - Add the template to `test/mograph-templates.test.mjs` (render, determinism, safe zone,
   Arabic, literal lint) and look at its `mograph preview` sheet before shipping it.
+
+## Scenes
+
+Templates sit *over* the picture. A **scene** *is* the picture for one to three seconds: a
+full-frame 1080×1920 insert or transition with its own camera, motion blur, film grain and
+synthesised sound. It covers the opener, the hook slam, the breather between sections, the reveal and the
+name card. Scenes live in `mograph/scenes/<id>.js` on the canvas runtime
+`mograph/scenes/runtime.js`, and share the templates' contract: the picture at `t` is a pure
+function of `(params, t)`.
+
+```bash
+capcutctl mograph scenes
+capcutctl mograph scene-preview --scene word-slam --params '{"text":"صُنع بالكود","then":"بأمر واحد"}' --out sheet.png
+capcutctl mograph scene-render  --scene word-slam --params '{"text":"صُنع بالكود"}' --out slam.mp4 --format mp4
+capcutctl mograph add --project NAME --scene particle-word --params '{"text":"Opus 5.5"}' --say "أوبس" --dry-run
+```
+
+In `edit.json`, scenes sit beside graphics and start **on** their word (a scene is a cut, not a
+super that leads the word):
+
+```json
+{ "version": 1,
+  "scenes": [
+    { "scene": "word-slam", "say": "بالكود", "params": { "text": "صُنع بالكود", "then": "بأمر واحد", "to": "footage" } },
+    { "scene": "dot-signature", "at": 41.5, "params": { "name": "سهيل", "role": "صانع محتوى" } }
+  ] }
+```
+
+| Property | How |
+|---|---|
+| **One look** | Scenes name colour *roles* (`ink`, `paper`, `brand`, `accent`, `hot`, `text`, `muted`) from `tokens.scene.palette`, the profile face through `K.font`, the tempo from `tokens.scene.bpm`. Change a role in the profile and every scene follows. A test rejects literal colours and fonts. |
+| **On the beat** | A scene lasts a whole number of half beats (`SCENE_BEATS` otherwise); hits, cuts and cues are placed on the beat grid, so two scenes chained end to end stay in time. |
+| **Chains** | Each scene declares `handoff: { in, out }`: `ignition` ends on a full frame of `hot`, and `word-slam` with `bg: "hot"` starts on one. `shape-grid` ends on a 9×16 dot grid that `particle-word` with `from: "dots"` picks up dot for dot. `out: "footage"` means the scene ends transparent. |
+| **Real motion blur** | Each frame averages `tokens.scene.blur.samples` sub-frames across a 180° shutter. The accumulation is done premultiplied, so edges moving over transparency blur correctly. |
+| **Readable text is safe** | Text drawn with `K.text` / `K.mark` records its box. `scene-render` samples every half beat and refuses (`SCENE_SAFE_ZONE`) when readable text lands in a platform-UI zone. Decorative full-bleed type (the poster, echo outlines) is exempt by design. Text seen only during a camera dive is not readable and is not marked. |
+| **Arabic** | Words animate as units (`K.words`, reading order and visual x separated), are drawn with `direction: rtl` so punctuation lands on the reading end, and particle text is sampled from the shaped glyphs. |
+| **Sound** | `cues(params, K)` returns `[{ at, kind, … }]`, which `mograph/scenes/sound.mjs` synthesises. There are no sample files, so a cue can never be missing. The clip carries its sound (PCM in the ProRes) and is placed at clip volume 1, so the gate does not ask for a separate cue. |
+| **Parallel** | Frames are independent, so `scene-render` splits them across browsers (`--workers`, default up to 4). A 2.5 s scene takes about 45 s on 4 cores at 8 samples. |
+
+`importVerified` is `false` for scenes as for every ProRes graphic until the checklist above passes.
+
+### Adding a scene without growing a pile of slop
+
+Read [`mograph/scenes/README.md`](../mograph/scenes/README.md) before writing one. In short:
+start from the catalog, extend a scene's params before adding a scene, fork the closest scene
+rather than a blank file, and promote only what clears the bar: documented header, roles only,
+half-beat length, declared hand-off, a cue on every hit, readable text through `K.text`, an entry
+in `test/mograph-scenes.test.mjs`, and a preview sheet somebody looked at.

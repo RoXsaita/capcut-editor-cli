@@ -37,7 +37,16 @@
     },
     "frames": { "micro": 4, "in": 8, "out": 6, "stagger": 3, "minHold": 30, "perWordHold": 10, "lead": 3 },
     "radius": { "chip": 999, "card": 36, "box": 18 },
-    "stroke": { "callout": 8 }
+    "stroke": { "callout": 8 },
+    "scene": {
+      "_note": "Full-frame motion-design scenes (mograph/scenes, docs/mograph.md#scenes). Scenes name colour ROLES, never hex: change a role here and every scene follows. brand/accent/ink mirror tokens.color.",
+      "bpm": 120,
+      "palette": { "ink": "#0B0B14", "paper": "#F1ECE2", "brand": "#4040FE", "accent": "#FFD84D", "hot": "#FF4D1A", "text": "#FFFFFF", "muted": "#8B8794" },
+      "mono": { "family": "JetBrains Mono", "files": { "400": ["jetbrains-mono-latin-400-normal.woff2"], "700": ["jetbrains-mono-latin-700-normal.woff2"] } },
+      "blur": { "samples": 8, "shutter": 0.5 },
+      "grain": 1,
+      "vignette": 0.3
+    }
   },
 
   "safeZones": {

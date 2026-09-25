@@ -85,7 +85,7 @@ export async function loadPlaywright() {
     + `Tried: ${attempts.join('; ')}`);
 }
 
-async function launch(playwright) {
+export async function launch(playwright) {
   const executablePath = process.env.CAPCUTCTL_CHROMIUM || undefined;
   try {
     return await playwright.chromium.launch({ executablePath, args: ['--font-render-hinting=none', '--disable-lcd-text'] });

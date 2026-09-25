@@ -7,7 +7,8 @@
  * order, with the profile's defaults filling every gap:
  *
  *   picture   reviewed shots (once) → layout auto → camera (stress pushes, optional reframe/cursor)
- *   graphics  mograph renders placed on their words → logo pops (or a brand-chip when the art is
+ *   graphics  mograph renders placed on their words, full-frame scenes cut in on theirs (their
+ *             sound is inside the clip) → logo pops (or a brand-chip when the art is
  *             missing) → endcard
  *   sound     motivated seams + SFX → music bed aligned to the graphics and picture changes →
  *             duck under speech → loudness
@@ -45,7 +46,7 @@ function workingDoc(projectDir) {
 export function normalizePlan(raw, { baseDir = process.cwd() } = {}) {
   if (!raw || typeof raw !== 'object') fail('PLAN_INVALID', 'edit plan must be a JSON object');
   if (raw.version !== EDIT_PLAN_VERSION) fail('PLAN_VERSION', `edit plan version must be ${EDIT_PLAN_VERSION}`);
-  const known = new Set(['version', 'profile', 'words', 'shots', 'layout', 'camera', 'graphics', 'logos', 'endcard', 'sound', 'notes']);
+  const known = new Set(['version', 'profile', 'words', 'shots', 'layout', 'camera', 'graphics', 'scenes', 'logos', 'endcard', 'sound', 'notes']);
   const unknown = Object.keys(raw).filter(k => !known.has(k));
   if (unknown.length) fail('PLAN_INVALID', `unknown edit plan keys: ${unknown.join(', ')}`);
   const abs = file => (file ? path.resolve(baseDir, String(file).replace(/^~(?=$|\/)/, process.env.HOME || '~')) : null);
@@ -56,9 +57,18 @@ export function normalizePlan(raw, { baseDir = process.cwd() } = {}) {
     if (!/^[\w.-]{1,80}$/.test(id)) fail('PLAN_INVALID', `graphics[${i}] id "${id}" must be alphanumeric`);
     return { ...g, id, params: { ...(g.params || {}) } };
   });
-  const ids = graphics.map(g => g.id);
+  // Scenes: full-frame motion design (mograph/scenes), anchored like graphics but starting ON
+  // their word (a scene is a cut, not a super that leads the word).
+  const scenes = (raw.scenes || []).map((g, i) => {
+    if (!g?.scene) fail('PLAN_INVALID', `scenes[${i}] needs a scene`);
+    if (g.say == null && g.at == null) fail('PLAN_INVALID', `scenes[${i}] (${g.scene}) needs "say" (words) or "at" (seconds)`);
+    const id = g.id || `${g.scene}-${i + 1}`;
+    if (!/^[\w.-]{1,80}$/.test(id)) fail('PLAN_INVALID', `scenes[${i}] id "${id}" must be alphanumeric`);
+    return { ...g, id, params: { ...(g.params || {}) } };
+  });
+  const ids = [...graphics, ...scenes].map(g => g.id);
   const dup = ids.find((id, i) => ids.indexOf(id) !== i);
-  if (dup) fail('PLAN_INVALID', `duplicate graphic id "${dup}"`);
+  if (dup) fail('PLAN_INVALID', `duplicate graphic/scene id "${dup}"`);
   const sound = { seams: 'motivated', music: false, duck: true, loudness: true, ...(raw.sound || {}) };
   if (sound.music && typeof sound.music === 'object' && sound.music.file) sound.music = { ...sound.music, file: abs(sound.music.file) };
   return {
@@ -69,6 +79,7 @@ export function normalizePlan(raw, { baseDir = process.cwd() } = {}) {
     layout: raw.layout === undefined ? 'auto' : raw.layout,
     camera: { stress: true, reframe: false, cursor: false, ...(raw.camera || {}) },
     graphics,
+    scenes,
     logos: raw.logos === undefined ? 'auto' : raw.logos,
     endcard: raw.endcard === undefined ? null : raw.endcard,
     sound,
@@ -157,14 +168,46 @@ async function renderGraphics(projectDir, graphics, { dryRun, profile }) {
   return out;
 }
 
+async function renderScenes(projectDir, scenes, { dryRun, profile }) {
+  if (!scenes.length) return [];
+  const mod = await import('./mograph-scene.mjs');
+  const dir = path.join(projectDir, 'mograph');
+  const out = [];
+  for (const g of scenes) {
+    const sidecarFile = path.join(dir, `${g.id}.json`);
+    const fingerprint = mod.sceneFingerprint(g.scene, g.params, profile);
+    const cached = fs.existsSync(sidecarFile) ? readJson(sidecarFile) : null;
+    let rendered;
+    if (cached && cached.fingerprint === fingerprint && fs.existsSync(cached.file)) {
+      rendered = { ...cached, unsafe: [], cached: true };
+    } else if (dryRun) {
+      const probe = await mod.probeScene({ scene: g.scene, params: g.params, profile });
+      rendered = { scene: g.scene, params: g.params, format: 'prores', meta: probe.meta, unsafe: probe.unsafe, fingerprint,
+        file: path.join(dir, `${g.id}.mov`) };
+    } else {
+      rendered = await mod.renderScene({ scene: g.scene, params: g.params, out: path.join(dir, g.id), format: 'prores', profile,
+        allowUnsafe: Boolean(g.allowUnsafe) });
+    }
+    if (rendered.unsafe?.length && !g.allowUnsafe) {
+      const u = rendered.unsafe[0];
+      fail('SCENE_SAFE_ZONE', `${g.id} (${g.scene}): "${u.text}" is in the ${u.zone} zone at ${u.t}s. `
+        + 'Shorten the text, or set "allowUnsafe": true if intended.');
+    }
+    out.push({ ...g, template: null, format: 'prores', rendered, sidecarFile, fingerprint,
+      box: { x: 0, y: 0, w: profile.canvas.width, h: profile.canvas.height } });
+  }
+  return out;
+}
+
 function writeSidecars(graphics) {
   for (const g of graphics) {
     const r = g.rendered;
     fs.mkdirSync(path.dirname(g.sidecarFile), { recursive: true });
     fs.writeFileSync(g.sidecarFile, `${JSON.stringify({
-      version: 1, id: g.id, template: g.template, params: g.params, format: g.format, file: r.file, box: r.box,
+      version: 1, id: g.id, ...(g.scene ? { scene: g.scene } : {}), template: g.template, params: g.params, format: g.format,
+      file: r.file, box: g.box || r.box,
       meta: r.meta, fingerprint: g.fingerprint, anchor: g.anchor || null, at: g.at, duration: g.duration,
-      importVerified: g.format === 'png-still',
+      importVerified: !g.scene && g.format === 'png-still',
     }, null, 2)}\n`);
   }
 }
@@ -182,6 +225,13 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
   principalTrack(doc);                                     // refuses a project with no talking head
   const wordsFile = plan.words || findWordsFile(doc);
   const templateHashes = Object.fromEntries(templates.map(t => [t.id, mograph.fingerprint(t.id, {}, profile)]));
+  if (plan.scenes.length) {
+    const { listScenes, sceneFingerprint } = await import('./mograph-scene.mjs');
+    const known = new Set(listScenes().map(x => x.id));
+    const unknown = plan.scenes.find(x => !known.has(x.scene));
+    if (unknown) fail('PLAN_INVALID', `unknown scene "${unknown.scene}" (see capcutctl mograph scenes)`);
+    for (const id of new Set(plan.scenes.map(x => x.scene))) templateHashes[`scene:${id}`] = sceneFingerprint(id, {}, profile);
+  }
   const hash = planHash(plan, profile, doc, wordsFile, templateHashes);
   const stateFile = path.join(projectDir, '.capcutctl', 'build.json');
   const state = fs.existsSync(stateFile) ? readJson(stateFile) : {};
@@ -243,10 +293,23 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
     const format = g.format || (templateMotion(g.template, templates) === 'rich' ? 'prores' : 'png-still');
     return { ...g, at: r3(at), params, format };
   });
-  const rendered = await renderGraphics(projectDir, graphics, { dryRun, profile });
+  const sceneItems = resolveAnchors(plan.scenes, { doc, wordsFile })
+    .map(g => ({ ...g, at: r3(Math.max(0, g.say ? g.at : Number(g.at) + Number(g.offset || 0))) }));
+  const rendered = [
+    ...(await renderGraphics(projectDir, graphics, { dryRun, profile })),
+    ...(await renderScenes(projectDir, sceneItems, { dryRun, profile })),
+  ].sort((a, b) => a.at - b.at);
   for (const g of rendered) g.duration = r3(g.rendered.meta.duration);
   const graphicOps = [{ op: 'mograph.prune', keep: rendered.map(g => g.id) }];
   for (const g of rendered) {
+    if (g.scene) {
+      graphicOps.push({
+        op: 'mograph.place', id: g.id, template: `scene:${g.scene}`, file: g.rendered.file, format: 'prores',
+        at: g.at, duration: g.duration, box: g.box, fingerprint: g.fingerprint, sfx: null,
+        clipVolume: g.volume ?? 1, importVerified: false,
+      });
+      continue;
+    }
     graphicOps.push({
       op: 'mograph.place', id: g.id, template: g.template, file: g.rendered.file, format: g.format,
       at: g.at, duration: g.duration, box: g.rendered.box, fingerprint: g.fingerprint,
@@ -260,8 +323,8 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
   if (Object.keys(signature).length) {
     graphicOps.push({ op: 'signature', ease: true, glow: (profile.logo?.reveal === 'glow'), ...signature });
   }
-  const planned = rendered.map(g => ({ id: g.id, template: g.template, at: g.at, duration: g.duration, format: g.format,
-    box: g.rendered.box, anchor: g.anchor || null, cached: Boolean(g.rendered.cached) }));
+  const planned = rendered.map(g => ({ id: g.id, ...(g.scene ? { scene: g.scene } : { template: g.template }), at: g.at,
+    duration: g.duration, format: g.format, box: g.box || g.rendered.box, anchor: g.anchor || null, cached: Boolean(g.rendered.cached) }));
   // A dry run has only probed the renders, so their files do not exist yet: validate everything
   // else in the stage and report the placements it would make.
   const applied = dryRun ? graphicOps.filter(op => op.op !== 'mograph.place') : graphicOps;
