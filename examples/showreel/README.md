@@ -3,7 +3,7 @@
 A 15-second, 1920×1080, 60 fps motion-design reel. Every frame is drawn from code; there are no keyframes, footage or samples. The score is synthesised too.
 
 ```sh
-node render.mjs                      # → out/showreel.mp4 (about 5 minutes on 4 cores)
+node render.mjs                      # → out/showreel.mp4, about 30 MB (roughly 9 minutes on 4 cores)
 node render.mjs --stills 2.1,8.2     # QA stills → out/still-<frame>.png
 node score.mjs out/score.wav         # just the soundtrack
 ```

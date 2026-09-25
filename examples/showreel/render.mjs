@@ -5,7 +5,7 @@
  *
  *   node render.mjs                         full render → out/showreel.mp4
  *   node render.mjs --stills 0.4,2.1,7.9    PNG stills at those times → out/still-<t>.png
- *   node render.mjs --workers 4 --samples 5 --crf 14
+ *   node render.mjs --workers 4 --samples 5 --crf 24
  *
  * The frame range is split across workers (one browser each); every frame is a pure function of
  * its index, so the segments join seamlessly. Needs Playwright (local or global) and an ffmpeg
@@ -27,7 +27,7 @@ const args = process.argv.slice(2);
 const opt = (name, def) => { const i = args.indexOf(`--${name}`); return i >= 0 ? args[i + 1] : def; };
 const workers = Number(opt('workers', Math.max(1, Math.min(4, os.cpus().length))));
 const samples = Number(opt('samples', 5));
-const crf = Number(opt('crf', 14));
+const crf = Number(opt('crf', 24));   // grain is unique per frame: 24 keeps it and lands near 30 MB (14 is ~600 MB)
 const stills = opt('stills', null);
 
 async function loadPlaywright() {
@@ -64,7 +64,7 @@ async function openPage(playwright, url) {
 
 function encoder(file) {
   const child = spawn(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'image2pipe', '-framerate', '60', '-c:v', 'png', '-i', '-',
-    '-c:v', 'libx264', '-preset', 'slow', '-crf', String(crf), '-pix_fmt', 'yuv420p', '-profile:v', 'high', '-tune', 'grain',
+    '-c:v', 'libx264', '-preset', 'slow', '-crf', String(crf), '-pix_fmt', 'yuv420p', '-profile:v', 'high',
     '-g', '60', '-r', '60', file], { stdio: ['pipe', 'inherit', 'inherit'] });
   const done = new Promise((resolve, reject) => child.on('close', code => (code ? reject(new Error(`ffmpeg exited ${code}`)) : resolve())));
   return { stdin: child.stdin, done };
