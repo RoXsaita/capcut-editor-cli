@@ -95,6 +95,12 @@ jobs:
       - name: Install Python runtime dependencies
         run: python -m pip install -e .
 
+      - name: Install optional caption dependencies
+        run: python -m pip install -e ".[captions]"
+
+      - name: Test standalone caption engine
+        run: python -m unittest discover -s test -p test_caption_generate.py
+
       - name: Compile Python helpers
         run: python -m compileall -q tools
 

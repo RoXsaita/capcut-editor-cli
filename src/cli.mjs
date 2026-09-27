@@ -149,6 +149,11 @@ Usage:
                                 [--track N] [--plain] [--no-sfx] [--plan]
                                 the artwork is the primitive: any image pops; --brand/--auto time
                                 themselves off the transcript. Glow reveal by default, --plain for the pop.
+  capcutctl captions            --project NAME_OR_PATH [--cues FILE.json] [--script FILE.txt]
+                                [--track NAME|N] [--name ID] [--lang ar] [--dry-run]
+                                generate Staging-style word cues from edited narration; insert editable text layers
+                                --cues imports existing timeline-time cues; --dry-run without cues prints a plan
+                                no paid caption service; native visual parity remains experimental
   capcutctl motion list         list native recipes, accepted inputs, and limitations; no project needed
   capcutctl motion RECIPE       --project NAME_OR_PATH --text TEXT|--asset FILE|--logo FILE [--name ID]
                                 [--at S] [--duration S] [--scale N] [--x N] [--y N] [--color HEX] [--accent HEX]
@@ -870,7 +875,7 @@ export async function main(argv, dependencies = {}) {
 
   const NEEDS_PROJECT = new Set([
     'inspect', 'doctor', 'snapshot', 'history', 'restore', 'sync', 'scenes',
-    'pace', 'ramp', 'punch', 'match', 'verify-shots', 'motion', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
+    'pace', 'ramp', 'punch', 'match', 'verify-shots', 'captions', 'motion', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
     'replace-media', 'localize', 'trim', 'shift', 'remove', 'volume', 'fade', 'keyframe',
     'preview', 'diff', 'apply', 'timeline', 'finish', 'music', 'grade', 'loudness'
   ]);
@@ -1683,6 +1688,10 @@ export async function main(argv, dependencies = {}) {
     }
     if (!otherDir) throw new CapcutError('diff requires --against NAME or --snapshot NAME', { exitCode: 2 });
     return print(diffSummaries(summarizeProject(otherDir), summarizeProject(projectDir)), true);
+  }
+  if (command === 'captions') {
+    const { runCaptions } = await import('./captions-run.mjs');
+    return print(await runCaptions(projectDir,args,options),true);
   }
   if (command === 'motion') {
     if (args.asset != null && args.logo != null) throw new CapcutError('Use either --asset or --logo, not both.', { code: 'MOTION_INPUT' });

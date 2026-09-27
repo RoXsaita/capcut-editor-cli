@@ -54,6 +54,20 @@ native layers, not flattened animation videos. Close CapCut before writes; add
 `--dry-run` to validate first. Image variants remain experimental, and gradient is
 text-only. See [commands, defaults, and limitations](docs/native-motion.md).
 
+## Editable word captions (experimental)
+
+```sh
+capcutctl captions --project "My Edit" --dry-run
+capcutctl captions --project "My Edit" --script script.txt
+capcutctl captions --project "My Edit" --cues captions.json
+```
+
+Uses the Staging word-cue engine and local Whisper, then writes ordinary editable
+text clips. No paid CapCut recognition and no burned-in caption media. Caption
+import needs no Python; generation needs the optional caption/ASR dependencies.
+**Native visual parity and the complete Staging review loop are not yet certified.**
+See [setup, safety, tested behaviour, and remaining gates](docs/native-captions.md).
+
 ## Requirements
 
 - macOS with CapCut Desktop installed and launched at least once;

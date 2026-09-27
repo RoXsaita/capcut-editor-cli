@@ -39,6 +39,7 @@ export const MIN_PYTHON_TEXT = MIN_PYTHON.join('.');
  * must still fail up front instead of tracebacking out of a lazy import.
  */
 export const TOOL_IMPORTS = Object.freeze({
+  'caption_generate.py': Object.freeze(['numpy', 'PIL', 'pysubs2']),
   'aroll.py': Object.freeze([]),
   'audio_index.py': Object.freeze([]),
   'audio_levels.py': Object.freeze(['numpy', 'PIL']),

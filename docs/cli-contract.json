@@ -6,6 +6,7 @@
     "commands": [
       "add",
       "apply",
+      "captions",
       "endcard",
       "fade",
       "finish",
@@ -73,6 +74,18 @@
     "brands": {
       "options": [],
       "transactional": false
+    },
+    "captions": {
+      "options": [
+        "--cues",
+        "--dry-run",
+        "--lang",
+        "--name",
+        "--project",
+        "--script",
+        "--track"
+      ],
+      "transactional": true
     },
     "close": {
       "options": [
