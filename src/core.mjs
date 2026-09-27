@@ -31,6 +31,7 @@ import { opCaption } from './captions-srt.mjs';
 import { opMographPlace, opMographPrune } from './mograph-place.mjs';
 import { opAnimation } from './animations.mjs';
 import { isPreframed } from './origin.mjs';
+import { userDir } from './profile.mjs';
 import { preflightPython } from './python.mjs';
 
 export const DEFAULT_ROOT = path.join(
@@ -133,7 +134,8 @@ const expandTree = value => {
 const PRESET_CACHE = new Map();
 
 /**
- * Where `<name>.json` is read from. `$CAPCUTCTL_PRESET_DIR` wins when it holds that file.
+ * Where `<name>.json` is read from. The user dir (`$CAPCUTCTL_PRESET_DIR`, else
+ * `~/.config/capcutctl`; see profile.mjs) wins when it holds that file.
  *
  * This is the supported way to bring your own palette. The bundled `sfx.json` and
  * `layouts.json` point into CapCut's effect/music cache, and those paths are minted on the
@@ -143,11 +145,8 @@ const PRESET_CACHE = new Map();
  * override directory only has to contain the presets it actually changes.
  */
 export function presetFile(name) {
-  const override = expandHome(String(process.env.CAPCUTCTL_PRESET_DIR || '').trim());
-  if (override) {
-    const candidate = path.join(path.resolve(override), `${name}.json`);
-    if (fs.existsSync(candidate)) return candidate;
-  }
+  const candidate = path.join(userDir(), `${name}.json`);
+  if (fs.existsSync(candidate)) return candidate;
   return path.join(PRESET_DIR, `${name}.json`);
 }
 

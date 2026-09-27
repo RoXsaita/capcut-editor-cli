@@ -1,22 +1,24 @@
 {
   "version": 1,
-  "name": "suheil-house",
+  "name": "default",
   "_about": [
-    "The one source of taste. Code reads its numbers from here; skills point here instead of restating them.",
-    "Library measurements (88 drafts) are kept under `provenance` as evidence. The targets below are what a finished,",
-    "ready-to-post edit should look like now: highly animated, but rhythm is contrast, not quantity.",
-    "Override per machine with CAPCUTCTL_PRESET_DIR/profile.json; a partial file merges over this one."
+    "The shipped, brand-neutral defaults. Code reads its numbers from here; skills point here instead of restating them.",
+    "Your brand does NOT go in this file. `capcutctl profile init` writes ~/.config/capcutctl/profile.json from",
+    "profile.template.json; that file merges over this one, holds only what you change, and never enters the repo.",
+    "`capcutctl profile where` lists the layers; `capcutctl profile` prints the merged result.",
+    "The engine numbers (camera, density, grammar) were measured from the original author's library (see",
+    "`provenance`); the colours below are placeholders chosen to look unfinished until you set your own."
   ],
   "canvas": { "width": 1080, "height": 1920, "fps": 30 },
 
   "tokens": {
     "color": {
-      "indigo": "#4040FE",
+      "brand": "#3D3D3D",
       "ring": "#FFFFFF",
       "ink": "#0B0B14",
       "text": "#FFFFFF",
-      "accent": "#FFD84D",
-      "_note": "indigo is the measured fill of assets/suheilai-rect-indigo-1080x1920 (2).png. One accent only, for the key word."
+      "accent": "#FFB020",
+      "_note": "Roles, not hues: brand is the fill behind white text (hook block, CTA chip); accent is the ONE key word. Set yours in the user profile."
     },
     "font": {
       "family": "IBM Plex Sans Arabic",
@@ -41,11 +43,67 @@
     "scene": {
       "_note": "Full-frame motion-design scenes (mograph/scenes, docs/mograph.md#scenes). Scenes name colour ROLES, never hex: change a role here and every scene follows. brand/accent/ink mirror tokens.color.",
       "bpm": 120,
-      "palette": { "ink": "#0B0B14", "paper": "#F1ECE2", "brand": "#4040FE", "accent": "#FFD84D", "hot": "#FF4D1A", "text": "#FFFFFF", "muted": "#8B8794" },
+      "palette": { "ink": "#0B0B14", "paper": "#F2F2F2", "brand": "#3D3D3D", "accent": "#FFB020", "hot": "#FF5A36", "text": "#FFFFFF", "muted": "#8A8A8A" },
       "mono": { "family": "JetBrains Mono", "files": { "400": ["jetbrains-mono-latin-400-normal.woff2"], "700": ["jetbrains-mono-latin-700-normal.woff2"] } },
       "blur": { "samples": 8, "shutter": 0.5 },
       "grain": 1,
       "vignette": 0.3
+    }
+  },
+
+  "brand": {
+    "_about": "Who the videos are from and the rules that make them feel like one channel. Skills read this section; the engine does not. Fill it in your user profile.",
+    "name": null,
+    "handle": null,
+    "languages": ["en"],
+    "audience": null,
+    "signature": null,
+    "rules": [
+      "One accent per piece, on at most one element per shot, never on a title or a large fill.",
+      "Structure comes from scale, weight, spacing and luminance, not from glow, gradients or drop shadows.",
+      "Every graphic serves a spoken beat: it starts on the word and is gone when the idea is.",
+      "Real material over illustration, illustration over stock: captured UI, real numbers, real frames."
+    ],
+    "avoid": []
+  },
+
+  "styles": {
+    "_about": "How the brand flexes per video type. Pick one per video (edit.json `style`). A style sets pace and emphasis; it is NOT a set of scenes. Add styles in your user profile, change any field, or set one to null to drop it.",
+    "explainer": {
+      "use": "An opinion, a lesson, an argument: the face carries it.",
+      "feel": "Typographic and calm. Big words, lots of empty frame, one visual idea.",
+      "pace": { "graphicEvery": [6, 9], "maxScenes": 2 },
+      "lead": "text",
+      "accent": "the one word the argument turns on",
+      "camera": "slow pushes on the claims; no punches",
+      "sound": "sparse: a cue on each graphic, nothing in between"
+    },
+    "demo": {
+      "use": "A tool or workflow shown on screen.",
+      "feel": "Fast and precise. The capture is the picture; graphics label it, never cover it.",
+      "pace": { "graphicEvery": [4, 7], "maxScenes": 2 },
+      "lead": "capture",
+      "accent": "the control or result the viewer must find",
+      "camera": "punches and callouts on the capture; the face stays 1x",
+      "sound": "clicks and ticks on the UI; one impact on the result"
+    },
+    "product": {
+      "use": "A physical object: a review, an unboxing, a comparison.",
+      "feel": "Tactile and deliberate. Real numbers, the object itself, fewer and bigger moves.",
+      "pace": { "graphicEvery": [5, 8], "maxScenes": 3 },
+      "lead": "number",
+      "accent": "the number or feature that decides it",
+      "camera": "holds on the object; one push on the verdict",
+      "sound": "weighty: thuds on numbers, a reveal on the verdict"
+    },
+    "news": {
+      "use": "Something just shipped or changed.",
+      "feel": "Urgent and dense. The name lands first, then what changed, then why it matters.",
+      "pace": { "graphicEvery": [3, 6], "maxScenes": 3 },
+      "lead": "name",
+      "accent": "the name of the thing, once",
+      "camera": "snap punch on the hook; stress pushes on each change",
+      "sound": "an impact on the name, pops on each change"
     }
   },
 
@@ -75,7 +133,7 @@
     "_note": "The measured 0.13s pop with its pop cue. `--motion RECIPE` and `--glow` are opt-in; native motion recipes are experimental."
   },
 
-  "motion": { "color": "4040FE", "accent": "FFD84D" },
+  "motion": { "color": "3D3D3D", "accent": "FFB020", "_note": "Native text recipes; mirror tokens.color.brand / accent without the #." },
 
   "seams": { "motivatedOnly": true, "maxShare": 0.4, "hardCutsByDefault": false },
 
@@ -133,7 +191,7 @@
   ],
 
   "provenance": {
-    "_note": "Measured from the author's hand edits across 88 drafts (2026-08-26). Evidence, not targets.",
+    "_note": "Measured from the original author's hand edits across 88 drafts (2026-08-26). Evidence for the engine defaults, not targets.",
     "cutRhythmMedianSeconds": 1.92,
     "seamSfxLeadSeconds": 0.14,
     "transitionsAcrossLibrary": 342,

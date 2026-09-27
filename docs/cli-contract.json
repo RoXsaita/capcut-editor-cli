@@ -363,7 +363,8 @@
         "--json",
         "--profile",
         "--project",
-        "--record"
+        "--record",
+        "--style"
       ],
       "transactional": false
     },
@@ -778,11 +779,18 @@
     },
     "profile": {
       "group": "start",
-      "summary": "The effective style profile (tokens, camera, sound, density, grammar).",
-      "example": "capcutctl profile",
+      "summary": "The effective style profile, its layers (bundled → yours → --profile), and init for your own.",
+      "example": "capcutctl profile where",
       "options": [
+        "--dry-run",
+        "--force",
         "--json",
         "--profile"
+      ],
+      "subcommands": [
+        "init",
+        "show",
+        "where"
       ],
       "transactional": false
     },

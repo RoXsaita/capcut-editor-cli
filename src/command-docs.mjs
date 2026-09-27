@@ -33,7 +33,7 @@ export const COMMAND_DOCS = Object.freeze({
   inspect: doc('start', 'Tracks, canvas and active timeline as JSON.', 'capcutctl inspect --project NAME'),
   scenes: doc('start', 'Every clip: time, track, desc, media, source; --transcript adds what is said.', 'capcutctl scenes --project NAME --transcript'),
   timeline: doc('start', 'ASCII stacked timeline.', 'capcutctl timeline --project NAME'),
-  profile: doc('start', 'The effective style profile (tokens, camera, sound, density, grammar).', 'capcutctl profile'),
+  profile: doc('start', 'The effective style profile, its layers (bundled → yours → --profile), and init for your own.', 'capcutctl profile where'),
   status: doc('start', 'Is CapCut running; optionally wait for it to close.', 'capcutctl status --json'),
   close: doc('start', 'Quit CapCut and wait: writes are refused while it runs.', 'capcutctl close'),
   version: doc('start', 'Installed CLI version.', 'capcutctl version'),

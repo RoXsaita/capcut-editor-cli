@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "name": "my-profile",
+  "_about": [
+    "YOUR profile. `capcutctl profile init` copied this to your user dir (~/.config/capcutctl/profile.json).",
+    "It merges over the shipped presets/profile.json: keep only what you change and delete the rest.",
+    "Objects merge key by key; arrays and plain values replace. Set a style to null to drop a shipped one.",
+    "`capcutctl profile` prints the merged result; `capcutctl profile where` shows which files it came from.",
+    "Colours are ROLES, not hues: `brand` fills the block behind white text, `accent` marks the one key word."
+  ],
+
+  "brand": {
+    "name": "Your name or channel",
+    "handle": "@yourhandle",
+    "languages": ["en"],
+    "audience": "Who watches, in one line.",
+    "signature": "The one thing every video of yours has, e.g. 'the last line is always the verdict, set big'.",
+    "rules": [
+      "The overarching rules every video keeps, whatever its style. Four to eight lines.",
+      "One accent per piece, on at most one element per shot."
+    ],
+    "avoid": [
+      "Looks you have rejected and never want proposed again, with the reason."
+    ]
+  },
+
+  "tokens": {
+    "color": {
+      "brand": "#3D3D3D",
+      "accent": "#FFB020",
+      "ink": "#0B0B14",
+      "text": "#FFFFFF",
+      "ring": "#FFFFFF"
+    },
+    "scene": {
+      "palette": { "ink": "#0B0B14", "paper": "#F2F2F2", "brand": "#3D3D3D", "accent": "#FFB020", "hot": "#FF5A36", "text": "#FFFFFF", "muted": "#8A8A8A" }
+    }
+  },
+
+  "motion": { "color": "3D3D3D", "accent": "FFB020" },
+
+  "styles": {
+    "_about": "Your video types. Each keeps the brand and flexes pace and emphasis. `edit.json` picks one with \"style\".",
+    "explainer": {
+      "use": "An opinion, a lesson, an argument: the face carries it.",
+      "feel": "Typographic and calm. Big words, lots of empty frame, one visual idea.",
+      "pace": { "graphicEvery": [6, 9], "maxScenes": 2 },
+      "lead": "text",
+      "accent": "the one word the argument turns on",
+      "camera": "slow pushes on the claims; no punches",
+      "sound": "sparse: a cue on each graphic, nothing in between"
+    }
+  }
+}

@@ -2,9 +2,17 @@
 
 JSON the CLI clones from instead of inventing CapCut objects.
 
+**Your brand does not live here.** Every file in this folder is looked up first in your user
+dir — `$CAPCUTCTL_PRESET_DIR`, else `$XDG_CONFIG_HOME/capcutctl`, else `~/.config/capcutctl` —
+and falls back to the copy here. `profile.json` is the exception that *merges* instead of
+replacing: yours only has to hold what you change. Start it with `capcutctl profile init`;
+see the layers with `capcutctl profile where`. Keep that folder in your own dotfiles if you
+want it versioned; it never goes in this repo.
+
 | File | Role |
 |---|---|
-| `profile.json` | **the style profile** — tokens, camera, seams, sound, density targets, motion grammar. The one source of taste; `CAPCUTCTL_PRESET_DIR/profile.json` merges over it |
+| `profile.json` | **the shipped, brand-neutral style profile** — tokens, brand rules, styles per video type, camera, seams, sound, density targets, motion grammar. Your own profile merges over it |
+| `profile.template.json` | what `capcutctl profile init` copies to your user dir as your own `profile.json` |
 | `motion.json` | harvested native structures for the experimental `motion` recipes |
 | `layouts.json` | split-screen / circle / full-face / background / screenRecording geometry + native mask templates |
 | `sfx.json` | transition ↔ sound pairing for `polish` |

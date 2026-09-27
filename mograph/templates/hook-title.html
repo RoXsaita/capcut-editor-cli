@@ -10,17 +10,17 @@
           color: var(--mg-text); letter-spacing: 0;
           text-shadow: 0 3px 4px rgba(var(--mg-ink-rgb), 0.4), 0 12px 40px rgba(var(--mg-ink-rgb), 0.55); }
   .hook .mg-word { padding: 0 0.05em; transform-origin: 50% 60%; }
-  .hl { position: absolute; background: var(--mg-indigo); border-radius: var(--mg-radius-box);
-        box-shadow: 0 10px 34px rgba(var(--mg-indigo-rgb), 0.45), 0 4px 10px rgba(var(--mg-ink-rgb), 0.35); }
+  .hl { position: absolute; background: var(--mg-brand); border-radius: var(--mg-radius-box);
+        box-shadow: 0 10px 34px rgba(var(--mg-brand-rgb), 0.45), 0 4px 10px rgba(var(--mg-ink-rgb), 0.35); }
 </style>
 </head>
 <body>
 <script>
 /*
- * hook-title — the first-second hook: 2–5 words slammed onto the frame, the key word wiped under an indigo block.
+ * hook-title — the first-second hook: 2–5 words slammed onto the frame, the key word wiped under a brand-colour block.
  * params: { text, key?: word|index|false (default: last word in reading order), layout?: full-face|card|split-screen, center?: [x, y] canvas px, hold?: seconds }
  * Timing (frames @30): each word slams in over 4f (micro) — scale 1.16 → 1 with the pop overshoot,
- * blur 10 → 0 — on a 3f stagger in reading order; the indigo block wipes behind the key word in
+ * blur 10 → 0 — on a 3f stagger in reading order; the brand block wipes behind the key word in
  * the reading direction over 6f as the last word lands, with a 1-beat settle of the whole line.
  * Total 45–75f by default (hold = max(minHold, perWordHold × words)); 6f out.
  * Type is tokens.type.hook (120px), broken into at most two balanced lines, shrunk only to fit the band.

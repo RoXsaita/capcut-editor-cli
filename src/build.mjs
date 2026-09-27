@@ -26,7 +26,7 @@ import { CapcutError, applySpec, loadProject, readJson } from './core.mjs';
 import { findWordsFile, resolveAnchors } from './anchors.mjs';
 import { layoutAt } from './mograph-place.mjs';
 import { safeZoneViolations } from './mograph-geometry.mjs';
-import { loadProfile } from './profile.mjs';
+import { loadProfile, applyStyle } from './profile.mjs';
 import { principalTrack, pictureChanges } from './polish.mjs';
 import { firstPictureProof } from './finish.mjs';
 import { gateReport, writeGateRecord } from './gate.mjs';
@@ -46,7 +46,7 @@ function workingDoc(projectDir) {
 export function normalizePlan(raw, { baseDir = process.cwd() } = {}) {
   if (!raw || typeof raw !== 'object') fail('PLAN_INVALID', 'edit plan must be a JSON object');
   if (raw.version !== EDIT_PLAN_VERSION) fail('PLAN_VERSION', `edit plan version must be ${EDIT_PLAN_VERSION}`);
-  const known = new Set(['version', 'profile', 'words', 'shots', 'layout', 'camera', 'graphics', 'scenes', 'logos', 'endcard', 'sound', 'notes']);
+  const known = new Set(['version', 'profile', 'style', 'words', 'shots', 'layout', 'camera', 'graphics', 'scenes', 'logos', 'endcard', 'sound', 'notes']);
   const unknown = Object.keys(raw).filter(k => !known.has(k));
   if (unknown.length) fail('PLAN_INVALID', `unknown edit plan keys: ${unknown.join(', ')}`);
   const abs = file => (file ? path.resolve(baseDir, String(file).replace(/^~(?=$|\/)/, process.env.HOME || '~')) : null);
@@ -74,6 +74,7 @@ export function normalizePlan(raw, { baseDir = process.cwd() } = {}) {
   return {
     version: EDIT_PLAN_VERSION,
     profile: abs(raw.profile),
+    style: raw.style == null ? null : String(raw.style),
     words: abs(raw.words),
     shots: abs(raw.shots),
     layout: raw.layout === undefined ? 'auto' : raw.layout,
@@ -217,7 +218,7 @@ function writeSidecars(graphics) {
  * writes nothing (renders are probed, not encoded).
  */
 export async function runBuild(projectDir, plan, { dryRun = false, force = false, forceRunning = false, backup = true, record = true } = {}) {
-  const profile = loadProfile({ file: plan.profile || null });
+  const profile = applyStyle(loadProfile({ file: plan.profile || null }), plan.style);
   const mograph = await import('./mograph.mjs');
   const templates = mograph.listTemplates();
   const txn = label => ({ dryRun, forceRunning, backup, label });

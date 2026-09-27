@@ -24,7 +24,7 @@ import { COMMAND_DOCS, TRANSACTIONAL_FROM_DOCS } from './command-docs.mjs';
 export const CONTRACT_VERSION = 2;
 
 /** Commands that dispatch on a positional subcommand (`args._[1]`). */
-const SUBCOMMAND_PARENTS = new Set(['layout', 'oracle', 'mograph']);
+const SUBCOMMAND_PARENTS = new Set(['layout', 'oracle', 'mograph', 'profile']);
 
 /**
  * Commands that mutate a project through the transaction machinery. These are the ones

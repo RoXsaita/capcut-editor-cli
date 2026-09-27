@@ -227,11 +227,16 @@ Usage:
                         seams, music aligned to the graphics, duck, loudness, then the gate.
                         Graphics anchor to SOURCE words, so a recut rebuilds exactly; an
                         unchanged plan on an unchanged cut is a no-op. Exit 1 when the gate fails.
-  capcutctl gate                --project NAME [--profile FILE] [--record] [--json]
+  capcutctl gate                --project NAME [--profile FILE] [--style NAME] [--record] [--json]
                       — the blocking ready-to-post check: hook, proof, longest static stretch,
                         crowding, template repeats, safe zones, graphics without a sound, seams.
-                        Thresholds come from the profile. Exit 1 on FAIL; WARNs go in the hand-off.
-  capcutctl profile             [--profile FILE] [--json]   — the effective style profile (tokens, camera, sound, density, grammar)
+                        Thresholds come from the profile; --style NAME applies that style's pace (build
+                        passes edit.json's "style"). Exit 1 on FAIL; WARNs go in the hand-off.
+  capcutctl profile show        [--profile FILE] [--json]   — the effective style profile (tokens, brand, styles, camera, sound, density, grammar);
+                        bare "capcutctl profile" is the same
+  capcutctl profile where       [--profile FILE]   — each layer in merge order (bundled → yours → --profile) and whether it exists
+  capcutctl profile init        [--force] [--dry-run]   — write your own profile.json from the template into your user dir
+                        (~/.config/capcutctl, or $CAPCUTCTL_PRESET_DIR). Your brand lives there, not in the repo.
   capcutctl mograph list        templates, their params and paired sound; no project needed
   capcutctl mograph preview     --template ID --params JSON|--params-file FILE --out SHEET.png [--times S,S] [--background IMG]
                       — frames on a dark canvas with the platform-UI zones tinted, for review.
@@ -338,8 +343,8 @@ Portability — what is bundled and what is yours:
   polish SKIPS any sound that is not on this machine and names it, instead of writing a
   reference that fails validation. Bring your own with either:
     CAPCUTCTL_ASSET_DIR=DIR    overlay artwork, searched before the bundled assets/
-    CAPCUTCTL_PRESET_DIR=DIR   your own sfx.json / brands.json / layouts.json; each file
-                               falls back to the bundled preset when absent
+    CAPCUTCTL_PRESET_DIR=DIR   your user dir (default ~/.config/capcutctl): profile.json, sfx.json,
+                               brands.json, layouts.json; each file falls back to the bundled one
   ffmpeg and ffprobe are required (cut, qa, find, preview, music, review).
   Run "capcutctl preflight" to see all of it at once.
 
@@ -767,8 +772,12 @@ export async function main(argv, dependencies = {}) {
   const root = args.root ? path.resolve(args.root) : DEFAULT_ROOT;
 
   if (command === 'profile') {
-    const { loadProfile } = await import('./profile.mjs');
-    return print(loadProfile({ file: args.profile || null }), true);
+    const { loadProfile, profileLayers, initUserProfile, userDir } = await import('./profile.mjs');
+    const sub = args._[1] || 'show';
+    if (sub === 'show') return print(loadProfile({ file: args.profile || null }), true);
+    if (sub === 'where') return print({ userDir: userDir(), layers: profileLayers({ file: args.profile || null }) }, true);
+    if (sub === 'init') return print(initUserProfile({ force: !!args.force, dryRun: !!args.dryRun }), true);
+    throw new CapcutError(`Unknown profile subcommand: ${sub}. Use show, where or init.`, { code: 'UNKNOWN_SUBCOMMAND', exitCode: 2 });
   }
   if (command === 'mograph' && ['scenes', 'scene-preview', 'scene-render'].includes(args._[1])) {
     const scenes = await import('./mograph-scene.mjs');
@@ -1580,8 +1589,9 @@ export async function main(argv, dependencies = {}) {
   }
   if (command === 'gate') {
     const { gateReport, gateText, writeGateRecord } = await import('./gate.mjs');
-    const { loadProfile } = await import('./profile.mjs');
-    const report = gateReport(await loadWorking(projectDir), { projectDir, profile: loadProfile({ file: args.profile || null }) });
+    const { loadProfile, applyStyle } = await import('./profile.mjs');
+    const profile = applyStyle(loadProfile({ file: args.profile || null }), args.style || null);
+    const report = gateReport(await loadWorking(projectDir), { projectDir, profile });
     if (args.record) report.recorded = writeGateRecord(projectDir, report);
     if (report.verdict === 'FAIL') process.exitCode = 1;
     return args.json ? print(report, true) : print(gateText(report));

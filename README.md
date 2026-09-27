@@ -68,7 +68,8 @@ capcutctl gate  --project "My Edit"                       # the ready-to-post ch
 Graphics are anchored to **source words**, so a recut rebuilds exactly; an unchanged plan on an
 unchanged cut is a no-op. The gate checks the hook, proof on screen, dead stretches, crowding,
 repeats, platform-UI safe zones, graphics without a sound and seam variety, with thresholds from
-[`presets/profile.json`](presets/profile.json) — the one file that holds the style.
+the style profile: the shipped, brand-neutral [`presets/profile.json`](presets/profile.json) with
+your own `~/.config/capcutctl/profile.json` merged over it (see [Your profile](#your-profile)).
 
 ## Motion graphics
 
@@ -224,6 +225,7 @@ the mirrors, and rolls back if the post-write doctor fails.
 | Is it ready to post? | `capcutctl gate --project NAME` |
 | Render or place a motion graphic | `capcutctl mograph add --project NAME --template keyword-super --params '{"text":"…"}' --say "…"` |
 | Show the effective style profile | `capcutctl profile` |
+| Start your own profile, outside the repo | `capcutctl profile init` |
 | Show the full command surface | `capcutctl help` |
 
 The checked-in [CLI contract](docs/cli-contract.json) is generated from
@@ -305,10 +307,26 @@ reported and skipped instead of creating an invalid project.
 Third-party logos are not included. `capcutctl brands` reports which configured brands
 have a usable local image.
 
-Use your own preset or asset directories without changing the repository:
+### Your profile
+
+Your brand, styles and preferences live **outside the repository**, in your user dir
+(`~/.config/capcutctl/`, or `$XDG_CONFIG_HOME/capcutctl`, or `$CAPCUTCTL_PRESET_DIR`):
 
 ```bash
-export CAPCUTCTL_PRESET_DIR=~/my-capcut-presets
+capcutctl profile init     # writes ~/.config/capcutctl/profile.json from presets/profile.template.json
+capcutctl profile where    # the layers, in merge order: bundled → yours → --profile FILE
+capcutctl profile          # the merged result every command uses
+```
+
+Your `profile.json` deep-merges over the shipped one, so it holds only what you change: your
+colours by role (`brand`, `accent`), your font, `brand` (who you are and the rules every video
+keeps), and `styles` (how the brand flexes per video type; `edit.json` picks one with
+`"style"`). `sfx.json`, `brands.json` and `layouts.json` in the same folder replace the shipped
+ones. Version that folder in your own dotfiles if you like; pulling a new CLI never touches it.
+
+Overlay artwork has its own override:
+
+```bash
 export CAPCUTCTL_ASSET_DIR=~/my-capcut-assets
 ```
 

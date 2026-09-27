@@ -180,18 +180,19 @@ are local *by nature*.
   **skipped and named** in the command's output, so you get the edit without the
   palette rather than a failed transaction. `capcutctl preflight` reports the ratio.
 
-  To use your own sounds instead of downloading his, put an `sfx.json` in a directory
-  and point at it — each preset falls back to the bundled one when absent:
+  To use your own sounds instead of downloading his, put an `sfx.json` in your user dir
+  (`~/.config/capcutctl/`, or wherever `CAPCUTCTL_PRESET_DIR` points) — each preset falls
+  back to the bundled one when absent.
 
-  ```bash
-  export CAPCUTCTL_PRESET_DIR=~/my-presets
-  ```
+* **Your profile.** `capcutctl profile init` writes `~/.config/capcutctl/profile.json`:
+  your colours, font, brand rules and per-video-type styles. It merges over the shipped,
+  brand-neutral `presets/profile.json` and never enters the repo.
 
 * **Logo and media folders.** `presets/brands.json` points at `~/Downloads/Logos` and
   `~/Downloads/Media/Images/2026`. Those are third-party marks and are not
   redistributable. `capcutctl brands` lists which have a usable PNG and which do not;
   only `logo` / `wrap` need them. Repoint each brand's `logo` at your own files, or
-  override the whole preset with `CAPCUTCTL_PRESET_DIR`. A `Logos/` folder inside the
+  put your own `brands.json` in your user dir. A `Logos/` folder inside the
   clone is gitignored if you want to keep a local copy there.
 
 * **Overlay artwork is bundled, not local.** The indigo bar and white ring the

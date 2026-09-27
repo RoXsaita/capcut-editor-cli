@@ -50,8 +50,8 @@ that the hand-off must name.
    `mograph preview` showed it, and can be moved/scaled in the UI.
 3. **Edges:** zoom to 400% on a text edge over a white and a black frame. No dark or light
    fringe (a fringe means premultiplied/straight alpha is being misread).
-4. **Colour:** render `brand-chip` or `cta-card` (indigo fill) and sample it in a CapCut export
-   frame: within ΔE < 2 of `#4040FE`. A shift means a colour-matrix mismatch.
+4. **Colour:** render `cta-card` (brand fill) and sample the chip in a CapCut export
+   frame: within ΔE < 2 of the profile's `tokens.color.brand`. A shift means a colour-matrix mismatch.
 5. **Export:** a native export (explicit request only) keeps the graphic and its alpha.
 6. Record the CapCut version and result in `docs/oracle.md`, then set
    `IMPORT_VERIFIED = true` in `src/mograph.mjs` (per build if they differ).
@@ -76,7 +76,7 @@ MG.define({
 
 Rules (from the profile's motion grammar):
 
-- Colours via `mg.color('indigo')`, sizes via `tokens.type`, easing via `mg.ease.enter/exit/pop`,
+- Colours via `mg.color('brand')`, sizes via `tokens.type`, easing via `mg.ease.enter/exit/pop`,
   timings in frames via `tokens.frames` and `mg.F(n)`. No literals.
 - Entrances ease (`enter`), exits are faster (`exit`); pops overshoot at most 6%.
   Linear only for counters and progress.
