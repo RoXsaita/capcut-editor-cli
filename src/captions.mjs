@@ -77,9 +77,9 @@ export function opCaptions(doc, op, context = {}) {
   const mint = key => seededId(op.__seed || fingerprint, `${trackName}:${key}`);
   const track = {...structuredClone(sourceTrack),id:mint('track'),name:trackName,is_default_name:false,segments:[]};
   const materials = [];
-  // Native size/stroke calibration is provisional until an unlocked CapCut pixel comparison.
-  // 15 native text units is the initial 90px-at-1080p target, not a claim of pixel parity.
-  const nativeSize = 15;
+  // Measured in a native export: size 15 drew a word 49px tall on a 1080x1920 canvas, so the
+  // 90px target is about 28.
+  const nativeSize = 28;
   for (const [i,cue] of cues.entries()) {
     const font = fonts[i];
     const fontPath = context.projectDir ? localizeMedia(context.projectDir,font.path,undefined,{dryRun:context.dryRun}) : font.path;

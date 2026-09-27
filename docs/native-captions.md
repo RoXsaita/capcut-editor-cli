@@ -5,8 +5,8 @@ and inserts **ordinary editable CapCut text clips**. It never invokes CapCut's
 paid recognition, subtitle templates, or premium caption effects. It never
 burns captions into imported media and does not export a video.
 
-**Not yet certified as visually identical to Staging.** The native font-size and
-stroke conversion are provisional until a real CapCut comparison. A valid draft
+**Not yet certified as visually identical to Staging.** Native size 28 was measured
+in a CapCut export (a word about 94px tall at 1080x1920, outline included). A valid draft
 is not evidence of correct Arabic shaping, font metrics, or face clearance.
 
 ## Usage
@@ -99,18 +99,24 @@ vendor snapshot, not the new adapter.
 
 ## Model typo pass
 
-No provider credentials or private dashboard configuration are copied. To enable
-the same sparse correction protocol, set `CAPCUTCTL_CAPTION_TEXT_COMMAND` to a
-**JSON argv array** for an explicitly chosen text-inference adapter. It receives
-the prompt on stdin and returns JSON such as `{"fixes":[]}` on stdout. It is
-executed without a shell, with a 90-second timeout. Use medium reasoning if the
-provider supports it. Provider setup/billing is the caller's explicit choice.
-Do not set this to a coding agent unless the user authorized agent delegation.
+On by default. With no `CAPCUTCTL_CAPTION_TEXT_COMMAND`, `tools/caption_text_llm.py` sends the
+Staging prompt to the first signed-in CLI in `CAPCUTCTL_CAPTION_TEXT_CHAIN`
+(default `codex-luna,claude-haiku,opencode`), falling through on error or unparseable output.
+Each runs with tools off from an empty temp directory; missing CLIs are skipped. `off` disables it.
 
-No hook, failed inference, or invalid corrections produce a visible
-`text_polish` warning. They never become a successful text review. Local E2E
-verification did not configure a provider, so automatic AI cleanup is **pending**,
-not equivalent to the complete Staging job yet.
+| Backend | Command | On the Dishwasher cues (119) |
+|---|---|---|
+| `codex-luna` | `codex exec -m gpt-6-luna`, low effort | 13s; caught القياسات and يقارن |
+| `claude-haiku` | `claude -p --model haiku`, thinking off | 4s; missed القياسات, rewrote Gmail to email |
+| `opencode` | `opencode run` (`CAPCUTCTL_OPENCODE_MODEL`) | not measured |
+
+Models also replace a word with a different one. The adapter keeps a fix only when it changes
+at most 1 character, or at most 2 that are no more than 30% of the word, and adds no words; the
+rest are dropped one by one. It cannot recover a word the ASR heard as nonsense (الغشرية).
+
+`CAPCUTCTL_CAPTION_TEXT_COMMAND` (a JSON argv array; prompt on stdin, `{"fixes":[]}` on stdout,
+90-second timeout, no shell) still overrides the chain. A failed pass leaves the Whisper text
+and a visible `text_polish` warning.
 
 ## Verification status and remaining acceptance gates
 
@@ -129,7 +135,7 @@ Still required before claiming identical behaviour or a finished handoff:
 2. Select and edit Arabic and mixed Latin clips, save/reopen, and verify they
    remain editable text. Compare actual native pixels against Staging for size,
    baseline/center, black-outline thickness, shaping, and both position presets.
-   The initial native size 15/stroke conversion is **not calibrated proof**.
+   Size 28 is measured on one export; stroke thickness is not yet compared with Staging.
 3. Configure and exercise the selected model typo pass.
 4. Inspect **native captioned pixels** for face clearance. No automated native
    captioned-grid review/correction loop is wired yet. The CLI correctly returns

@@ -47,7 +47,7 @@ def prepare_captions(transcript, *, duration, scenes=(), script='', run_text=Non
             clipped += 1
     warnings = ['Native CapCut font/stroke appearance and face safety require visual review.']
     if report.get('status') != 'completed':
-        warnings.append('Text needs review: no successful model typo pass. Configure CAPCUTCTL_CAPTION_TEXT_COMMAND.')
+        warnings.append('Text needs review: the model typo pass did not complete (see text_polish).')
     return {'version':1, 'style':'suheil', 'language':transcript.get('language') or 'ar',
             'cues':cues, 'transcript':transcript,
             'asr':{'backend':transcript.get('backend'), 'model':transcript.get('model'), 'quality':'strong'},
@@ -57,10 +57,11 @@ def prepare_captions(transcript, *, duration, scenes=(), script='', run_text=Non
 
 
 def text_callback():
-    """Explicit provider hook, no shell, no embedded keys or implicit paid API calls."""
+    """Explicit provider hook when set; otherwise the cheapest signed-in CLI (caption_text_llm)."""
     raw = os.environ.get('CAPCUTCTL_CAPTION_TEXT_COMMAND')
     if not raw:
-        return None
+        from caption_text_llm import default_text_callback
+        return default_text_callback()
     argv = json.loads(raw)
     if not isinstance(argv, list) or not argv or not all(isinstance(x, str) and x for x in argv):
         raise ValueError('CAPCUTCTL_CAPTION_TEXT_COMMAND must be a JSON argv array')

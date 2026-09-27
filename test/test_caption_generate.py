@@ -60,5 +60,31 @@ class CaptionGenerationTests(unittest.TestCase):
         self.assertEqual(b['text_polish']['status'],'completed')
 
 
+class CaptionTextModelTests(unittest.TestCase):
+    def test_keeps_typo_fixes_and_drops_word_swaps(self):
+        from caption_text_llm import fixes_json
+        reply = '```json\n' + json.dumps({'fixes': [
+            {'id': 24, 'before': 'من القيسات', 'text': 'من القياسات'},
+            {'id': 88, 'before': 'يقار', 'text': 'يقارن'},
+            {'id': 20, 'before': 'الغشرية', 'text': 'الغسالة'},
+            {'id': 87, 'before': 'بلش', 'text': 'بدأ'},
+            {'id': 65, 'before': 'لا فقام', 'text': 'فقام'},
+            {'id': 56, 'before': 'بلا', 'text': 'بلا'},
+        ]}, ensure_ascii=False) + '\n```'
+        kept = json.loads(fixes_json(reply))['fixes']
+        self.assertEqual([f['id'] for f in kept], [24, 88])
+        self.assertIsNone(fixes_json('no json here'))
+
+    def test_chain_can_be_turned_off_and_rejects_unknown_backends(self):
+        import os
+        from unittest import mock
+
+        import caption_text_llm
+        with mock.patch.dict(os.environ, {'CAPCUTCTL_CAPTION_TEXT_CHAIN': 'off'}):
+            self.assertIsNone(caption_text_llm.default_text_callback())
+        with mock.patch.dict(os.environ, {'CAPCUTCTL_CAPTION_TEXT_CHAIN': 'gpt-free'}):
+            self.assertRaises(ValueError, caption_text_llm.chain)
+
+
 if __name__ == '__main__':
     unittest.main()
