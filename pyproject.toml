@@ -26,6 +26,9 @@ dependencies = [
 # Neither is installed by default: they pull large wheels and download model weights on
 # first use, which must stay an explicit choice rather than a side effect of `pip install`.
 whisper = ["openai-whisper>=20231117"]
+# Caption import needs no Python. Generation uses the pinned Staging cue engine.
+# Install an ASR backend separately: mlx-whisper (Apple Silicon) or faster-whisper.
+captions = ["pysubs2>=1.8", "arabic-reshaper>=3", "python-bidi>=0.6"]
 
 [project.urls]
 Homepage = "https://github.com/RoXsaita/capcut-editor-cli"
@@ -44,7 +47,7 @@ py-modules = []
 [tool.ruff]
 line-length = 110
 target-version = "py311"
-exclude = ["tools/__pycache__"]
+exclude = ["tools/__pycache__", "tools/caption_engine"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "RUF"]
@@ -63,3 +66,5 @@ ignore = [
 [tool.vulture]
 min_confidence = 80
 paths = ["tools"]
+# Unmodified, hash-pinned Staging snapshot; lint the adapter, not the vendored source.
+exclude = ["tools/caption_engine"]

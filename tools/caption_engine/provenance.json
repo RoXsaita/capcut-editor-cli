@@ -1,0 +1,21 @@
+{
+  "source": "RoXsaita/Openclaw dashboard/caption_engine",
+  "purpose": "Pinned Staging snapshot; standalone adapter lives outside this directory. No dashboard runtime dependency.",
+  "files": {
+    "align.py": "182b768108c2d9d506787871a6747e2ba6cefaf2094ed3f531f8082ab2dfbcd4",
+    "layout.py": "90e4226ceeae0b1d3a0678516d7fc81ea3ec0fd9ca907fe97f72dcaf2e0e202c",
+    "apple_face_detect.swift": "af7041fe623ec032f51473969da1b716d8f9ca6803ac1f7fb3a94a8f44599a57",
+    "subtitle_utils.py": "965e8053d3172fde7312e0d50786b03fddd6db3a4f7b68cf85aa160122eb2d7e",
+    "__init__.py": "d5a74fda50667fe7e6b4bbc67cbe832a01c54853cae5d186d2cd40abd3832f19",
+    "asr.py": "17fcd9139a9598ff51befedcaf63216c91e6d9baea48bc5b3fb766f8c13264a6",
+    "pipeline.py": "d81f33217d312ce82312c7b6e441cb57310de232317f39a4ab0ad15221120d4e",
+    "LICENSE-ai-video-captions.txt": "edad56250b349f62cbe3f3b97a0ff7c3c06a35c750df712000a868a260b477de",
+    "styles.py": "40e4d4a2da40483b214de3a85a63b08505d73addce31d3f184b4a63a66ac8cc6",
+    "asr_worker.py": "8cc54c587aaa8028cc9a3e618fa19a9b8d9393e8092110d7a6c371fe84a48c5d",
+    "styles.json": "16e424e9aedb8a922dbd93da3e04b804d6d2bf1d343ff8364d4621b2be215a40",
+    "NOTICE.md": "1eb14b640b1562b4f7d19ab97fb23ca8179caf221900a8b7855585824c1e45b6",
+    "fonts/Changa-ExtraBold.ttf": "9d4f3f2975844ef5c2f653fc4a0e7bc808dd377f6f115ded5f4d3df72d727f16",
+    "fonts/OFL-Changa.txt": "e0999ea0a92e0dc633160abda7d2d156096bc8838b99f2cbb25785af2f2af987",
+    "fonts/README.md": "c486319d27a44233f1ce836a8e24f1c3e67dbb26a256a9cc51950f9aca0d6e01"
+  }
+}

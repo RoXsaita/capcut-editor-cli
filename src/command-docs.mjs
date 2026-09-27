@@ -73,6 +73,7 @@ export const COMMAND_DOCS = Object.freeze({
   brands: doc('graphics', 'Known brands, spoken aliases, and which have artwork.', 'capcutctl brands'),
   endcard: doc('graphics', 'The CTA card on the talking head near the end.', 'capcutctl endcard --project NAME --text Follow --dry-run', true),
   wrap: doc('graphics', 'Logos from what is said + the endcard in one pass.', 'capcutctl wrap --project NAME --plan', true),
+  captions: doc('graphics', 'Word-by-word editable native captions from the edited narration (or --cues); EXPERIMENTAL styling.', 'capcutctl captions --project NAME --dry-run', true),
   motion: doc('graphics', 'EXPERIMENTAL native text/logo recipes; prefer mograph.', 'capcutctl motion list', true),
   animate: doc('graphics', 'Native CapCut intro/outro animation on a clip.', 'capcutctl animate --project NAME --segments ID --intro fade-in --dry-run', true),
 

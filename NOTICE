@@ -17,6 +17,12 @@ you download the corresponding effects inside CapCut on your own Mac.
 Third-party brand names and logo *paths* in `presets/brands.json` are examples
 for the signature pass. Do not commit logo raster files you do not own.
 
+The caption engine in tools/caption_engine is a pinned snapshot of Suheil AI's
+Staging engine, with MIT-derived ai-video-captions helpers. See that directory's
+NOTICE.md, LICENSE-ai-video-captions.txt, and provenance.json. Changa ExtraBold
+is bundled under SIL OFL (fonts/OFL-Changa.txt). Arial Unicode is NOT distributed;
+mixed-script captions use the user's locally licensed font.
+
 Use of this software with CapCut is subject to CapCut's own terms of service.
 The authors provide no warranty that writing project JSON is permitted on your
 account or in your jurisdiction.

@@ -9,6 +9,7 @@
       "apply",
       "blur-broll",
       "build",
+      "captions",
       "cursor",
       "denoise",
       "endcard",
@@ -131,6 +132,21 @@
         "--force",
         "--json",
         "--project"
+      ],
+      "transactional": true
+    },
+    "captions": {
+      "group": "graphics",
+      "summary": "Word-by-word editable native captions from the edited narration (or --cues); EXPERIMENTAL styling.",
+      "example": "capcutctl captions --project NAME --dry-run",
+      "options": [
+        "--cues",
+        "--dry-run",
+        "--lang",
+        "--name",
+        "--project",
+        "--script",
+        "--track"
       ],
       "transactional": true
     },

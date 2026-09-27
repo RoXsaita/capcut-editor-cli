@@ -1,196 +1,114 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
+import { CapcutError, loadPreset, seededId, localizeMedia, contentEndUs } from './core.mjs';
 
-import { CapcutError, clone, contentEndUs, loadPreset, seededId } from './core.mjs';
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const fail = (code, message) => { throw new CapcutError(`${code}: ${message}`, {code}); };
+const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const CHANGA = path.join(ROOT, 'tools/caption_engine/fonts/Changa-ExtraBold.ttf');
 
-const US = seconds => Math.round(Number(seconds) * 1e6);
-const S = microseconds => Number(microseconds) / 1e6;
-const TAG = 'caption:native';
-
-function parseClock(value) {
-  const match = String(value).trim().match(/^(\d+):(\d{2}):(\d{2})[,.](\d{3})$/);
-  if (!match) throw new CapcutError(`Invalid SRT timestamp: ${value}`, { code: 'CAPTION_BAD_TIME', exitCode: 2 });
-  const [, hours, minutes, seconds, millis] = match;
-  return US(Number(hours) * 3600 + Number(minutes) * 60 + Number(seconds) + Number(millis) / 1000);
+// Logical Unicode only. CapCut, not a manual bidi pre-pass, shapes native text.
+export function captionDisplayText(text, language = 'ar') {
+  if (!['ar', 'fa', 'ur'].includes(language.split('-')[0])) return text.normalize('NFC');
+  return text.normalize('NFC').replace(/[0-9]/g, n => '٠١٢٣٤٥٦٧٨٩'[Number(n)])
+    .replace(/%/g, '٪').replace(/[\u064b-\u065f\u0670]/g, '');
+}
+function latinFont() {
+  const candidates = [process.env.CAPCUTCTL_LATIN_FONT,
+    '/System/Library/Fonts/Supplemental/Arial Unicode.ttf',
+    '/Library/Fonts/Arial Unicode.ttf'];
+  const result = candidates.find(p => p && fs.existsSync(p));
+  if (!result) fail('CAPTION_FONT_MISSING', 'Mixed Latin cues require Arial Unicode; set CAPCUTCTL_LATIN_FONT to your licensed font file.');
+  return result;
+}
+function ownedDigest(doc, track) {
+  const ids = new Set(track.segments.map(s => s.material_id));
+  const clean = structuredClone(track);
+  for (const s of clean.segments) s.desc = '';
+  return hash({track:clean, texts:(doc.materials.texts || []).filter(m => ids.has(m.id))});
 }
 
-export function parseSrt(text) {
-  const source = String(text || '').replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n').trim();
-  if (!source) return [];
-  const cues = [];
-  for (const block of source.split(/\n{2,}/)) {
-    const lines = block.split('\n');
-    const timingIndex = lines.findIndex(line => line.includes('-->'));
-    if (timingIndex < 0) continue;
-    const [left, right] = lines[timingIndex].split('-->').map(value => value.trim());
-    if (!left || !right) throw new CapcutError('Malformed SRT timing line.', { code: 'CAPTION_BAD_TIME', exitCode: 2 });
-    const startUs = parseClock(left);
-    const endUs = parseClock(right.split(/\s+/)[0]);
-    const cueText = lines.slice(timingIndex + 1).join('\n').trim();
-    if (!cueText) continue;
-    cues.push({ startUs, endUs, text: cueText });
-  }
-  return cues;
-}
-
-function normalizeCue(raw, index) {
-  if (!raw || typeof raw !== 'object') {
-    throw new CapcutError(`Caption cue ${index + 1} must be an object.`, { code: 'CAPTION_BAD_CUE', exitCode: 2 });
-  }
-  const text = String(raw.text ?? raw.caption ?? '').trim();
-  if (!text) throw new CapcutError(`Caption cue ${index + 1} has no text.`, { code: 'CAPTION_BAD_CUE', exitCode: 2 });
-
-  const startUs = raw.startUs != null ? Number(raw.startUs)
-    : raw.start_us != null ? Number(raw.start_us)
-      : raw.start != null ? US(raw.start)
-        : NaN;
-  let endUs = raw.endUs != null ? Number(raw.endUs)
-    : raw.end_us != null ? Number(raw.end_us)
-      : raw.end != null ? US(raw.end)
-        : NaN;
-  if (!Number.isFinite(endUs)) {
-    if (raw.durationUs != null) endUs = startUs + Number(raw.durationUs);
-    else if (raw.duration_us != null) endUs = startUs + Number(raw.duration_us);
-    else if (raw.duration != null) endUs = startUs + US(raw.duration);
-  }
-  if (!Number.isFinite(startUs) || startUs < 0 || !Number.isFinite(endUs) || endUs <= startUs) {
-    throw new CapcutError(`Caption cue ${index + 1} has an invalid time range.`, {
-      code: 'CAPTION_BAD_TIME', exitCode: 2, details: { startUs, endUs }
-    });
-  }
-  return { startUs: Math.round(startUs), endUs: Math.round(endUs), text };
-}
-
-export function normalizeCaptionCues(value) {
-  const rows = Array.isArray(value) ? value
-    : Array.isArray(value?.cues) ? value.cues
-      : Array.isArray(value?.segments) ? value.segments
-        : null;
-  if (!rows) {
-    throw new CapcutError('Caption JSON must be an array, {cues:[...]}, or Whisper-style {segments:[...]}.', {
-      code: 'CAPTION_BAD_FILE', exitCode: 2
-    });
-  }
-  const cues = rows.map(normalizeCue).sort((a, b) => a.startUs - b.startUs || a.endUs - b.endUs);
-  for (let i = 1; i < cues.length; i++) {
-    if (cues[i].startUs < cues[i - 1].endUs) {
-      throw new CapcutError(`Caption cues overlap at ${S(cues[i].startUs).toFixed(3)}s.`, {
-        code: 'CAPTION_OVERLAP', exitCode: 2,
-        details: { previous: cues[i - 1], current: cues[i] }
-      });
+export function validateCaptionCues(cues, duration) {
+  if (!Array.isArray(cues) || !cues.length || cues.length > 10000) fail('CAPTION_CUES', 'Supply 1–10000 word cues.');
+  let previous = -1; const ids = new Set();
+  return cues.map((cue, index) => {
+    const {start, end, text} = cue || {}, position = cue?.position ?? 20;
+    if (typeof start !== 'number' || typeof end !== 'number' || !Number.isFinite(start) || !Number.isFinite(end)
+        || start < 0 || end <= start || start <= previous || end > duration + .001) {
+      fail('CAPTION_TIMING', `Cue ${index + 1} must have finite, ordered, unique times inside the project content.`);
     }
-  }
-  return cues;
-}
-
-export function loadCaptionCues(file) {
-  const resolved = path.resolve(file);
-  if (!fs.existsSync(resolved)) {
-    throw new CapcutError(`Caption file not found: ${resolved}`, { code: 'CAPTION_FILE_MISSING', exitCode: 2 });
-  }
-  const text = fs.readFileSync(resolved, 'utf8');
-  if (/\.srt$/i.test(resolved)) return normalizeCaptionCues(parseSrt(text));
-  let parsed;
-  try { parsed = JSON.parse(text); }
-  catch (error) {
-    throw new CapcutError(`Caption file is neither .srt nor valid JSON: ${error.message}`, {
-      code: 'CAPTION_BAD_FILE', exitCode: 2
-    });
-  }
-  return normalizeCaptionCues(parsed);
-}
-
-function updateTextMaterial(template, id, text) {
-  const material = clone(template);
-  material.id = id;
-  material.sub_type = 1;
-  material.name = '';
-  material.recognize_text = text;
-  const content = JSON.parse(material.content || '{}');
-  content.text = text;
-  if (!Array.isArray(content.styles) || !content.styles.length) content.styles = [{}];
-  content.styles[0].range = [0, text.length];
-  material.content = JSON.stringify(content);
-  return material;
-}
-
-function captionTrack(doc, template, name, seed) {
-  const existing = (doc.tracks || []).find(track => track.type === 'text' && track.name === name);
-  if (existing) {
-    const foreign = (existing.segments || []).find(segment => !String(segment.desc || '').startsWith(TAG));
-    if (foreign) {
-      throw new CapcutError(`Text track "${name}" already contains non-capcutctl segments. Choose another --track.`, {
-        code: 'CAPTION_TRACK_OCCUPIED', exitCode: 2, details: { track: name, segment: foreign.id }
-      });
+    if (cue.id == null || ids.has(String(cue.id))) fail('CAPTION_ID', 'Cue IDs must be present and unique.');
+    if (typeof text !== 'string' || !text.trim() || text.length > 120 || text.trim().split(/\s+/).length > 2) {
+      fail('CAPTION_TEXT', `Cue ${cue.id} must contain one word or a glued particle pair.`);
     }
-    const oldIds = new Set((existing.segments || []).map(segment => segment.material_id).filter(Boolean));
-    doc.materials.texts = (doc.materials.texts || []).filter(material => !oldIds.has(material.id));
-    existing.segments = [];
-    return existing;
-  }
-  const track = clone(template);
-  track.id = seededId(seed, `caption:track:${name}`);
-  track.name = name;
-  track.is_default_name = false;
-  track.segments = [];
-  (doc.tracks ||= []).push(track);
-  return track;
+    if (typeof position !== 'number' || !Number.isFinite(position) || position < 5 || position > 85) {
+      fail('CAPTION_POSITION', `Cue ${cue.id}: position must be 5–85 percent from the bottom.`);
+    }
+    ids.add(String(cue.id)); previous = start;
+    return {...cue, text:text.trim(), position};
+  });
 }
 
-export function opCaption(doc, op = {}, context = {}) {
-  const cues = normalizeCaptionCues(op.cues || []);
-  if (!cues.length) throw new CapcutError('caption requires at least one cue.', { code: 'CAPTION_EMPTY', exitCode: 2 });
-
-  const trackName = String(op.track || 'captions').trim();
-  if (!trackName) throw new CapcutError('caption --track cannot be empty.', { code: 'CAPTION_BAD_TRACK', exitCode: 2 });
-  const scale = op.scale == null ? 1 : Number(op.scale);
-  const y = op.y == null ? null : Number(op.y);
-  if (!Number.isFinite(scale) || scale <= 0 || scale > 8) {
-    throw new CapcutError('caption --scale must be greater than 0 and no more than 8.', { code: 'CAPTION_BAD_STYLE', exitCode: 2 });
+/** Ordinary text segments; no subtitle recognition task, effect resource, or baked media. */
+export function opCaptions(doc, op, context = {}) {
+  const name = op.name ?? 'suheil';
+  if (!/^[\w.-]{1,80}$/.test(name)) fail('CAPTION_NAME', 'Use a stable alphanumeric name.');
+  const duration = contentEndUs(doc, context.projectDir) / 1e6;
+  const cues = validateCaptionCues(op.cues, duration);
+  const language = op.language || 'ar';
+  const fingerprint = hash({name, cues, language, profile:'suheil-native-v1'});
+  const trackName = `captions:${name}`;
+  const owned = doc.tracks.filter(t => t.name?.startsWith('captions:'));
+  if (owned.length) {
+    const track = owned[0];
+    if (owned.length === 1 && track.name === trackName) {
+      const marker = `${trackName}:${fingerprint}:${ownedDigest(doc,track)}`;
+      if (track.segments.length && track.segments.every(s => s.desc === marker)) return {changed:0, unchanged:true, name};
+    }
+    fail('CAPTION_CONFLICT', 'Caption layers already exist or were edited. Preserve them; explicitly remove them before generating a replacement.');
   }
-  if (y != null && (!Number.isFinite(y) || y < -2 || y > 2)) {
-    throw new CapcutError('caption --y must be between -2 and 2.', { code: 'CAPTION_BAD_STYLE', exitCode: 2 });
+  const fonts = cues.map(c => /[a-z]/i.test(c.text) ? {path:latinFont(), name:'Arial Unicode MS'} : {path:CHANGA,name:'Changa ExtraBold'});
+  for (const font of fonts) if (!fs.existsSync(font.path)) fail('CAPTION_FONT_MISSING', font.path);
+  const template = loadPreset('motion').text;
+  const sourceTrack = template.tracks.find(t => t.type === 'text');
+  const sourceText = template.materials.texts[0];
+  const mint = key => seededId(op.__seed || fingerprint, `${trackName}:${key}`);
+  const track = {...structuredClone(sourceTrack),id:mint('track'),name:trackName,is_default_name:false,segments:[]};
+  const materials = [];
+  // Native size/stroke calibration is provisional until an unlocked CapCut pixel comparison.
+  // 15 native text units is the initial 90px-at-1080p target, not a claim of pixel parity.
+  const nativeSize = 15;
+  for (const [i,cue] of cues.entries()) {
+    const font = fonts[i];
+    const fontPath = context.projectDir ? localizeMedia(context.projectDir,font.path,undefined,{dryRun:context.dryRun}) : font.path;
+    const text = captionDisplayText(cue.text,language);
+    const mat = structuredClone(sourceText), seg = structuredClone(sourceTrack.segments[0]);
+    mat.id = mint(`text:${cue.id}`);
+    const style = {
+      fill:{alpha:1,content:{render_type:'solid',solid:{alpha:1,color:[1,1,1]}}},
+      font:{id:'',path:fontPath},range:[0,text.length],size:nativeSize,
+      strokes:[{content:{solid:{alpha:1,color:[0,0,0]}},width:4/90}],
+    };
+    Object.assign(mat, {content:JSON.stringify({styles:[style],text}),font_name:font.name,font_title:font.name,
+      font_path:fontPath,font_size:nativeSize,check_flag:15,alignment:1,has_shadow:false,background_style:0,
+      border_color:'#000000',border_width:4/90,border_alpha:1,text_color:'#FFFFFF',recognize_task_id:'',
+      recognize_text:'',type:'text',language,words:{start_time:[],end_time:[],text:[]}});
+    // Match Staging's half-open windows, retaining original timings in command output.
+    const start = Math.round(cue.start*1e6);
+    const end = Math.min(Math.round(cue.end*1e6),i+1<cues.length ? Math.round(cues[i+1].start*1e6)-1000 : Infinity);
+    if (end <= start) fail('CAPTION_TIMING', `Cue ${cue.id} has no drawable window.`);
+    Object.assign(seg,{id:mint(`segment:${cue.id}`),material_id:mat.id,extra_material_refs:[],
+      target_timerange:{start,duration:end-start},source_timerange:null,common_keyframes:[],keyframe_refs:[],
+      render_index:14000+doc.tracks.length,track_render_index:doc.tracks.length,caption_info:null,enable_video_mask:false});
+    seg.clip.scale={x:1,y:1}; seg.clip.transform={x:0,y:(cue.position-50)/50};
+    seg.clip.rotation=0; seg.clip.alpha=1;
+    materials.push(mat); track.segments.push(seg);
   }
-
-  const end = contentEndUs(doc, context.projectDir);
-  if (end > 0 && cues.at(-1).endUs > end + 1000) {
-    throw new CapcutError(`Last caption ends at ${S(cues.at(-1).endUs).toFixed(3)}s, after content ends at ${S(end).toFixed(3)}s.`, {
-      code: 'CAPTION_PAST_END', exitCode: 2
-    });
-  }
-
-  const preset = loadPreset('signature');
-  const seed = op.__seed || `caption:${trackName}`;
-  const track = captionTrack(doc, preset.textTrackTemplate, trackName, seed);
-  const texts = (doc.materials.texts ||= []);
-
-  for (let index = 0; index < cues.length; index++) {
-    const cue = cues[index];
-    const materialId = seededId(seed, `caption:material:${index}`);
-    const segmentId = seededId(seed, `caption:segment:${index}`);
-    texts.push(updateTextMaterial(preset.textMaterialTemplate, materialId, cue.text));
-
-    const segment = clone(preset.textSegmentTemplate);
-    segment.id = segmentId;
-    segment.material_id = materialId;
-    segment.desc = `${TAG}:${trackName}`;
-    segment.source_timerange = null;
-    segment.target_timerange = { start: cue.startUs, duration: cue.endUs - cue.startUs };
-    segment.extra_material_refs = [];
-    segment.keyframe_refs = [];
-    segment.common_keyframes = [];
-    segment.clip = clone(segment.clip || {});
-    segment.clip.scale = { x: scale, y: scale };
-    segment.clip.transform = clone(segment.clip.transform || { x: 0, y: 0 });
-    if (y != null) segment.clip.transform.y = y;
-    track.segments.push(segment);
-  }
-
-  track.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
-  return {
-    changed: cues.length,
-    track: trackName,
-    first: { at: S(cues[0].startUs), text: cues[0].text },
-    last: { at: S(cues.at(-1).startUs), text: cues.at(-1).text }
-  };
+  (doc.materials.texts ||= []).push(...materials); doc.tracks.push(track);
+  const marker = `${trackName}:${fingerprint}:${ownedDigest(doc,track)}`;
+  for (const seg of track.segments) seg.desc = marker;
+  return {changed:cues.length,name,track:track.id,editable:true,nativeVerified:false,
+    warning:'Native font/stroke pixel parity and Arabic playback still require CapCut visual review.'};
 }

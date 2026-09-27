@@ -20,13 +20,14 @@ import { opPunch } from './punch.mjs';
 import { opStressZoom } from './stress.mjs';
 import { opSignature } from './signature.mjs';
 import { opMotion } from './motion.mjs';
+import { opCaptions } from './captions.mjs';
 import {
   opClipAdd, opReplaceMedia, opScaleKeyframe,
   opClipShift, opClipTrim, opClipFade, opLocalizeAll
 } from './add.mjs';
 import { opMusic } from './music.mjs';
 import { opLoudness } from './loudness.mjs';
-import { opCaption } from './captions.mjs';
+import { opCaption } from './captions-srt.mjs';
 import { opMographPlace, opMographPrune } from './mograph-place.mjs';
 import { opAnimation } from './animations.mjs';
 import { isPreframed } from './origin.mjs';
@@ -2894,6 +2895,7 @@ export function applyOperations(doc, operations, context) {
     else if (op.op === 'zoom.stress') result = opStressZoom(doc, op, context);
     else if (op.op === 'signature') result = opSignature(doc, op, context);
     else if (op.op === 'motion') result = opMotion(doc, op, context);
+    else if (op.op === 'captions') result = opCaptions(doc, op, context);
     else if (op.op === 'clip.add') result = opClipAdd(doc, op, context);
     else if (op.op === 'replace.media') result = opReplaceMedia(doc, op, context);
     else if (op.op === 'media.localize') result = opLocalizeAll(doc, op, context);
