@@ -125,4 +125,4 @@ jobs:
         run: |
           set -euo pipefail
           shellcheck --version
-          find . -name '*.sh' -not -path './node_modules/*' -print -exec shellcheck {} +
+          git ls-files --cached --others --exclude-standard -z -- '*.sh' | xargs -0 shellcheck

@@ -35,6 +35,7 @@
       "replace-media",
       "restore",
       "rm",
+      "screen-motion",
       "shift",
       "sync",
       "trim",
@@ -187,14 +188,16 @@
     },
     "cursor": {
       "group": "camera",
-      "summary": "Native halo that follows recorded pointer telemetry.",
-      "example": "capcutctl cursor --project NAME --auto --plan",
+      "summary": "Editable halo or polished spring pointer and click ripples from recorded telemetry.",
+      "example": "capcutctl cursor --project NAME --auto --style polished --plan",
       "options": [
         "--auto",
         "--dry-run",
         "--plan",
         "--project",
-        "--segment"
+        "--segment",
+        "--size",
+        "--style"
       ],
       "transactional": true
     },
@@ -992,6 +995,24 @@
         "--transcript"
       ],
       "transactional": false
+    },
+    "screen-motion": {
+      "group": "camera",
+      "summary": "Sparse native eased zooms and connected pans across screen targets.",
+      "example": "capcutctl screen-motion --project NAME --segment ID --regions regions.json --plan",
+      "options": [
+        "--connect-gap",
+        "--dry-run",
+        "--glide",
+        "--plan",
+        "--project",
+        "--regions",
+        "--replace",
+        "--segment",
+        "--zoom-in",
+        "--zoom-out"
+      ],
+      "transactional": true
     },
     "shift": {
       "group": "broll",

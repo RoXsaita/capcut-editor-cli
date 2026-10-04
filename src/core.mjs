@@ -16,6 +16,7 @@ import { opBlurBroll } from './derived-media.mjs';
 import { opDenoise } from './denoise.mjs';
 import { opReframe } from './reframe.mjs';
 import { opCursor } from './cursor.mjs';
+import { opScreenMotion } from './screen-camera.mjs';
 import { opPunch } from './punch.mjs';
 import { opStressZoom } from './stress.mjs';
 import { opSignature } from './signature.mjs';
@@ -2890,6 +2891,7 @@ export function applyOperations(doc, operations, context) {
     else if (op.op === 'blur-broll') result = opBlurBroll(doc, op, context);
     else if (op.op === 'reframe') result = opReframe(doc, op, context);
     else if (op.op === 'cursor') result = opCursor(doc, op, context);
+    else if (op.op === 'screen.motion') result = opScreenMotion(doc, op, context);
     else if (op.op === 'punch') result = opPunch(doc, op, context);
     else if (op.op === 'zoom.stress') result = opStressZoom(doc, op, context);
     else if (op.op === 'signature') result = opSignature(doc, op, context);

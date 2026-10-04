@@ -48,7 +48,7 @@ def _opencode(prompt, work):
     argv = ['opencode', 'run']
     if os.environ.get('CAPCUTCTL_OPENCODE_MODEL'):
         argv += ['-m', os.environ['CAPCUTCTL_OPENCODE_MODEL']]
-    return subprocess.run(argv + [prompt], text=True, capture_output=True, cwd=work,
+    return subprocess.run([*argv, prompt], text=True, capture_output=True, cwd=work,
                           timeout=TIMEOUT, check=True).stdout
 
 

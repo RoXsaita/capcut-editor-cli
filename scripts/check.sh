@@ -130,8 +130,9 @@ fi
 
 stage "shellcheck"
 if have shellcheck; then
-    # find -exec, not $(...): macOS ships bash 3.2, which has no mapfile.
-    if find . -name '*.sh' -not -path './node_modules/*' -exec shellcheck {} +; then
+    # Include new project scripts, exclude ignored dependencies/cache files, and
+    # still lint every tracked script even if its directory is now gitignored.
+    if git ls-files --cached --others --exclude-standard -z -- '*.sh' | xargs -0 shellcheck; then
         ok "shell clean"
     else
         fail "shellcheck"

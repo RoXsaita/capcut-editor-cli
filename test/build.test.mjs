@@ -61,6 +61,18 @@ test('gate fails a static full-face edit and names why', () => {
   assert.match(report.scope, /cannot see pixels/);
 });
 
+test('gate does not count word captions as graphic entrances', () => {
+  const doc = docOf(buildProject());
+  const words = Array.from({ length: 12 }, (_, i) => ({ id: `cap-${i}`, desc: 'captions:suheil:x:y',
+    target_timerange: { start: i * 100000, duration: 100000 } }));
+  const before = gateReport(doc).checks;
+  doc.tracks.push({ id: 'CAPTIONS', type: 'text', name: 'captions:suheil', segments: words });
+  const after = gateReport(doc).checks;
+  for (const id of ['simultaneity', 'entrance-spacing']) {
+    assert.deepEqual(after.find(c => c.id === id), before.find(c => c.id === id), `${id} ignores the caption track`);
+  }
+});
+
 async function browserOr(t) {
   try {
     const { probeMograph } = await import('../src/mograph.mjs');

@@ -3,6 +3,7 @@ import { CapcutError, seededId, allSegments, clone, removeUnreferencedMaterials 
 import { brollWindows, findRl2Sessions, loadSession, windowsForSession, eventVt, principalTrack } from './polish.mjs';
 import { opClipAdd, writeCameraPath } from './add.mjs';
 import { applyFreeCurve, keyframeValue, simplifyMotion } from './easing.mjs';
+import { planPolishedCursor, opPolishedCursor } from './polished-cursor.mjs';
 
 const US = s => Math.round(s * 1e6);
 const fail = m => { throw new CapcutError(m, { code: 'CURSOR_UNSUPPORTED', exitCode: 2 }); };
@@ -27,6 +28,7 @@ function position(doc, segment, material, p) {
 }
 
 export function planCursor(doc, op = {}, context = {}) {
+  if (op.style && op.style !== 'halo') return planPolishedCursor(doc, op, context);
   if (!!op.segment === !!op.auto) fail('cursor requires --segment ID or --auto.');
   const windows = brollWindows(doc, context).filter(w=>op.auto || w.id===op.segment);
   if (op.segment && !windows.length) fail('Select a visible B-roll recording below the face.');
@@ -80,6 +82,7 @@ export function planCursor(doc, op = {}, context = {}) {
 }
 
 export function opCursor(doc, op, context = {}) {
+  if (op.style && op.style !== 'halo') return opPolishedCursor(doc, op, context);
   const plan=planCursor(doc,op,context);
   if(op.plan || !plan.clips.length) return {changed:0,...plan};
   const ids=new Set(plan.clips.map(c=>c.id));

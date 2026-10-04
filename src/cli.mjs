@@ -301,8 +301,14 @@ Usage:
                       — opt-in motion-compensated mix for muted B-roll already at ≥8x.
   capcutctl reframe --project NAME --segment ID | --auto [--plan] [--dry-run]
                       — on-device face camera path; masked/existing moves are excluded.
-  capcutctl cursor --project NAME --segment ID | --auto [--plan] [--dry-run]
-                      — native telemetry halo; missing pointer samples are skipped.
+  capcutctl cursor --project NAME --segment ID | --auto [--style halo|polished] [--size 2.5] [--plan] [--dry-run]
+                      polished: editable spring pointer + blue click ripples from cursor-free rl2 captures.
+                      Apply screen-motion first, then cursor; rerun cursor after camera/cut changes.
+  capcutctl screen-motion --project NAME --segment ID --regions FILE.json
+                      [--zoom-in 0.65] [--zoom-out 0.7] [--connect-gap 1.5] [--glide 1]
+                      [--replace] [--plan] [--dry-run]
+                      regions: [{start,end,focus:[x,y,width,height]}], timeline seconds/source pixels.
+                      Native eased camera: four poses per isolated zoom; connected targets glide without returning wide.
   capcutctl music               --project NAME [--plan] [--regen] [--volume 0.08] [--prompt TEXT] [--file FILE] [--hits S[,S...]] [--offset S] [--width 64] [--json]
                                 --duck [--under-db 12] [--attack-ms 120] [--release-ms 380] [--min-gap-ms 450]
                                 [--track N] [--words FILE] ducks an existing bed from speech indexes; --plan writes nothing.
@@ -371,7 +377,7 @@ export function parseArgs(argv) {
          'waitForClose', 'force', 'reindex', 'noRepair', 'inPlace',
          'generated', 'allowEphemeral', 'measure', 'apply', 'native', 'noCache', 'noGrade',
          'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'noEase', 'easePosition', 'stress', 'allowBoost', 'values',
-         'faceDetail', 'replaceExisting', 'record', 'allowUnsafe', 'markdown', 'brief'].includes(key)) result[key] = true;
+         'faceDetail', 'replaceExisting', 'replace', 'record', 'allowUnsafe', 'markdown', 'brief'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
       const value = argv[++i];
@@ -1065,7 +1071,7 @@ export async function main(argv, dependencies = {}) {
 
   const NEEDS_PROJECT = new Set([
     'inspect', 'doctor', 'snapshot', 'history', 'restore', 'sync', 'scenes',
-    'denoise', 'blur-broll', 'reframe', 'cursor', 'pace', 'ramp', 'punch', 'match', 'verify-shots', 'captions', 'motion', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
+    'denoise', 'blur-broll', 'reframe', 'cursor', 'screen-motion', 'pace', 'ramp', 'punch', 'match', 'verify-shots', 'captions', 'motion', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
     'replace-media', 'localize', 'trim', 'shift', 'remove', 'volume', 'fade', 'keyframe', 'animate',
     'preview', 'diff', 'apply', 'timeline', 'finish', 'music', 'grade', 'loudness', 'gate', 'build', 'mograph', 'notes'
   ]);
@@ -1741,12 +1747,23 @@ export async function main(argv, dependencies = {}) {
     return print(applySpec(projectDir,{version:1,name:'reframe',operations:[op]},options),true);
   }
   if (command === 'cursor') {
-    const op = { op: 'cursor', segment: args.segment, auto: Boolean(args.auto) };
+    const op = { op: 'cursor', segment: args.segment, auto: Boolean(args.auto), style: args.style,
+      ...(args.size != null ? { size: Number(args.size) } : {}) };
     if (args.plan) {
       const { planCursor } = await import('./cursor.mjs');
       return print(planCursor(await loadWorking(projectDir), op, { projectDir }), true);
     }
     return print(applySpec(projectDir, { version: 1, name: 'cursor', operations: [op] }, options), true);
+  }
+  if (command === 'screen-motion') {
+    if (!args.regions || typeof args.regions !== 'string') throw new CapcutError('screen-motion requires --regions FILE.json.', { exitCode: 2 });
+    const op = { op: 'screen.motion', segment: args.segment, regions: readJson(path.resolve(args.regions)), replace: Boolean(args.replace),
+      ...Object.fromEntries(['zoomIn', 'zoomOut', 'connectGap', 'glide'].filter(k => args[k] != null).map(k => [k, Number(args[k])])) };
+    if (args.plan) {
+      const { planScreenMotion } = await import('./screen-camera.mjs');
+      return print(planScreenMotion(await loadWorking(projectDir), op, { projectDir }), true);
+    }
+    return print(applySpec(projectDir, { version: 1, name: 'screen-motion', operations: [op] }, options), true);
   }
   if (command === 'music' && !args.duck && ['underDb', 'attackMs', 'releaseMs', 'minGapMs', 'words'].some(key => args[key] != null)) {
     throw new CapcutError('Ducking controls require music --duck.', { code: 'MUSIC_OPTIONS', exitCode: 2 });

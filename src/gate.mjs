@@ -44,6 +44,7 @@ export function graphicEvents(doc) {
   const seen = new Set();
   for (const { track, index, segment } of segmentsOf(doc)) {
     const desc = segment.desc || '';
+    if ((track.name || '').startsWith('captions:')) continue;   // word captions are subtitles, not graphic beats
     const isGraphic = GRAPHIC.test(desc) || (track.name || '').startsWith('motion:')
       || track.type === 'text' || (principal && index > principal.index && track.type === 'video'
         && !desc.startsWith('layout:') && !(track.name || '').startsWith('sig-') && !/^mograph-\d+$/.test(track.name || '')

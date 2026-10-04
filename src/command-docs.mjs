@@ -66,7 +66,8 @@ export const COMMAND_DOCS = Object.freeze({
   keyframe: doc('camera', 'Eased camera move: --to scale or --focus a source rectangle.', 'capcutctl keyframe --project NAME --segments ID --at 12 --to 1.3 --hold 1.2 --plan', true),
   pace: doc('camera', 'Speed as arithmetic: compress waiting B-roll, never the face.', 'capcutctl pace --project NAME', true),
   ramp: doc('camera', 'Split a B-roll clip at its result: ramp the wait, land the result at 1x.', 'capcutctl ramp --project NAME --segment ID --speed 20 --dry-run', true),
-  cursor: doc('camera', 'Native halo that follows recorded pointer telemetry.', 'capcutctl cursor --project NAME --auto --plan', true),
+  cursor: doc('camera', 'Editable halo or polished spring pointer and click ripples from recorded telemetry.', 'capcutctl cursor --project NAME --auto --style polished --plan', true),
+  'screen-motion': doc('camera', 'Sparse native eased zooms and connected pans across screen targets.', 'capcutctl screen-motion --project NAME --segment ID --regions regions.json --plan', true),
 
   mograph: doc('graphics', 'Rendered HTML/JS motion graphics: list, preview, render, add on a word, rerender.', 'capcutctl mograph add --project NAME --template keyword-super --params \'{"text":"أسرع"}\' --say "أسرع" --dry-run', true),
   logo: doc('graphics', 'Brand mark pop with its cue, timed off the transcript or --at.', 'capcutctl logo --project NAME --auto --plan', true),
