@@ -93,7 +93,13 @@ def run_vision(exe, paths, dual=True, languages="en-US,ar"):
 
 
 def load_profile_zones():
-    """Safe zones and caption bands: repo presets deep-merged with the user's profile."""
+    """Safe zones and caption bands from the merged profile."""
+    zones = load_profile().get("safeZones") or {}
+    return zones.get("forbidden") or [], zones.get("textBands") or {}
+
+
+def load_profile():
+    """The repo presets deep-merged with the user's profile, as the Node side layers them."""
     def merge(a, b):
         for k, v in b.items():
             a[k] = merge(a.get(k, {}), v) if isinstance(v, dict) and isinstance(a.get(k), dict) else v
@@ -107,8 +113,7 @@ def load_profile_zones():
     if user.exists():
         with contextlib.suppress(ValueError):
             profile = merge(profile, json.loads(user.read_text()))
-    zones = profile.get("safeZones") or {}
-    return zones.get("forbidden") or [], zones.get("textBands") or {}
+    return profile
 
 
 # ---------------------------------------------------------------- text utilities

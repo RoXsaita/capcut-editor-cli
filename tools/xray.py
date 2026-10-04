@@ -54,8 +54,11 @@ POLICY = {
     "dup_d1": 0.0015,             # below this a frame repeats the previous one
     "dup_motion": 0.005,          # ...while its neighbours move at least this much
     "dup_ratio": 10.0,            # ...and at least this many times more than the repeat
-    "loudness_lufs": (-16.0, -12.0),
-    "true_peak_dbtp": -1.0,
+    "loudness_lufs": -14.0,       # the profile's sound.loudnessTarget replaces these at run time
+    "loudness_tolerance_lu": 1.0,
+    "true_peak_dbtp": -1.0,       # the profile's sound.peak
+    "max_static_s": 3.0,          # the profile's density.maxStatic
+    "first_sound_s": 0.5,
     "clip_level": 0.999,
     "clip_run": 3,
     "clip_dense_level": 0.98,     # after lossy encoding, clipping shows as dense near-full-scale samples
@@ -704,7 +707,9 @@ def draft_events(project, export_duration):
             events.append(ev)
     events.sort(key=lambda e: (e["t0"], e["track"]))
     draft_ident = file_identity(path)
+    canvas = tl.get("canvas_config") or {}
     return {"project": proj, "draft_path": path, "draft": draft_ident,
+            "canvas": {"width": canvas.get("width"), "height": canvas.get("height"), "fps": tl.get("fps")},
             "content_range": [round(start, 4), round(end, 4)],
             "content_duration": round(end - start, 4),
             "duration_matches_export": abs((end - start) - export_duration) <= 0.05,
@@ -804,9 +809,26 @@ def fmt_t(t):
 
 # ---------------------------------------------------------------- scan command
 
+def apply_profile():
+    """Hold the export to the same numbers as the gate and check-export: the user's profile."""
+    import xray_text as xt
+    try:
+        prof = xt.load_profile()
+    except (OSError, ValueError):
+        return
+    sound, density = prof.get("sound") or {}, prof.get("density") or {}
+    if sound.get("loudnessTarget") is not None:
+        POLICY["loudness_lufs"] = float(sound["loudnessTarget"])
+    if sound.get("peak") is not None:
+        POLICY["true_peak_dbtp"] = float(sound["peak"])
+    if density.get("maxStatic") is not None:
+        POLICY["max_static_s"] = float(density["maxStatic"])
+
+
 def cmd_scan(args):
     need("ffmpeg")
     need("ffprobe")
+    apply_profile()
     video = args.video
     out = Path(args.out or default_dir(video))
     out.mkdir(parents=True, exist_ok=True)
@@ -836,7 +858,8 @@ def cmd_scan(args):
     if draft:
         annotate_declared(vid, draft, ledger)
     text = text_pass(args, video, ledger, info, out, draft)
-    verdicts = build_verdicts(vid, audio, draft, ledger, sx)
+    verdicts = build_verdicts(vid, audio, draft, ledger, sx,
+                              dims=(info["video"]["width"], info["video"]["height"]))
     verdicts[-len(NOT_CHECKED):-len(NOT_CHECKED)] = text["verdicts"]
     queue, overview = build_queue(vid, ledger, ident, audio, text)
     intent = intent_step(args, text, queue, ledger, verdicts)
@@ -954,9 +977,10 @@ def _shot_of(cuts, n):
     return shots
 
 
-def build_verdicts(vid, audio, draft, ledger, sx):
+def build_verdicts(vid, audio, draft, ledger, sx, dims=(0, 0)):
     P = POLICY
     v = []
+    ledger_info_dims = dims
 
     def add(prop, verdict, detail, origin="M", where=None):
         item = {"property": prop, "verdict": verdict, "detail": detail, "origin": origin}
@@ -970,6 +994,18 @@ def build_verdicts(vid, audio, draft, ledger, sx):
     by = {}
     for f in vid["findings"]:
         by.setdefault(f["kind"], []).append(f)
+    n_frames = ledger["frames"]
+    edges = {"open": [], "tail": []}
+    for kind in ("black_frames", "white_frames"):
+        keep = []
+        for h in by.get(kind, []):
+            if kind == "black_frames" and h["frames"][0] == 0:
+                edges["open"].append(h)
+            elif kind == "black_frames" and h["frames"][1] >= n_frames - 1:
+                edges["tail"].append(h)
+            else:
+                keep.append(h)
+        by[kind] = keep
     for kind, prop, bad in (("black_frames", "video.black_frames", "FAIL"),
                             ("white_frames", "video.white_flash", "FAIL"),
                             ("glitch", "video.one_or_two_frame_glitch", "FAIL"),
@@ -1000,6 +1036,19 @@ def build_verdicts(vid, audio, draft, ledger, sx):
             note += f"; {len(declared)} inside a declared transition ({', '.join(sorted({h['declared'] for h in declared}))})"
         add(prop, verdict, f"{len(hits)} event(s): " + ", ".join(where[:6]) + (" …" if len(hits) > 6 else "") + note,
             where=[h["frames"] for h in hits])
+    fps = 1 / (ledger["frame_step_pts"]["median"] * ledger["_tb"])
+    o = edges["open"]
+    add("video.opens_black", "UNKNOWN" if o else "PASS",
+        f"opens on {o[0]['count'] / fps:.2f}s of black: the first frame is the thumbnail and the scroll-stopper"
+        if o else "the first frame has picture")
+    tl_ = edges["tail"]
+    add("video.black_tail", "UNKNOWN" if tl_ else "PASS",
+        f"ends on {tl_[0]['count'] / fps:.2f}s of black: cut it unless it is a deliberate fade" if tl_ else "no black tail")
+    still = vid.get("longest_static")
+    still_s = (still[1] - still[0] + 1) / fps if still else 0.0
+    add("video.frozen", "UNKNOWN" if still_s > P["max_static_s"] else "PASS",
+        f"longest still picture {still_s:.2f}s (profile maxStatic {P['max_static_s']}s)"
+        + (f" at f{still[0]:05d}-f{still[1]:05d}" if still_s > P["max_static_s"] else ""))
     add("video.letterbox", "UNKNOWN" if vid["letterbox"] else "PASS",
         "dark bands at top and bottom in >95% of frames" if vid["letterbox"] else "no persistent bands")
 
@@ -1009,25 +1058,31 @@ def build_verdicts(vid, audio, draft, ledger, sx):
             add(prop, "NOT CHECKED", "no audio stream")
     else:
         L = audio["loudness"]
-        lo, hi = P["loudness_lufs"]
+        target, tol = P["loudness_lufs"], P["loudness_tolerance_lu"]
         il = L.get("integrated_lufs")
-        add("audio.loudness", "UNKNOWN" if il is None else ("PASS" if lo <= il <= hi else "FAIL"),
-            f"{il} LUFS integrated (policy {lo}..{hi}), LRA {L.get('lra_lu')} LU")
+        # Off-target loudness is a warning, as in check-export; the platform normalises it.
+        add("audio.loudness", "UNKNOWN" if il is None or abs(il - target) > tol else "PASS",
+            f"{il} LUFS integrated (profile target {target} ±{tol} LU), LRA {L.get('lra_lu')} LU")
         tp = L.get("true_peak_dbtp")
-        add("audio.true_peak", "UNKNOWN" if tp is None else ("PASS" if tp <= P["true_peak_dbtp"] else "FAIL"),
+        add("audio.true_peak", "UNKNOWN" if tp is None else ("PASS" if tp <= P["true_peak_dbtp"] + 0.05 else "FAIL"),
             f"{tp} dBTP (policy ≤ {P['true_peak_dbtp']})")
         kinds = {}
         for f in audio["findings"]:
             kinds.setdefault(f["kind"], []).append(f)
         clips = kinds.get("clipping", [])
         add("audio.clipping", "FAIL" if clips else "PASS",
-            (f"{len(clips)} run(s) of ≥{P['clip_run']} samples at full scale, first at "
-             + ", ".join(fmt_t(c["t"]) for c in clips[:5])) if clips else "no full-scale runs in any sample")
+            (f"{len(clips)} stretch(es) at or near full scale (a run of {P['clip_run']}+ samples at "
+             f"{P['clip_level']}, or {P['clip_dense_count']}+ at {P['clip_dense_level']} in 10 ms): "
+             + ", ".join(fmt_t(c["t"]) for c in clips[:5])) if clips else "no sample stretch at or near full scale")
         clicks = kinds.get("click", [])
         add("audio.clicks", "UNKNOWN" if clicks else "PASS",
             (f"{len(clicks)} candidate(s) at " + ", ".join(fmt_t(c["t"]) for c in clicks[:6])
              + (" …" if len(clicks) > 6 else "") + "; may be intended transients, listen") if clicks
             else "no sample jumps off the local curve")
+        lead = [s for s in kinds.get("silence", []) if s["where"] == "start"]
+        first = lead[0]["dur_s"] if lead else 0.0
+        add("audio.first_sound", "UNKNOWN" if first > P["first_sound_s"] else "PASS",
+            f"silent until {first:.2f}s: the hook starts late" if first > P["first_sound_s"] else f"sound from {first:.2f}s")
         sil = [s for s in kinds.get("silence", []) if s["where"] == "inside"]
         add("audio.silence", "UNKNOWN" if sil else "PASS",
             (f"{len(sil)} gap(s) ≥{P['silence_min_s']}s below {P['silence_dbfs']} dBFS: "
@@ -1048,6 +1103,13 @@ def build_verdicts(vid, audio, draft, ledger, sx):
             verdict = "UNKNOWN"
             notes.append("draft was saved after this export")
         add("draft.match", verdict, "; ".join(notes) or "draft content length matches the export", origin="A")
+        cv = draft.get("canvas") or {}
+        w, h = int(ledger_info_dims[0]), int(ledger_info_dims[1])
+        if cv.get("width") and cv.get("height"):
+            same = (w, h) == (int(cv["width"]), int(cv["height"]))
+            fps_ok = not cv.get("fps") or abs(fps - float(cv["fps"])) < 0.02
+            add("export.canvas", "PASS" if same and fps_ok else "FAIL",
+                f"{w}x{h} at {fps:g} fps" + ("" if same and fps_ok else f" (the draft is {cv['width']}x{cv['height']} at {cv.get('fps')} fps)"))
         declared = sorted({round(e["t0"], 4) for e in draft["events"] if e["type"] in ("video",)} |
                           {round(e["t1"], 4) for e in draft["events"] if e["type"] in ("video",)})
         dframes = {frame_at(ledger, max(0.0, t)) for t in declared if t < ledger["duration_s"]}
