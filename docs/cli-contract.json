@@ -365,7 +365,8 @@
         "--profile",
         "--project",
         "--record",
-        "--style"
+        "--style",
+        "--xray"
       ],
       "transactional": false
     },

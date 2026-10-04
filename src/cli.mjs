@@ -240,11 +240,12 @@ Usage:
                         seams, music aligned to the graphics, duck, loudness, then the gate.
                         Graphics anchor to SOURCE words, so a recut rebuilds exactly; an
                         unchanged plan on an unchanged cut is a no-op. Exit 1 when the gate fails.
-  capcutctl gate                --project NAME [--profile FILE] [--style NAME] [--record] [--json]
+  capcutctl gate                --project NAME [--profile FILE] [--style NAME] [--record] [--json] [--xray DIR]
                       — the blocking ready-to-post check: hook, proof, longest static stretch,
                         crowding, template repeats, safe zones, graphics without a sound, seams.
                         Thresholds come from the profile; --style NAME applies that style's pace (build
                         passes edit.json's "style"). Exit 1 on FAIL; WARNs go in the hand-off.
+                        --xray DIR folds an export X-ray in: its FAILs block, its UNKNOWNs warn.
   capcutctl profile show        [--profile FILE] [--json]   — the effective style profile (tokens, brand, styles, camera, sound, density, grammar);
                         bare "capcutctl profile" is the same
   capcutctl profile where       [--profile FILE]   — each layer in merge order (bundled → yours → --profile) and whether it exists
@@ -1605,6 +1606,10 @@ export async function main(argv, dependencies = {}) {
     const { loadProfile, applyStyle } = await import('./profile.mjs');
     const profile = applyStyle(loadProfile({ file: args.profile || null }), args.style || null);
     const report = gateReport(await loadWorking(projectDir), { projectDir, profile });
+    if (args.xray) {
+      const { foldXray } = await import('./gate.mjs');
+      foldXray(report, args.xray, projectDir);
+    }
     if (args.record) report.recorded = writeGateRecord(projectDir, report);
     if (report.verdict === 'FAIL') process.exitCode = 1;
     return args.json ? print(report, true) : print(gateText(report));

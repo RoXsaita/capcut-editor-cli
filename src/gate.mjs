@@ -246,6 +246,46 @@ export function gateReport(doc, { projectDir = null, profile = loadProfile() } =
   };
 }
 
+/**
+ * Fold an export X-ray (capcutctl xray scan --project) into a gate report. The draft says what
+ * was configured; the X-ray says what the export shows. Its FAIL verdicts block, its UNKNOWNs
+ * warn (they must be named in the hand-off), and what it could not check is listed, never passed.
+ */
+export function foldXray(report, xrayDir, projectDir) {
+  const file = path.join(path.resolve(xrayDir), 'xray.json');
+  let doc;
+  try { doc = JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch (error) {
+    report.checks.push({ id: 'xray', level: 'FAIL', ok: false, message: `cannot read ${file}: ${error.message}`, value: null, target: null });
+    return finalise(report);
+  }
+  const add = (id, level, ok, message) => report.checks.push({ id, level, ok, message, value: null, target: null });
+  const draftPath = doc.draft?.draft_path;
+  if (!doc.draft) add('xray-draft', 'WARN', false, 'the X-ray was scanned without --project; it cannot be tied to this draft');
+  else if (projectDir && path.resolve(doc.draft.project) !== path.resolve(projectDir)) {
+    add('xray-draft', 'FAIL', false, `the X-ray is of another project (${path.basename(doc.draft.project)})`);
+  } else if (draftPath && fs.existsSync(draftPath) && fs.statSync(draftPath).mtimeMs * 1e6 > (doc.export?.mtime_ns || 0)) {
+    add('xray-draft', 'WARN', false, 'the draft was saved after the exported video; re-export if anything changed');
+  } else add('xray-draft', 'WARN', true, 'X-ray is of this draft\'s export');
+  const notChecked = [];
+  for (const v of doc.verdicts || []) {
+    if (v.verdict === 'NOT CHECKED') { notChecked.push(v.property); continue; }
+    add(`xray:${v.property}`, v.verdict === 'FAIL' ? 'FAIL' : 'WARN', v.verdict === 'PASS', v.detail);
+  }
+  report.xray = { dir: path.resolve(xrayDir), export: doc.export?.path, sha256: doc.export?.sha256, notChecked };
+  report.scope = `Draft structure plus the export X-ray (every frame and sample measured). Not checked: ${notChecked.join(', ') || 'nothing'}.`;
+  return finalise(report);
+}
+
+function finalise(report) {
+  const failed = report.checks.filter(c => !c.ok && c.level === 'FAIL');
+  const warned = report.checks.filter(c => !c.ok && c.level === 'WARN');
+  report.failed = failed.map(c => c.id);
+  report.warned = warned.map(c => c.id);
+  report.verdict = failed.length ? 'FAIL' : warned.length ? 'WARN' : 'PASS';
+  return report;
+}
+
 export function gateText(report) {
   const mark = c => (c.ok ? 'ok  ' : c.level === 'FAIL' ? 'FAIL' : 'warn');
   const lines = [`gate: ${report.verdict}  (profile ${report.profile}, ${report.duration}s)`];
