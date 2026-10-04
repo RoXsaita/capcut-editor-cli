@@ -67,7 +67,6 @@ POLICY = {
 
 NOT_CHECKED = [
     ("layout.logos", "logo and brand-mark tracking is not built; text, numbers and faces are"),
-    ("intent.claims", "phase 4: narrative beats and screen evidence are not built yet"),
     ("sync.lip", "no lip-sync estimator yet"),
     ("video.undeclared_motion", "needs a draft renderer comparison with declared support; not built yet"),
 ]
@@ -813,6 +812,7 @@ def cmd_scan(args):
     verdicts = build_verdicts(vid, audio, draft, ledger, sx)
     verdicts[-len(NOT_CHECKED):-len(NOT_CHECKED)] = text["verdicts"]
     queue, overview = build_queue(vid, ledger, ident, audio, text)
+    intent = intent_step(args, text, queue, ledger, verdicts)
     sheets = []
     if overview:
         tiles_dir = out / "tiles"
@@ -837,7 +837,8 @@ def cmd_scan(args):
                      "scan_size": scan["scan_size"], "tile_px_scan": TILE,
                      "audio_samples": audio.get("samples"), "audio_rate": audio.get("rate")},
         "verdicts": verdicts, "video": _jsonable(vid), "audio": _jsonable(audio), "draft": draft,
-        "text": {k: v for k, v in text.items() if k not in ("samples", "verdicts")},
+        "text": {k: v for k, v in text.items() if k not in ("samples", "verdicts") and not k.startswith("_")},
+        "intent": intent,
         "queue": queue, "overview_frames": overview, "sheets": sheets,
         "per_frame": {k: [round(float(x), 4) for x in v] for k, v in scan["cols"].items()},
     }
@@ -869,11 +870,42 @@ def text_pass(args, video, ledger, info, out, draft):
         if getattr(args, "speech", False):
             speech = xt.transcribe_export(video, out / "speech", lang=getattr(args, "lang", None))
             _atomic_write(out / "speech.json", json.dumps(speech, ensure_ascii=False))
-        return xt.scan_text(video, ledger, info, extract, t_of, frame_at, out,
-                            authored=authored, speech=speech)
+        res = xt.scan_text(video, ledger, info, extract, t_of, frame_at, out,
+                           authored=authored, speech=speech)
     except xt.TextUnavailable as e:
-        return {"verdicts": [{"property": "captions", "verdict": "NOT CHECKED", "origin": "-",
-                              "detail": str(e)}], "captions": []}
+        res = {"verdicts": [{"property": "captions", "verdict": "NOT CHECKED", "origin": "-",
+                             "detail": str(e)}], "captions": []}
+    res["_authored"], res["_speech"] = authored, speech
+    return res
+
+
+def intent_step(args, text, queue, ledger, verdicts):
+    """Phase 4: beats, the numbers check, and with --jev a judgement per beat plus a
+    noticeability rank that reorders the UNKNOWN part of the queue (never a verdict)."""
+    import xray_intent as xi
+    unknown = []
+    for i, q in enumerate(queue):
+        if q["rank"][0] >= 1 and "blind" not in q["why"] and not q["why"].startswith("cut "):
+            a, b = q["frames"]
+            unknown.append({"id": f"q{i:03d}", "state": f"At {fmt_t(t_of(ledger, a))} "
+                            f"({(b - a + 1)} frames): {q['why']}"})
+    res = xi.intent_pass(text, text.get("_speech"), text.get("_authored"), unknown,
+                         use_jev=getattr(args, "jev", False))
+    for v in res["verdicts"]:
+        verdicts.insert(len(verdicts) - len(NOT_CHECKED), v)
+        for t0, t1 in v.pop("where_t", []) or []:
+            a, b = frame_at(ledger, max(0.0, t0)), frame_at(ledger, min(t1, ledger["duration_s"] - 1e-6))
+            queue.append({"frames": [a, min(b, a + 35)], "why": f"{v['property']}: {v['detail'][:60]}",
+                          "rank": [1, 0]})
+    order = {"likely": 0, "possible": 1, "insufficient_evidence": 2, "unlikely": 3}
+    for i, q in enumerate(queue):
+        tri = res["triage"].get(f"q{i:03d}")
+        if tri:
+            q["noticeable"] = tri
+            if q["rank"][0] >= 1:
+                q["rank"] = [1 + order.get(tri["answer"], 2) * 0.1, q["rank"][1]]
+    queue.sort(key=lambda q: (q["rank"], q["frames"][0]))
+    return {"beats": res["beats"], "jev_errors": res.get("jev_errors", [])}
 
 
 def _jsonable(x):
@@ -1127,7 +1159,7 @@ def render_score(doc, ledger, video, sx):
     L.append("EVENTS")
     lines = []
     for f in doc["video"]["findings"]:
-        a0, b0 = f["frames"]
+        a0 = f["frames"][0]
         extra = ""
         if f["kind"] == "glitch":
             bx = [round(x * sx) for x in f["box_scan"]]
@@ -1197,12 +1229,8 @@ def render_score(doc, ledger, video, sx):
     L.append(lanes(doc, ledger))
     L.append("")
     L.append("QUEUE  (look closer; every frame is exact and verified by PTS)")
-    # Quoted for a POSIX shell: a filename must never be able to end the command.
-    rel = shlex.quote(os.path.basename(video))
     shown = doc["queue"][:QUEUE_SHOWN]
-    for q in shown:
-        a0, b0 = q["frames"]
-        L.append(f"  capcutctl xray window {rel} --frames {a0}-{b0}   # {q['why'][:110]}")
+    L.extend(render_queue_lines({"queue": shown}, video))
     if len(doc["queue"]) > len(shown):
         L.append(f"  … {len(doc['queue']) - len(shown)} more, lower priority, in xray.json \"queue\"")
     if doc["sheets"]:
@@ -1214,6 +1242,19 @@ def render_score(doc, ledger, video, sx):
         L.append(f"PACING  longest still stretch f{st[0]:05d}-f{st[1]:05d} "
                  f"({(st[1] - st[0] + 1) / doc['fps']:.2f}s); {len(doc['video']['cuts'])} visible cuts")
     return "\n".join(L) + "\n"
+
+
+def render_queue_lines(doc, video):
+    # Quoted for a POSIX shell: a filename must never be able to end the command.
+    rel = shlex.quote(os.path.basename(video))
+    out = []
+    for q in doc["queue"]:
+        a0, b0 = q["frames"]
+        # The reason can carry text read off the video; no control character may leave the
+        # comment and start a new shell line when someone pastes this.
+        why = re.sub(r"[\x00-\x1f\x7f\u2028\u2029]", " ", q["why"])[:110]
+        out.append(f"  capcutctl xray window {rel} --frames {a0}-{b0}   # {why}")
+    return out
 
 
 def lanes(doc, ledger):
@@ -1428,6 +1469,15 @@ def _selftest_text(check):
             check("its box sits where it was drawn", 1180 <= y <= 1230 and 50 <= h <= 130, f"y={y:.0f} h={h:.0f}")
 
 
+def cmd_jev_setup(_args):
+    import xray_intent as xi
+    try:
+        print(json.dumps(xi.setup_jev()))
+    except xi.JevUnavailable as e:
+        fail(str(e))
+    return 0
+
+
 def cmd_selftest(_args):
     need("ffmpeg")
     checks = []
@@ -1487,6 +1537,10 @@ def cmd_selftest(_args):
         check("mono downmix of identical channels keeps 0 dB", abs(au["mono_ratio_db"]) < 0.1, f"{au['mono_ratio_db']}")
         lo = loudness(video)
         hostile = '$(touch pwned)"; echo x.mp4'
+        doc = {"queue": [{"frames": [1, 2], "why": "caption hidden: sits on \"x\nrm -rf ~\""}]}
+        lines = render_queue_lines(doc, "v.mp4")
+        check("OCR text cannot break a queue line into a second command",
+              len(lines) == 1 and "\n" not in lines[0] and lines[0].lstrip().startswith("capcutctl"), f"{lines}")
         check("queue commands quote hostile filenames",
               shlex.split(f"capcutctl xray window {shlex.quote(hostile)} --frames 1-2")[3] == hostile)
         check("true peak measured", lo["true_peak_dbtp"] is not None and lo["true_peak_dbtp"] > -1.0, f"{lo['true_peak_dbtp']}")
@@ -1509,6 +1563,8 @@ def main(argv=None):
     s.add_argument("--no-text", action="store_true", help="skip captions, screen text and faces")
     s.add_argument("--speech", action="store_true", help="transcribe the export and check captions against it")
     s.add_argument("--lang", help="speech language for --speech (e.g. ar); default auto")
+    s.add_argument("--jev", action="store_true",
+                   help="ask Jev (TypeSafe) to judge beats and rank UNKNOWNs; sends transcript and screen text")
     f = sub.add_parser("frame", help="one exact frame at native resolution")
     f.add_argument("video")
     f.add_argument("--frame", type=int)
@@ -1529,10 +1585,11 @@ def main(argv=None):
     a.add_argument("--from", dest="start", type=float, required=True)
     a.add_argument("--to", dest="end", type=float, required=True)
     sub.add_parser("selftest", help="build a fixture with known defects and check every detector")
+    sub.add_parser("jev-setup", help="build the private environment Jev runs in (needs network)")
     args = p.parse_args(argv)
     try:
         return {"scan": cmd_scan, "frame": cmd_frame, "window": cmd_window,
-                "audio": cmd_audio, "selftest": cmd_selftest}[args.cmd](args)
+                "audio": cmd_audio, "selftest": cmd_selftest, "jev-setup": cmd_jev_setup}[args.cmd](args)
     except XrayError as e:
         print(f"xray: {e.message}", file=sys.stderr)
         return 2
