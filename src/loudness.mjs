@@ -13,10 +13,8 @@
  * ~/Downloads/.video-index.
  */
 import { spawnSync } from 'node:child_process';
-import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-import { CapcutError, requireBinary, resolveMediaPath } from './core.mjs';
+import { CapcutError, resolveMediaPath } from './core.mjs';
 import { isBrollSegment } from './broll-lint.mjs';
 import { pythonForTool, PACKAGE_ROOT } from './python.mjs';
 
@@ -24,7 +22,6 @@ const r3 = n => Math.round(n * 1000) / 1000;
 const r6 = n => Math.round(n * 1e6) / 1e6;
 
 export const DEFAULT_TARGET_LUFS = -14;
-export const LUFS_CACHE_VERSION = 1;
 
 export function analyzeAudio(doc, projectDir, { mixOnly = false } = {}) {
   const python = pythonForTool('audio_levels.py');
@@ -53,87 +50,6 @@ export function playbackLufs(measuredLufs, volume) {
   const v = Number(volume);
   if (!(v > 0)) return null;
   return measuredLufs + 20 * Math.log10(v);
-}
-
-export function parseEbur128(text) {
-  const body = String(text || '');
-  const summary = body.split(/Summary:/i).at(-1) || body;
-  const match = summary.match(/\bI:\s*([+-]?\d+(?:\.\d+)?)\s*LUFS/i)
-    || summary.match(/Integrated loudness:\s*([+-]?\d+(?:\.\d+)?)\s*LUFS/i);
-  if (!match) return null;
-  const value = Number(match[1]);
-  return Number.isFinite(value) ? value : null;
-}
-
-function defaultCacheDir() {
-  return path.join(os.homedir(), 'Downloads', '.video-index');
-}
-
-function cacheKey(file) {
-  const stem = path.basename(file).replace(/\.[^.]+$/, '');
-  return `${stem}.lufs.json`;
-}
-
-function fileToken(file) {
-  const st = fs.statSync(file);
-  return { path: path.resolve(file), mtimeMs: Math.round(st.mtimeMs), size: st.size };
-}
-
-export function readLufsCache(file, { cacheDir } = {}) {
-  const token = fileToken(file);
-  const dest = path.join(cacheDir || defaultCacheDir(), cacheKey(file));
-  if (!fs.existsSync(dest)) return null;
-  try {
-    const parsed = JSON.parse(fs.readFileSync(dest, 'utf8'));
-    if (parsed?.version !== LUFS_CACHE_VERSION) return null;
-    if (parsed.path !== token.path || parsed.mtimeMs !== token.mtimeMs || parsed.size !== token.size) {
-      return null;
-    }
-    const lufs = Number(parsed.integratedLufs);
-    return Number.isFinite(lufs) ? lufs : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeLufsCache(file, lufs, { cacheDir } = {}) {
-  const dir = cacheDir || defaultCacheDir();
-  fs.mkdirSync(dir, { recursive: true });
-  const token = fileToken(file);
-  const dest = path.join(dir, cacheKey(file));
-  const tmp = `${dest}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify({
-    version: LUFS_CACHE_VERSION,
-    ...token,
-    integratedLufs: lufs,
-  }));
-  fs.renameSync(tmp, dest);
-}
-
-export function measureIntegratedLufs(file, { cacheDir, measurements } = {}) {
-  const resolved = path.resolve(file);
-  const injected = lookupMeasurement(measurements, { path: resolved, id: null });
-  if (injected != null) return injected;
-  const cached = readLufsCache(resolved, { cacheDir });
-  if (cached != null) return cached;
-  requireBinary('ffmpeg', 'measuring integrated LUFS');
-  const result = spawnSync('ffmpeg', [
-    '-nostats', '-i', resolved, '-filter_complex', 'ebur128=peak=true', '-f', 'null', '-',
-  ], { encoding: 'utf8', timeout: 120_000 });
-  const text = `${result.stderr || ''}\n${result.stdout || ''}`;
-  if (result.error) {
-    throw new CapcutError(`ffmpeg could not measure LUFS for ${path.basename(resolved)}: ${result.error.message}`, {
-      code: 'LUFS_MEASURE_FAILED', exitCode: 2,
-    });
-  }
-  const lufs = parseEbur128(text);
-  if (lufs == null) {
-    throw new CapcutError(`ffmpeg ebur128 produced no Integrated loudness for ${path.basename(resolved)}.`, {
-      code: 'LUFS_MEASURE_FAILED', exitCode: 2, details: { status: result.status },
-    });
-  }
-  try { writeLufsCache(resolved, lufs, { cacheDir }); } catch { /* cache is optional */ }
-  return lufs;
 }
 
 function lookupMeasurement(measurements, { path: mediaPath, id }) {

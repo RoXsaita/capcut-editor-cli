@@ -892,10 +892,12 @@ export function describeScenes(projectDir, trackFilter = null, withTranscript = 
   }
   if (withTranscript) {
     const byMedia = new Map();
+    const rowById = new Map();
+    for (const row of rows) if (!rowById.has(row.id)) rowById.set(row.id, row);
     for (const { segment, track } of allSegments(doc)) {
       if (track.type !== 'video') continue;
       const mat = mats.get(segment.material_id);
-      const row = rows.find(r => r.id === segment.id);
+      const row = rowById.get(segment.id);
       if (!row) continue;
       if (mat?.type === 'photo') {
         row.transcriptStatus = 'not-applicable';

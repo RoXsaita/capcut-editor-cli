@@ -23,6 +23,7 @@ import {
   readJson,
   resolveProject,
   restoreProjectSnapshot,
+  stableJson,
   syncMirrors
 } from './core.mjs';
 
@@ -420,8 +421,38 @@ export function setOutput(write) {
 }
 const emit = text => (SINK ? SINK(text) : process.stdout.write(text));
 
+// Media probed from disk, or the --width/--height/--media-duration the caller supplied
+// when the file cannot be probed (placeholders, offline media).
+async function probeOrOverride(file, args) {
+  const { probeMedia } = await import('./create.mjs');
+  try {
+    return probeMedia(path.resolve(file));
+  } catch (error) {
+    if (args.width && args.height && args.mediaDuration != null) {
+      return { width: Number(args.width), height: Number(args.height), duration: Math.round(Number(args.mediaDuration) * 1e6) };
+    }
+    throw error;
+  }
+}
+
+// The media-origin contract every importing command shares.
+function originOptions(args) {
+  return {
+    generated: Boolean(args.generated),
+    derivedFrom: args.derivedFrom ? path.resolve(args.derivedFrom) : null,
+    derivedOffset: args.derivedOffset != null ? Number(args.derivedOffset) : null,
+    allowEphemeral: Boolean(args.allowEphemeral)
+  };
+}
+
+// --plan prints what the operation would do; otherwise it runs as a one-operation transaction.
+async function planOrApply(projectDir, name, op, args, options, loadPlanner) {
+  if (args.plan) return print((await loadPlanner())(await loadWorking(projectDir), op, { projectDir }), true);
+  return print(applySpec(projectDir, { version: 1, name, operations: [op] }, options), true);
+}
+
 function print(value, asJson = false) {
-  if (asJson || typeof value !== 'string') emit(`${JSON.stringify(value, null, 2)}\n`);
+  if (asJson || typeof value !== 'string') emit(stableJson(value));
   else emit(`${value}\n`);
 }
 
@@ -464,7 +495,6 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
  * matched nothing — and `add`'s primary form is the named one.
  */
 async function loadWorking(projectDir) {
-  const { loadProject } = await import('./core.mjs');
   const state = loadProject(projectDir);
   const group = state.groups.find(g => g.name.startsWith('timeline:')) || state.groups[0];
   return group.doc;
@@ -904,7 +934,7 @@ export async function main(argv, dependencies = {}) {
       if (!args.plan) {
         const dest = path.resolve(args.profile);
         fs.mkdirSync(path.dirname(dest), { recursive: true });
-        fs.writeFileSync(dest, `${JSON.stringify(profile, null, 2)}\n`);
+        fs.writeFileSync(dest, stableJson(profile));
         return print({ wrote: dest, profile }, true);
       }
       return print({ wrote: null, profile }, true);
@@ -1015,7 +1045,7 @@ export async function main(argv, dependencies = {}) {
       if (!report.override) throw new CapcutError('no visual events were detected, so there is no density to write.', { code: 'REFERENCE_EMPTY', exitCode: 2 });
       const out = path.resolve(args.profileOut);
       fs.mkdirSync(path.dirname(out), { recursive: true });
-      fs.writeFileSync(out, `${JSON.stringify(report.override, null, 2)}\n`);
+      fs.writeFileSync(out, stableJson(report.override));
       report.profileOut = out;
     }
     return print(report, true);
@@ -1051,10 +1081,7 @@ export async function main(argv, dependencies = {}) {
       width: args.width, height: args.height, duration: args.duration,
       newTimelineId: Boolean(args.newTimelineId),
       localize: !args.noLocalize,
-      generated: Boolean(args.generated),
-      derivedFrom: args.derivedFrom ? path.resolve(args.derivedFrom) : null,
-      derivedOffset: args.derivedOffset != null ? Number(args.derivedOffset) : null,
-      allowEphemeral: Boolean(args.allowEphemeral),
+      ...originOptions(args),
       dryRun: Boolean(args.dryRun), forceRunning: Boolean(args.forceRunning)
     }), true);
   }
@@ -1078,7 +1105,7 @@ export async function main(argv, dependencies = {}) {
   }
   if (command === 'projects') return print(listProjects(root), args.json);
   if (command === 'init-spec') {
-    const data = `${JSON.stringify(EXAMPLE_SPEC, null, 2)}\n`;
+    const data = stableJson(EXAMPLE_SPEC);
     if (args.output) { fs.writeFileSync(path.resolve(args.output), data); return print(`Wrote ${path.resolve(args.output)}`); }
     return emit(data);
   }
@@ -1162,7 +1189,6 @@ export async function main(argv, dependencies = {}) {
   }
   if (command === 'grade') {
     const g = await import('./grade.mjs');
-    const doc = await loadWorking(projectDir);
     if (args.layer != null) {
       if (args.target || args.reference || args.measure || args.faceDetail || args.source
         || args.sharpen != null || args.clarity != null || args.vignette != null) {
@@ -1186,6 +1212,7 @@ export async function main(argv, dependencies = {}) {
       return print(applySpec(projectDir, { version: 1, name: 'grade-reset', operations: [op] },
         { ...options, dryRun: Boolean(args.plan || args.dryRun) }), true);
     }
+    const doc = await loadWorking(projectDir);
     if (args.measure) {
       return print({ target: null, sources: g.measureSources(doc, projectDir, { samples: 4 }) }, true);
     }
@@ -1342,7 +1369,7 @@ export async function main(argv, dependencies = {}) {
     if (args.out) {
       const dest = path.resolve(args.out);
       fs.mkdirSync(path.dirname(dest), { recursive: true });
-      fs.writeFileSync(dest, `${JSON.stringify(result, null, 2)}\n`);
+      fs.writeFileSync(dest, stableJson(result));
       result = { ...result, wrote: dest };
     }
     if (args.apply) {
@@ -1699,10 +1726,10 @@ export async function main(argv, dependencies = {}) {
         importVerified: false };
       if (args.dryRun) return print({ dryRun: true, placement: op, meta: rendered.meta, unsafe: rendered.unsafe }, true);
       const result = applySpec(projectDir, { version: 1, name: `mograph-${sub}`, operations: [op] }, options);
-      fs.writeFileSync(path.join(dir, `${item.id}.json`), `${JSON.stringify({
+      fs.writeFileSync(path.join(dir, `${item.id}.json`), stableJson({
         version: 1, id: item.id, scene: item.scene, template: null, params: item.params, format: 'prores', file: rendered.file,
         box, meta: rendered.meta, fingerprint, anchor: item.anchor || null, at: item.at,
-        duration: rendered.meta.duration, importVerified: false }, null, 2)}\n`);
+        duration: rendered.meta.duration, importVerified: false }));
       return print(result, true);
     }
     const fingerprint = mograph.fingerprint(item.template, item.params, profile);
@@ -1720,10 +1747,10 @@ export async function main(argv, dependencies = {}) {
       sfx: args.noSfx ? null : rendered.meta.sfx, sfxLead: 0, importVerified: item.format === 'png-still' };
     if (args.dryRun) return print({ dryRun: true, placement: op, box: rendered.box, meta: rendered.meta }, true);
     const result = applySpec(projectDir, { version: 1, name: `mograph-${sub}`, operations: [op] }, options);
-    fs.writeFileSync(path.join(dir, `${item.id}.json`), `${JSON.stringify({
+    fs.writeFileSync(path.join(dir, `${item.id}.json`), stableJson({
       version: 1, id: item.id, template: item.template, params: item.params, format: item.format, file: rendered.file,
       box: rendered.box, meta: rendered.meta, fingerprint, anchor: item.anchor || null, at: item.at,
-      duration: rendered.meta.duration, importVerified: item.format === 'png-still' }, null, 2)}\n`);
+      duration: rendered.meta.duration, importVerified: item.format === 'png-still' }));
     return print(result, true);
   }
   if (command === 'polish') {
@@ -1747,41 +1774,29 @@ export async function main(argv, dependencies = {}) {
     return print(view.text);
   }
   if (command === 'denoise') {
-    const op={op:'denoise'};
-    if(args.plan){const {planDenoise}=await import('./denoise.mjs');return print(planDenoise(await loadWorking(projectDir),op,{projectDir}),true);}
-    return print(applySpec(projectDir,{version:1,name:'denoise',operations:[op]},options),true);
+    return planOrApply(projectDir, 'denoise', { op: 'denoise' }, args, options,
+      async () => (await import('./denoise.mjs')).planDenoise);
   }
   if (command === 'blur-broll') {
-    const op={op:'blur-broll',segment:args.segment};
-    if(args.plan){const {planBlurBroll}=await import('./derived-media.mjs');return print(planBlurBroll(await loadWorking(projectDir),op,{projectDir}),true);}
-    return print(applySpec(projectDir,{version:1,name:'blur-broll',operations:[op]},options),true);
+    return planOrApply(projectDir, 'blur-broll', { op: 'blur-broll', segment: args.segment }, args, options,
+      async () => (await import('./derived-media.mjs')).planBlurBroll);
   }
   if (command === 'reframe') {
-    const op = { op:'reframe',segment:args.segment,auto:Boolean(args.auto) };
-    if (args.plan) {
-      const { planReframe } = await import('./reframe.mjs');
-      return print(planReframe(await loadWorking(projectDir),op,{projectDir}),true);
-    }
-    return print(applySpec(projectDir,{version:1,name:'reframe',operations:[op]},options),true);
+    return planOrApply(projectDir, 'reframe', { op: 'reframe', segment: args.segment, auto: Boolean(args.auto) }, args, options,
+      async () => (await import('./reframe.mjs')).planReframe);
   }
   if (command === 'cursor') {
     const op = { op: 'cursor', segment: args.segment, auto: Boolean(args.auto), style: args.style,
       ...(args.size != null ? { size: Number(args.size) } : {}) };
-    if (args.plan) {
-      const { planCursor } = await import('./cursor.mjs');
-      return print(planCursor(await loadWorking(projectDir), op, { projectDir }), true);
-    }
-    return print(applySpec(projectDir, { version: 1, name: 'cursor', operations: [op] }, options), true);
+    return planOrApply(projectDir, 'cursor', op, args, options,
+      async () => (await import('./cursor.mjs')).planCursor);
   }
   if (command === 'screen-motion') {
     if (!args.regions || typeof args.regions !== 'string') throw new CapcutError('screen-motion requires --regions FILE.json.', { exitCode: 2 });
     const op = { op: 'screen.motion', segment: args.segment, regions: readJson(path.resolve(args.regions)), replace: Boolean(args.replace),
       ...Object.fromEntries(['zoomIn', 'zoomOut', 'connectGap', 'glide'].filter(k => args[k] != null).map(k => [k, Number(args[k])])) };
-    if (args.plan) {
-      const { planScreenMotion } = await import('./screen-camera.mjs');
-      return print(planScreenMotion(await loadWorking(projectDir), op, { projectDir }), true);
-    }
-    return print(applySpec(projectDir, { version: 1, name: 'screen-motion', operations: [op] }, options), true);
+    return planOrApply(projectDir, 'screen-motion', op, args, options,
+      async () => (await import('./screen-camera.mjs')).planScreenMotion);
   }
   if (command === 'music' && !args.duck && ['underDb', 'attackMs', 'releaseMs', 'minGapMs', 'words'].some(key => args[key] != null)) {
     throw new CapcutError('Ducking controls require music --duck.', { code: 'MUSIC_OPTIONS', exitCode: 2 });
@@ -1881,16 +1896,8 @@ export async function main(argv, dependencies = {}) {
       if (args.at == null || !args.media) {
         throw new CapcutError('layout screen requires --at SECONDS and --media FILE.', { exitCode: 2 });
       }
-      const { probeMedia } = await import('./create.mjs');
       const media = path.resolve(args.media);
-      let probe;
-      try {
-        probe = probeMedia(media);
-      } catch (error) {
-        if (args.width && args.height && args.mediaDuration != null) {
-          probe = { width: Number(args.width), height: Number(args.height), duration: Math.round(Number(args.mediaDuration) * 1e6) };
-        } else throw error;
-      }
+      const probe = await probeOrOverride(media, args);
       const duration = args.dur != null ? Number(args.dur) : Number(probe.duration) / 1e6;
       const spec = buildScreenLayoutSpec({
         media,
@@ -1924,15 +1931,7 @@ export async function main(argv, dependencies = {}) {
     if (!args.media) throw new CapcutError('add requires --media FILE.', { exitCode: 2 });
     if (args.at == null || args.dur == null) throw new CapcutError('add requires --at SECONDS and --dur SECONDS.', { exitCode: 2 });
     if (args.track == null) throw new CapcutError('add requires --track NAME (creates) or --track N (existing).', { exitCode: 2 });
-    const { probeMedia } = await import('./create.mjs');
-    let probe;
-    try {
-      probe = probeMedia(path.resolve(args.media));
-    } catch (e) {
-      if (args.width && args.height && args.mediaDuration != null) {
-        probe = { width: Number(args.width), height: Number(args.height), duration: Math.round(Number(args.mediaDuration) * 1e6) };
-      } else throw e;
-    }
+    const probe = await probeOrOverride(args.media, args);
     let cover = null;
     if (args.cover) {
       const [a, b] = String(args.cover).split(/[-:,]/).map(Number);
@@ -1956,10 +1955,7 @@ export async function main(argv, dependencies = {}) {
       height: probe.height,
       mediaDuration: probe.duration,
       localize: !args.noLocalize,
-      generated: Boolean(args.generated),
-      derivedFrom: args.derivedFrom ? path.resolve(args.derivedFrom) : null,
-      derivedOffset: args.derivedOffset != null ? Number(args.derivedOffset) : null,
-      allowEphemeral: Boolean(args.allowEphemeral)
+      ...originOptions(args)
     };
     const result = applySpec(projectDir, { version: 1, name: 'add', operations: [op] }, options);
     const added = (result.result || []).find(g => g.group === 'root')?.operations?.[0];
@@ -1972,8 +1968,6 @@ export async function main(argv, dependencies = {}) {
     const file = args.file || args.media;
     if (!file) throw new CapcutError('replace-media requires --file FILE.', { exitCode: 2 });
     if (args.at == null && !args.segments) throw new CapcutError('replace-media requires --at SECONDS or --segments ID.', { exitCode: 2 });
-    const { probeMedia } = await import('./create.mjs');
-    const { loadProject } = await import('./core.mjs');
     let selector;
     if (args.segments) selector = { id: String(args.segments).split(',')[0].trim() };
     else {
@@ -1995,14 +1989,7 @@ export async function main(argv, dependencies = {}) {
       }
       selector = { id: hits[0].id };
     }
-    let probe;
-    try {
-      probe = probeMedia(path.resolve(file));
-    } catch (e) {
-      if (args.width && args.height && args.mediaDuration != null) {
-        probe = { width: Number(args.width), height: Number(args.height), duration: Math.round(Number(args.mediaDuration) * 1e6) };
-      } else throw e;
-    }
+    const probe = await probeOrOverride(file, args);
     const op = {
       op: 'replace.media',
       selector,
@@ -2012,10 +1999,7 @@ export async function main(argv, dependencies = {}) {
       width: probe.width,
       height: probe.height,
       mediaDuration: probe.duration,
-      generated: Boolean(args.generated),
-      derivedFrom: args.derivedFrom ? path.resolve(args.derivedFrom) : null,
-      derivedOffset: args.derivedOffset != null ? Number(args.derivedOffset) : null,
-      allowEphemeral: Boolean(args.allowEphemeral)
+      ...originOptions(args)
     };
     return print(applySpec(projectDir, { version: 1, name: 'replace-media', operations: [op] }, options), true);
   }
@@ -2023,12 +2007,12 @@ export async function main(argv, dependencies = {}) {
     return print(applySpec(projectDir, { version: 1, name: 'localize', operations: [{ op: 'media.localize' }] }, options), true);
   }
   if (command === 'trim' || command === 'shift' || command === 'remove' || command === 'volume' || command === 'keyframe' || command === 'fade' || command === 'animate') {
-    const { loadProject } = await import('./core.mjs');
     const { resolveClip } = await import('./add.mjs');
-    const doc = loadProject(projectDir).groups.find(g => g.name === 'root').doc;
+    // --segments names the clip outright; only an --at lookup needs the draft.
     const selector = args.segments
       ? { id: String(args.segments).split(',')[0].trim() }
-      : { id: resolveClip(doc, { at: args.at != null ? Number(args.at) : undefined, track: args.track }).segment.id };
+      : { id: resolveClip(loadProject(projectDir).groups.find(g => g.name === 'root').doc,
+        { at: args.at != null ? Number(args.at) : undefined, track: args.track }).segment.id };
     if (command === 'animate') {
       if (!args.intro && !args.outro) throw new CapcutError('animate requires --intro SLUG and/or --outro SLUG.', { exitCode: 2 });
       const op = {

@@ -16,7 +16,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { CapcutError, managedFile } from './core.mjs';
+import { CapcutError, stableJson, managedFile } from './core.mjs';
 
 const RELATIVE = path.join('.capcutctl', 'notes.json');
 const MAX_TEXT = 2000;
@@ -61,7 +61,7 @@ function writeNotes(projectDir, notes) {
   const file = notesPath(projectDir);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const temp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(temp, `${JSON.stringify(notes, null, 2)}\n`);
+  fs.writeFileSync(temp, stableJson(notes));
   fs.renameSync(temp, file);
 }
 

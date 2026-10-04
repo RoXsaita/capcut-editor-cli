@@ -2950,8 +2950,10 @@ export function createSnapshot(projectDir, label = 'snapshot') {
     const relative = path.relative(projectDir, file);
     const destination = path.join(root, relative);
     fs.mkdirSync(path.dirname(destination), { recursive: true });
-    fs.copyFileSync(file, destination);
-    manifest.files.push({ relative, sha256: sha256(fs.readFileSync(file)) });
+    // One read: the copy and its digest are the same bytes, even if CapCut writes mid-snapshot.
+    const bytes = fs.readFileSync(file);
+    fs.writeFileSync(destination, bytes);
+    manifest.files.push({ relative, sha256: sha256(bytes) });
   }
   fs.writeFileSync(path.join(root, 'manifest.json'), stableJson(manifest));
   return root;

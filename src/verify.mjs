@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CapcutError, allSegments, resolveMediaPath } from './core.mjs';
+import { CapcutError, stableJson, allSegments, resolveMediaPath } from './core.mjs';
 import { isBrollSegment } from './broll-lint.mjs';
 import { scoreAt, loadClicks, loadOcrBoxes } from './punch.mjs';
 import { momentsFromSidecar } from './broll-lint.mjs';
@@ -302,9 +302,9 @@ export function verifyShots({
       strip,
       dir,
     };
-    fs.writeFileSync(path.join(dir, 'brief.json'), `${JSON.stringify(brief, null, 2)}\n`);
+    fs.writeFileSync(path.join(dir, 'brief.json'), stableJson(brief));
     fs.writeFileSync(path.join(dir, 'prompt.md'), promptMarkdown(brief));
-    fs.writeFileSync(path.join(dir, 'verdict.json'), `${JSON.stringify({ verdict, baseline: verdict }, null, 2)}\n`);
+    fs.writeFileSync(path.join(dir, 'verdict.json'), stableJson({ verdict, baseline: verdict }));
     reports.push(row);
   }
   const contradicted = reports.filter(row => row.verdict === 'CONTRADICTED');
@@ -321,7 +321,7 @@ export function verifyShots({
     flags: insufficient.map(row => ({ id: row.id, sentence: row.sentence })),
     note: 'prompt.md is for a fresh agent in the session (no API billing) to second-guess the strip. CONTRADICTED blocks the build; INSUFFICIENT only flags. Never writes the draft.',
   };
-  fs.writeFileSync(path.join(outDir, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`);
+  fs.writeFileSync(path.join(outDir, 'summary.json'), stableJson(summary));
   return summary;
 }
 

@@ -22,7 +22,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { CapcutError, applySpec, loadProject, readJson } from './core.mjs';
+import { CapcutError, stableJson, applySpec, loadProject, readJson } from './core.mjs';
 import { findWordsFile, resolveAnchors } from './anchors.mjs';
 import { layoutAt } from './mograph-place.mjs';
 import { safeZoneViolations } from './mograph-geometry.mjs';
@@ -204,12 +204,12 @@ function writeSidecars(graphics) {
   for (const g of graphics) {
     const r = g.rendered;
     fs.mkdirSync(path.dirname(g.sidecarFile), { recursive: true });
-    fs.writeFileSync(g.sidecarFile, `${JSON.stringify({
+    fs.writeFileSync(g.sidecarFile, stableJson({
       version: 1, id: g.id, ...(g.scene ? { scene: g.scene } : {}), template: g.template, params: g.params, format: g.format,
       file: r.file, box: g.box || r.box,
       meta: r.meta, fingerprint: g.fingerprint, anchor: g.anchor || null, at: g.at, duration: g.duration,
       importVerified: !g.scene && g.format === 'png-still',
-    }, null, 2)}\n`);
+    }));
   }
 }
 
@@ -380,7 +380,7 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
     fs.mkdirSync(path.dirname(stateFile), { recursive: true });
     const next = { version: 1, hash: planHash(plan, profile, workingDoc(projectDir), wordsFile, templateHashes), builtFrom: hash,
       shots: stages.shots?.key || state.shots || null, at: new Date().toISOString(), verdict: gate.verdict };
-    fs.writeFileSync(stateFile, `${JSON.stringify(next, null, 2)}\n`);
+    fs.writeFileSync(stateFile, stableJson(next));
   }
   return { dryRun, hash, stages, gate };
 }
