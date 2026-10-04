@@ -24,7 +24,7 @@ import { COMMAND_DOCS, TRANSACTIONAL_FROM_DOCS } from './command-docs.mjs';
 export const CONTRACT_VERSION = 2;
 
 /** Commands that dispatch on a positional subcommand (`args._[1]`). */
-const SUBCOMMAND_PARENTS = new Set(['layout', 'oracle', 'mograph', 'profile']);
+const SUBCOMMAND_PARENTS = new Set(['layout', 'oracle', 'mograph', 'profile', 'xray']);
 
 /**
  * Commands that mutate a project through the transaction machinery. These are the ones
@@ -72,7 +72,7 @@ export const TOOL_OPTIONS = Object.freeze({
 
 /** Which tools/*.py each of those commands is a front end for. */
 export const TOOL_SCRIPTS = Object.freeze({
-  cut: 'aroll.py', qa: 'frame_qa.py', find: 'find.py', preview: 'frame_qa.py',
+  cut: 'aroll.py', qa: 'frame_qa.py', find: 'find.py', preview: 'frame_qa.py', xray: 'xray.py',
 });
 
 /**

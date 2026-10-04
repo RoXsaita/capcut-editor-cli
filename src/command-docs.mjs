@@ -87,6 +87,7 @@ export const COMMAND_DOCS = Object.freeze({
   gate: doc('check', 'Blocking ready-to-post check from the profile\'s motion grammar.', 'capcutctl gate --project NAME'),
   doctor: doc('check', 'Structural integrity; must be error-free before hand-off.', 'capcutctl doctor --project NAME'),
   qa: doc('check', 'Composite real frames (incl. keyframes, grades, mograph clips); --expect gates text.', 'capcutctl qa --project NAME --times 3,9,15 --sheet'),
+  xray: doc('check', 'Every frame and sample of a real export measured; exact-frame queries; honest verdicts.', 'capcutctl xray scan export.mp4 --project NAME'),
   preview: doc('check', 'Lightweight proxy with audio.', 'capcutctl preview --project NAME --out preview.mp4'),
   review: doc('check', 'Proxy + EDL + contact sheet into outputs/.', 'capcutctl review --project NAME'),
   diff: doc('check', 'What changed since a snapshot or another project; --allow proves a scoped edit stayed in scope.', 'capcutctl diff --project NAME --snapshot NAME --allow SEGMENT-ID,track:broll'),

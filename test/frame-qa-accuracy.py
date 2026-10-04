@@ -147,7 +147,7 @@ class FrameAccuracyTests(unittest.TestCase):
         self.assertEqual(len(output_dirs), 2)
         self.assertTrue(all(path.name.startswith("capcutctl-frame-") for path in output_dirs))
 
-    def test_one_frame_fast_seek_drift_is_reported_without_retry(self):
+    def test_fast_seek_one_whole_frame_late_is_retried_and_reported(self):
         calls = []
 
         def fake_run(command, **_kwargs):
@@ -161,10 +161,32 @@ class FrameAccuracyTests(unittest.TestCase):
                 patch.object(frame_qa.subprocess, "run", side_effect=fake_run):
             sample = frame_qa.extract_frame("recording.mp4", 1.0, fps=30)
 
-        self.assertEqual(sample.method, "fast-seek")
-        self.assertFalse(sample.reextracted)
-        self.assertEqual(len(calls), 1)
+        # 1.033 is the next frame, not the one at 1.000: the accurate path must decide, and
+        # whatever it delivers is reported with its drift rather than hidden.
+        self.assertEqual(sample.method, "coarse+timestamp")
+        self.assertTrue(sample.reextracted)
+        self.assertEqual(len(calls), 2)
         self.assertAlmostEqual(sample.drift, 0.033)
+
+    def test_fast_seek_landing_one_frame_early_is_retried(self):
+        calls = []
+
+        def fake_run(command, **_kwargs):
+            calls.append(command)
+            Image.new("RGBA", (4, 4), "blue").save(command[-1])
+            if "select=" in " ".join(command):
+                return SimpleNamespace(stderr="[showinfo] n: 0 pts: 1000 pts_time:1.000000 duration_time:0.033")
+            # The previous frame: within one frame of the request, but not the frame at it.
+            return SimpleNamespace(stderr="[showinfo] n: 0 pts: 967 pts_time:0.966667 duration_time:0.033")
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"TMPDIR": tmp}), \
+                patch.object(frame_qa.subprocess, "run", side_effect=fake_run):
+            sample = frame_qa.extract_frame("recording.mp4", 1.0, fps=30)
+
+        self.assertEqual(sample.method, "coarse+timestamp")
+        self.assertTrue(sample.reextracted)
+        self.assertEqual(len(calls), 2)
+        self.assertAlmostEqual(sample.delivered_pts, 1.0)
 
     def test_qa_prints_requested_and_delivered_pts(self):
         sample = frame_qa.FrameSample(

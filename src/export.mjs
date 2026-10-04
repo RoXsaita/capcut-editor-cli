@@ -24,6 +24,24 @@ export function exportGrid(media, out, times) {
   return JSON.parse(run(python.executable, [path.join(HERE, '..', 'tools', 'export_grid.py'),
     '--media', path.resolve(media), '--out', path.resolve(out), ...(times ? ['--times', String(times)] : [])], 180000));
 }
+/**
+ * X-ray the published export: every frame and sample measured, verdicts against the draft.
+ * A FAIL verdict is the X-ray's finding, not an export failure, so its exit 1 is reported
+ * back in the result rather than thrown; only exit 2 (the tool could not run) throws.
+ */
+export function exportXray(video, projectDir, outDir) {
+  const python = pythonForTool('xray.py');
+  const argv = [path.join(HERE, '..', 'tools', 'xray.py'), 'scan', path.resolve(video),
+    '--project', projectDir, '--json', ...(outDir ? ['--out', path.resolve(outDir)] : [])];
+  const result = spawnSync(python.executable, argv, { encoding: 'utf8', timeout: 900000 });
+  if (result.error || ![0, 1].includes(result.status)) {
+    fail(`EXPORT_XRAY_FAILED: ${result.error?.message || String(result.stderr || '').trim().split('\n').pop()}`);
+  }
+  const report = JSON.parse(result.stdout);
+  const count = verdict => report.verdicts.filter(v => v.verdict === verdict).length;
+  return { dir: report.out, score: report.score, sheets: report.sheets,
+    fail: count('FAIL'), unknown: count('UNKNOWN'), notChecked: count('NOT CHECKED'), pass: count('PASS') };
+}
 export async function exportProject(projectDir, args) {
   if (process.platform !== 'darwin') fail('EXPORT_MACOS_ONLY');
   if (!args.out || path.extname(args.out).toLowerCase() !== '.mp4') fail('export requires --out FILE.mp4');
@@ -64,5 +82,7 @@ export async function exportProject(projectDir, args) {
     fs.unlinkSync(temp);
   }
   fs.unlinkSync(staged);
-  return { video: out, duration: Number(probe.format.duration), grid: grid?.grid || null, renderer: 'CapCut native', uiBridge: true };
+  const xray = args.xray ? exportXray(out, projectDir, args.xray) : null;
+  return { video: out, duration: Number(probe.format.duration), grid: grid?.grid || null, xray,
+    renderer: 'CapCut native', uiBridge: true };
 }

@@ -55,6 +55,18 @@ Usage:
                         canvas = the changing 2D app surface. Default any (output unchanged).
                         --kind action prefers canvas/toolbar hits over chat that only describes
                         the thing; implied when the query contains a verb like click/tap/hit.
+  capcutctl xray scan VIDEO [--project NAME] [--out DIR] [--json] [--no-text] [--speech [--lang ar]] [--jev]
+                      — measure every frame and audio sample of a real export: an exact
+                        frame ledger, PASS/FAIL/UNKNOWN/NOT CHECKED verdicts, score.txt,
+                        overview sheets and a ranked queue of windows to look at. Exit 1 on FAIL.
+  capcutctl xray frame VIDEO [--frame N|--t S] [--crop X,Y,W,H] [--out PNG] [--xray DIR]
+  capcutctl xray window VIDEO [--frames A-B|--from S --to S] [--crop X,Y,W,H] [--out PNG] [--xray DIR]
+                      — exact frames, verified by PTS, at native resolution or as a strip.
+  capcutctl xray audio VIDEO --from S --to S
+  capcutctl xray bench VIDEO [--rounds 3] [--per-family 2] [--seed 7]
+                      — plant known defects in re-encoded copies and measure what is caught.
+  capcutctl xray jev-setup
+  capcutctl xray selftest
 
   capcutctl preflight [--root PATH] [--json]   — will this work on this machine? deps, assets, tools, disk
   capcutctl projects [--root PATH] [--json]
@@ -62,8 +74,9 @@ Usage:
   capcutctl close [--timeout MS] [--json]      — quit CapCut and wait for it to exit
   capcutctl status [--json] [--wait-for-close [--timeout MS]]
                                 report CapCut state; optionally request quit and return a branchable close result
-  capcutctl export --project NAME --out FILE.mp4 [--overwrite] [--grid FILE.png] [--times 3,9,15]
+  capcutctl export --project NAME --out FILE.mp4 [--overwrite] [--grid FILE.png] [--times 3,9,15] [--xray DIR]
                       — explicitly requested native macOS export, verified before replacing output.
+                        --xray DIR then measures every frame and sample of it into DIR (see xray scan).
   capcutctl export-grid --media FILE --out GRID.png [--times 3,9,15]
                       — fast labelled grid from an existing exported video; no CapCut UI.
   capcutctl check-export --media FILE.mp4 [--project NAME] [--target -14] [--peak -1] [--sheet FILE.png] [--json]
@@ -227,11 +240,12 @@ Usage:
                         seams, music aligned to the graphics, duck, loudness, then the gate.
                         Graphics anchor to SOURCE words, so a recut rebuilds exactly; an
                         unchanged plan on an unchanged cut is a no-op. Exit 1 when the gate fails.
-  capcutctl gate                --project NAME [--profile FILE] [--style NAME] [--record] [--json]
+  capcutctl gate                --project NAME [--profile FILE] [--style NAME] [--record] [--json] [--xray DIR]
                       — the blocking ready-to-post check: hook, proof, longest static stretch,
                         crowding, template repeats, safe zones, graphics without a sound, seams.
                         Thresholds come from the profile; --style NAME applies that style's pace (build
                         passes edit.json's "style"). Exit 1 on FAIL; WARNs go in the hand-off.
+                        --xray DIR folds an export X-ray in: its FAILs block, its UNKNOWNs warn.
   capcutctl profile show        [--profile FILE] [--json]   — the effective style profile (tokens, brand, styles, camera, sound, density, grammar);
                         bare "capcutctl profile" is the same
   capcutctl profile where       [--profile FILE]   — each layer in merge order (bundled → yours → --profile) and whether it exists
@@ -758,8 +772,8 @@ export async function main(argv, dependencies = {}) {
     const cutRoot = cutArgs.root ? path.resolve(cutArgs.root) : DEFAULT_ROOT;
     return runInPlaceCut(cutArgs, cutRoot, dependencies.applySpec || applySpec);
   }
-  if (command === 'cut' || command === 'qa' || command === 'find') {
-    const tool = { cut: 'aroll.py', qa: 'frame_qa.py', find: 'find.py' }[command];
+  if (command === 'cut' || command === 'qa' || command === 'find' || command === 'xray') {
+    const tool = { cut: 'aroll.py', qa: 'frame_qa.py', find: 'find.py', xray: 'xray.py' }[command];
     const script = path.join(HERE, '..', 'tools', tool);
     // Resolve and verify the interpreter first. A missing runtime is a named CapcutError
     // with an install line, never a ModuleNotFoundError traceback from a child process.
@@ -1598,6 +1612,10 @@ export async function main(argv, dependencies = {}) {
     const { loadProfile, applyStyle } = await import('./profile.mjs');
     const profile = applyStyle(loadProfile({ file: args.profile || null }), args.style || null);
     const report = gateReport(await loadWorking(projectDir), { projectDir, profile });
+    if (args.xray) {
+      const { foldXray } = await import('./gate.mjs');
+      foldXray(report, args.xray, projectDir);
+    }
     if (args.record) report.recorded = writeGateRecord(projectDir, report);
     if (report.verdict === 'FAIL') process.exitCode = 1;
     return args.json ? print(report, true) : print(gateText(report));
