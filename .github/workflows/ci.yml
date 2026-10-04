@@ -115,6 +115,10 @@ jobs:
       - name: Run frame QA self-tests
         run: python tools/frame_qa.py --selftest
 
+      # The X-ray self-test builds and measures real media, so it needs ffmpeg like the node job.
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
       - name: Run X-ray self-tests
         run: python tools/xray.py selftest
 
