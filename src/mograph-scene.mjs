@@ -22,7 +22,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { CapcutError, requireBinary } from './core.mjs';
 import { loadProfile } from './profile.mjs';
-import { FONT_DIR, MOGRAPH_DIR, launch, loadPlaywright } from './mograph.mjs';
+import { FONT_DIR, MOGRAPH_DIR, launch, loadPlaywright, pngPipeEncoder } from './mograph.mjs';
 
 export const SCENE_DIR = path.join(MOGRAPH_DIR, 'scenes');
 export const SCENE_FORMATS = Object.freeze(['prores', 'mp4']);
@@ -135,18 +135,7 @@ function encoderArgs(format, fps, out) {
 }
 
 function spawnEncoder(format, fps, out) {
-  const child = spawn('ffmpeg', encoderArgs(format, fps, out), { stdio: ['pipe', 'ignore', 'pipe'] });
-  let stderr = '';
-  child.stderr.on('data', d => { stderr += d; });
-  const done = new Promise((resolve, reject) => {
-    child.on('error', reject);
-    child.on('close', code => (code === 0 ? resolve() : reject(new CapcutError(
-      `ffmpeg could not encode ${path.basename(out)}: ${stderr.trim().split('\n').pop()}`, { code: 'SCENE_ENCODE', exitCode: 2 }))));
-  });
-  return {
-    async write(buf) { if (!child.stdin.write(buf)) await new Promise(r => child.stdin.once('drain', r)); },
-    end() { child.stdin.end(); return done; },
-  };
+  return pngPipeEncoder(encoderArgs(format, fps, out), out, 'SCENE_ENCODE');
 }
 
 /**

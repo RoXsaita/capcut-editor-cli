@@ -431,9 +431,9 @@ test('help and layout list expose the supported screen and automatic QA surface'
   }
 });
 
-test('the check script syntax-checks the shipped review module', () => {
+test('the check script syntax-checks every shipped src module', () => {
   const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-  assert.match(pkg.scripts.check, /node --check src\/review\.mjs/);
+  assert.match(pkg.scripts.check, /src\/\*\.mjs/);
 });
 
 test('bootstrap version works and failed JSON preflight remains branchable by exit code', () => {

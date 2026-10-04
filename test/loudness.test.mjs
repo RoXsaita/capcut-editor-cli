@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import {
-  volumeForLufs, playbackLufs, parseEbur128, classifyLoudnessRole, isMusicSegment,
+  volumeForLufs, playbackLufs, classifyLoudnessRole, isMusicSegment,
   opLoudness, DEFAULT_TARGET_LUFS, analyzeAudio,
 } from '../src/loudness.mjs';
 
@@ -127,19 +127,6 @@ test('a selected boost leaves other clips alone and ebur128 silence is never amp
   const trimmed = opLoudness(doc(), { segments: ' face0 ', measurements: -18, allowBoost: true });
   assert.equal(trimmed.changed, 1);
   assert.throws(() => opLoudness(doc(), { segments: 'missing', measurements: -18 }), { code: 'SELECTOR_EMPTY' });
-});
-
-test('parseEbur128 reads the Integrated loudness summary', () => {
-  const stderr = `
-[Parsed_ebur128_0 @ 0x1] Summary:
-  Integrated loudness:
-    I:         -23.7 LUFS
-  Loudness range:
-    LRA:         4.2 LU
-`;
-  assert.equal(parseEbur128(stderr), -23.7);
-  assert.equal(parseEbur128('I:  -14.0 LUFS'), -14);
-  assert.equal(parseEbur128('no loudness here'), null);
 });
 
 test('music vs speech vs sfx vs b-roll classification', () => {

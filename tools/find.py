@@ -335,6 +335,17 @@ def _mask_at(index, when):
     return 0, app
 
 
+def _ocr_entry(path, rows):
+    if not isinstance(rows, list):
+        raise SystemExit(f"OCR returned an unexpected result for {path}")
+    boxes = []
+    for row in rows:
+        obs = _ocr_observation(row)
+        if obs is not None:
+            boxes.append(obs)
+    return {"text": _normalise_text(" ".join(box["text"] for box in boxes)), "boxes": boxes}
+
+
 def _ocr_frame(path):
     try:
         result = subprocess.run(
@@ -350,14 +361,33 @@ def _ocr_frame(path):
         rows = json.loads(result.stdout or "[]")
     except json.JSONDecodeError as error:
         raise SystemExit(f"OCR returned invalid JSON for {path}: {error}") from None
-    if not isinstance(rows, list):
-        raise SystemExit(f"OCR returned an unexpected result for {path}")
-    boxes = []
-    for row in rows:
-        obs = _ocr_observation(row)
-        if obs is not None:
-            boxes.append(obs)
-    return {"text": _normalise_text(" ".join(box["text"] for box in boxes)), "boxes": boxes}
+    return _ocr_entry(path, rows)
+
+
+def _ocr_frames(paths):
+    """OCR many frames in one helper process; a helper built before --batch falls back to one per frame."""
+    if not paths:
+        return []
+    try:
+        result = subprocess.run(
+            [OCR_BIN, "--batch", "--languages", "en-US,ar"],
+            input="".join(f"{path}\n" for path in paths), capture_output=True, text=True,
+        )
+    except OSError as error:
+        raise SystemExit(f"could not run the Vision OCR helper: {error}") from None
+    lines = (result.stdout or "").splitlines()
+    if result.returncode != 0 or len(lines) != len(paths):
+        return [_ocr_frame(path) for path in paths]
+    entries = []
+    for path, line in zip(paths, lines, strict=True):
+        try:
+            rows = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise SystemExit(f"OCR returned invalid JSON for {path}: {error}") from None
+        if isinstance(rows, dict) and "error" in rows:
+            raise SystemExit(f"OCR failed for {path}: {rows['error']}")
+        entries.append(_ocr_entry(path, rows))
+    return entries
 
 
 def _ocr_record(media, token, duration, frames):
@@ -480,14 +510,15 @@ def build_ocr_index(media, cache_dir=None):
             detail = (result.stderr or "").strip() or "ffmpeg returned an error"
             raise SystemExit(f"could not extract frames for OCR: {detail}")
 
-        frames = {}
+        paths = []
         for second in range(expected):
             frame = os.path.join(tmp, f"frame-{second + 1:06d}.jpg")
             if not os.path.isfile(frame):
                 raise SystemExit(
                     f"OCR frame extraction stopped at {second}s of {duration:.3f}s; "
                     "rerun with --refresh after checking the source")
-            frames[second] = _ocr_frame(frame)
+            paths.append(frame)
+        frames = dict(enumerate(_ocr_frames(paths)))
 
     index, _reason = optional_change_index(media, change_index.MIN_SCORE)
     for second, entry in frames.items():
@@ -626,10 +657,13 @@ def build_moment_index(media, index, cache_dir=None):
 
     samples = {}
     with tempfile.TemporaryDirectory(prefix="capcutctl-moments-") as tmp:
+        paths = []
         for position, moment in enumerate(index.moments):
             frame = os.path.join(tmp, f"m{position:05d}.jpg")
             _extract_frame_at(media, moment.start, frame)
-            entry = _frame_entry(_ocr_frame(frame))
+            paths.append(frame)
+        for moment, ocr_entry in zip(index.moments, _ocr_frames(paths), strict=True):
+            entry = _frame_entry(ocr_entry)
             entry["boxes"] = tag_regions(
                 entry.get("boxes") or [], mask=moment.mask, focus_app=index.app_at(moment.start))
             samples[f"{moment.start:.3f}"] = _frame_entry(entry)

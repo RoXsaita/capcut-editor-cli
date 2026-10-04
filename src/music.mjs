@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { CapcutError, clone, seededId, requireBinary, contentEndUs, LOCAL_MEDIA_DIR, resolveMediaPath } from './core.mjs';
+import { CapcutError, stableJson, clone, seededId, requireBinary, contentEndUs, LOCAL_MEDIA_DIR, resolveMediaPath } from './core.mjs';
 import { geminiApiKey, loadEnv } from './env.mjs';
 import { audioSegment, ensureAudioTrack, pictureChanges, sfxPresets } from './polish.mjs';
 import { opDuckMusic } from './duck.mjs';
@@ -581,7 +581,7 @@ export async function prepareMusic(projectDir, doc, {
     };
     if (dryRun) return meta;
     fs.mkdirSync(state.paths.dir, { recursive: true });
-    fs.writeFileSync(state.paths.meta, JSON.stringify(meta, null, 2) + '\n');
+    fs.writeFileSync(state.paths.meta, stableJson(meta));
     return meta;
   }
 
@@ -625,6 +625,6 @@ export async function prepareMusic(projectDir, doc, {
     model: MUSIC_MODEL,
     dryRun: false,
   };
-  fs.writeFileSync(paths.meta, JSON.stringify(meta, null, 2) + '\n');
+  fs.writeFileSync(paths.meta, stableJson(meta));
   return meta;
 }

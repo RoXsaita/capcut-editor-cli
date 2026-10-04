@@ -11,7 +11,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { contentEndUs } from './core.mjs';
+import { allSegments, contentEndUs } from './core.mjs';
 import { coldOpen, cutPoints, pictureChanges, principalTrack } from './polish.mjs';
 import { firstPictureProof, finishScorecard } from './finish.mjs';
 import { safeZoneViolations } from './mograph-geometry.mjs';
@@ -22,14 +22,6 @@ const r2 = n => Math.round(n * 100) / 100;
 const GRAPHIC = /^(mograph:(?!sfx:)|sig:logo|sig:endcard|motion:)/;
 const SFX_DESC = /^(polish:(sfx|callout|click|type)|sig:sfx|mograph:sfx:|callout|sfx)/;
 const MOVE_PROPS = new Set(['KFTypeScaleX', 'KFTypePositionX', 'KFTypePositionY', 'KFTypeRotation']);
-
-function segmentsOf(doc) {
-  const out = [];
-  (doc.tracks || []).forEach((track, index) => {
-    for (const segment of track.segments || []) out.push({ track, index, segment });
-  });
-  return out;
-}
 
 const startOf = s => S(s.target_timerange?.start);
 const endOf = s => S((s.target_timerange?.start || 0) + (s.target_timerange?.duration || 0));
@@ -42,7 +34,7 @@ export function graphicEvents(doc) {
   const videos = new Map((doc.materials?.videos || []).map(m => [m.id, m]));
   const out = [];
   const seen = new Set();
-  for (const { track, index, segment } of segmentsOf(doc)) {
+  for (const { track, trackIndex: index, segment } of allSegments(doc)) {
     const desc = segment.desc || '';
     if ((track.name || '').startsWith('captions:')) continue;   // word captions are subtitles, not graphic beats
     const isGraphic = GRAPHIC.test(desc) || (track.name || '').startsWith('motion:')
@@ -67,7 +59,7 @@ export function graphicEvents(doc) {
 /** Camera ramps: every keyframe leg whose value changes, in timeline seconds. */
 export function cameraMoves(doc) {
   const out = [];
-  for (const { track, segment } of segmentsOf(doc)) {
+  for (const { track, segment } of allSegments(doc)) {
     if (track.type !== 'video') continue;
     if (GRAPHIC.test(segment.desc || '')) continue;
     const t0 = startOf(segment), speed = speedOf(segment) || 1;
@@ -93,7 +85,7 @@ export function cameraMoves(doc) {
 
 export function sfxEvents(doc) {
   const out = [];
-  for (const { track, segment } of segmentsOf(doc)) {
+  for (const { track, segment } of allSegments(doc)) {
     if (track.type !== 'audio') continue;
     const desc = segment.desc || '';
     if (desc === 'finish:music' || track.name === 'finish-music') continue;
@@ -106,7 +98,7 @@ export function sfxEvents(doc) {
 function transitionNames(doc) {
   const byId = new Map((doc.materials?.transitions || []).map(m => [m.id, m.name || m.effect_id || 'transition']));
   const names = [];
-  for (const { segment } of segmentsOf(doc)) {
+  for (const { segment } of allSegments(doc)) {
     for (const ref of segment.extra_material_refs || []) if (byId.has(ref)) names.push(byId.get(ref));
   }
   return names;

@@ -154,22 +154,34 @@ function encoderArgs(format, fps, out) {
   return [...input, '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-b:v', '0', '-crf', '28', '-auto-alt-ref', '0', out];
 }
 
-function encode(format, fps, out, frames) {
-  requireBinary('ffmpeg');
-  return new Promise((resolve, reject) => {
-    const child = spawn('ffmpeg', encoderArgs(format, fps, out), { stdio: ['pipe', 'ignore', 'pipe'] });
-    let stderr = '';
-    child.stderr.on('data', d => { stderr += d; });
+/** ffmpeg fed PNG frames on stdin, with backpressure; `end()` resolves once the file is written. */
+export function pngPipeEncoder(args, out, code) {
+  const child = spawn('ffmpeg', args, { stdio: ['pipe', 'ignore', 'pipe'] });
+  let stderr = '';
+  child.stderr.on('data', d => { stderr += d; });
+  const done = new Promise((resolve, reject) => {
     child.on('error', reject);
-    child.on('close', code => (code === 0 ? resolve() : reject(new CapcutError(
-      `ffmpeg could not encode ${path.basename(out)}: ${stderr.trim().split('\n').pop()}`, { code: 'MOGRAPH_ENCODE', exitCode: 2 }))));
-    (async () => {
-      for await (const frame of frames) {
-        if (!child.stdin.write(frame)) await new Promise(r => child.stdin.once('drain', r));
-      }
-      child.stdin.end();
-    })().catch(reject);
+    child.on('close', exit => (exit === 0 ? resolve() : reject(new CapcutError(
+      `ffmpeg could not encode ${path.basename(out)}: ${stderr.trim().split('\n').pop()}`, { code, exitCode: 2 }))));
   });
+  done.catch(() => {});   // surfaced through write() or end(), never as an unhandled rejection
+  return {
+    // Racing `done` means an ffmpeg that dies mid-stream fails the write instead of hanging on 'drain'.
+    async write(buf) { if (!child.stdin.write(buf)) await Promise.race([new Promise(r => child.stdin.once('drain', r)), done]); },
+    end() { child.stdin.end(); return done; },
+  };
+}
+
+async function encode(format, fps, out, frames) {
+  requireBinary('ffmpeg');
+  const encoder = pngPipeEncoder(encoderArgs(format, fps, out), out, 'MOGRAPH_ENCODE');
+  try {
+    for await (const frame of frames) await encoder.write(frame);
+  } catch (error) {
+    encoder.end().catch(() => {});
+    throw error;
+  }
+  return encoder.end();
 }
 
 export function fingerprint(template, params, profile) {

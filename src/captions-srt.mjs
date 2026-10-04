@@ -1,37 +1,8 @@
-import fs from 'node:fs';
-import path from 'node:path';
-
 import { CapcutError, clone, contentEndUs, loadPreset, seededId } from './core.mjs';
 
 const US = seconds => Math.round(Number(seconds) * 1e6);
 const S = microseconds => Number(microseconds) / 1e6;
 const TAG = 'caption:native';
-
-function parseClock(value) {
-  const match = String(value).trim().match(/^(\d+):(\d{2}):(\d{2})[,.](\d{3})$/);
-  if (!match) throw new CapcutError(`Invalid SRT timestamp: ${value}`, { code: 'CAPTION_BAD_TIME', exitCode: 2 });
-  const [, hours, minutes, seconds, millis] = match;
-  return US(Number(hours) * 3600 + Number(minutes) * 60 + Number(seconds) + Number(millis) / 1000);
-}
-
-export function parseSrt(text) {
-  const source = String(text || '').replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n').trim();
-  if (!source) return [];
-  const cues = [];
-  for (const block of source.split(/\n{2,}/)) {
-    const lines = block.split('\n');
-    const timingIndex = lines.findIndex(line => line.includes('-->'));
-    if (timingIndex < 0) continue;
-    const [left, right] = lines[timingIndex].split('-->').map(value => value.trim());
-    if (!left || !right) throw new CapcutError('Malformed SRT timing line.', { code: 'CAPTION_BAD_TIME', exitCode: 2 });
-    const startUs = parseClock(left);
-    const endUs = parseClock(right.split(/\s+/)[0]);
-    const cueText = lines.slice(timingIndex + 1).join('\n').trim();
-    if (!cueText) continue;
-    cues.push({ startUs, endUs, text: cueText });
-  }
-  return cues;
-}
 
 function normalizeCue(raw, index) {
   if (!raw || typeof raw !== 'object') {
@@ -81,23 +52,6 @@ export function normalizeCaptionCues(value) {
     }
   }
   return cues;
-}
-
-export function loadCaptionCues(file) {
-  const resolved = path.resolve(file);
-  if (!fs.existsSync(resolved)) {
-    throw new CapcutError(`Caption file not found: ${resolved}`, { code: 'CAPTION_FILE_MISSING', exitCode: 2 });
-  }
-  const text = fs.readFileSync(resolved, 'utf8');
-  if (/\.srt$/i.test(resolved)) return normalizeCaptionCues(parseSrt(text));
-  let parsed;
-  try { parsed = JSON.parse(text); }
-  catch (error) {
-    throw new CapcutError(`Caption file is neither .srt nor valid JSON: ${error.message}`, {
-      code: 'CAPTION_BAD_FILE', exitCode: 2
-    });
-  }
-  return normalizeCaptionCues(parsed);
 }
 
 function updateTextMaterial(template, id, text) {

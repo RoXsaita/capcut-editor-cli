@@ -1576,14 +1576,7 @@ def _content_track_index(tl, content_end):
 
 
 def _material_index(tl):
-    index = {}
-    for values in (tl.get("materials") or {}).values():
-        if not isinstance(values, list):
-            continue
-        for material in values:
-            if isinstance(material, dict) and material.get("id"):
-                index[material["id"]] = material
-    return index
+    return {material_id: material for material_id, (_kind, material) in _typed_material_index(tl).items()}
 
 
 def _typed_material_index(tl):
@@ -1836,8 +1829,8 @@ def simple_aroll_segments(project_dir, tl, start, end):
     if any(track.get("type") in ("audio", "adjust") and track.get("segments")
            for track in tl.get("tracks") or []):
         return None
-    materials = _material_index(tl)
     typed_materials = _typed_material_index(tl)
+    materials = {material_id: material for material_id, (_kind, material) in typed_materials.items()}
     selected = []
     cursor = start
     for _index, _track, segment, seg_start, seg_end in sorted(principal_entries, key=lambda row: row[3]):

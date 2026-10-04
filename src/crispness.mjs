@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { allSegments, resolveMediaPath } from './core.mjs';
 
@@ -108,8 +109,19 @@ export function peakUpscale(segment, sourceDims, canvas, extras = {}) {
   };
 }
 
+// Clips that share a source would otherwise probe it once each; keyed on the file's
+// identity so an edited file is probed again.
+const dimsCache = new Map();
+
 export function probeSourceDims(file) {
   if (!file || !fs.existsSync(file)) return null;
+  const st = fs.statSync(file);
+  const key = `${path.resolve(file)}:${st.mtimeMs}:${st.size}`;
+  if (!dimsCache.has(key)) dimsCache.set(key, probeDimsUncached(file));
+  return dimsCache.get(key);
+}
+
+function probeDimsUncached(file) {
   try {
     const out = execFileSync('ffprobe', [
       '-v', 'error', '-select_streams', 'v:0',

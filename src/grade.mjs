@@ -209,7 +209,18 @@ export function scope(buf) {
   };
 }
 
+// Each sampled frame asks for its source's size; probe each file once per run.
+const sizeCache = new Map();
+
 function probeSize(file) {
+  const st = fs.statSync(file, { throwIfNoEntry: false });
+  if (!st) return probeSizeUncached(file);   // let ffprobe report the missing file as before
+  const key = `${path.resolve(file)}:${st.mtimeMs}:${st.size}`;
+  if (!sizeCache.has(key)) sizeCache.set(key, probeSizeUncached(file));
+  return sizeCache.get(key);
+}
+
+function probeSizeUncached(file) {
   const out = execFileSync('ffprobe', ['-v', 'quiet', '-select_streams', 'v:0',
     '-show_entries', 'stream=width,height', '-of', 'json', file], { encoding: 'utf8' });
   const s = JSON.parse(out).streams[0];

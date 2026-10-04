@@ -19,7 +19,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { CapcutError } from './core.mjs';
+import { CapcutError, stableJson } from './core.mjs';
 
 /** The whole taxonomy, and which verdicts may be read as "the write survived". */
 export const VERDICTS = Object.freeze({
@@ -79,7 +79,7 @@ export function captureProject(projectDir, { out, label = 'capture' } = {}) {
     manifest.files.push({ relative, bytes: data.length, sha256: sha256(data) });
   }
   fs.mkdirSync(root, { recursive: true });
-  fs.writeFileSync(path.join(root, 'oracle.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+  fs.writeFileSync(path.join(root, 'oracle.json'), stableJson(manifest));
   return { capture: root, label: slug, files: manifest.files.length };
 }
 
