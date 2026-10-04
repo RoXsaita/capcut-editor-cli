@@ -55,6 +55,15 @@ Usage:
                         canvas = the changing 2D app surface. Default any (output unchanged).
                         --kind action prefers canvas/toolbar hits over chat that only describes
                         the thing; implied when the query contains a verb like click/tap/hit.
+  capcutctl xray scan VIDEO [--project NAME] [--out DIR] [--json]
+                      — measure every frame and audio sample of a real export: an exact
+                        frame ledger, PASS/FAIL/UNKNOWN/NOT CHECKED verdicts, score.txt,
+                        overview sheets and a ranked queue of windows to look at. Exit 1 on FAIL.
+  capcutctl xray frame VIDEO [--frame N|--t S] [--crop X,Y,W,H] [--out PNG] [--xray DIR]
+  capcutctl xray window VIDEO [--frames A-B|--from S --to S] [--crop X,Y,W,H] [--out PNG] [--xray DIR]
+                      — exact frames, verified by PTS, at native resolution or as a strip.
+  capcutctl xray audio VIDEO --from S --to S
+  capcutctl xray selftest
 
   capcutctl preflight [--root PATH] [--json]   — will this work on this machine? deps, assets, tools, disk
   capcutctl projects [--root PATH] [--json]
@@ -752,8 +761,8 @@ export async function main(argv, dependencies = {}) {
     const cutRoot = cutArgs.root ? path.resolve(cutArgs.root) : DEFAULT_ROOT;
     return runInPlaceCut(cutArgs, cutRoot, dependencies.applySpec || applySpec);
   }
-  if (command === 'cut' || command === 'qa' || command === 'find') {
-    const tool = { cut: 'aroll.py', qa: 'frame_qa.py', find: 'find.py' }[command];
+  if (command === 'cut' || command === 'qa' || command === 'find' || command === 'xray') {
+    const tool = { cut: 'aroll.py', qa: 'frame_qa.py', find: 'find.py', xray: 'xray.py' }[command];
     const script = path.join(HERE, '..', 'tools', tool);
     // Resolve and verify the interpreter first. A missing runtime is a named CapcutError
     // with an install line, never a ModuleNotFoundError traceback from a child process.

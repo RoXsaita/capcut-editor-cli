@@ -97,6 +97,11 @@ if [ -n "$py" ]; then
         fail "aroll selftest"
     fi
     if "$py" tools/frame_qa.py --selftest; then ok "frame qa"; else fail "frame qa selftest"; fi
+    if command -v ffmpeg >/dev/null 2>&1; then
+        if "$py" tools/xray.py selftest; then ok "xray"; else fail "xray selftest"; fi
+    else
+        skip "xray selftest" "no ffmpeg"
+    fi
 else
     skip "python selftests" "no interpreter"
 fi

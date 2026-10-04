@@ -49,6 +49,7 @@ export const TOOL_IMPORTS = Object.freeze({
   'export_grid.py': Object.freeze(['numpy', 'PIL']),
   'verify_shots.py': Object.freeze(['numpy', 'PIL']),
   'media_scan.py': Object.freeze([]),
+  'xray.py': Object.freeze(['numpy', 'PIL']),
 });
 
 /**

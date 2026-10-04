@@ -1121,6 +1121,31 @@
       ],
       "transactional": true
     },
+    "xray": {
+      "group": "check",
+      "summary": "Every frame and sample of a real export measured; exact-frame queries; honest verdicts.",
+      "example": "capcutctl xray scan export.mp4 --project NAME",
+      "options": [
+        "--crop",
+        "--frame",
+        "--frames",
+        "--from",
+        "--json",
+        "--out",
+        "--project",
+        "--t",
+        "--to",
+        "--xray"
+      ],
+      "subcommands": [
+        "audio",
+        "frame",
+        "scan",
+        "selftest",
+        "window"
+      ],
+      "transactional": false
+    },
     "zoom": {
       "group": "camera",
       "summary": "Face pushes on stressed words (--stress), or at explicit times.",

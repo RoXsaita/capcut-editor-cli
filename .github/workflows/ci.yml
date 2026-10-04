@@ -115,6 +115,9 @@ jobs:
       - name: Run frame QA self-tests
         run: python tools/frame_qa.py --selftest
 
+      - name: Run X-ray self-tests
+        run: python tools/xray.py selftest
+
       - name: Run Ruff
         run: ruff check tools/
 
