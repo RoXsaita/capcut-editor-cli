@@ -445,10 +445,11 @@ def _extract_path(path, requested, method):
 def extract_frame(path, t, fps=None, force_accurate=False):
     """Extract a frame with timing evidence and an automatic accuracy retry.
 
-    Fast seeking is cheap, but its delivered PTS can be more than one frame
-    away from the requested PTS on long-GOP/VFR media.  Such a result is never
-    silently accepted: the coarse-seek + timestamp-select path is retried and
-    the returned object records that retry in ``reextracted``.
+    Fast seeking is cheap, but its delivered PTS can land on a neighbouring
+    frame, or further away on long-GOP/VFR media. Only the first frame at or
+    after the request is accepted; anything else is retried through the
+    coarse-seek + timestamp-select path, and the returned object records that
+    retry in ``reextracted``.
     """
     path = os.fspath(path)
     requested = float(t)
@@ -472,7 +473,11 @@ def extract_frame(path, t, fps=None, force_accurate=False):
             image, delivered, period = _extract_path(path, requested, "fast-seek")
             period = _frame_period(period, fps)
             fast = FrameSample(image, requested, delivered, period, "fast-seek")
-            if fast.drift <= period + 1e-6:
+            # Keep the fast result only when it is the frame the accurate path would pick:
+            # the first frame at or after the request. A frame from before the request, or a
+            # whole period after it, is a different frame, however close it looks.
+            ahead = delivered - requested
+            if -1e-4 <= ahead < period - 1e-4:
                 return fast
     except FrameExtractionError:
         # An accurate retry gives a useful error and also handles media where

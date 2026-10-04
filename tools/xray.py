@@ -24,6 +24,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1116,11 +1117,12 @@ def render_score(doc, ledger, video, sx):
     L.append(lanes(doc, ledger))
     L.append("")
     L.append("QUEUE  (look closer; every frame is exact and verified by PTS)")
-    rel = os.path.basename(video)
+    # Quoted for a POSIX shell: a filename must never be able to end the command.
+    rel = shlex.quote(os.path.basename(video))
     shown = doc["queue"][:QUEUE_SHOWN]
     for q in shown:
         a0, b0 = q["frames"]
-        L.append(f"  capcutctl xray window \"{rel}\" --frames {a0}-{b0}   # {q['why'][:110]}")
+        L.append(f"  capcutctl xray window {rel} --frames {a0}-{b0}   # {q['why'][:110]}")
     if len(doc["queue"]) > len(shown):
         L.append(f"  … {len(doc['queue']) - len(shown)} more, lower priority, in xray.json \"queue\"")
     if doc["sheets"]:
@@ -1177,9 +1179,12 @@ def lanes(doc, ledger):
 def parse_crop(text):
     if not text:
         return None
-    parts = [round(float(x)) for x in text.split(",")]
-    if len(parts) != 4 or parts[2] <= 0 or parts[3] <= 0:
-        fail("--crop takes X,Y,W,H in export pixels")
+    try:
+        parts = [int(x) for x in text.split(",")]
+    except ValueError:
+        fail("--crop takes four whole numbers X,Y,W,H in export pixels")
+    if len(parts) != 4 or min(parts) < 0 or parts[2] == 0 or parts[3] == 0:
+        fail("--crop takes X,Y,W,H in export pixels, all non-negative, W and H above zero")
     return parts
 
 
@@ -1368,6 +1373,9 @@ def cmd_selftest(_args):
               f"{clicks}")
         check("mono downmix of identical channels keeps 0 dB", abs(au["mono_ratio_db"]) < 0.1, f"{au['mono_ratio_db']}")
         lo = loudness(video)
+        hostile = '$(touch pwned)"; echo x.mp4'
+        check("queue commands quote hostile filenames",
+              shlex.split(f"capcutctl xray window {shlex.quote(hostile)} --frames 1-2")[3] == hostile)
         check("true peak measured", lo["true_peak_dbtp"] is not None and lo["true_peak_dbtp"] > -1.0, f"{lo['true_peak_dbtp']}")
     failed = [c for c in checks if not c[1]]
     print(f"xray selftest: {len(checks) - len(failed)}/{len(checks)} passed")
