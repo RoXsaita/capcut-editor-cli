@@ -58,6 +58,8 @@ POLICY = {
     "true_peak_dbtp": -1.0,
     "clip_level": 0.999,
     "clip_run": 3,
+    "clip_dense_level": 0.98,     # after lossy encoding, clipping shows as dense near-full-scale samples
+    "clip_dense_count": 5,        # ...this many in one 10 ms window
     "silence_dbfs": -55.0,
     "silence_min_s": 0.30,
     "mono_fail_db": -6.0,
@@ -393,9 +395,14 @@ def _is_dip(mean, a, b, rising=False, k=3):
     if a - k < 0 or b + k >= len(mean):
         return False
     pre, post = mean[a - k:a], mean[b + 1:b + 1 + k]
+    # A fade moves the picture's brightness on purpose; natural drift of a few thousandths
+    # in the same direction is not a fade.
+    ramp = 0.05
     if rising:
-        return bool(np.all(np.diff(pre) > 0) and np.all(np.diff(post) < 0))
-    return bool(np.all(np.diff(pre) < 0) and np.all(np.diff(post) > 0))
+        return bool(np.all(np.diff(pre) > 0) and np.all(np.diff(post) < 0)
+                    and pre[-1] - pre[0] >= ramp and post[0] - post[-1] >= ramp)
+    return bool(np.all(np.diff(pre) < 0) and np.all(np.diff(post) > 0)
+                and pre[0] - pre[-1] >= ramp and post[-1] - post[0] >= ramp)
 
 
 def _runs(mask):
@@ -558,14 +565,32 @@ def detect_audio(samples, rate, offset_s=0.0):
     mono = samples.mean(axis=1)
     peaks = np.abs(samples).max(axis=0)
     out["sample_peak_dbfs"] = [round(_db(float(p)), 2) for p in peaks]
-    # clipping: runs of samples at full scale, per channel
+    # clipping: runs of samples at full scale, per channel. After AAC a clipped stretch is not a
+    # flat run but dense ringing around full scale, so 10 ms windows thick with near-full-scale
+    # samples count too.
+    clip_windows = []
+    blk_c = rate // 100
+    clipped = None
     for ch in range(samples.shape[1]):
-        hot = np.abs(samples[:, ch]) >= P["clip_level"]
+        x = np.abs(samples[:, ch])
+        hot = x >= P["clip_level"]
+        flagged = set()
         if hot.any():
             for a, b in _runs_np(hot):
                 if b - a + 1 >= P["clip_run"]:
-                    out["findings"].append({"kind": "clipping", "t": round(offset_s + a / rate, 4),
-                                            "dur_ms": round((b - a + 1) / rate * 1000, 2), "channel": ch})
+                    flagged.add(a // blk_c)
+        nbc = len(x) // blk_c
+        if nbc:
+            dense = (x[:nbc * blk_c].reshape(nbc, blk_c) >= P["clip_dense_level"]).sum(axis=1)
+            flagged.update(np.nonzero(dense >= P["clip_dense_count"])[0].tolist())
+        mask = np.isin(np.arange(nbc), sorted(flagged))
+        clipped = mask if clipped is None else (clipped | mask)
+    # One finding per clipped stretch, whichever channels it hit.
+    if clipped is not None:
+        for a, b in _runs_np(clipped):
+            out["findings"].append({"kind": "clipping", "t": round(offset_s + a / 100, 4),
+                                    "dur_ms": int((b - a + 1) * 10), "channel": "any"})
+            clip_windows.append((a / 100, (b + 1) / 100))
     # clicks: a sample that jumps off the local curve far beyond the local residual level
     res = np.zeros_like(mono)
     res[1:-1] = mono[1:-1] - 0.5 * (mono[:-2] + mono[2:])
@@ -580,6 +605,8 @@ def detect_audio(samples, rate, offset_s=0.0):
         last = -1e9
         for i in np.nonzero(hit)[0]:
             t = i / rate
+            if any(a - 0.01 <= t <= b + 0.01 for a, b in clip_windows):
+                continue  # part of a clipped stretch, already reported as clipping
             if t - last > 0.01:
                 out["findings"].append({"kind": "click", "t": round(offset_s + t, 4),
                                         "jump": round(float(r[i]), 3)})
@@ -1176,7 +1203,7 @@ def render_score(doc, ledger, video, sx):
             lines.append((t_of(ledger, c), f"f{c:05d} {fmt_t(t_of(ledger, c))} M CUT                  "
                                              f"{pf['frac'][c] * 100:.0f}% of tiles changed, Δ{pf['d1'][c]:.3f}"))
     for f in doc["audio"].get("findings") or []:
-        desc = {"clipping": f"{f.get('dur_ms')} ms at full scale, ch{f.get('channel')}",
+        desc = {"clipping": f"{f.get('dur_ms')} ms at or near full scale",
                 "click": f"jump {f.get('jump')}",
                 "silence": f"{f.get('dur_s')}s below {POLICY['silence_dbfs']} dBFS ({f.get('where')})"}[f["kind"]]
         t = f["t"]
@@ -1469,6 +1496,15 @@ def _selftest_text(check):
             check("its box sits where it was drawn", 1180 <= y <= 1230 and 50 <= h <= 130, f"y={y:.0f} h={h:.0f}")
 
 
+def cmd_bench(args):
+    need("ffmpeg")
+    import xray_bench as xb
+    doc = xb.run_bench(sys.modules[__name__], args.video, rounds=args.rounds, per_family=args.per_family,
+                       seed=args.seed, out_dir=args.out or default_dir(args.video))
+    print(xb.render_summary(doc))
+    return 0
+
+
 def cmd_jev_setup(_args):
     import xray_intent as xi
     try:
@@ -1586,10 +1622,17 @@ def main(argv=None):
     a.add_argument("--to", dest="end", type=float, required=True)
     sub.add_parser("selftest", help="build a fixture with known defects and check every detector")
     sub.add_parser("jev-setup", help="build the private environment Jev runs in (needs network)")
+    b = sub.add_parser("bench", help="plant known defects in copies of an export and measure what is caught")
+    b.add_argument("video")
+    b.add_argument("--rounds", type=int, default=3)
+    b.add_argument("--per-family", type=int, default=2)
+    b.add_argument("--seed", type=int, default=7)
+    b.add_argument("--out", help="folder for bench.json (default: VIDEO.xray)")
     args = p.parse_args(argv)
     try:
         return {"scan": cmd_scan, "frame": cmd_frame, "window": cmd_window,
-                "audio": cmd_audio, "selftest": cmd_selftest, "jev-setup": cmd_jev_setup}[args.cmd](args)
+                "audio": cmd_audio, "selftest": cmd_selftest, "jev-setup": cmd_jev_setup,
+                "bench": cmd_bench}[args.cmd](args)
     except XrayError as e:
         print(f"xray: {e.message}", file=sys.stderr)
         return 2

@@ -55,7 +55,7 @@ Usage:
                         canvas = the changing 2D app surface. Default any (output unchanged).
                         --kind action prefers canvas/toolbar hits over chat that only describes
                         the thing; implied when the query contains a verb like click/tap/hit.
-  capcutctl xray scan VIDEO [--project NAME] [--out DIR] [--json]
+  capcutctl xray scan VIDEO [--project NAME] [--out DIR] [--json] [--no-text] [--speech [--lang ar]] [--jev]
                       — measure every frame and audio sample of a real export: an exact
                         frame ledger, PASS/FAIL/UNKNOWN/NOT CHECKED verdicts, score.txt,
                         overview sheets and a ranked queue of windows to look at. Exit 1 on FAIL.
@@ -63,6 +63,9 @@ Usage:
   capcutctl xray window VIDEO [--frames A-B|--from S --to S] [--crop X,Y,W,H] [--out PNG] [--xray DIR]
                       — exact frames, verified by PTS, at native resolution or as a strip.
   capcutctl xray audio VIDEO --from S --to S
+  capcutctl xray bench VIDEO [--rounds 3] [--per-family 2] [--seed 7]
+                      — plant known defects in re-encoded copies and measure what is caught.
+  capcutctl xray jev-setup
   capcutctl xray selftest
 
   capcutctl preflight [--root PATH] [--json]   — will this work on this machine? deps, assets, tools, disk
