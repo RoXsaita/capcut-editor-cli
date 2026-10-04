@@ -281,7 +281,8 @@
         "--out",
         "--overwrite",
         "--project",
-        "--times"
+        "--times",
+        "--xray"
       ],
       "transactional": false
     },

@@ -71,8 +71,9 @@ Usage:
   capcutctl close [--timeout MS] [--json]      — quit CapCut and wait for it to exit
   capcutctl status [--json] [--wait-for-close [--timeout MS]]
                                 report CapCut state; optionally request quit and return a branchable close result
-  capcutctl export --project NAME --out FILE.mp4 [--overwrite] [--grid FILE.png] [--times 3,9,15]
+  capcutctl export --project NAME --out FILE.mp4 [--overwrite] [--grid FILE.png] [--times 3,9,15] [--xray DIR]
                       — explicitly requested native macOS export, verified before replacing output.
+                        --xray DIR then measures every frame and sample of it into DIR (see xray scan).
   capcutctl export-grid --media FILE --out GRID.png [--times 3,9,15]
                       — fast labelled grid from an existing exported video; no CapCut UI.
   capcutctl check-export --media FILE.mp4 [--project NAME] [--target -14] [--peak -1] [--sheet FILE.png] [--json]
