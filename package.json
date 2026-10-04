@@ -29,6 +29,7 @@
     "!tools/caption_engine/__pycache__/",
     "tools/vision/ocr.swift",
     "tools/vision/face.swift",
+    "tools/vision/frames.swift",
     "pyproject.toml",
     "LICENSE",
     "NOTICE",

@@ -66,10 +66,7 @@ POLICY = {
 }
 
 NOT_CHECKED = [
-    ("captions.readability", "phase 3: caption OCR and dwell time are not built yet"),
-    ("captions.text_vs_speech", "phase 3: caption OCR is not built yet"),
-    ("layout.safe_zones", "phase 3: platform safe-zone profiles are not built yet"),
-    ("layout.protected_regions", "phase 3: brands, logos and numbers from edit.json are not tracked yet"),
+    ("layout.logos", "logo and brand-mark tracking is not built; text, numbers and faces are"),
     ("intent.claims", "phase 4: narrative beats and screen evidence are not built yet"),
     ("sync.lip", "no lip-sync estimator yet"),
     ("video.undeclared_motion", "needs a draft renderer comparison with declared support; not built yet"),
@@ -253,7 +250,7 @@ def _parse_showinfo(stderr):
     return [int(m.group(2)) for m in _SHOWINFO.finditer(stderr)]
 
 
-def extract(video, ledger, frames, out_dir, crop=None, width=None, force_decode=False):
+def extract(video, ledger, frames, out_dir, crop=None, width=None, force_decode=False, ext="png"):
     """Write exactly these frames as PNGs; every one is verified by its integer PTS.
 
     Tries a seek first (cheap), then falls back to a full decode selected by index.
@@ -283,20 +280,20 @@ def extract(video, ledger, frames, out_dir, crop=None, width=None, force_decode=
     attempts.append(("decode", ["-copyts"], sel_n))
     last = ""
     for method, pre, sel in attempts:
-        for old in out_dir.glob("x_*.png"):
+        for old in out_dir.glob(f"x_*.{ext}"):
             old.unlink()
         vf = ",".join([f"select='{sel}'", "showinfo", *post])
         cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-y", *pre, "-i", str(video), "-map", "0:v:0",
                "-vf", vf, "-fps_mode", "passthrough", "-frames:v", str(len(frames)),
-               str(out_dir / "x_%06d.png")]
+               *(["-q:v", "2"] if ext == "jpg" else []), str(out_dir / f"x_%06d.{ext}")]
         r = subprocess.run(cmd, capture_output=True, text=True)
         got = _parse_showinfo(r.stderr)
         if r.returncode == 0 and got == want:
-            files = sorted(out_dir.glob("x_*.png"))
+            files = sorted(out_dir.glob(f"x_*.{ext}"))
             if len(files) == len(frames):
                 result = []
                 for n, f in zip(frames, files, strict=True):
-                    dest = out_dir / f"f{n:06d}.png"
+                    dest = out_dir / f"f{n:06d}.{ext}"
                     os.replace(f, dest)
                     result.append((n, dest))
                 return result
@@ -632,6 +629,12 @@ def draft_events(project, export_duration):
             kind, mat = materials.get(seg.get("material_id"), (None, {}))
             label = _material_label(kind, mat)
             ev = {"t0": round(t0, 4), "t1": round(t1, 4), "track": ti, "type": ttype, "label": label}
+            tname = str(track.get("name") or "")
+            if tname:
+                ev["track_name"] = tname
+            if ttype == "effect" or re.match(r"(mograph|motion|sting|graphic|scene)", tname.lower()) \
+                    or re.search(r"(mograph|motion__|sting)", label.lower()):
+                ev["graphic"] = True
             clip = seg.get("clip") or {}
             if ttype == "video":
                 src0, src_d = fq.source_span(seg)
@@ -650,6 +653,9 @@ def draft_events(project, export_duration):
                     elif rk == "material_animations":
                         for an in rm.get("animations") or []:
                             ev.setdefault("animations", []).append(f"{an.get('type', '')}:{an.get('name')}")
+                            a0 = t0 + (an.get("start") or 0) / 1e6
+                            ev.setdefault("animation_windows", []).append(
+                                [round(a0, 3), round(a0 + (an.get("duration") or 0) / 1e6, 3), an.get("name")])
                 keys = []
                 for block in seg.get("common_keyframes") or []:
                     pts = block.get("keyframe_list") or []
@@ -666,6 +672,7 @@ def draft_events(project, export_duration):
             if ttype == "audio" and seg.get("volume") not in (None, 1, 1.0):
                 ev["volume_db"] = round(_db(float(seg["volume"])), 1) if seg["volume"] > 0 else "-inf"
             if ttype == "text":
+                ev["text"] = _material_text(mat)
                 pos = clip.get("transform") or {}
                 ev["pos"] = [round(pos.get("x", 0), 3), round(pos.get("y", 0), 3)]
             events.append(ev)
@@ -689,8 +696,22 @@ def transition_windows(draft):
     return out
 
 
+def declared_windows(draft):
+    """Every stretch the draft says is meant to move oddly: transitions, effects, graphics, animations."""
+    wins = [(a, b, f"transition {name}") for a, b, name in transition_windows(draft)]
+    for e in draft["events"]:
+        if e.get("graphic"):
+            wins.append((e["t0"], e["t1"], f"graphic {e['label'][:40]}"))
+        for name in e.get("effects") or []:
+            wins.append((e["t0"], e["t1"], f"effect {name}"))
+        for a, b, name in e.get("animation_windows") or []:
+            if b > a:
+                wins.append((a, b, f"animation {name}"))
+    return wins
+
+
 def annotate_declared(vid, draft, ledger):
-    wins = transition_windows(draft)
+    wins = declared_windows(draft)
     for f in vid["findings"]:
         a, b = f["frames"]
         ta, tb = t_of(ledger, a), t_of(ledger, b)
@@ -698,6 +719,13 @@ def annotate_declared(vid, draft, ledger):
             if ta <= w1 + 0.07 and tb >= w0 - 0.07:
                 f["declared"] = name
                 break
+
+
+def _material_text(mat):
+    try:
+        return (json.loads(mat.get("content") or "{}").get("text") or "").strip()
+    except ValueError:
+        return str(mat.get("content") or "").strip()
 
 
 def _material_label(kind, mat):
@@ -781,8 +809,10 @@ def cmd_scan(args):
 
     if draft:
         annotate_declared(vid, draft, ledger)
+    text = text_pass(args, video, ledger, info, out, draft)
     verdicts = build_verdicts(vid, audio, draft, ledger, sx)
-    queue, overview = build_queue(vid, ledger, ident, audio)
+    verdicts[-len(NOT_CHECKED):-len(NOT_CHECKED)] = text["verdicts"]
+    queue, overview = build_queue(vid, ledger, ident, audio, text)
     sheets = []
     if overview:
         tiles_dir = out / "tiles"
@@ -807,6 +837,7 @@ def cmd_scan(args):
                      "scan_size": scan["scan_size"], "tile_px_scan": TILE,
                      "audio_samples": audio.get("samples"), "audio_rate": audio.get("rate")},
         "verdicts": verdicts, "video": _jsonable(vid), "audio": _jsonable(audio), "draft": draft,
+        "text": {k: v for k, v in text.items() if k not in ("samples", "verdicts")},
         "queue": queue, "overview_frames": overview, "sheets": sheets,
         "per_frame": {k: [round(float(x), 4) for x in v] for k, v in scan["cols"].items()},
     }
@@ -821,6 +852,28 @@ def cmd_scan(args):
         print(score)
         print(f"\nwrote {out / 'score.txt'}, {out / 'xray.json'} and {len(sheets)} sheet(s)")
     return 1 if fails else 0
+
+
+def text_pass(args, video, ledger, info, out, draft):
+    """Phase 3: captions, screen text, faces, and speech if asked. Never fatal to the scan."""
+    import xray_text as xt
+    if getattr(args, "no_text", False):
+        return {"verdicts": [{"property": "captions", "verdict": "NOT CHECKED", "origin": "-",
+                              "detail": "--no-text"}], "captions": []}
+    authored = None
+    if draft is not None:
+        authored = [{"t0": e["t0"], "t1": e["t1"], "text": e["text"], "track": e["track"]}
+                    for e in draft["events"] if e["type"] == "text" and e.get("text")]
+    speech = None
+    try:
+        if getattr(args, "speech", False):
+            speech = xt.transcribe_export(video, out / "speech", lang=getattr(args, "lang", None))
+            _atomic_write(out / "speech.json", json.dumps(speech, ensure_ascii=False))
+        return xt.scan_text(video, ledger, info, extract, t_of, frame_at, out,
+                            authored=authored, speech=speech)
+    except xt.TextUnavailable as e:
+        return {"verdicts": [{"property": "captions", "verdict": "NOT CHECKED", "origin": "-",
+                              "detail": str(e)}], "captions": []}
 
 
 def _jsonable(x):
@@ -959,7 +1012,7 @@ def build_verdicts(vid, audio, draft, ledger, sx):
     return v
 
 
-def build_queue(vid, ledger, ident, audio):
+def build_queue(vid, ledger, ident, audio, text=None):
     n = ledger["frames"]
     queue = []
     busy = set()
@@ -988,6 +1041,12 @@ def build_queue(vid, ledger, ident, audio):
             k = frame_at(ledger, min(f["t"], ledger["duration_s"] - 1e-6))
             window(k - 2, k + 2, f"audio {f['kind']} {fmt_t(f['t'])}", (0 if f["kind"] == "clipping" else 2, 0))
     spans = dict(vid.get("transitions", []))
+    for kind, items in ((text or {}).get("issues") or {}).items():
+        for it in items:
+            a, b = it["frames"]
+            # Speech mismatches are noisy (dialect vs Whisper's spelling): look at them last.
+            rank = 0 if it["verdict"] == "FAIL" else (2.7 if kind == "speech" else 1)
+            window(a - 2, min(b + 2, a + 30), f"caption {kind}: {it['detail'][:60]}", (rank, 0))
     for c in vid["cuts"]:
         e = spans.get(c, c)
         window(c - 2, e + 2, (f"transition f{c:05d}-f{e:05d}" if e != c else f"cut f{c:05d}"), (3, 0))
@@ -1091,8 +1150,11 @@ def render_score(doc, ledger, video, sx):
         t = f["t"]
         k = frame_at(ledger, min(t, ledger["duration_s"] - 1e-6))
         lines.append((t, f"f{k:05d} {fmt_t(t)} M AUDIO {f['kind'].upper():<14} {desc}"))
+    captions_listed = bool((doc.get("text") or {}).get("captions"))
     if doc["draft"]:
         for e in doc["draft"]["events"]:
+            if captions_listed and e["type"] == "text":
+                continue  # the CAPTIONS section lists what was read; xray.json keeps the authored text
             t0 = max(0.0, e["t0"])
             if t0 >= ledger["duration_s"]:
                 continue
@@ -1113,6 +1175,24 @@ def render_score(doc, ledger, video, sx):
                                       f"{e['label'][:48]}  until {fmt_t(e['t1'])}{extra}"))
     for _, line in sorted(lines, key=lambda x: x[0]):
         L.append("  " + line)
+    caps = (doc.get("text") or {}).get("captions") or []
+    if caps:
+        L.append("")
+        L.append(f"CAPTIONS  ({len(caps)} states read on exact frames; dwell is a range because frames "
+                 f"are read every {doc['text'].get('stride_frames')} frames)")
+        for c in caps:
+            flags = []
+            if c.get("face_cover", 0) >= 0.10:
+                flags.append(f"face {c['face_cover']:.0%}")
+            if c.get("unspoken_words"):
+                flags.append("unheard " + ",".join(c["unspoken_words"][:3]))
+            if c.get("draft_match") is not None and c["draft_match"] < 0.8:
+                flags.append(f"draft match {c['draft_match']}")
+            bx = c["box"]
+            L.append(f"  f{c['frames'][0]:05d} {fmt_t(c['t'][0])} M \"{c['text'][:28]}\"  "
+                     f"{c['height_px_1920']:.0f}px  {c['dwell_s'][0]:.2f}-{c['dwell_s'][1]:.2f}s  "
+                     f"contrast {c['contrast']}:1  box ({bx[0]:.0f},{bx[1]:.0f},{bx[2]:.0f}x{bx[3]:.0f})"
+                     + (f"  [{'; '.join(flags)}]" if flags else ""))
     L.append("")
     L.append(lanes(doc, ledger))
     L.append("")
@@ -1315,6 +1395,39 @@ def _read_barcode(png, bits=12):
     return sum((1 << i) for i in range(bits) if im[10:18, 12 + i * 21:20 + i * 21].mean() > 0.5)
 
 
+def _selftest_text(check):
+    import xray_text as xt
+    black_white = Image.new("L", (40, 20), 0)
+    black_white.paste(255, (0, 0, 10, 20))
+    check("contrast: white text on black is 21:1", xt.contrast_ratio(black_white) == 21.0,
+          f"{xt.contrast_ratio(black_white)}")
+    check("contrast: flat grey is 1:1", xt.contrast_ratio(Image.new("L", (40, 20), 128)) == 1.0)
+    check("Arabic normalisation folds alef forms and tashkeel", xt.norm("أَنا") == xt.norm("انا"))
+    check("a one-letter misread is not the same caption", not xt.matches("حظ", "حط"))
+    check("a short word is not 'inside' a URL", not xt.matches("chatgpt.com/c/6ac108a1q", "ChatGPT"))
+    check("a close misread of a caption still matches", xt.matches("وعفل", "وعمل"))
+    if sys.platform != "darwin" or not shutil.which("swiftc"):
+        check("Vision read (skipped: needs macOS and swiftc)", True)
+        return
+    with tempfile.TemporaryDirectory() as td:
+        im = Image.new("RGB", (1080, 1920), (40, 40, 40))
+        ImageDraw.Draw(im).text((200, 1200), "READ THIS CAPTION", fill=(255, 255, 255), font=_font(90))
+        path = Path(td) / "cap.png"
+        im.save(path)
+        try:
+            rec = xt.run_vision(xt.vision_helper(), [path])[str(path)]
+        except xt.TextUnavailable as e:
+            check("Vision helper builds and runs", False, str(e))
+            return
+        lines = xt.merge_reads(rec)
+        hit = [ln for ln in lines if "caption" in ln["text"].lower()]
+        check("Vision reads a drawn caption with both language orders", bool(hit),
+              f"{[ln['text'] for ln in lines]}")
+        if hit:
+            y, h = hit[0]["y"] * 1920, hit[0]["h"] * 1920
+            check("its box sits where it was drawn", 1180 <= y <= 1230 and 50 <= h <= 130, f"y={y:.0f} h={h:.0f}")
+
+
 def cmd_selftest(_args):
     need("ffmpeg")
     checks = []
@@ -1377,6 +1490,7 @@ def cmd_selftest(_args):
         check("queue commands quote hostile filenames",
               shlex.split(f"capcutctl xray window {shlex.quote(hostile)} --frames 1-2")[3] == hostile)
         check("true peak measured", lo["true_peak_dbtp"] is not None and lo["true_peak_dbtp"] > -1.0, f"{lo['true_peak_dbtp']}")
+    _selftest_text(check)
     failed = [c for c in checks if not c[1]]
     print(f"xray selftest: {len(checks) - len(failed)}/{len(checks)} passed")
     return 1 if failed else 0
@@ -1392,6 +1506,9 @@ def main(argv=None):
     s.add_argument("--project", help="CapCut project name or folder, to add authored events")
     s.add_argument("--out", help="output folder (default: VIDEO.xray next to the video)")
     s.add_argument("--json", action="store_true", help="print verdicts as JSON instead of the score")
+    s.add_argument("--no-text", action="store_true", help="skip captions, screen text and faces")
+    s.add_argument("--speech", action="store_true", help="transcribe the export and check captions against it")
+    s.add_argument("--lang", help="speech language for --speech (e.g. ar); default auto")
     f = sub.add_parser("frame", help="one exact frame at native resolution")
     f.add_argument("video")
     f.add_argument("--frame", type=int)
