@@ -165,6 +165,9 @@
   "final": {
     "_note": "The final-export gates (gate, and export through it). Speech numbers are measured on the export's own transcript (xray scan --speech), not the draft.",
     "captionsRequired": true,
+    "firstWordBy": 0.5,
+    "maxSpeechGap": 0.7,
+    "lastWordTail": 0.08,
     "lengthWarnAbove": 90
   },
 

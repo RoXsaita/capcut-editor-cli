@@ -369,7 +369,45 @@ export function gateReport(doc, { projectDir = null, profile = loadProfile() } =
  * was configured; the X-ray says what the export shows. Its FAIL verdicts block, its UNKNOWNs
  * warn (they must be named in the hand-off), and what it could not check is listed, never passed.
  */
-export function foldXray(report, xrayDir, projectDir) {
+const finalCheck = (id, ok, message) => ({ id, level: 'FAIL', ok, message, value: null, target: null });
+
+/** Speech timing on the export's own transcript: first word, gaps between words, a clipped last word. */
+export function speechGates(speech, { fin = {}, stop, enderAt = null, pauses = [] } = {}) {
+  if (!speech) return [finalCheck('speech', false, 'no transcript of the export: re-run the X-ray with --speech')];
+  const words = (speech.words || []).filter(w => Number.isFinite(w.start) && w.start < stop);
+  if (!words.length) return [finalCheck('speech', false, 'the export transcript has no words')];
+  const firstBy = fin.firstWordBy ?? 0.5, maxGap = fin.maxSpeechGap ?? 0.7, tailMin = fin.lastWordTail ?? 0.08;
+  const first = words[0];
+  const gaps = [];
+  for (let i = 1; i < words.length; i++) {
+    const a = words[i - 1].end, b = words[i].start;
+    if (b - a > maxGap && !pauses.some(p => p >= a - 0.1 && p <= b + 0.1)) gaps.push({ t: r2(a), gap: r2(b - a) });
+  }
+  const last = words.at(-1);
+  const tail = r2(stop - last.end);
+  return [
+    finalCheck('first-word', first.start <= firstBy + 1e-6, `first word "${first.word}" at ${r2(first.start)}s (by ${firstBy}s)`),
+    finalCheck('speech-gaps', !gaps.length, gaps.length
+      ? `${gaps.length} silence(s) over ${maxGap}s inside the speech at ${gaps.slice(0, 5).map(g => `${g.t}s (${g.gap}s)`).join(', ')}: tighten, or declare a deliberate pause with --pause SECONDS`
+      : `no gap over ${maxGap}s between words`),
+    finalCheck('last-word', tail >= tailMin, `last word "${last.word}" ends ${tail}s before ${enderAt != null ? 'the ender' : 'the end'}${tail < tailMin ? ': clipped — extend the clip' : ''}`),
+  ];
+}
+
+/**
+ * The final-export checks the X-ray measures but does not judge. Pure, so tests feed it numbers.
+ * `enderAt` is where the follow ender starts (speech and sound rules stop there); `pauses` are
+ * timeline seconds of deliberate pauses the editor declared.
+ */
+export function exportGates(xray, speech, { profile = loadProfile(), enderAt = null, pauses = [] } = {}) {
+  const fin = profile.final || {};
+  const stop = enderAt ?? (Number(xray.info?.format?.duration) || 0);
+  return [
+    ...speechGates(speech, { fin, stop, enderAt, pauses }),
+  ];
+}
+
+export function foldXray(report, xrayDir, projectDir, { profile = null, draft = null, pauses = [] } = {}) {
   const file = path.join(path.resolve(xrayDir), 'xray.json');
   let doc;
   try { doc = JSON.parse(fs.readFileSync(file, 'utf8')); }
@@ -389,6 +427,14 @@ export function foldXray(report, xrayDir, projectDir) {
   for (const v of doc.verdicts || []) {
     if (v.verdict === 'NOT CHECKED') { notChecked.push(v.property); continue; }
     add(`xray:${v.property}`, v.verdict === 'FAIL' ? 'FAIL' : 'WARN', v.verdict === 'PASS', v.detail);
+  }
+  // Final-export gates: only when the caller holds the profile (gate --xray, export).
+  if (profile) {
+    let speech = null;
+    try { speech = JSON.parse(fs.readFileSync(path.join(path.resolve(xrayDir), 'speech.json'), 'utf8')); } catch { /* checked below */ }
+    const end = draft ? S(contentEndUs(draft, projectDir)) : null;
+    const ender = draft && end ? endingCard(draft, end) : null;
+    report.checks.push(...exportGates(doc, speech, { profile, enderAt: ender?.t ?? null, pauses }));
   }
   report.xray = { dir: path.resolve(xrayDir), export: doc.export?.path, sha256: doc.export?.sha256, notChecked };
   report.scope = `Draft structure plus the export X-ray (every frame and sample measured). Not checked: ${notChecked.join(', ') || 'nothing'}.`;

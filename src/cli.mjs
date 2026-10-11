@@ -393,7 +393,7 @@ const r2 = n => Math.round(n * 100) / 100;
 
 export function parseArgs(argv) {
   const result = { _: [] };
-  const repeatValueKeys = new Set(['trimBeat', 'recoverBeat', 'set', 'allow']);
+  const repeatValueKeys = new Set(['trimBeat', 'recoverBeat', 'set', 'allow', 'pause']);
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i];
     if (!token.startsWith('--')) { result._.push(token); continue; }
@@ -461,6 +461,11 @@ function originOptions(args) {
 async function planOrApply(projectDir, name, op, args, options, loadPlanner) {
   if (args.plan) return print((await loadPlanner())(await loadWorking(projectDir), op, { projectDir }), true);
   return print(applySpec(projectDir, { version: 1, name, operations: [op] }, options), true);
+}
+
+/** --pause 12.3,40 (repeatable): timeline seconds of deliberate pauses the speech-gap gate allows. */
+function pauseList(value) {
+  return [value].flat().filter(v => v != null && v !== true).flatMap(v => String(v).split(',')).map(Number).filter(Number.isFinite);
 }
 
 function print(value, asJson = false) {
@@ -1668,10 +1673,11 @@ export async function main(argv, dependencies = {}) {
     const { gateReport, gateText, writeGateRecord } = await import('./gate.mjs');
     const { loadProfile, applyStyle } = await import('./profile.mjs');
     const profile = applyStyle(loadProfile({ file: args.profile || null }), args.style || null);
-    const report = gateReport(await loadWorking(projectDir), { projectDir, profile });
+    const doc = await loadWorking(projectDir);
+    const report = gateReport(doc, { projectDir, profile });
     if (args.xray) {
       const { foldXray } = await import('./gate.mjs');
-      foldXray(report, args.xray, projectDir);
+      foldXray(report, args.xray, projectDir, { profile, draft: doc, pauses: pauseList(args.pause) });
     }
     if (args.record) report.recorded = writeGateRecord(projectDir, report);
     if (report.verdict === 'FAIL') process.exitCode = 1;
