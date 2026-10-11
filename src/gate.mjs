@@ -370,7 +370,7 @@ export function gateReport(doc, { projectDir = null, profile = loadProfile() } =
  * warn (they must be named in the hand-off), and what it could not check is listed, never passed.
  */
 // X-ray verdicts that only warn in a scan but block a final export.
-const PROMOTE = new Set(['video.opens_black', 'video.stutter']);
+const PROMOTE = new Set(['video.opens_black', 'video.stutter', 'audio.loudness']);
 
 const finalCheck = (id, ok, message) => ({ id, level: 'FAIL', ok, message, value: null, target: null });
 
@@ -416,6 +416,21 @@ export function deliveryGates(xray, { profile, fin = {}, stop }) {
     : 'sound all the way to the ender')];
 }
 
+/** Sudden level steps: short-term loudness (3s window) moving more than maxLoudnessJump LU in 1s. */
+export function loudnessJumps(xray, { fin = {}, stop }) {
+  const limit = fin.maxLoudnessJump ?? 6;
+  const series = (xray.audio?.loudness?.momentary || []).filter(([t, , st]) => t < stop && st != null && st > -40);
+  const at = new Map(series.map(([t, , st]) => [Math.round(t * 10), st]));
+  const jumps = [];
+  for (const [t, , st] of series) {
+    const before = at.get(Math.round(t * 10) - 10);
+    if (before != null && Math.abs(st - before) > limit && !(jumps.length && t - jumps.at(-1).t <= 1)) jumps.push({ t: r2(t), lu: r2(st - before) });
+  }
+  return [finalCheck('loudness-jumps', !jumps.length, jumps.length
+    ? `short-term loudness steps over ${limit} LU in 1s at ${jumps.slice(0, 4).map(j => `${j.t}s (${j.lu > 0 ? '+' : ''}${j.lu} LU)`).join(', ')}`
+    : 'no sudden loudness steps')];
+}
+
 /**
  * The final-export checks the X-ray measures but does not judge. Pure, so tests feed it numbers.
  * `enderAt` is where the follow ender starts (speech and sound rules stop there); `pauses` are
@@ -426,6 +441,7 @@ export function exportGates(xray, speech, { profile = loadProfile(), enderAt = n
   const stop = enderAt ?? (Number(xray.info?.format?.duration) || 0);
   return [
     ...deliveryGates(xray, { profile, fin, stop }),
+    ...(xray.audio?.present ? loudnessJumps(xray, { fin, stop }) : []),
     ...speechGates(speech, { fin, stop, enderAt, pauses }),
   ];
 }

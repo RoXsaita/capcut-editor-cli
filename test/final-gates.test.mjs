@@ -55,3 +55,17 @@ test('wrong format, no audio, and no transcript fail by name rather than pass', 
   assert.equal(c['export-audio'].ok, false);
   assert.equal(c.speech.ok, false);
 });
+
+test('a dropout before the ender fails; silence running into the ender, and a step in level, are told apart', () => {
+  const drop = xray();
+  drop.audio.findings = [{ kind: 'silence', t: 9, dur_s: 0.4, where: 'inside' }, { kind: 'silence', t: 17.9, dur_s: 0.5, where: 'inside' }];
+  const c = byId(exportGates(drop, words([0, 17]), { profile, enderAt: 18 }));
+  assert.equal(c['export-audio'].ok, false);
+  assert.match(c['export-audio'].message, /9s \(0\.4s\)/);
+  assert.doesNotMatch(c['export-audio'].message, /17\.9/);
+  const jump = xray();
+  jump.audio.loudness.momentary = jump.audio.loudness.momentary.map(([t, m, s]) => [t, m, t >= 10 ? s + 9 : s]);
+  const j = byId(exportGates(jump, words([0, 17]), { profile, enderAt: 18 }));
+  assert.equal(j['loudness-jumps'].ok, false);
+  assert.match(j['loudness-jumps'].message, /at 10s \(\+9 LU\)/);
+});

@@ -168,6 +168,7 @@
     "firstWordBy": 0.5,
     "maxSpeechGap": 0.7,
     "lastWordTail": 0.08,
+    "maxLoudnessJump": 6,
     "lengthWarnAbove": 90
   },
 

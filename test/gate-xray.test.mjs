@@ -50,3 +50,18 @@ test('an unreadable X-ray folder fails by name', () => {
   assert.equal(report.verdict, 'FAIL');
   assert.deepEqual(report.failed, ['xray']);
 });
+
+test('a final export (gate --xray with the profile) blocks on opens-black, stutter and loudness the scan only warns on', () => {
+  const dir = xrayDir({ export: {}, draft: null, info: { video: { width: 1080, height: 1920, avg_frame_rate: '30/1' }, format: { duration: '10' } },
+    audio: { present: true, findings: [], loudness: { momentary: [] } }, verdicts: [
+      { property: 'video.stutter', verdict: 'UNKNOWN', detail: '2 events' },
+      { property: 'audio.loudness', verdict: 'UNKNOWN', detail: '-16 LUFS' },
+      { property: 'audio.clicks', verdict: 'UNKNOWN', detail: 'listen' },
+    ] });
+  fs.writeFileSync(path.join(dir, 'speech.json'), JSON.stringify({ words: [{ word: 'a', start: 0.1, end: 9 }] }));
+  const profile = { canvas: { width: 1080, height: 1920, fps: 30 }, final: {} };
+  const report = foldXray(baseReport(), dir, null, { profile });
+  assert.deepEqual(report.failed, ['xray:video.stutter', 'xray:audio.loudness']);
+  assert.ok(report.warned.includes('xray:audio.clicks'));
+  assert.equal(foldXray(baseReport(), dir, null).failed.length, 0, 'a plain scan fold still only warns');
+});
