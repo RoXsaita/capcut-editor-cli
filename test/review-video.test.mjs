@@ -9,6 +9,7 @@ import { CHUNK, prepareScript } from '../src/gemini-page.mjs';
 import {
   audioCheck, collectIssues, decideIssue, driverPrompt, extractReviewJson, foldReview, normaliseArabic, parseDriverText,
   reviewVideo, soundCheck, toolResultTexts,
+  driverEnv,
 } from '../src/review-video.mjs';
 
 const WORDS = 'كلود استخدم جهازي زي كأنه بني آدم عشان يعملي منتاج لفيديو'.split(' ').map((word, i) => ({ word, start: i * 0.4, end: i * 0.4 + 0.35 }));
@@ -182,3 +183,12 @@ test('the audio-only answer is decisive when the draft has music at the end, inc
   assert.match(audioCheck({ music_in_last_2s: true }, null).detail, /no draft/);
 });
 
+
+test('the review never uses the Gemini API: no keys reach the driver, no API endpoint on the review path', () => {
+  const env = driverEnv({ PATH: '/bin', HOME: '/h', GEMINI_API_KEY: 'g', GOOGLE_API_KEY: 'k', GOOGLE_CLOUD_PROJECT: 'p', ANTHROPIC_API_KEY: 'a' });
+  assert.deepEqual(env, { PATH: '/bin', HOME: '/h' });
+  for (const file of ['review-video.mjs', 'gemini-page.mjs']) {
+    const src = fs.readFileSync(new URL(`../src/${file}`, import.meta.url), 'utf8');
+    assert.doesNotMatch(src, /generativelanguage|aiplatform\.googleapis|@google\/genai|geminiApiKey|music\.mjs/, file);
+  }
+});

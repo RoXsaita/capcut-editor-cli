@@ -200,6 +200,16 @@ export function toolResultTexts(lines) {
  * lines. Tests replace it. While it runs, the marked tab is kept in front; a `hidden` state
  * escalates to activating Chrome.
  */
+/**
+ * The driver's environment: no API keys at all. The review is the Gemini web app in the creator's
+ * Chrome, never the Gemini API (cli/.env holds a GEMINI_API_KEY for `music`, and loadEnv puts it in
+ * process.env), and `claude -p` runs on the creator's own login instead of billing ANTHROPIC_API_KEY.
+ */
+export const DRIVER_STRIPPED_ENV = /^(GEMINI_API_KEY|GOOGLE_API_KEY|GOOGLE_APPLICATION_CREDENTIALS|GOOGLE_CLOUD_PROJECT(_NUMBER)?|ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN)$/;
+export function driverEnv(env = process.env) {
+  return Object.fromEntries(Object.entries(env).filter(([k]) => !DRIVER_STRIPPED_ENV.test(k)));
+}
+
 export async function runClaudeDriver({ prompt, cwd, run, model = 'sonnet', timeoutMs = 600000, log = null }) {
   const claude = process.env.CAPCUTCTL_CLAUDE || 'claude';
   const which = spawnSync(claude, ['--version'], { encoding: 'utf8' });
@@ -209,7 +219,7 @@ export async function runClaudeDriver({ prompt, cwd, run, model = 'sonnet', time
     .map(t => `mcp__claude-in-chrome__${t}`)];
   const child = spawn(claude, ['-p', '--chrome', '--model', model, '--output-format', 'stream-json', '--verbose',
     '--allowedTools', tools.join(','), '--add-dir', cwd, '--disallowedTools', 'Bash,Edit,Write,WebFetch,WebSearch,Agent'],
-  { cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+  { cwd, env: driverEnv(), stdio: ['pipe', 'pipe', 'pipe'] });
   child.stdin.end(prompt);   // on stdin: the tool lists are variadic and would swallow a trailing prompt
   const marker = titleMarker(run);
   const lines = [];
