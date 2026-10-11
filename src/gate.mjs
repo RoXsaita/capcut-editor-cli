@@ -312,6 +312,9 @@ export function gateReport(doc, { projectDir = null, profile = loadProfile() } =
   const ender = endingCard(doc, end);
   add('ending', 'FAIL', Boolean(ender), ender ? `ends on the follow ender (${ender.desc} at ${ender.t}s)`
     : 'no follow ender / endcard on the last frame: edit.json endcard, or the follow-ender clip');
+  if (fin.lengthWarnAbove) {
+    add('length', 'WARN', end <= fin.lengthWarnAbove, `${r2(end)}s (45–60s ideal, 75s fine, warn above ${fin.lengthWarnAbove}s)`, r2(end), fin.lengthWarnAbove);
+  }
   add('chip-and-logo', 'FAIL', !chipClash.length, chipClash.length ? `brand-chip and logo pop on one mention at ${chipClash.map(g => g.t).join(', ')}s` : 'no doubled brand mentions');
 
   // Seams.
