@@ -27,7 +27,7 @@ function keyed(segment, property, atUs, fallback, notes) {
   if (atUs <= keys[0].time_offset) return keys[0].values[0];
   if (atUs >= keys.at(-1).time_offset) return keys.at(-1).values[0];
   const b = keys.findIndex(k => k.time_offset >= atUs), a = keys[b - 1], z = keys[b];
-  if ([a, z].some(k => k.curveType && k.curveType !== 'Line')) notes.add(`${property} mid-ease`);
+  if (a.values[0] !== z.values[0] && [a, z].some(k => k.curveType && k.curveType !== 'Line')) notes.add(`${property} mid-ease`);
   return a.values[0] + (z.values[0] - a.values[0]) * (atUs - a.time_offset) / (z.time_offset - a.time_offset);
 }
 

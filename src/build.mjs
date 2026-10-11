@@ -23,7 +23,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { CapcutError, stableJson, applySpec, loadProject, readJson } from './core.mjs';
+import { CapcutError, stableJson, applySpec, loadProject, readJson, resolveMediaPath } from './core.mjs';
 import { findWordsFile, resolveAnchors } from './anchors.mjs';
 import { layoutAt } from './mograph-place.mjs';
 import { safeZoneViolations } from './mograph-geometry.mjs';
@@ -103,17 +103,23 @@ export function readEditPlan(file) {
   return normalizePlan(readJson(resolved), { baseDir: path.dirname(resolved) });
 }
 
-function principalSignature(doc) {
+function principalSignature(doc, projectDir = null) {
   const { track } = principalTrack(doc);
-  return (track.segments || []).map(s => [s.material_id, s.source_timerange?.start, s.source_timerange?.duration,
+  const media = new Map((doc.materials?.videos || []).map(m => [m.id, m.path]));
+  // A relink keeps the material id; the file stamp is what tells the ending its frame changed.
+  const stamp = id => {
+    try { const st = fs.statSync(resolveMediaPath(media.get(id), projectDir)); return `${st.size}@${st.mtimeMs}`; }
+    catch { return ''; }
+  };
+  return (track.segments || []).map(s => [s.material_id, stamp(s.material_id), s.source_timerange?.start, s.source_timerange?.duration,
     s.target_timerange?.start, s.target_timerange?.duration].join(':')).join('|');
 }
 
-function planHash(plan, profile, doc, wordsFile, templateHashes) {
+function planHash(plan, profile, doc, wordsFile, templateHashes, projectDir = null) {
   let wordsStamp = null;
   if (wordsFile && fs.existsSync(wordsFile)) { const st = fs.statSync(wordsFile); wordsStamp = `${st.size}:${st.mtimeMs}`; }
   return crypto.createHash('sha256').update(JSON.stringify({
-    plan, profile, principal: principalSignature(doc), wordsStamp, templateHashes,
+    plan, profile, principal: principalSignature(doc, projectDir), wordsStamp, templateHashes,
   })).digest('hex').slice(0, 24);
 }
 
@@ -243,7 +249,7 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
     if (unknown) fail('PLAN_INVALID', `unknown scene "${unknown.scene}" (see capcutctl mograph scenes)`);
     for (const id of new Set(plan.scenes.map(x => x.scene))) templateHashes[`scene:${id}`] = sceneFingerprint(id, {}, profile);
   }
-  const hash = planHash(plan, profile, doc, wordsFile, templateHashes);
+  const hash = planHash(plan, profile, doc, wordsFile, templateHashes, projectDir);
   const stateFile = path.join(projectDir, '.capcutctl', 'build.json');
   const state = fs.existsSync(stateFile) ? readJson(stateFile) : {};
   if (!force && !dryRun && state.hash === hash) {
@@ -400,7 +406,7 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
   if (!dryRun) {
     if (record) writeGateRecord(projectDir, gate);
     fs.mkdirSync(path.dirname(stateFile), { recursive: true });
-    const next = { version: 1, hash: planHash(plan, profile, workingDoc(projectDir), wordsFile, templateHashes), builtFrom: hash,
+    const next = { version: 1, hash: planHash(plan, profile, workingDoc(projectDir), wordsFile, templateHashes, projectDir), builtFrom: hash,
       shots: stages.shots?.key || state.shots || null, at: new Date().toISOString(), verdict: gate.verdict };
     fs.writeFileSync(stateFile, stableJson(next));
   }

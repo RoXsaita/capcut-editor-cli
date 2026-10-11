@@ -169,7 +169,9 @@ test('the captured frame is the last displayed source frame, placed with the cli
   rewrite(dir, doc => {
     const B = doc.tracks.find(tr => tr.name === 'content').segments.find(s => s.id === 'B');
     B.common_keyframes = [{ property_type: 'KFTypeScaleX', keyframe_list: [
-      { time_offset: 13_000_000, values: [1], curveType: 'FreeCurveInOut' }, { time_offset: 15_000_000, values: [2] }] }];
+      { time_offset: 13_000_000, values: [1], curveType: 'FreeCurveInOut' }, { time_offset: 15_000_000, values: [2] }] },
+    { property_type: 'KFTypePositionX', keyframe_list: [   // an eased hold is not mid-ease
+      { time_offset: 13_000_000, values: [0], curveType: 'FreeCurveInOut' }, { time_offset: 15_000_000, values: [0] }] }];
     doc.tracks.push({ id: 'TXT', type: 'text', segments: [{ id: 'END', desc: 'sig:endcard', target_timerange: { start: 6_000_000, duration: 2_000_000 } }] });
   });
   shot = captureLastFrame(working(dir), dir);
@@ -220,6 +222,10 @@ test('build appends the ending on the edit\'s own last frame, keeps the endcard 
   assert.equal(again.stages.ending.at, 8, 'a rebuild does not append after its own ending');
   assert.equal(enders().length, 1);
   assert.deepEqual(endcard(), [{ start: 7_680_000, duration: 400_000 }], 'a rebuild keeps the endcard off the ending');
+  // A relink keeps the material id; the new file still invalidates the no-op hash.
+  assert.equal((await runBuild(dir, normalizePlan(base), { forceRunning: true })).upToDate, true);
+  fs.utimesSync(working(dir).materials.videos[0].path, new Date(), new Date(Date.now() + 5000));
+  assert.notEqual((await runBuild(dir, normalizePlan(base), { forceRunning: true, dryRun: true })).upToDate, true);
   await runBuild(dir, normalizePlan({ ...base, ending: false }), { forceRunning: true });
   assert.equal(enders().length, 0);
   assert.equal(contentEndUs(working(dir), dir), 8_000_000);
