@@ -404,7 +404,8 @@ export function parseArgs(argv) {
          'waitForClose', 'force', 'reindex', 'noRepair', 'inPlace',
          'generated', 'allowEphemeral', 'measure', 'apply', 'native', 'noCache', 'noGrade',
          'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'noEase', 'easePosition', 'stress', 'allowBoost', 'values',
-         'faceDetail', 'replaceExisting', 'replace', 'record', 'allowUnsafe', 'markdown', 'brief', 'check', 'restyle'].includes(key)) result[key] = true;
+         'faceDetail', 'replaceExisting', 'replace', 'record', 'allowUnsafe', 'markdown', 'brief', 'check', 'restyle',
+         'accept', 'reject', 'resetRounds', 'noReview', 'noGate'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
       const value = argv[++i];
@@ -1072,6 +1073,19 @@ export async function main(argv, dependencies = {}) {
     const { exportProject } = await import('./export.mjs');
     return print(await exportProject(resolveProject(args.project, root), args), true);
   }
+  if (command === 'review-video') {
+    const { reviewVideo, decideIssue, reviewText } = await import('./review-video.mjs');
+    if (args.decide) {
+      if (!args.issue || args.accept === args.reject) throw new CapcutError('review-video --decide FILE --issue ID --accept|--reject --reason "…"', { exitCode: 2 });
+      return print(decideIssue(path.resolve(args.decide), args.issue, args.accept ? 'accepted' : 'rejected', args.reason), true);
+    }
+    if (!args.media) throw new CapcutError('review-video requires --media FINAL.mp4', { exitCode: 2 });
+    const record = await reviewVideo({ media: path.resolve(args.media), projectDir: args.project ? resolveProject(args.project, root) : null,
+      script: args.script ? path.resolve(args.script) : null, speech: args.speech ? path.resolve(args.speech) : null,
+      model: args.model || 'sonnet', resetRounds: Boolean(args.resetRounds) });
+    if (record.status === 'discarded' || record.issues.some(i => i.blocker)) process.exitCode = 1;
+    return args.json ? print(record, true) : print(reviewText(record));
+  }
   if (command === 'review') {
     if (!args.project) throw new CapcutError('review requires --project NAME.', { exitCode: 2 });
     const projectDir = resolveProject(args.project, root);
@@ -1670,7 +1684,7 @@ export async function main(argv, dependencies = {}) {
     return print(applySpec(projectDir, { version: 1, name: command, operations: [op] }, options), true);
   }
   if (command === 'gate') {
-    const { gateReport, gateText, writeGateRecord } = await import('./gate.mjs');
+    const { gateReport, gateText, writeGateRecord, finaliseReport } = await import('./gate.mjs');
     const { loadProfile, applyStyle } = await import('./profile.mjs');
     const profile = applyStyle(loadProfile({ file: args.profile || null }), args.style || null);
     const doc = await loadWorking(projectDir);
@@ -1678,6 +1692,11 @@ export async function main(argv, dependencies = {}) {
     if (args.xray) {
       const { foldXray } = await import('./gate.mjs');
       foldXray(report, args.xray, projectDir, { profile, draft: doc, pauses: pauseList(args.pause) });
+    }
+    if (args.review) {
+      const { foldReview } = await import('./review-video.mjs');
+      foldReview(report, path.resolve(args.review));
+      finaliseReport(report);
     }
     if (args.record) report.recorded = writeGateRecord(projectDir, report);
     if (report.verdict === 'FAIL') process.exitCode = 1;

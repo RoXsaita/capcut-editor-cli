@@ -452,7 +452,7 @@ export function foldXray(report, xrayDir, projectDir, { profile = null, draft = 
   try { doc = JSON.parse(fs.readFileSync(file, 'utf8')); }
   catch (error) {
     report.checks.push({ id: 'xray', level: 'FAIL', ok: false, message: `cannot read ${file}: ${error.message}`, value: null, target: null });
-    return finalise(report);
+    return finaliseReport(report);
   }
   const add = (id, level, ok, message) => report.checks.push({ id, level, ok, message, value: null, target: null });
   const draftPath = doc.draft?.draft_path;
@@ -477,10 +477,10 @@ export function foldXray(report, xrayDir, projectDir, { profile = null, draft = 
   }
   report.xray = { dir: path.resolve(xrayDir), export: doc.export?.path, sha256: doc.export?.sha256, notChecked };
   report.scope = `Draft structure plus the export X-ray (every frame and sample measured). Not checked: ${notChecked.join(', ') || 'nothing'}.`;
-  return finalise(report);
+  return finaliseReport(report);
 }
 
-function finalise(report) {
+export function finaliseReport(report) {
   const failed = report.checks.filter(c => !c.ok && c.level === 'FAIL');
   const warned = report.checks.filter(c => !c.ok && c.level === 'WARN');
   report.failed = failed.map(c => c.id);
