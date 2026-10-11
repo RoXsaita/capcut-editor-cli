@@ -373,7 +373,8 @@ export function gateReport(doc, { projectDir = null, profile = loadProfile() } =
 // X-ray verdicts that only warn in a scan but block a final export. A frozen frame is the picture
 // stuck past maxStatic; one repeated frame (video.stutter) stays a warning: on the 2026-10-11
 // finals it was a single duplicate and a source frame-rate cadence, never visible as a freeze.
-const PROMOTE = new Set(['video.opens_black', 'video.frozen', 'audio.loudness']);
+// Integrated loudness is judged by exportGates against final.loudnessTolerance instead.
+const PROMOTE = new Set(['video.opens_black', 'video.frozen']);
 
 const finalCheck = (id, ok, message) => ({ id, level: 'FAIL', ok, message, value: null, target: null });
 
@@ -468,8 +469,18 @@ export function deliveryGates(xray, { profile, fin = {}, stop }) {
     : 'sound all the way to the ender')];
 }
 
-/** Sudden level steps: short-term loudness (3s window) moving more than maxLoudnessJump LU in 1s. */
-export function loudnessJumps(xray, { fin = {}, stop }) {
+/**
+ * Loudness on the export: integrated within final.loudnessTolerance of the target (-14 ±2.5 by
+ * Suheil's call, 2026-10-11: platforms normalise, and the finals sit at -15.4 to -16.3 that
+ * `loudness` cannot lift without breaking the peak ceiling), and no sudden steps — short-term
+ * loudness (3s window) moving more than maxLoudnessJump LU in 1s.
+ */
+export function loudnessJumps(xray, { profile = null, fin = {}, stop }) {
+  const out = [];
+  const il = xray.audio?.loudness?.integrated_lufs;
+  const target = profile?.sound?.loudnessTarget ?? -14, tol = fin.loudnessTolerance ?? 2.5;
+  out.push(finalCheck('export-loudness', il != null && Math.abs(il - target) <= tol,
+    `${il ?? '?'} LUFS integrated (target ${target} ±${tol} LU)${il != null && Math.abs(il - target) > tol ? ': capcutctl loudness --project NAME, then re-export' : ''}`));
   const limit = fin.maxLoudnessJump ?? 6;
   const series = (xray.audio?.loudness?.momentary || []).filter(([t, , st]) => t < stop && st != null && st > -40);
   const at = new Map(series.map(([t, , st]) => [Math.round(t * 10), st]));
@@ -478,7 +489,7 @@ export function loudnessJumps(xray, { fin = {}, stop }) {
     const before = at.get(Math.round(t * 10) - 10);
     if (before != null && Math.abs(st - before) > limit && !(jumps.length && t - jumps.at(-1).t <= 1)) jumps.push({ t: r2(t), lu: r2(st - before) });
   }
-  return [finalCheck('loudness-jumps', !jumps.length, jumps.length
+  return [...out, finalCheck('loudness-jumps', !jumps.length, jumps.length
     ? `short-term loudness steps over ${limit} LU in 1s at ${jumps.slice(0, 4).map(j => `${j.t}s (${j.lu > 0 ? '+' : ''}${j.lu} LU)`).join(', ')}`
     : 'no sudden loudness steps')];
 }
@@ -493,7 +504,7 @@ export function exportGates(xray, speech, { profile = loadProfile(), enderAt = n
   const stop = enderAt ?? (Number(xray.info?.format?.duration) || 0);
   return [
     ...deliveryGates(xray, { profile, fin, stop }),
-    ...(xray.audio?.present ? loudnessJumps(xray, { fin, stop }) : []),
+    ...(xray.audio?.present ? loudnessJumps(xray, { profile, fin, stop }) : []),
     ...speechGates(speech, { fin, stop, enderAt, pauses, envelope }),
   ];
 }

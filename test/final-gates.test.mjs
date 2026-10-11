@@ -28,7 +28,7 @@ test('ending: a follow-ender clip or sig:endcard on the last frame passes; one t
 
 const xray = (over = {}) => ({
   info: { video: { width: 1080, height: 1920, avg_frame_rate: '30/1' }, format: { duration: '20.0' } },
-  audio: { present: true, findings: [], loudness: { momentary: Array.from({ length: 200 }, (_, i) => [i / 10, -20, -18]) } },
+  audio: { present: true, findings: [], loudness: { integrated_lufs: -15.8, momentary: Array.from({ length: 200 }, (_, i) => [i / 10, -20, -18]) } },
   ...over,
 });
 const words = (...spans) => ({ words: spans.map(([start, end], i) => ({ word: `w${i}`, start, end })) });
@@ -77,4 +77,13 @@ test('a dropout before the ender fails; silence running into the ender, and a st
   const j = byId(exportGates(jump, words([0, 17]), { profile, enderAt: 18 }));
   assert.equal(j['loudness-jumps'].ok, false);
   assert.match(j['loudness-jumps'].message, /at 10s \(\+9 LU\)/);
+});
+
+test('integrated loudness blocks only outside -14 ±2.5 LU', () => {
+  const at = il => { const x = xray(); x.audio.loudness.integrated_lufs = il;
+    return byId(exportGates(x, words([0, 17]), { profile: { ...profile, sound: { loudnessTarget: -14 }, final: { ...profile.final, loudnessTolerance: 2.5 } }, enderAt: 18, envelope: envelope(20, [0, 17]) }))['export-loudness']; };
+  assert.equal(at(-16.3).ok, true);
+  assert.equal(at(-17).ok, false);
+  assert.equal(at(-11).ok, false);
+  assert.equal(at(null).ok, false, 'unmeasured is not a pass');
 });
