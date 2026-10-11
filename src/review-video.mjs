@@ -16,7 +16,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { CapcutError } from './core.mjs';
+import { CapcutError, allSegments, contentEndUs, loadProject } from './core.mjs';
+import { isMusicSegment } from './loudness.mjs';
 import { GEMINI_URL, UPLOAD_LABEL, titleMarker, prepareScript, uploadWaitScript, sendScript, answerWaitScript, chunkScript } from './gemini-page.mjs';
 
 const fail = (code, message, exitCode = 2) => { throw new CapcutError(message, { code, exitCode }); };
@@ -47,6 +48,7 @@ Return ONLY this JSON, inside one \`\`\`json code block:
   "audio_problems": [ { "timestamp": "mm:ss", "issue": "...", "fix": "..." } ],
   "ending": { "last_word_clipped": true/false, "follow_ender_present": true/false, "notes": "..." },
   "first_spoken_sentence": "quote the first sentence exactly as spoken, in Arabic",
+  "audio_check": { "music_in_last_2s": true/false },
   "save_value": "one sentence: would a viewer save this to come back to it, and why or why not",
   "blockers": [ "only real defects a viewer would notice: clipped word, wrong/misspelled caption, caption over face, unreadable key proof, black/frozen frame, audio dropout, hook shows no result by 2s, payoff does not match hook" ]
 }
@@ -56,6 +58,7 @@ Rules:
 - Do not invent problems to fill the lists. Empty lists are fine.
 - Do not give a virality score or predict views.
 - Do not suggest changing the story, claims or script wording. Only judge execution: picture, sound, captions, pacing, clarity.
+- Answer audio_check from the sound alone: is music playing during the last 2 seconds?
 `;
 
 const SEND_MESSAGE = 'Two files are attached: the video to review and review-instructions.txt. '
@@ -323,6 +326,34 @@ export function soundCheck(quote, words) {
   return { ok: said.length >= 3 && score >= 0.6 && coverage >= 0.75, score, coverage, quote: quote || null, reference: referenceWords.join(' ') };
 }
 
+/**
+ * What the draft says about the end of the mix: is music under the last 2s? Captions cannot give
+ * it away, and the house ending carries music under the follow ender.
+ */
+export function draftAudioFacts(doc, projectDir = null) {
+  const end = contentEndUs(doc, projectDir) / 1e6;
+  const audios = new Map((doc.materials?.audios || []).map(m => [m.id, m]));
+  return { musicAtEnd: allSegments(doc).some(({ track, segment }) => track.type === 'audio'
+    && isMusicSegment(track, segment, audios.get(segment.material_id))
+    && (segment.target_timerange.start + segment.target_timerange.duration) / 1e6 > end - 1.8
+    && segment.target_timerange.start / 1e6 < end - 0.2) };
+}
+
+/**
+ * Gemini's audio-only answer against the draft. Decisive when the draft has music at the end (a
+ * deaf model says no) or Gemini claims music the draft lacks; otherwise inconclusive and the quote
+ * check stands alone. A first-sound-effect question was tried and dropped: listening, Gemini
+ * missed a 0.23s opening hit (2026-10-11), so it would discard good reviews.
+ */
+export function audioCheck(answer, facts) {
+  if (!facts) return { ok: true, checked: [], detail: 'no draft (--project) to check the audio answer against' };
+  const said = answer?.music_in_last_2s;
+  if (!facts.musicAtEnd && said !== true) return { ok: true, checked: [], detail: 'inconclusive: no music at the end of the draft' };
+  const ok = said === facts.musicAtEnd;
+  return { ok, checked: [{ what: 'music in the last 2s', draft: facts.musicAtEnd, gemini: said ?? null, ok }],
+    detail: `music in the last 2s: draft ${facts.musicAtEnd}, Gemini ${said ?? null}${ok ? '' : ' ✗'}` };
+}
+
 const toSeconds = ts => {
   const m = String(ts || '').match(/(\d+):(\d{1,2}(?:\.\d+)?)/);
   return m ? Number(m[1]) * 60 + Number(m[2]) : null;
@@ -437,7 +468,14 @@ export async function reviewVideo({ media, projectDir = null, script = null, spe
   fs.writeFileSync(path.join(dir, 'gemini-raw.txt'), answer?.raw || '');
   if (!parsed) fail('REVIEW_BAD_JSON', `Gemini did not return valid JSON, even after one follow-up; raw answer in ${path.join(dir, 'gemini-raw.txt')}`);
   fs.writeFileSync(path.join(dir, 'gemini.json'), `${JSON.stringify(parsed, null, 2)}\n`);
-  const sound = soundCheck(parsed.first_spoken_sentence, words);
+  let facts = null;
+  if (projectDir) {
+    const loaded = loadProject(projectDir);
+    facts = draftAudioFacts(loaded.groups.find(g => g.name.startsWith('timeline:'))?.doc || loaded.groups[0]?.doc, projectDir);
+  }
+  const quoted = soundCheck(parsed.first_spoken_sentence, words);
+  const audio = audioCheck(parsed.audio_check, facts);
+  const sound = { ...quoted, ok: quoted.ok && audio.ok, quoteOk: quoted.ok, audio };
   const issues = sound.ok ? extractEvidence(media, collectIssues(parsed, { duration }), path.join(dir, 'evidence')) : [];
   const record = {
     version: 1, round, maxRounds: MAX_ROUNDS, at: now().toISOString(), media, duration: r2(duration),
@@ -445,7 +483,7 @@ export async function reviewVideo({ media, projectDir = null, script = null, spe
     soundCheck: sound,
     status: sound.ok ? (issues.length ? 'pending' : 'decided') : 'discarded',
     note: sound.ok ? 'Second opinion, not ground truth: open each issue\'s evidence, then capcutctl review-video --decide FILE --issue ID --verdict accept|reject --reason "…". Fix only accepted issues.'
-      : 'Discarded: Gemini could not quote the first spoken sentence, so it did not hear the sound. Re-run review-video.',
+      : `Discarded: ${quoted.ok ? `Gemini's audio answers do not match the draft (${audio.detail})` : 'Gemini could not quote the first spoken sentence'}, so it did not hear the sound. Re-run review-video.`,
     issues, gemini: path.join(dir, 'gemini.json'), raw: path.join(dir, 'gemini-raw.txt'),
   };
   const file = path.join(dir, 'review.json');
@@ -484,7 +522,7 @@ export function foldReview(report, file) {
   try { record = JSON.parse(fs.readFileSync(file, 'utf8')); }
   catch (error) { add('review', 'FAIL', false, `cannot read ${file}: ${error.message}`); return report; }
   if (record.status === 'discarded') {
-    add('review', 'FAIL', false, `Gemini review round ${record.round} discarded: its quote did not match the first sentence (score ${record.soundCheck?.score}) — re-run review-video`);
+    add('review', 'FAIL', false, `Gemini review round ${record.round} discarded: no proof it heard the sound (quote ${record.soundCheck?.score}/${record.soundCheck?.coverage}; ${record.soundCheck?.audio?.detail || 'no audio check'}) — re-run review-video`);
     return report;
   }
   const blockers = record.issues.filter(i => i.blocker);
@@ -504,7 +542,8 @@ export function foldReview(report, file) {
 
 export function reviewText(record) {
   const lines = [`review-video: round ${record.round}/${record.maxRounds} · ${record.model || 'model?'} · ${record.status}`,
-    `  sound check: ${record.soundCheck.ok ? 'ok' : 'FAILED'} (words ${record.soundCheck.score}, coverage ${record.soundCheck.coverage}) — Gemini heard "${record.soundCheck.quote}"`];
+    `  sound check: ${record.soundCheck.ok ? 'ok' : 'FAILED'} (words ${record.soundCheck.score}, coverage ${record.soundCheck.coverage}) — Gemini heard "${record.soundCheck.quote}"`,
+    `  audio check: ${record.soundCheck.audio.ok ? 'ok' : 'FAILED'} — ${record.soundCheck.audio.detail}`];
   for (const i of record.issues) {
     lines.push(`  ${i.id.padEnd(4)} ${i.blocker ? 'BLOCKER ' : ''}${i.kind.padEnd(10)} ${i.timestamp || '--:--'}  ${i.issue}${i.fix ? `  → ${i.fix}` : ''}`);
   }

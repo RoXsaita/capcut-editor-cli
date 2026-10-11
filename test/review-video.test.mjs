@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 
 import { CHUNK, prepareScript } from '../src/gemini-page.mjs';
 import {
-  collectIssues, decideIssue, driverPrompt, extractReviewJson, foldReview, normaliseArabic, parseDriverText,
+  audioCheck, collectIssues, decideIssue, driverPrompt, extractReviewJson, foldReview, normaliseArabic, parseDriverText,
   reviewVideo, soundCheck, toolResultTexts,
 } from '../src/review-video.mjs';
 
@@ -170,3 +170,15 @@ test('a login wall, a refused upload and a missing transcript fail by name', { s
   fs.rmSync(path.join(dir, 'speech.json'));
   await assert.rejects(reviewVideo({ media, driver: wall }), /no transcript/);
 });
+
+test('the audio-only answer is decisive when the draft has music at the end, inconclusive otherwise', () => {
+  assert.equal(audioCheck({ music_in_last_2s: true }, { musicAtEnd: true }).ok, true);
+  assert.equal(audioCheck({ music_in_last_2s: false }, { musicAtEnd: true }).ok, false, 'a muted listen says no music');
+  assert.equal(audioCheck({}, { musicAtEnd: true }).ok, false, 'no answer is no proof');
+  assert.equal(audioCheck({ music_in_last_2s: true }, { musicAtEnd: false }).ok, false, 'music the draft lacks is invented');
+  const none = audioCheck({ music_in_last_2s: false }, { musicAtEnd: false });
+  assert.equal(none.ok, true);
+  assert.match(none.detail, /inconclusive/);
+  assert.match(audioCheck({ music_in_last_2s: true }, null).detail, /no draft/);
+});
+
