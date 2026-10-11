@@ -27,14 +27,14 @@ const REVIEW = {
 
 /** stream-json lines a driver session would print, carrying the answer in CHUNK slices. */
 function driverLines(answer, { model = 'Auto + High', extra = [] } = {}) {
-  const ser = JSON.stringify(answer);
+  const ser = Buffer.from(JSON.stringify(answer), 'utf8').toString('base64');
   const n = Math.ceil(ser.length / CHUNK);
   const result = text => JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', content: [{ type: 'text', text: `${text}\n\nTab Context: …` }] }] } });
   return [
     result(`CAPCUTCTL ${JSON.stringify({ state: 'ready', model, href: 'https://gemini.google.com/app' })}`),
     ...extra.map(result),
     result(`CAPCUTCTL ${JSON.stringify({ state: 'done', href: 'https://gemini.google.com/app/abc', chunks: n })}`),
-    ...Array.from({ length: n }, (_, i) => result(`CAPCUTCTL_CHUNK ${i} ${JSON.stringify(ser.slice(i * CHUNK, (i + 1) * CHUNK))}`)),
+    ...Array.from({ length: n }, (_, i) => result(`CAPCUTCTL_CHUNK ${i} ${ser.slice(i * CHUNK, (i + 1) * CHUNK)}`)),
     JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'CAPCUTCTL {"state":"done","chunks":99}' }] } }),
   ];
 }
@@ -45,6 +45,8 @@ test('the driver transcript is read from tool results only, and the chunks reass
   const answer = answerFor(REVIEW);
   const parsed = parseDriverText(toolResultTexts(driverLines(answer)));
   assert.deepEqual(parsed.answer, answer);
+  assert.ok(!driverLines(answer).some(l => l.includes('CAPCUTCTL_CHUNK') && /caption over face|استخدم/.test(l)),
+    'the driver never sees the answer as text');
   assert.equal(parsed.model, 'Auto + High');
   assert.equal(parsed.href, 'https://gemini.google.com/app/abc');
   const lines = driverLines(answer);

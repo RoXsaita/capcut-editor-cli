@@ -93,6 +93,7 @@ export const COMMAND_DOCS = Object.freeze({
   xray: doc('check', 'Every frame and sample of a real export measured; exact-frame queries; honest verdicts.', 'capcutctl xray scan export.mp4 --project NAME'),
   preview: doc('check', 'Lightweight proxy with audio.', 'capcutctl preview --project NAME --out preview.mp4'),
   review: doc('check', 'Proxy + EDL + contact sheet into outputs/.', 'capcutctl review --project NAME'),
+  'review-video': doc('check', 'Gemini watches the final export in your own Chrome; a verified second opinion, two rounds max.', 'capcutctl review-video --media final.mp4 --project NAME'),
   diff: doc('check', 'What changed since a snapshot or another project; --allow proves a scoped edit stayed in scope.', 'capcutctl diff --project NAME --snapshot NAME --allow SEGMENT-ID,track:broll'),
 
   snapshot: doc('safety', 'Snapshot the project.', 'capcutctl snapshot --project NAME --label before-build'),

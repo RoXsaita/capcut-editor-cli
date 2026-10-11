@@ -29,10 +29,10 @@ export function exportGrid(media, out, times) {
  * A FAIL verdict is the X-ray's finding, not an export failure, so its exit 1 is reported
  * back in the result rather than thrown; only exit 2 (the tool could not run) throws.
  */
-export function exportXray(video, projectDir, outDir) {
+export function exportXray(video, projectDir, outDir, { speech = false } = {}) {
   const python = pythonForTool('xray.py');
   const argv = [path.join(HERE, '..', 'tools', 'xray.py'), 'scan', path.resolve(video),
-    '--project', projectDir, '--json', ...(outDir ? ['--out', path.resolve(outDir)] : [])];
+    '--project', projectDir, '--json', ...(outDir ? ['--out', path.resolve(outDir)] : []), ...(speech ? ['--speech'] : [])];
   const result = spawnSync(python.executable, argv, { encoding: 'utf8', timeout: 900000 });
   if (result.error || ![0, 1].includes(result.status)) {
     fail(`EXPORT_XRAY_FAILED: ${result.error?.message || String(result.stderr || '').trim().split('\n').pop()}`);
@@ -82,7 +82,48 @@ export async function exportProject(projectDir, args) {
     fs.unlinkSync(temp);
   }
   fs.unlinkSync(staged);
-  const xray = args.xray ? exportXray(out, projectDir, args.xray) : null;
-  return { video: out, duration: Number(probe.format.duration), grid: grid?.grid || null, xray,
+  const result = { video: out, duration: Number(probe.format.duration), grid: grid?.grid || null, xray: null,
     renderer: 'CapCut native', uiBridge: true };
+  if (args.noGate) {
+    result.xray = args.xray ? exportXray(out, projectDir, args.xray) : null;
+    result.gate = { skipped: '--no-gate: not a final export' };
+    return result;
+  }
+  return finalGates(result, { projectDir, doc, args });
+}
+
+/**
+ * The finalization path every export takes: X-ray the file (with its own transcript), gate the
+ * draft plus the X-ray, then — only if the gates pass — the Gemini watch-review, folded back in.
+ * A FAIL leaves the export in place and sets the verdict; the CLI exits 1 on it.
+ */
+export async function finalGates(result, { projectDir, doc, args, xray = exportXray, review = null }) {
+  const { gateReport, foldXray, finaliseReport, writeGateRecord } = await import('./gate.mjs');
+  const { loadProfile } = await import('./profile.mjs');
+  const profile = loadProfile();
+  const xrayDir = typeof args.xray === 'string' ? args.xray : `${result.video.replace(/\.mp4$/i, '')}.xray`;
+  result.xray = xray(result.video, projectDir, xrayDir, { speech: true });
+  const pauses = [args.pause].flat().filter(v => v != null).flatMap(v => String(v).split(',')).map(Number).filter(Number.isFinite);
+  const report = foldXray(gateReport(doc, { projectDir, profile }), xrayDir, projectDir, { profile, draft: doc, pauses });
+  if (report.verdict !== 'FAIL' && !args.noReview) {
+    const { reviewVideo, foldReview } = await import('./review-video.mjs');
+    try {
+      const record = await (review || reviewVideo)({ media: result.video, projectDir, speech: path.join(xrayDir, 'speech.json'),
+        script: args.script ? path.resolve(args.script) : null, model: args.reviewModel || 'sonnet' });
+      result.review = { file: record.file, round: record.round, model: record.model, status: record.status,
+        blockers: record.issues.filter(i => i.blocker).map(i => `${i.id} ${i.issue}`), notes: record.issues.length };
+      foldReview(report, record.file);
+    } catch (error) {
+      if (error.code === 'REVIEW_ROUNDS_EXHAUSTED') result.review = { skipped: error.message };
+      else {
+        result.review = { error: `${error.code || 'REVIEW_FAILED'}: ${error.message}` };
+        report.checks.push({ id: 'review', level: 'FAIL', ok: false, message: result.review.error, value: null, target: null });
+      }
+    }
+  } else if (args.noReview) result.review = { skipped: '--no-review' };
+  finaliseReport(report);
+  report.recorded = writeGateRecord(projectDir, report);
+  result.gate = { verdict: report.verdict, failed: report.failed, warned: report.warned, record: report.recorded,
+    checks: report.checks.filter(c => !c.ok).map(c => `${c.level} ${c.id}: ${c.message}`) };
+  return result;
 }

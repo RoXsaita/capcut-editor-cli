@@ -33,8 +33,10 @@ export const titleMarker = run => `capcutctl-${run}`;
 // The label the driver's `find` resolves to a file_upload ref.
 export const UPLOAD_LABEL = 'capcutctl-upload';
 
-// Gemini's answer is read back in slices small enough that the javascript tool never truncates.
-export const CHUNK = 450;
+// Gemini's answer is read back as base64 slices: small enough that the javascript tool never
+// truncates them, and opaque to the driver, so text a video steers Gemini into writing can
+// never read as instructions to the session holding the browser.
+export const CHUNK = 900;
 
 const S = JSON.stringify(SELECTORS);
 const helpers = `const $=${S};const sleep=ms=>new Promise(r=>setTimeout(r,ms));const out=o=>'CAPCUTCTL '+JSON.stringify(o);`;
@@ -111,13 +113,14 @@ const busy=Boolean(document.querySelector($.stop))||Date.now()-since<4000||!last
 if(busy)return out({state:'generating',chars:last.length});
 const r=[...document.querySelectorAll($.response)].at(-1);
 const code=r.querySelector('pre code, code-block code');
-window.__capcutctlAnswer={raw:last,json:code?code.innerText:null};
-if(last.length<600&&/limit|quota|try again later|too many|reached|unavailable/i.test(last))return out({state:'quota',message:last.slice(0,300)});
-const total=JSON.stringify(window.__capcutctlAnswer).length;
-return out({state:'done',href:location.href,chunks:Math.ceil(total/${CHUNK})});})()`;
+if(last.length<600&&/limit|quota|try again later|too many|reached|unavailable/i.test(last))return out({state:'quota'});
+const bytes=new TextEncoder().encode(JSON.stringify({raw:last,json:code?code.innerText:null}));
+let bin='';for(let i=0;i<bytes.length;i+=8192)bin+=String.fromCharCode(...bytes.subarray(i,i+8192));
+window.__capcutctlAnswer=btoa(bin);
+return out({state:'done',href:location.href,chunks:Math.ceil(window.__capcutctlAnswer.length/${CHUNK})});})()`;
 }
 
-/** One slice of the saved answer, as a JSON string fragment. `i` may be a placeholder the driver fills. */
+/** One base64 slice of the saved answer. `i` may be a placeholder the driver fills. */
 export function chunkScript(i) {
-  return `(()=>{const i=${i};const s=JSON.stringify(window.__capcutctlAnswer||null);return 'CAPCUTCTL_CHUNK '+i+' '+JSON.stringify(s.slice(i*${CHUNK},(i+1)*${CHUNK}));})()`;
+  return `(()=>{const i=${i};return 'CAPCUTCTL_CHUNK '+i+' '+(window.__capcutctlAnswer||'').slice(i*${CHUNK},(i+1)*${CHUNK});})()`;
 }

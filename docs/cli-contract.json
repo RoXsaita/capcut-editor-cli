@@ -297,9 +297,14 @@
       "example": "capcutctl export --project NAME --out final.mp4 --grid grid.png",
       "options": [
         "--grid",
+        "--no-gate",
+        "--no-review",
         "--out",
         "--overwrite",
+        "--pause",
         "--project",
+        "--review-model",
+        "--script",
         "--times",
         "--xray"
       ],
@@ -381,9 +386,11 @@
       "example": "capcutctl gate --project NAME",
       "options": [
         "--json",
+        "--pause",
         "--profile",
         "--project",
         "--record",
+        "--review",
         "--style",
         "--xray"
       ],
@@ -988,6 +995,25 @@
         "--out",
         "--project",
         "--width"
+      ],
+      "transactional": false
+    },
+    "review-video": {
+      "group": "check",
+      "summary": "Gemini watches the final export in your own Chrome; a verified second opinion, two rounds max.",
+      "example": "capcutctl review-video --media final.mp4 --project NAME",
+      "options": [
+        "--decide",
+        "--issue",
+        "--json",
+        "--media",
+        "--model",
+        "--project",
+        "--reason",
+        "--reset-rounds",
+        "--script",
+        "--speech",
+        "--verdict"
       ],
       "transactional": false
     },

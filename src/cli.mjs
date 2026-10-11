@@ -76,8 +76,12 @@ Usage:
   capcutctl status [--json] [--wait-for-close [--timeout MS]]
                                 report CapCut state; optionally request quit and return a branchable close result
   capcutctl export --project NAME --out FILE.mp4 [--overwrite] [--grid FILE.png] [--times 3,9,15] [--xray DIR]
-                      — explicitly requested native macOS export, verified before replacing output.
-                        --xray DIR then measures every frame and sample of it into DIR (see xray scan).
+                   [--pause SECONDS] [--script FILE] [--review-model sonnet] [--no-review] [--no-gate]
+                      — explicitly requested native macOS export, verified before replacing output, then the
+                        final gates: X-ray with the export's transcript (into --xray DIR, default FILE.xray),
+                        gate + X-ray, and — only if that passes — the Gemini watch-review (review-video).
+                        Exit 1 when the gates fail; the export stays. --pause allows a deliberate pause;
+                        --no-gate is for a render that is not a final (no X-ray unless --xray).
   capcutctl export-grid --media FILE --out GRID.png [--times 3,9,15]
                       — fast labelled grid from an existing exported video; no CapCut UI.
   capcutctl check-export --media FILE.mp4 [--project NAME] [--target -14] [--peak -1] [--sheet FILE.png] [--json]
@@ -91,6 +95,14 @@ Usage:
                         by section, first visual event, longest static stretch, median shot, speech ratio,
                         loudness; side by side with the profile (and the project with --project).
                         --profile-out writes the density override; --sheet the first frame of every shot.
+  capcutctl review-video --media FINAL.mp4 [--project NAME] [--script FILE] [--speech FILE] [--model sonnet]
+                   [--reset-rounds] [--json]
+                      — Gemini (the free web app, in your signed-in Chrome via Claude in Chrome) watches the
+                        export as a cold viewer and returns JSON. Discarded unless it quotes the first
+                        sentence; every issue gets evidence frames in FINAL.review/round-N/. Two rounds per
+                        edit (--project), then hand off. Exit 1 on blockers or a discarded review.
+  capcutctl review-video --decide REVIEW.json --issue ID --verdict accept|reject --reason "one line"
+                      — log the verdict on one Gemini issue after checking its evidence.
   capcutctl review --project NAME [--out DIR] [--id NAME] [--fps 6] [--width 240]
                       — write outputs/<id>/proxy.mp4, edl.json, and contact-sheet.png (never CapCut export)
   capcutctl new --project NAME [--media FILE] [--scenes 0:6,6:12,12:18]
@@ -254,11 +266,16 @@ Usage:
                         Graphics anchor to SOURCE words, so a recut rebuilds exactly; an
                         unchanged plan on an unchanged cut is a no-op. Exit 1 when the gate fails.
   capcutctl gate                --project NAME [--profile FILE] [--style NAME] [--record] [--json] [--xray DIR]
+                                [--pause SECONDS] [--review REVIEW.json]
                       — the blocking ready-to-post check: hook, proof, longest static stretch,
                         crowding, template repeats, safe zones, graphics without a sound, seams.
                         Thresholds come from the profile; --style NAME applies that style's pace (build
                         passes edit.json's "style"). Exit 1 on FAIL; WARNs go in the hand-off.
-                        --xray DIR folds an export X-ray in: its FAILs block, its UNKNOWNs warn.
+                        Also: captions present on one layer, the follow ender on the last frame, length (warn).
+                        --xray DIR folds an export X-ray in: its FAILs block, its UNKNOWNs warn, and the final
+                        gates run on it: first word by 0.5s, no gap over 0.7s (--pause allows one), last word
+                        not clipped, 1080x1920@30 with sound to the ender, -14 LUFS with no sudden steps.
+                        --review folds a review-video log in: undecided or accepted Gemini blockers block.
   capcutctl profile show        [--profile FILE] [--json]   — the effective style profile (tokens, brand, styles, camera, sound, density, grammar);
                         bare "capcutctl profile" is the same
   capcutctl profile where       [--profile FILE]   — each layer in merge order (bundled → yours → --profile) and whether it exists
@@ -405,7 +422,7 @@ export function parseArgs(argv) {
          'generated', 'allowEphemeral', 'measure', 'apply', 'native', 'noCache', 'noGrade',
          'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'noEase', 'easePosition', 'stress', 'allowBoost', 'values',
          'faceDetail', 'replaceExisting', 'replace', 'record', 'allowUnsafe', 'markdown', 'brief', 'check', 'restyle',
-         'accept', 'reject', 'resetRounds', 'noReview', 'noGate'].includes(key)) result[key] = true;
+         'resetRounds', 'noReview', 'noGate'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
       const value = argv[++i];
@@ -1071,13 +1088,16 @@ export async function main(argv, dependencies = {}) {
   if (command === 'export') {
     if (!args.project) throw new CapcutError('export requires --project NAME', { exitCode: 2 });
     const { exportProject } = await import('./export.mjs');
-    return print(await exportProject(resolveProject(args.project, root), args), true);
+    const result = await exportProject(resolveProject(args.project, root), args);
+    if (result.gate?.verdict === 'FAIL') process.exitCode = 1;
+    return print(result, true);
   }
   if (command === 'review-video') {
     const { reviewVideo, decideIssue, reviewText } = await import('./review-video.mjs');
     if (args.decide) {
-      if (!args.issue || args.accept === args.reject) throw new CapcutError('review-video --decide FILE --issue ID --accept|--reject --reason "…"', { exitCode: 2 });
-      return print(decideIssue(path.resolve(args.decide), args.issue, args.accept ? 'accepted' : 'rejected', args.reason), true);
+      const verdict = { accept: 'accepted', reject: 'rejected' }[args.verdict];
+      if (!args.issue || !verdict) throw new CapcutError('review-video --decide FILE --issue ID --verdict accept|reject --reason "…"', { exitCode: 2 });
+      return print(decideIssue(path.resolve(args.decide), args.issue, verdict, args.reason), true);
     }
     if (!args.media) throw new CapcutError('review-video requires --media FINAL.mp4', { exitCode: 2 });
     const record = await reviewVideo({ media: path.resolve(args.media), projectDir: args.project ? resolveProject(args.project, root) : null,
