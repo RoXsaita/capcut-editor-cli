@@ -51,17 +51,49 @@ export function parseScenes(spec) {
   return out;
 }
 
+/** Still images CapCut imports as `photo` materials (measured on real drafts). */
+export const STILL_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.bmp']);
+/** CapCut's own duration for a photo material: 3 hours, in microseconds. */
+export const STILL_DURATION_US = 10800000000;
+
+export function isStillImage(file) {
+  return STILL_EXTENSIONS.has(path.extname(String(file || '')).toLowerCase());
+}
+
+/**
+ * A still's upright size. Phones store portrait shots as landscape pixels plus EXIF
+ * Orientation 5-8; CapCut records the rotated size (Broken Chair.jpg: 4000x3000 + 6 → 3000x4000).
+ */
+function probeStill(file) {
+  const out = JSON.parse(execFileSync('ffprobe', [
+    '-v', 'error', '-select_streams', 'v:0', '-show_frames', '-read_intervals', '%+#1',
+    '-show_entries', 'frame=width,height:frame_tags=Orientation', '-of', 'json', file
+  ], { encoding: 'utf8' }));
+  const frame = out.frames?.[0] || {};
+  const orientation = Number(String(frame.tags?.Orientation || '1').trim());
+  const [width, height] = [Number(frame.width), Number(frame.height)];
+  if (!width || !height) throw new Error('incomplete probe');
+  const turned = orientation >= 5 && orientation <= 8;
+  return { width: turned ? height : width, height: turned ? width : height, duration: STILL_DURATION_US, still: true };
+}
+
 export function probeMedia(file) {
   requireBinary('ffprobe', 'reading a media file\'s dimensions and duration');
   try {
-    const out = execFileSync('ffprobe', [
+    if (isStillImage(file)) return probeStill(file);
+    const out = JSON.parse(execFileSync('ffprobe', [
       '-v', 'error', '-select_streams', 'v:0',
-      '-show_entries', 'stream=width,height', '-show_entries', 'format=duration',
-      '-of', 'default=nw=1:nk=1', file
-    ], { encoding: 'utf8' }).trim().split('\n');
-    const [width, height, duration] = [Number(out[0]), Number(out[1]), Number(out[2])];
+      '-show_entries', 'stream=width,height:stream_side_data=rotation', '-show_entries', 'format=duration',
+      '-of', 'json', file
+    ], { encoding: 'utf8' }));
+    const stream = out.streams?.[0] || {};
+    const [width, height, duration] = [Number(stream.width), Number(stream.height), Number(out.format?.duration)];
     if (!width || !height || !duration) throw new Error('incomplete probe');
-    return { width, height, duration: Math.round(duration * 1e6) };
+    // Phone video stores landscape pixels plus a ±90° display matrix; CapCut records the
+    // upright size (WOW-Website IMG_0192.MOV: 1920x1080 at -90 → 1080x1920).
+    const rotation = Math.abs(Number((stream.side_data_list || []).find(s => s.rotation != null)?.rotation || 0)) % 180;
+    const turned = rotation === 90;
+    return { width: turned ? height : width, height: turned ? width : height, duration: Math.round(duration * 1e6) };
   } catch {
     throw new CapcutError(
       `Could not probe ${path.basename(file)} with ffprobe. Pass --width, --height and `

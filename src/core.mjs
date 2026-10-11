@@ -8,9 +8,10 @@ import { createRequire } from 'node:module';
 import {
   opLayoutApply, opLayoutBackground, opLayoutBroll, opLayoutScreen, SCREEN_LAYOUT_OPERATION, renumberTracks
 } from './layouts.mjs';
-import { opPolish, opCalloutSfx, opInteractions, principalTrack } from './polish.mjs';
+import { opPolish, opCalloutSfx, opInteractions, opSfxPlace, principalTrack } from './polish.mjs';
 import { opGradeApply, opGradeReset, opGradeLayer } from './grade.mjs';
 import { opPace } from './pace.mjs';
+import { opRipple } from './ripple.mjs';
 import { opRamp } from './ramp.mjs';
 import { opBlurBroll } from './derived-media.mjs';
 import { opDenoise } from './denoise.mjs';
@@ -21,7 +22,7 @@ import { opPunch } from './punch.mjs';
 import { opStressZoom } from './stress.mjs';
 import { opSignature } from './signature.mjs';
 import { opMotion } from './motion.mjs';
-import { opCaptions } from './captions.mjs';
+import { opCaptions, opCaptionsRestyle } from './captions.mjs';
 import {
   opClipAdd, opReplaceMedia, opScaleKeyframe,
   opClipShift, opClipTrim, opClipFade, opLocalizeAll
@@ -1689,7 +1690,7 @@ export function doctor(projectDir, { checkFiles = true, duplicateBaseline = null
     // four of its nine cuts. The fault is a higher track of MOVING PICTURE that cuts at the
     // same instant with no transition of its own: that layer hard-cuts through the wipe.
     const plates = new Set((doc.materials?.videos || [])
-      .filter(m => m.type && m.type !== 'video').map(m => m.id));
+      .filter(m => m.type && m.type !== 'video' && m.capcutctl_origin !== 'capture' && m.capcutctl_origin !== 'derived').map(m => m.id));
     for (const { i, at } of carriers) {
       for (const { i: j, t } of videoTracks) {
         if (j <= i) continue;
@@ -2885,6 +2886,7 @@ export function applyOperations(doc, operations, context) {
     else if (op.op === 'polish') result = opPolish(doc, op, context);
     else if (op.op === 'polish.callouts') result = opCalloutSfx(doc, op);
     else if (op.op === 'polish.interactions') result = opInteractions(doc, op, context);
+    else if (op.op === 'sfx.place') result = opSfxPlace(doc, op);
     else if (op.op === 'pace') result = opPace(doc, op, context);
     else if (op.op === 'ramp') result = opRamp(doc, op, context);
     else if (op.op === 'denoise') result = opDenoise(doc, op, context);
@@ -2897,11 +2899,13 @@ export function applyOperations(doc, operations, context) {
     else if (op.op === 'signature') result = opSignature(doc, op, context);
     else if (op.op === 'motion') result = opMotion(doc, op, context);
     else if (op.op === 'captions') result = opCaptions(doc, op, context);
+    else if (op.op === 'captions-restyle') result = opCaptionsRestyle(doc, op, context);
     else if (op.op === 'clip.add') result = opClipAdd(doc, op, context);
     else if (op.op === 'replace.media') result = opReplaceMedia(doc, op, context);
     else if (op.op === 'media.localize') result = opLocalizeAll(doc, op, context);
     else if (op.op === 'keyframe.scale') result = opScaleKeyframe(doc, op, context);
     else if (op.op === 'clip.shift') result = opClipShift(doc, op, context);
+    else if (op.op === 'timeline.ripple') result = opRipple(doc, op, context);
     else if (op.op === 'clip.trim') result = opClipTrim(doc, op, context);
     else if (op.op === 'clip.fade') result = opClipFade(doc, op, context);
     else if (op.op === 'music') result = opMusic(doc, op, context);

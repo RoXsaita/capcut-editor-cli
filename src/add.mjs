@@ -249,9 +249,13 @@ const AUDIO_FADE_TEMPLATE = {
   fade_out_duration: 0
 };
 
+// Stills are CapCut `photo` materials, never `video` (measured on real drafts).
+const STILL_EXT = /\.(jpe?g|png|webp|bmp)$/i;
+
 function ensureMaterial(doc, op, context) {
   const mediaPath = path.resolve(op.media);
-  const existing = (doc.materials?.videos || []).find(m => m.path === mediaPath && m.type === 'video');
+  const kind = STILL_EXT.test(mediaPath) ? 'photo' : 'video';
+  const existing = (doc.materials?.videos || []).find(m => m.path === mediaPath && m.type === kind);
   if (existing && !op.forceNewMaterial) return existing;
   const tpl = (doc.materials?.videos || []).find(m => m.type === 'video') || { type: 'video', crop_scale: 1 };
   const material = clone(tpl);
@@ -259,7 +263,7 @@ function ensureMaterial(doc, op, context) {
   material.path = mediaPath;
   material.material_name = path.basename(mediaPath);
   material.local_material_id = '';
-  material.type = 'video';
+  material.type = kind;
   material.width = op.width || tpl.width;
   material.height = op.height || tpl.height;
   material.duration = op.mediaDuration != null ? op.mediaDuration : (tpl.duration || 0);

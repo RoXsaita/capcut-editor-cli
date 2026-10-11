@@ -5,6 +5,9 @@ import path from 'node:path';
 import { principalTrack } from './polish.mjs';
 import { assertOrigin } from './origin.mjs';
 import { setSpeed } from './pace.mjs';
+import { profileValue } from './profile.mjs';
+import { blurredBackgrounds } from './house-rules.mjs';
+import { execFileSync } from 'node:child_process';
 import {
   CapcutError, clone, seededId, allSegments, selectSegments, loadProject, loadPreset,
   expandHome, localizeMedia, stableJson, assetSearchRoots, preservedRange
@@ -288,6 +291,55 @@ function ensurePhotoMaterial(doc, basename, projectDir) {
   return material.id;
 }
 
+/**
+ * The clear background behind a circle or screen card: the profile's sharp room plate
+ * (brand.background.plate), cover-fit to the canvas, opaque, no effect.
+ *
+ * Never a blurred copy of the face. 2026-10-11: "never ever put the blurry background … delete
+ * the blurry background, and always add the clear one." Returns null when the profile names no
+ * plate or the file is missing, and the caller then adds NO background rather than a blur.
+ */
+export function clearBackgroundPlate(doc, template, { id, target, renderIndex, desc, projectDir = null }) {
+  const raw = profileValue('brand.background.plate');
+  if (!raw) return null;
+  let file = expandHome(String(raw));
+  if (!fs.existsSync(file)) return null;
+  if (projectDir) file = localizeMedia(projectDir, path.resolve(file));
+  let material = (doc.materials?.videos || []).find(m => m.path === file && m.type === 'photo');
+  if (!material) {
+    const out = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0',
+      '-show_entries', 'stream=width,height', '-of', 'json', file], { encoding: 'utf8' }));
+    const s = out.streams?.[0] || {};
+    material = clone(presets().photoMaterialTemplate);
+    material.id = mint(`asset:background:${path.basename(file)}`);
+    material.path = file;
+    material.material_name = path.basename(file);
+    material.local_material_id = '';
+    material.width = Number(s.width) || material.width;
+    material.height = Number(s.height) || material.height;
+    ensureMaterialArray(doc, 'videos').push(material);
+  }
+  const cc = doc.canvas_config || {};
+  const [W, H] = [cc.width || 1080, cc.height || 1920];
+  // CapCut scale 1 fits the picture inside the canvas; cover-fit is the ratio of the two fits.
+  const fitW = W / material.width, fitH = H / material.height;
+  const cover = Math.max(fitW, fitH) / Math.min(fitW, fitH);
+  const plate = clone(template);
+  plate.id = id;
+  plate.material_id = material.id;
+  plate.target_timerange = clone(target);
+  plate.source_timerange = { start: 0, duration: target.duration };
+  plate.clip = { scale: { x: cover, y: cover }, transform: { x: 0, y: 0 }, rotation: 0,
+    flip: { horizontal: false, vertical: false }, alpha: 1 };
+  plate.render_index = renderIndex;
+  plate.desc = desc;
+  plate.volume = 0;
+  plate.enable_video_mask = false;
+  plate.extra_material_refs = [];
+  plate.speed = 1;
+  return plate;
+}
+
 /** Attach (or retune) a mask on a segment so it matches the preset exactly. */
 function applyMask(doc, segment, maskTemplate, config) {
   const index = materialById(doc);
@@ -456,9 +508,30 @@ function removeOverlaysOver(doc, _trackIndex, span) {
  * If nothing does, he is alone in it: full face. Verified against grok-build-final, where
  * this reproduces the eight split-screen beats and the two full-face ones exactly.
  */
-export function layoutAudit(doc, trackIndex = null) {
+// Origins that mark a still as footage rather than a frame plate (see origin.mjs).
+const FOOTAGE_ORIGINS = new Set(['capture', 'derived']);
+
+/**
+ * Still materials that are footage (a before/after photo), not frame plates. The material's own
+ * capcutctl_origin is read first; CapCut drops unknown fields when it re-saves a draft, so the
+ * project's media-map.json (outside the draft) is the durable record.
+ */
+export function footageStillIds(doc, projectDir = null) {
+  const map = projectDir ? readMediaMap(projectDir).materials || {} : {};
+  return new Set((doc.materials?.videos || [])
+    .filter(m => m.type && m.type !== 'video'
+      && (FOOTAGE_ORIGINS.has(m.capcutctl_origin) || FOOTAGE_ORIGINS.has(map[m.id]?.origin)))
+    .map(m => m.id));
+}
+
+export function layoutAudit(doc, trackIndex = null, projectDir = null) {
   const { index: pi, track } = principalTrack(doc, trackIndex);
-  const plates = new Set((doc.materials.videos || []).filter(m => m.type && m.type !== 'video').map(m => m.id));
+  // Plates are frames and brand art. A photo `add` imported as footage (capcutctl_origin
+  // 'capture', or a 'derived' copy of one) is picture: a before/after still under the face
+  // is split-screen B-roll.
+  const footage = footageStillIds(doc, projectDir);
+  const plates = new Set((doc.materials.videos || [])
+    .filter(m => m.type && m.type !== 'video' && !footage.has(m.id)).map(m => m.id));
   const masks = new Set((doc.materials.common_mask || []).map(m => m.id));
   const covers = (start, end) => doc.tracks.some((t, i) =>
     i < pi && t.type === 'video' && (t.segments || []).some(s =>
@@ -523,10 +596,45 @@ export function findCircleScenes(doc) {
     .map(({ segment, trackIndex }) => ({ id: segment.id, trackIndex, range: segment.target_timerange }));
 }
 
+/**
+ * Delete every blurred copy of the face (house-rules.mjs, blurredBackgrounds) and put the clear
+ * room plate in its place: same track, same span, same layer order. Any other blurred clip
+ * loses its Blur. Whoever added the blur, nothing behind the talking head stays blurred.
+ * Orphaned Blur effect materials go too.
+ */
+export function clearBlurredBackgrounds(doc, context = {}) {
+  const bg = presets().background;
+  const all = blurredBackgrounds(doc);
+  const found = all.filter(b => b.kind === 'face-copy');
+  const replaced = [], removed = [], unblurred = [];
+  const blurIds = new Set((doc.materials.video_effects || []).filter(e => e.name === 'Blur').map(e => e.id));
+  for (const hit of all.filter(b => b.kind === 'blurred-video')) {
+    const seg = doc.tracks[hit.trackIndex].segments.find(s => s.id === hit.id);
+    seg.extra_material_refs = (seg.extra_material_refs || []).filter(id => !blurIds.has(id));
+    unblurred.push(hit);
+  }
+  for (const hit of found) {
+    const track = doc.tracks[hit.trackIndex];
+    const at = track.segments.findIndex(s => s.id === hit.id);
+    const old = track.segments[at];
+    const plate = clearBackgroundPlate(doc, bg.segmentTemplate, {
+      id: mint(`${old.id}:clear`), target: old.target_timerange,
+      renderIndex: old.render_index || 0, desc: old.desc || 'layout:background-blur', projectDir: context.projectDir || null });
+    if (plate) { track.segments[at] = plate; replaced.push(hit); }
+    else { track.segments.splice(at, 1); removed.push(hit); }
+  }
+  if (found.length || unblurred.length) {
+    const used = new Set(allSegments(doc).flatMap(({ segment }) => segment.extra_material_refs || []));
+    doc.materials.video_effects = (doc.materials.video_effects || []).filter(e => used.has(e.id) || e.name !== 'Blur');
+  }
+  return { replaced: replaced.length, removed: removed.length + unblurred.length };
+}
+
 export function opLayoutBackground(doc, op, context = {}) {
   SEED = op.__seed || null;
   const config = presets();
   const bg = config.background;
+  const unblurred = clearBlurredBackgrounds(doc, context);
   let scenes = op.selector
     ? selectSegments(doc, op.selector).map(e => ({ id: e.segment.id, trackIndex: e.trackIndex, range: e.segment.target_timerange }))
     : findCircleScenes(doc);
@@ -539,7 +647,7 @@ export function opLayoutBackground(doc, op, context = {}) {
   }
   if (!scenes.length) {
     return {
-      changed: 0, scenes: 0, skippedTemplate: skipped,
+      changed: unblurred.replaced + unblurred.removed, scenes: 0, skippedTemplate: skipped, unblurred,
       note: skipped
         ? `no circle scenes outside the cloned preset (${skipped} skipped; use --include-template to override)`
         : 'no circle scenes with a white ring found'
@@ -564,27 +672,17 @@ export function opLayoutBackground(doc, op, context = {}) {
     bgTrack.segments = (bgTrack.segments || []).filter(s =>
       !(s.target_timerange.start === subject.target_timerange.start
         && s.target_timerange.duration === subject.target_timerange.duration));
-    const plate = clone(bg.segmentTemplate);
-    plate.id = mint(`${subject.id}:bgplate`);
-    plate.material_id = subject.material_id;
-    plate.target_timerange = clone(subject.target_timerange);
-    plate.source_timerange = clone(subject.source_timerange || { start: 0, duration: subject.target_timerange.duration });
-    plate.clip = clone(bg.clip);
-    plate.render_index = Math.max(0, (subject.render_index || 0) - 1);
-    plate.desc = 'layout:background-blur';
-    plate.volume = 0;
-    plate.enable_video_mask = false;
-    const effect = clone(bg.effect);
-    effect.id = mint(`${subject.id}:blur`);
-    if ('bind_segment_id' in effect) effect.bind_segment_id = plate.id;
-    ensureMaterialArray(doc, 'video_effects').push(effect);
-    plate.extra_material_refs = [effect.id];
+    // The clear room plate — never a blurred copy of the face (clearBackgroundPlate).
+    const plate = clearBackgroundPlate(doc, bg.segmentTemplate, {
+      id: mint(`${subject.id}:bgplate`), target: subject.target_timerange,
+      renderIndex: Math.max(0, (subject.render_index || 0) - 1), desc: 'layout:background-blur', projectDir: context?.projectDir || null });
+    if (!plate) continue;
     bgTrack.segments.push(plate);
     changed++;
   }
   bgTrack.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
   renumberTracks(doc);
-  return { changed, scenes: scenes.length, skippedTemplate: skipped, track: doc.tracks.indexOf(bgTrack) };
+  return { changed: changed + unblurred.replaced + unblurred.removed, scenes: scenes.length, skippedTemplate: skipped, unblurred, track: doc.tracks.indexOf(bgTrack) };
 }
 
 
@@ -1740,25 +1838,16 @@ function buildScreenPip(doc, recording, source, circle, piece) {
   return pip;
 }
 
-function buildScreenBlur(doc, recording, source, background, piece, index) {
-  const plate = clone(background.segmentTemplate);
+// The desc keeps its historical 'layout:screen-blur' role name (role lookups key on it), but the
+// layer is the clear room plate — never a blurred copy of the face (clearBackgroundPlate).
+function buildScreenBlur(doc, recording, source, background, piece, index, projectDir = null) {
   const suffix = index ? `:${source.segment.id}:${piece.target.start}` : '';
-  plate.id = mint(`${recording.id}:screen-blur${suffix}`);
-  plate.material_id = source.segment.material_id;
-  plate.target_timerange = clone(piece.target);
-  plate.source_timerange = clone(piece.source);
-  plate.clip = clone(background.clip);
-  plate.render_index = Math.max(0, (recording.render_index || 0) - 1);
-  plate.desc = 'layout:screen-blur';
+  const plate = clearBackgroundPlate(doc, background.segmentTemplate, {
+    id: mint(`${recording.id}:screen-blur${suffix}`), target: piece.target,
+    renderIndex: Math.max(0, (recording.render_index || 0) - 1), desc: 'layout:screen-blur', projectDir });
+  if (!plate) return null;
   plate.screen_recording_id = recording.id;
-  plate.volume = 0;
-  plate.enable_video_mask = false;
-  const effect = clone(background.effect);
-  effect.id = mint(`${recording.id}:screen-blur-effect${suffix}`);
-  if ('bind_segment_id' in effect) effect.bind_segment_id = plate.id;
-  ensureMaterialArray(doc, 'video_effects').push(effect);
-  plate.extra_material_refs = [effect.id];
-  return { plate, effect };
+  return { plate, effect: null };
 }
 
 /**
@@ -1901,7 +1990,8 @@ export function opLayoutScreen(doc, op = {}, context = {}) {
 
     const blurs = pipSources.flatMap((source, index) => {
       const piece = sourceSlice(source.segment, recording.target_timerange);
-      return piece ? [buildScreenBlur(doc, recording, source, background, piece, index)] : [];
+      const built = piece ? buildScreenBlur(doc, recording, source, background, piece, index, context.projectDir || null) : null;
+      return built ? [built] : [];
     });
     backgroundTrack.track.segments = (backgroundTrack.track.segments || []).filter(segment =>
       !(segment.desc === 'layout:screen-blur'
@@ -1916,7 +2006,7 @@ export function opLayoutScreen(doc, op = {}, context = {}) {
       pip: pips[0].id,
       frame: frame.id,
       ring: ring.id,
-      blur: blurs[0].plate.id,
+      blur: blurs[0]?.plate.id || null,
       tracks: {
         recording: recordingTrack,
         background: backgroundTrack.track,
@@ -1970,7 +2060,7 @@ export function buildLayoutSpec(projectDir, name, opts = {}) {
   }
   if (name === 'auto') {
     const doc = activeDoc(projectDir);
-    const rows = layoutAudit(doc, opts.track == null ? null : Number(opts.track));
+    const rows = layoutAudit(doc, opts.track == null ? null : Number(opts.track), projectDir);
     const changes = rows.filter(r => r.change);
     return { version: 1, name: 'layout-auto',
              operations: changes.map(r => ({ op: 'layout.apply', layout: r.want, selector: { id: r.id } })),

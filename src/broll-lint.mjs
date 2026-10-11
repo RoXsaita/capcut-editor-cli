@@ -18,6 +18,8 @@ export function isBrollSegment(segment, material) {
   if (desc === SCREEN_RECORDING) return true;
   if (desc.startsWith('layout:') || desc.startsWith('sig:')) return false;
   if (!material) return false;
+  // A photo imported as footage is B-roll; frames and brand art are plates.
+  if (material.type === 'photo' && (material.capcutctl_origin === 'capture' || material.capcutctl_origin === 'derived')) return true;
   if (material.type && material.type !== 'video') return false;
   const file = String(material.path || '').toLowerCase();
   if (PLATE_EXT.test(file)) return false;

@@ -392,6 +392,33 @@ def _batch_timing(stderr, requested, seek_start, fps):
     return timing
 
 
+_PREMULT_CACHE = {}
+
+
+def _capcut_alpha(image, path):
+    """Show an alpha frame the way CapCut composites it.
+
+    CapCut treats ProRes 4444 alpha as PREMULTIPLIED: on screen = rgb + (1 - a) * bg. PIL's
+    alpha_composite is straight, so un-premultiply ProRes frames (rgb / a) before compositing;
+    then qa paints exactly what CapCut paints, including the haze a straight-alpha file leaves
+    (a real edit, 2026-10-11: a callout's glow tail filled its box solid yellow).
+    """
+    if image.mode != "RGBA" or image.getextrema()[3][0] == 255:
+        return image  # opaque: nothing to composite, and no probe for ordinary video
+    if path not in _PREMULT_CACHE:
+        info = _probe_video_info(path) or {}
+        _PREMULT_CACHE[path] = bool(info.get("premultiplied"))
+    if not _PREMULT_CACHE[path]:
+        return image
+    px = np.asarray(image).astype(np.float32)
+    rgb = px[..., :3]
+    # CapCut: out = rgb + (1 - a) * bg. In straight form that is colour rgb / a' at alpha a', where
+    # a' = max(a, max(rgb)) — equal to a for a clean premultiplied file, larger where colour leaks.
+    a = np.maximum(px[..., 3], rgb.max(-1))[..., None]
+    out = np.concatenate([np.where(a > 0, np.clip(rgb * 255.0 / np.maximum(a, 1.0), 0, 255), 0), a], axis=-1)
+    return Image.fromarray(out.astype(np.uint8), "RGBA")
+
+
 def _extract_path(path, requested, method):
     """Use ffmpeg to write one frame and return ``(image, pts, period)``.
 
@@ -438,7 +465,7 @@ def _extract_path(path, requested, method):
                 f"ffmpeg returned a frame without a PTS for t={requested:.3f}s in {path}"
             )
         with Image.open(tmp) as opened:
-            image = opened.convert("RGBA")
+            image = _capcut_alpha(opened.convert("RGBA"), path)
         return image, delivered, period
 
 
@@ -1969,7 +1996,8 @@ def _probe_video_info(path):
     pix_fmt = str(video.get("pix_fmt") or "")
     return {"width": width, "height": height, "fps": fps, "audio": any(
         stream.get("codec_type") == "audio" for stream in streams
-    ), "alpha": pix_fmt.startswith(("yuva", "rgba", "argb", "bgra", "abgr", "gbrap", "ya"))}
+    ), "alpha": pix_fmt.startswith(("yuva", "rgba", "argb", "bgra", "abgr", "gbrap", "ya")),
+        "premultiplied": video.get("codec_name") == "prores" and pix_fmt.startswith("yuva")}
 
 
 def _preview_decode_options():
@@ -2086,7 +2114,7 @@ def _decode_batch(path, requests, output_size, timeline_fps):
                     data += rest
                 if len(data) != frame_bytes:
                     break
-                images.append(Image.frombytes(mode, source_size, data).convert("RGBA"))
+                images.append(_capcut_alpha(Image.frombytes(mode, source_size, data).convert("RGBA"), path))
             return_code = process.wait()
             log.seek(0)
             timing = _batch_timing(log.read().decode(errors="replace"), ordered, seek_start, source_fps)

@@ -412,3 +412,17 @@ test('the sweep is keyed on the beat, so an unrelated legacy cue survives', () =
   const kept = d.tracks.flatMap(t => t.segments || []).filter(x => x.id === 'LEGACY-ELSEWHERE');
   assert.equal(kept.length, 1, 'a cue on a beat this pass does not touch is left alone');
 });
+
+test('layoutAudit counts a footage photo as B-roll but never a frame plate', () => {
+  for (const [origin, want] of [['capture', 'split-screen'], ['derived', 'split-screen'], [undefined, 'full-face']]) {
+    const d = doc();
+    d.materials.videos.push({ id: 'STILL', type: 'photo', path: '/x/before.jpg', width: 3000, height: 4000,
+      duration: 10800000000, ...(origin ? { capcutctl_origin: origin } : {}) });
+    d.tracks.splice(1, 0, { type: 'video', id: 'broll', segments: [
+      { id: 'p1', material_id: 'STILL', extra_material_refs: [],
+        target_timerange: { start: 0, duration: US(5) },
+        source_timerange: { start: 0, duration: US(5) }, clip: { scale: { x: 1, y: 1 } } },
+    ] });
+    assert.equal(layoutAudit(d)[0].want, want, String(origin));
+  }
+});

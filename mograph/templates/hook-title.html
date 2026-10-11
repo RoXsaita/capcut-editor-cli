@@ -10,6 +10,8 @@
           color: var(--mg-text); letter-spacing: 0;
           text-shadow: 0 3px 4px rgba(var(--mg-ink-rgb), 0.4), 0 12px 40px rgba(var(--mg-ink-rgb), 0.55); }
   .hook .mg-word { padding: 0 0.05em; transform-origin: 50% 60%; }
+  .slab { position: absolute; border-radius: var(--mg-radius-card); background: rgba(var(--mg-ink-rgb), 0.92);
+          box-shadow: 0 10px 34px rgba(var(--mg-ink-rgb), 0.35); }
   .hl { position: absolute; background: var(--mg-brand); border-radius: var(--mg-radius-box);
         box-shadow: 0 10px 34px rgba(var(--mg-brand-rgb), 0.45), 0 4px 10px rgba(var(--mg-ink-rgb), 0.35); }
 </style>
@@ -18,7 +20,7 @@
 <script>
 /*
  * hook-title — the first-second hook: 2–5 words slammed onto the frame, the key word wiped under a brand-colour block.
- * params: { text, key?: word|index|false (default: last word in reading order), layout?: full-face|card|split-screen, center?: [x, y] canvas px, hold?: seconds }
+ * params: { text, key?: word|index|false (default: last word in reading order), slab?: true (an ink plate behind both lines, for light backgrounds), layout?: full-face|card|split-screen, center?: [x, y] canvas px, hold?: seconds }
  * Timing (frames @30): each word slams in over 4f (micro) — scale 1.16 → 1 with the pop overshoot,
  * blur 10 → 0 — on a 3f stagger in reading order; the brand block wipes behind the key word in
  * the reading direction over 6f as the last word lands, with a 1-beat settle of the whole line.
@@ -91,8 +93,20 @@ MG.define({
       Object.assign(hl.style, { left: `${k.left - g.left - px * 0.12}px`, width: `${k.width + px * 0.24}px`,
         top: `${k.top - g.top + px * 0.07}px`, height: `${k.height - px * 0.04}px` });
     } else hl.remove();
+    // Optional ink plate behind the whole hook: white type vanishes on a pale wall or photo.
+    let slab = null;
+    if (params.slab) {
+      const g = group.getBoundingClientRect();
+      const r = line.getBoundingClientRect();
+      const padX = px * 0.3, padY = px * 0.14;
+      slab = document.createElement('div');
+      slab.className = 'slab';
+      Object.assign(slab.style, { left: `${r.left - g.left - padX}px`, top: `${r.top - g.top - padY}px`,
+        width: `${r.width + padX * 2}px`, height: `${r.height + padY * 2}px` });
+      group.insertBefore(slab, group.firstChild);
+    }
     const { inEnd, total } = timing(n, params, tokens, mg);
-    return { spans, group, line, hl: keyIndex >= 0 ? hl : null, keyIndex, f: tokens.frames, px, inEnd,
+    return { spans, group, line, slab, hl: keyIndex >= 0 ? hl : null, keyIndex, f: tokens.frames, px, inEnd,
       rtl: mg.isArabic(text), total: total / mg.fps };
   },
   duration(params, tokens, mg) {
@@ -117,6 +131,7 @@ MG.define({
     s.group.style.transform = `translateY(${-q * 18}px) scale(${1 + 0.018 * land})`;
     s.group.style.filter = q > 0 ? `blur(${q * 6}px)` : 'none';
     mg.show(s.group, 1 - q);
+    if (s.slab) mg.show(s.slab, ease.enter(win(t, 0, F(s.f.micro))));
     if (s.hl) {
       const h = ease.enter(win(t, F(s.inEnd - 1), F(WIPE)));
       const cut = `${(1 - h) * 100}%`;

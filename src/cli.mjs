@@ -101,6 +101,10 @@ Usage:
   capcutctl doctor --project NAME_OR_PATH [--root PATH] [--json]
   capcutctl snapshot --project NAME_OR_PATH [--label NAME]
   capcutctl history --project NAME_OR_PATH
+  capcutctl alpha FILE… | --project NAME [--check] [--force] [--dry-run] [--force-running]
+                      — premultiply ProRes alpha overlays in place. CapCut composites alpha as
+                        premultiplied; a straight file paints its glow's hidden colour as a haze.
+                        --project fixes every leaking overlay on the timeline; --check only measures.
   capcutctl notes --project NAME [--reject TEXT --why TEXT | --accept TEXT --why TEXT | --decide TEXT [--why TEXT]
                   | --todo TEXT | --done N] [--brief] [--json]
                       — the project's creative log: rejected looks and why, the accepted look, decisions,
@@ -120,9 +124,15 @@ Usage:
   capcutctl localize --project NAME   — copy outside videos into the project (fixes Link media)
   capcutctl trim --project NAME --at S --track NAME|N | --segments ID  --src IN-OUT | --start S --dur S
   capcutctl shift --project NAME --at S --track NAME|N | --segments ID  --by SECONDS
+  capcutctl ripple --project NAME --from S --to S [--dry-run]
+                      — delete a timeline range on every track and pull everything after it up
+                        (dead air between words); clips keep their speed, the face stays 1x.
   capcutctl remove --project NAME --at S --track NAME|N | --segments ID
   capcutctl volume --project NAME --at S --track NAME|N | --segments ID  --level 0
   capcutctl fade --project NAME --at S --track NAME|N | --segments ID  [--in 0.08] [--out 0.12] [--plan]
+  capcutctl sfx --project NAME --sound typing|click|enter|"PALETTE NAME" --cues AT[:DUR[:SRC]],… [--volume 0.6] [--track sfx-keys]
+                      — named palette sound at explicit timeline seconds (typing bed under a typed
+                        command, an Enter click on the real Enter); SRC starts inside a long bed.
   capcutctl keyframe --project NAME --at S --track NAME|N | --segments ID
                     [--from SCALE] [--to SCALE] [--hold 1.6] [--ramp 0.2] [--clear] [--plan]
                     [--focus X,Y,W,H] [--viewport X,Y,W,H] [--no-ease] [--ease] [--ease-position]
@@ -210,10 +220,12 @@ Usage:
                                 logo.reveal: the measured 0.13s pop with its pop cue. --glow is the
                                 halo pop; --motion RECIPE (experimental native recipe) is opt-in.
   capcutctl captions            --project NAME_OR_PATH [--cues FILE.json] [--script FILE.txt]
-                                [--track NAME|N] [--name ID] [--lang ar] [--dry-run]
+                                [--track NAME|N] [--name ID] [--lang ar] [--restyle] [--dry-run]
                                 generate Staging-style word cues from edited narration; insert editable text layers
                                 --cues imports existing timeline-time cues; --dry-run without cues prints a plan
                                 no paid caption service; native visual parity remains experimental
+                                --restyle puts every existing caption word in the one house style (Changa
+                                ExtraBold, size 28, white, black stroke); text, timing and position are kept
   capcutctl motion list         list native recipes, accepted inputs, and limitations; no project needed
   capcutctl motion [RECIPE]    --project NAME_OR_PATH --text TEXT|--asset FILE|--logo FILE [--name ID]
                                 [--at S] [--duration S] [--scale N] [--x N] [--y N] [--color HEX] [--accent HEX]
@@ -338,7 +350,7 @@ Layouts are exact, measured geometry (presets/layouts.json) — not judgement:
   split-screen  subject fills the BOTTOM half from y=960, indigo bar on the seam
   circle        subject as the upper-left circular avatar, inside the white ring
   full-face     subject at scale 1, no mask — the whole picture
-  background    finds every circle scene and builds the blurred backdrop under it
+  background    deletes any blurred face copy and puts the clear room plate under every circle scene
   screen        a centred rl2 window recording inside the indigo frame (layout screen)
 
 New projects clone "Preset 3" by default: leftover preset clips are parked 30s after
@@ -392,7 +404,7 @@ export function parseArgs(argv) {
          'waitForClose', 'force', 'reindex', 'noRepair', 'inPlace',
          'generated', 'allowEphemeral', 'measure', 'apply', 'native', 'noCache', 'noGrade',
          'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'noEase', 'easePosition', 'stress', 'allowBoost', 'values',
-         'faceDetail', 'replaceExisting', 'replace', 'record', 'allowUnsafe', 'markdown', 'brief'].includes(key)) result[key] = true;
+         'faceDetail', 'replaceExisting', 'replace', 'record', 'allowUnsafe', 'markdown', 'brief', 'check', 'restyle'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
       const value = argv[++i];
@@ -1085,6 +1097,24 @@ export async function main(argv, dependencies = {}) {
       dryRun: Boolean(args.dryRun), forceRunning: Boolean(args.forceRunning)
     }), true);
   }
+  if (command === 'alpha') {
+    // Premultiply alpha overlays in place: CapCut composites ProRes alpha premultiplied (alpha.mjs).
+    const { premultiplyFile, projectAlphaLeaks } = await import('./alpha.mjs');
+    const files = args._.slice(1);
+    if (!files.length && !args.project) throw new CapcutError('alpha takes FILE… or --project NAME.', { exitCode: 2 });
+    let targets = files.map(f => path.resolve(f));
+    if (args.project) {
+      const { resolveMediaPath } = await import('./core.mjs');
+      const dir = resolveProject(args.project, root);
+      targets.push(...projectAlphaLeaks(await loadWorking(dir), dir, { resolve: resolveMediaPath }).map(l => l.file));
+    }
+    if (!args.dryRun && !args.check) assertCapcutClosed({ forceRunning: Boolean(args.forceRunning) });
+    const { straightAlphaLeak } = await import('./alpha.mjs');
+    const results = [...new Set(targets)].map(file => args.check || args.dryRun
+      ? { file, ...straightAlphaLeak(file) }
+      : premultiplyFile(file, { force: Boolean(args.force) }));
+    return print({ files: results.length, results }, true);
+  }
   if (command === 'preflight') {
     const unknown = Object.keys(args).find(key => !['_', 'root', 'json'].includes(key));
     if (unknown) throw new CapcutError(`Unknown preflight option: --${unknown}.`, { exitCode: 2 });
@@ -1113,7 +1143,7 @@ export async function main(argv, dependencies = {}) {
   const NEEDS_PROJECT = new Set([
     'inspect', 'doctor', 'snapshot', 'history', 'restore', 'sync', 'scenes',
     'denoise', 'blur-broll', 'reframe', 'cursor', 'screen-motion', 'pace', 'ramp', 'punch', 'match', 'verify-shots', 'captions', 'motion', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
-    'replace-media', 'localize', 'trim', 'shift', 'remove', 'volume', 'fade', 'keyframe', 'animate',
+    'replace-media', 'localize', 'trim', 'shift', 'ripple', 'remove', 'volume', 'fade', 'sfx', 'keyframe', 'animate',
     'preview', 'diff', 'apply', 'timeline', 'finish', 'music', 'grade', 'loudness', 'gate', 'build', 'mograph', 'notes'
   ]);
   if (!NEEDS_PROJECT.has(command)) throw new CapcutError(`Unknown command: ${command}\n\n${HELP}`, { exitCode: 2 });
@@ -1890,7 +1920,7 @@ export async function main(argv, dependencies = {}) {
     const { buildLayoutSpec } = layoutsMod;
     if (name === 'audit' || (name === 'auto' && args.plan)) {
       const doc = await loadWorking(projectDir);
-      return print(layoutsMod.layoutAudit(doc, await trackIndex(projectDir, args.track)), true);
+      return print(layoutsMod.layoutAudit(doc, await trackIndex(projectDir, args.track), projectDir), true);
     }
     if (name === 'screen') {
       if (args.at == null || !args.media) {
@@ -2002,6 +2032,23 @@ export async function main(argv, dependencies = {}) {
       ...originOptions(args)
     };
     return print(applySpec(projectDir, { version: 1, name: 'replace-media', operations: [op] }, options), true);
+  }
+  if (command === 'ripple') {
+    if (args.from == null || args.to == null) throw new CapcutError('ripple requires --from S --to S', { exitCode: 2 });
+    return print(applySpec(projectDir, { version: 1, name: 'ripple', operations: [{
+      op: 'timeline.ripple', from: Number(args.from), to: Number(args.to) }] },
+      { ...options, dryRun: Boolean(args.dryRun) }), true);
+  }
+  if (command === 'sfx') {
+    if (!args.sound) throw new CapcutError('sfx requires --sound typing|click|enter|"PALETTE NAME".', { exitCode: 2 });
+    const cues = String(args.cues || '').split(',').filter(Boolean).map(item => {
+      const [at, dur, src] = item.split(':').map(Number);
+      return { at, ...(Number.isFinite(dur) ? { dur } : {}), ...(Number.isFinite(src) ? { src } : {}) };
+    });
+    const op = { op: 'sfx.place', sound: String(args.sound), cues,
+      ...(args.volume != null ? { volume: Number(args.volume) } : {}),
+      ...(args.track != null ? { track: String(args.track) } : {}) };
+    return print(applySpec(projectDir, { version: 1, name: 'sfx', operations: [op] }, { ...options, dryRun: Boolean(args.dryRun) }), true);
   }
   if (command === 'localize') {
     return print(applySpec(projectDir, { version: 1, name: 'localize', operations: [{ op: 'media.localize' }] }, options), true);
@@ -2120,6 +2167,7 @@ export async function main(argv, dependencies = {}) {
     return print(report, true);
   }
   if (command === 'captions') {
+    if (args.restyle) return print(applySpec(projectDir, {version:1, name:'captions-restyle', operations:[{op:'captions-restyle'}]}, options), true);
     const { runCaptions } = await import('./captions-run.mjs');
     return print(await runCaptions(projectDir,args,options),true);
   }

@@ -17,13 +17,18 @@ const arr = (doc, kind) => (doc.materials[kind] ||= []);
 
 const SCREEN_RECORDING_DESC = 'layout:screen-recording';
 
+function isScreenRecording(segment) {
+  const desc = String(segment?.desc || '');
+  return desc === SCREEN_RECORDING_DESC || desc.startsWith(`${SCREEN_RECORDING_DESC} `);
+}
+
 /** Generated screen decorations are not independent footage or callout plates. */
 function isScreenHelper(segment) {
   const desc = String(segment?.desc || '');
   // A rendered graphic entering is not a scene cut: no transition or seam sound belongs there
   // (the graphic carries its own cue).
   if (desc.startsWith('mograph:')) return true;
-  return desc.startsWith('layout:') && desc !== SCREEN_RECORDING_DESC;
+  return desc.startsWith('layout:') && !isScreenRecording(segment);
 }
 
 function contentBoundaryUs(doc, projectDir = null) {
@@ -42,14 +47,25 @@ function inContent(doc, segment, projectDir = null) {
   return Number.isFinite(start) && start < contentBoundaryUs(doc, projectDir);
 }
 
-function isVisibleBroll(doc, segment) {
+function isVisibleBroll(doc, segment, track, trackIndex, principalIndex) {
   const desc = String(segment?.desc || '');
-  if (isScreenHelper(segment) || desc.startsWith('sig:')) return false;
+  const markedScreen = isScreenRecording(segment);
+  const belowPrincipal = trackIndex < principalIndex;
+  const markedAbovePrincipal = trackIndex > principalIndex && markedScreen;
+  if (!track || track.type !== 'video' || track.flag === 0 || track.hidden === true || track.visible === false
+      || (!belowPrincipal && !markedAbovePrincipal)
+      || isScreenHelper(segment) || desc.startsWith('sig:')) return false;
   const material = (doc.materials?.videos || []).find(item => item.id === segment.material_id);
   if (!material) return false;
+  if (material.capcutctl_mograph) return false;
   if (material.type && material.type !== 'video') return false;
   const file = String(material.path || '').toLowerCase();
   if (/\.(png|jpe?g|gif|webp|heic)$/.test(file)) return false;
+  if ((segment.clip?.alpha ?? 1) <= 0) return false;
+  const alphaGroups = (segment.common_keyframes || []).filter(group => group.property_type === 'KFTypeAlpha');
+  if (alphaGroups.length && alphaGroups.every(group => (group.keyframe_list || []).length > 0
+      && group.keyframe_list.every(keyframe => Array.isArray(keyframe.values)
+        && keyframe.values.length > 0 && keyframe.values.every(value => Number(value) <= 0)))) return false;
   return Boolean(segment.source_timerange && segment.target_timerange);
 }
 
@@ -59,27 +75,25 @@ function coveringBroll(doc, t, principalIndex, projectDir = null) {
   const us = US(t);
   if (us < 0 || us >= contentBoundaryUs(doc, projectDir)) return null;
   const videos = new Map((doc.materials?.videos || []).map(m => [m.id, m]));
-  for (let i = 0; i < principalIndex; i++) {
-    const track = doc.tracks[i];
-    if (!track || track.type !== 'video' || track.flag === 0) continue;
-    for (const s of track.segments || []) {
-      if (!s.target_timerange) continue;
-      if (!isVisibleBroll(doc, s) || !inContent(doc, s, projectDir)) continue;
-      const a = s.target_timerange.start, b = a + s.target_timerange.duration;
-      if (a - 20000 < us && us < b - 20000) {
-        const m = videos.get(s.material_id);
-        const sr = s.source_timerange || {};
-        const cl = s.clip || {};
-        return {
-          desc: s.desc || '', path: m?.path || '', id: s.id,
-          scale: cl.scale?.x ?? 1, tx: cl.transform?.x ?? 0, ty: cl.transform?.y ?? 0,
-          srcStart: (sr.start || 0) / 1e6,
-          srcEnd: ((sr.start || 0) + (sr.duration || 0)) / 1e6,
-        };
-      }
-    }
+  let found = null;
+  for (const { segment: s, track, trackIndex: i } of allSegments(doc)) {
+    if (!isVisibleBroll(doc, s, track, i, principalIndex)) continue;
+    if (!s.target_timerange || !inContent(doc, s, projectDir)) continue;
+    const a = s.target_timerange.start, b = a + s.target_timerange.duration;
+    if (!(a - 20000 < us && us < b - 20000)) continue;
+    const m = videos.get(s.material_id);
+    const sr = s.source_timerange || {};
+    const cl = s.clip || {};
+    const hit = {
+      desc: s.desc || '', path: m?.path || '', id: s.id,
+      scale: cl.scale?.x ?? 1, tx: cl.transform?.x ?? 0, ty: cl.transform?.y ?? 0,
+      srcStart: (sr.start || 0) / 1e6,
+      srcEnd: ((sr.start || 0) + (sr.duration || 0)) / 1e6,
+    };
+    // An explicitly marked upper screen recording is composited over the face and any lower B-roll.
+    if (i > principalIndex || !found) found = hit;
   }
-  return null;
+  return found;
 }
 
 function coveringLayout(doc, t, principal) {
@@ -587,22 +601,16 @@ export function opCalloutSfx(doc, op = {}, context = {}) {
 const INTERACT_LANE = 'polish-interact';
 const INTERACT_DESC = /^polish:(click|type)$/;
 
-function isBrollFootage(doc, segment) {
-  return isVisibleBroll(doc, segment);
-}
-
 /** Every on-screen B-roll window, in timeline order. Chopped clips are the map — a click in a skipped source gap has no timeline. */
 export function brollWindows(doc, { projectDir = null } = {}) {
   const videos = new Map((doc.materials?.videos || []).map(m => [m.id, m]));
   let principal = null;
   try { principal = optionalPrincipal(doc, null); } catch { /* malformed drafts are still inspectable */ }
-  const brollCeiling = principal ? principal.index : doc.tracks.length;
+  const principalIndex = principal ? principal.index : doc.tracks.length;
   const out = [];
   for (const { segment, trackIndex } of allSegments(doc)) {
     const track = doc.tracks[trackIndex];
-    if (!track || track.type !== 'video' || track.flag === 0) continue;
-    if (trackIndex >= brollCeiling) continue;
-    if (!isBrollFootage(doc, segment)) continue;
+    if (!isVisibleBroll(doc, segment, track, trackIndex, principalIndex)) continue;
     if (!inContent(doc, segment, projectDir)) continue;
     const st = segment.source_timerange, tt = segment.target_timerange;
     if (!(tt.duration > 0) || !(st.duration > 0)) continue;
@@ -854,6 +862,39 @@ export function opInteractions(doc, op = {}, context = {}) {
   lane.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
   doc.tracks.forEach((t, i) => (t.segments || []).forEach(s => { s.track_render_index = i; }));
   return { changed: cues.length, sfx: cues.length, cues };
+}
+
+/**
+ * Place a named palette sound at explicit times (typing under a typed command, an Enter click on
+ * the real Enter). Cues are {at, dur?, src?} in timeline seconds; `src` starts inside a long bed
+ * such as the one-minute typing recording. The sound must be cached on this machine.
+ */
+export function opSfxPlace(doc, op = {}) {
+  SEED = op.__seed || SEED || null;
+  const p = sfxPresets();
+  const name = p.accents?.[op.sound] || (p.audioTemplates[op.sound] ? op.sound : null);
+  if (!name) {
+    throw new CapcutError(`sfx: unknown sound "${op.sound}". Use ${Object.keys(p.accents || {}).join(', ')} or a palette name from presets/sfx.json.`, { code: 'UNKNOWN_SFX', exitCode: 2 });
+  }
+  if (!Array.isArray(op.cues) || !op.cues.length) throw new CapcutError('sfx needs --cues AT[:DUR[:SRC]],…', { code: 'SFX_NO_CUES', exitCode: 2 });
+  const audioId = ensureAudio(doc, name);
+  if (!audioId) throw new CapcutError(`sfx: "${name}" is not cached on this machine; open it once in CapCut or pick another sound.`, { code: 'SFX_UNAVAILABLE', exitCode: 2 });
+  const fileDur = (p.audioTemplates[name].duration || US(0.5)) / 1e6;
+  const lane = ensureAudioTrack(doc, op.track || 'sfx-keys');
+  const volume = op.volume ?? p.rules?.volume ?? 1;
+  let placed = 0;
+  for (const [i, cue] of op.cues.entries()) {
+    const src = Math.max(0, Number(cue.src) || 0);
+    const dur = Math.min(Number(cue.dur) || fileDur, fileDur - src);
+    if (!(Number.isFinite(cue.at) && cue.at >= 0 && dur > 0)) throw new CapcutError(`sfx cue ${i} is out of range: ${JSON.stringify(cue)}`, { code: 'SFX_BAD_CUE', exitCode: 2 });
+    const seg = audioSegment(doc, audioId, cue.at, dur, `sfx-place:${name}:${i}:${cue.at}`, volume, `sfx:${op.sound}`);
+    seg.source_timerange = { start: US(src), duration: US(dur) };
+    lane.segments.push(seg);
+    placed++;
+  }
+  lane.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
+  doc.tracks.forEach((t, i) => (t.segments || []).forEach(s => { s.track_render_index = i; }));
+  return { changed: placed, sfx: name, track: lane.name };
 }
 
 /**

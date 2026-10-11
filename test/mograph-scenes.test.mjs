@@ -1,4 +1,4 @@
-// Full-frame motion-design scenes (mograph/scenes/*.js): the catalog, the literal/determinism
+// Motion-design scenes (mograph/scenes/*.js): the catalog, the literal/determinism
 // lint, the synthesised sound, per-scene meta, frame determinism, the readable-text safe-zone
 // refusal, alpha hand-off, plan validation and placement/gate handling. Browser tests skip
 // cleanly when Playwright/Chromium cannot launch; everything else always runs.
@@ -28,6 +28,8 @@ const CASES = {
   'particle-word': { params: { text: 'كود', caption: 'أمر واحد', from: 'dots' }, beats: 6, handoff: { in: 'dots', out: 'ink' } },
   'style-stinger': { params: { count: 4, word: 'إيقاع' }, beats: 2, handoff: { in: 'cut', out: 'cut' } },
   'dot-signature': { params: { name: 'سهيل', role: 'صانع محتوى', footer: 'made in code' }, beats: 5, handoff: { in: 'ink', out: 'ink' } },
+  'format-morph': { params: { labels: ['فيديو', 'تطبيق', 'موقع'], actions: ['اختار', 'ابني', 'شارك'], hero: ['فكرتك', 'جاهزة'] }, beats: 6, handoff: { in: 'seam', out: 'seam' } },
+  'claude-brief': { params: { text: 'زيّه', then: 'بس عنّي' }, beats: 5, handoff: { in: 'seam', out: 'seam' } },
 };
 
 // ---- browser ----------------------------------------------------------------------------------
@@ -64,6 +66,16 @@ const pixels = page => page.evaluate(() => {
   let h = 2166136261;
   for (let i = 0; i < d.length; i += 7) { h ^= d[i]; h = Math.imul(h, 16777619); }
   return h >>> 0;
+});
+const alphaStats = page => page.evaluate(() => {
+  const c = document.getElementById('out'), d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+  let count = 0, outside = 0, x0 = c.width, y0 = c.height, x1 = -1, y1 = -1;
+  for (let y = 0; y < c.height; y++) for (let x = 0, p = y * c.width * 4 + 3; x < c.width; x++, p += 4) {
+    if (d[p] <= 0) continue;
+    count++; x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y);
+    if (x < 70 || x > 930 || y < 230 || y > 600) outside++;
+  }
+  return { count, outside, bounds: count ? [x0, y0, x1, y1] : null };
 });
 
 // ---- catalog & lint -----------------------------------------------------------------------------
@@ -144,6 +156,129 @@ test('a frame is a pure function of its index (same pixels alone, in sequence, t
   } finally { await context.close(); }
 });
 
+test('format-morph labels match format hits and the alpha aperture returns to its seam', async t => {
+  const b = await sharedBrowser();
+  if (b.skip) return t.skip(b.skip);
+  const { context, page, meta } = await openPage(b.browser, 'format-morph', CASES['format-morph'].params);
+  try {
+    assert.equal(meta.alpha, true);
+    assert.deepEqual(meta.cues.map(cue => cue.at), [0.6, 2, 3.6].map(beat => beat * BEAT));
+    for (const [beat, label] of [[1.1, 'فيديو'], [2.5, 'تطبيق'], [4.1, 'موقع']]) {
+      const boxes = await page.evaluate(t => window.__scene.textAt(t), beat * BEAT);
+      assert.equal(boxes.filter(box => box.text === label).length, 1);
+      for (const box of boxes) {
+        assert.ok(box.x >= 140 && box.x + box.w <= 940);
+        assert.ok(box.y >= 220 && box.y + box.h <= 1500);
+      }
+    }
+    await page.evaluate(() => window.__scene.frame(0, { samples: 3, grain: 0 }));
+    const first = await pixels(page);
+    await page.evaluate(i => window.__scene.frame(i, { samples: 3, grain: 0 }), meta.frames - 1);
+    assert.equal(await pixels(page), first, 'the handoff is exactly the opening seam');
+    const alpha = await page.evaluate(() => {
+      const ctx = document.getElementById('out').getContext('2d');
+      return [ctx.getImageData(540, 700, 1, 1).data[3], ctx.getImageData(540, 960, 1, 1).data[3]];
+    });
+    assert.deepEqual(alpha, [0, 255], 'footage is revealed outside the 12px seam');
+  } finally { await context.close(); }
+});
+
+test('claude-brief reveals two joined Arabic phrases and returns to its alpha seam', async t => {
+  const b = await sharedBrowser();
+  if (b.skip) return t.skip(b.skip);
+  const { context, page, meta } = await openPage(b.browser, 'claude-brief', CASES['claude-brief'].params);
+  try {
+    assert.equal(meta.alpha, true);
+    assert.deepEqual(meta.cues.map(cue => cue.at), [0.6, 1.4].map(beat => beat * BEAT));
+    const phrases = await page.evaluate(t => window.__scene.textAt(t).map(box => box.text), 3.4 * BEAT);
+    assert.deepEqual(phrases, ['زيّه', 'بس عنّي']);
+    await page.evaluate(() => window.__scene.frame(0, { samples: 3, grain: 0 }));
+    const first = await pixels(page);
+    await page.evaluate(i => window.__scene.frame(i, { samples: 3, grain: 0 }), meta.frames - 1);
+    assert.equal(await pixels(page), first, 'the clean brief hands off through the same seam');
+  } finally { await context.close(); }
+});
+
+for (const [scene, params, cues, labels] of [
+  ['claude-brief', { text: 'زيّه', then: 'بس عنّي', presentation: 'overlay' }, [0.6, 1.4],
+    [[1.2, ['زيّه']], [3.4, ['زيّه', 'بس عنّي']]]],
+  ['format-morph', { labels: ['فيديو', 'تطبيق', 'موقع'], actions: ['اختار', 'ابني', 'شارك'], hero: ['فكرتك', 'جاهزة'], presentation: 'overlay' }, [0.6, 2, 3.6],
+    [[1.1, ['فيديو']], [2.5, ['تطبيق', 'اختار', 'ابني', 'شارك']], [4.1, ['موقع', 'فكرتك', 'جاهزة']]]],
+]) {
+  test(`${scene}: overlay stays transparent outside the upper composition`, async t => {
+    const b = await sharedBrowser();
+    if (b.skip) return t.skip(b.skip);
+    const { context, page, meta } = await openPage(b.browser, scene, params);
+    try {
+      assert.equal(meta.alpha, true);
+      assert.deepEqual(meta.handoff, { in: 'footage', out: 'footage' });
+      assert.deepEqual(meta.cues.map(cue => cue.at), cues.map(beat => beat * BEAT));
+      await page.evaluate(() => window.__scene.frame(0, { samples: 5, grain: 0 }));
+      assert.equal((await alphaStats(page)).count, 0, 'the opening frame is fully transparent');
+      for (const [beat, expected] of labels) {
+        const at = beat * BEAT;
+        const boxes = await page.evaluate(time => window.__scene.textAt(time), at);
+        for (const label of expected) assert.equal(boxes.filter(box => box.text === label).length, 1, `${label} appears once`);
+        for (const box of boxes) {
+          assert.ok(box.x >= 70 && box.x + box.w <= 930, `${box.text} stays within x70–930: ${JSON.stringify(box)}`);
+          assert.ok(box.y >= 230 && box.y + box.h <= 600, `${box.text} stays within y230–600: ${JSON.stringify(box)}`);
+        }
+        await page.evaluate(([frame]) => window.__scene.frame(frame, { samples: 1, grain: 0 }), [Math.round(at * meta.fps)]);
+        const stats = await alphaStats(page);
+        assert.ok(stats.count > 0, `${scene} draws at ${beat} beats`);
+        assert.equal(stats.outside, 0, `${scene} has no aperture, stage or spill outside the composition: ${JSON.stringify(stats)}`);
+      }
+      await page.evaluate(i => window.__scene.frame(i, { samples: 5, grain: 0 }), meta.frames - 1);
+      assert.equal((await alphaStats(page)).count, 0, 'the last frame is fully transparent');
+    } finally { await context.close(); }
+  });
+}
+
+test('format-morph carries a decoded data image through clipped overlay viewports without old labels at cues', async t => {
+  const b = await sharedBrowser();
+  if (b.skip) return t.skip(b.skip);
+  const { context: seedContext, page: seedPage } = await openPage(b.browser, 'format-morph', CASES['format-morph'].params);
+  let images;
+  try {
+    images = await seedPage.evaluate(() => {
+      const c = document.createElement('canvas'); c.width = 16; c.height = 9;
+      const ctx = c.getContext('2d'); ctx.fillStyle = 'rgb(23,131,247)'; ctx.fillRect(0, 0, 16, 9);
+      return ['image/png', 'image/jpeg'].map(type => c.toDataURL(type));
+    });
+  } finally { await seedContext.close(); }
+  for (const imageData of images) {
+    const { context, page, meta } = await openPage(b.browser, 'format-morph', {
+      ...CASES['format-morph'].params, presentation: 'overlay', imageData,
+    });
+    try {
+      for (const [at, x, y] of [[0.55, 200, 350], [1.25, 500, 380], [2.15, 730, 430]]) {
+        await page.evaluate(i => window.__scene.frame(i, { samples: 1, grain: 0 }), Math.round(at * meta.fps));
+        const pixel = await page.evaluate(([x, y]) => [...document.getElementById('out').getContext('2d').getImageData(x, y, 1, 1).data], [x, y]);
+        assert.ok(pixel[2] > 180 && pixel[0] < 50, `same supplied picture survives at ${at}: ${pixel}`);
+      }
+      for (const at of [0.2, 0.3, 0.85, 0.95, 1, 1.65, 1.75, 1.8, 2.15, 2.6, 2.9]) {
+        await page.evaluate(i => window.__scene.frame(i, { samples: 3, grain: 0 }), Math.round(at * meta.fps));
+        assert.equal((await alphaStats(page)).outside, 0, `motion stays within the upper composition at ${at}`);
+      }
+      for (const [cue, label] of [[0.3, 'فيديو'], [1, 'تطبيق'], [1.8, 'موقع']]) {
+        for (const offset of [-0.49 / meta.fps, 0, 0.49 / meta.fps]) {
+          const words = await page.evaluate(at => window.__scene.textAt(at).map(box => box.text), cue + offset);
+          assert.deepEqual(words.filter(word => CASES['format-morph'].params.labels.includes(word)), [label], `only current format in cue shutter at ${cue + offset}`);
+        }
+      }
+      await page.evaluate(() => window.__scene.frame(40, { samples: 3, grain: 0 }));
+      const first = await pixels(page);
+      await page.evaluate(() => window.__scene.frame(13, { samples: 3, grain: 0 }));
+      await page.evaluate(() => window.__scene.frame(40, { samples: 3, grain: 0 }));
+      assert.equal(await pixels(page), first, 'decoded picture renders deterministically');
+    } finally { await context.close(); }
+  }
+  for (const imageData of ['https://example.com/image.png', 'data:image/svg+xml;base64,AAAA', 'data:image/png;base64,', 'data:image/jpeg;base64,AAAA', 123]) {
+    await assert.rejects(probeScene({ scene: 'format-morph', params: { ...CASES['format-morph'].params, presentation: 'overlay', imageData }, profile }),
+      err => err.code === 'SCENE_PARAM' && /imageData/.test(err.message));
+  }
+});
+
 test('a "footage" word-slam ends as a transparent hole (an alpha transition)', async t => {
   const b = await sharedBrowser();
   if (b.skip) return t.skip(b.skip);
@@ -173,6 +308,10 @@ test('bad params and unknown scenes fail by name', async t => {
   if (b.skip) return t.skip(b.skip);
   await assert.rejects(probeScene({ scene: 'word-slam', params: {}, profile }), err => err.code === 'SCENE_PARAM');
   await assert.rejects(probeScene({ scene: 'nope', params: {}, profile }), err => err.code === 'SCENE_ID');
+  for (const scene of ['claude-brief', 'format-morph']) {
+    await assert.rejects(probeScene({ scene, params: { presentation: 'screen' }, profile }),
+      err => err.code === 'SCENE_PARAM' && /presentation/.test(err.message));
+  }
 });
 
 // ---- plan, placement, gate ---------------------------------------------------------------------

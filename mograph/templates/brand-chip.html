@@ -20,7 +20,7 @@
 <script>
 /*
  * brand-chip — a white pill naming the tool on screen, with its logo when one is given.
- * params: { name, logo?: absolute path or file:// URL, from?: right|left (default right, the Arabic reading side), layout?: full-face|card|split-screen, center?: [x, y] canvas px, hold?: seconds }
+ * params: { name, variant?: chapter (large brand tab), logo?: absolute path or file:// URL, from?: right|left (default right, the Arabic reading side), layout?: full-face|card|split-screen, center?: [x, y] canvas px, hold?: seconds }
  * Timing (frames @30): slides 56px in from the reading-direction side and fades up over 8f
  * (enter ease); holds 46f by default (params.hold); 6f out, sliding back 28px as it fades.
  * Motion is slide-only, so a png-still with native CapCut keys is allowed.
@@ -36,10 +36,16 @@ MG.define({
   build(root, params, tokens, mg) {
     const name = String(params.name || '').trim();
     if (!name) throw new Error('MOGRAPH_PARAM: brand-chip needs params.name');
+    if (params.variant != null && params.variant !== 'chapter') throw new Error('MOGRAPH_PARAM: brand-chip variant must be chapter');
     mg.cssVars(root);
     const chip = document.createElement('div');
     chip.className = 'chip';
-    chip.style.fontSize = `${tokens.type.chip}px`;
+    const size = params.variant === 'chapter' ? tokens.type.super : tokens.type.chip;
+    chip.style.fontSize = `${size}px`;
+    if (params.variant === 'chapter') Object.assign(chip.style, {
+      background: mg.color('brand'), color: mg.color('text'),
+      borderRadius: `${tokens.radius.box}px`, boxShadow: 'none',
+    });
     // Logo on the start side of the name's own script: left of a Latin name, right of an Arabic one.
     chip.dir = mg.isArabic(name) ? 'rtl' : 'ltr';
     root.appendChild(chip);
@@ -55,7 +61,7 @@ MG.define({
     chip.appendChild(label);
     mg.words(label, name);
     const lay = mg.layout(params, { margin: 40 + TRAVEL });
-    mg.fitFont(chip, tokens.type.chip, lay.safe.w, Infinity, tokens.type.micro);
+    mg.fitFont(chip, size, lay.safe.w, Infinity, tokens.type.micro);
     mg.place(chip, lay);
     const side = params.from === 'left' ? -1 : 1;     // +1: enters from the right
     return { chip, side, total: (IN + hold(params, mg) + OUT) / mg.fps };

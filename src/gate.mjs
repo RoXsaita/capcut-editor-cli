@@ -11,7 +11,9 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { allSegments, contentEndUs } from './core.mjs';
+import { allSegments, contentEndUs, resolveMediaPath } from './core.mjs';
+import { projectAlphaLeaks } from './alpha.mjs';
+import { blurredBackgrounds, captionStyleDrift } from './house-rules.mjs';
 import { coldOpen, cutPoints, pictureChanges, principalTrack } from './polish.mjs';
 import { firstPictureProof, finishScorecard } from './finish.mjs';
 import { safeZoneViolations } from './mograph-geometry.mjs';
@@ -63,13 +65,17 @@ export function cameraMoves(doc) {
     if (track.type !== 'video') continue;
     if (GRAPHIC.test(segment.desc || '')) continue;
     const t0 = startOf(segment), speed = speedOf(segment) || 1;
+    // time_offset is SOURCE time (what CapCut writes and core's recut remaps), so a clip cut
+    // from 187s holds keys near 187s, not near 0.
+    const src0 = S(segment.source_timerange?.start || 0);
+    const at = offset => r2(t0 + (S(offset) - src0) / speed);
     for (const block of segment.common_keyframes || []) {
       if (!MOVE_PROPS.has(block.property_type)) continue;
       const keys = [...(block.keyframe_list || [])].sort((a, b) => a.time_offset - b.time_offset);
       for (let i = 1; i < keys.length; i++) {
         const a = keys[i - 1], b = keys[i];
         if (Math.abs((a.values?.[0] ?? 0) - (b.values?.[0] ?? 0)) < 1e-6) continue;
-        out.push({ t: r2(t0 + S(a.time_offset) / speed), end: r2(t0 + S(b.time_offset) / speed), property: block.property_type });
+        out.push({ t: at(a.time_offset), end: at(b.time_offset), property: block.property_type });
       }
     }
   }
@@ -112,6 +118,61 @@ function maxGap(times, from, to) {
     if (gap > worst.gap) worst = { gap: r2(gap), from: r2(pts[i - 1]), to: r2(pts[i]) };
   }
   return worst;
+}
+
+/**
+ * Captions that sit on the face. Captions are native text, so qa cannot draw them and only a
+ * watch in CapCut shows them; this is the geometric version. Full face: the head fills about
+ * 10–75% of the clip height, so a caption belongs in the bottom band (position ≤ ~22). Split
+ * with the face below the seam: the caption rides the seam, never inside the face half.
+ */
+export function captionsOnFace(doc) {
+  let principal = null;
+  try { principal = principalTrack(doc); } catch { return []; }
+  const faces = principal.track.segments || [];
+  // Only a CLI-marked scene is known to cover the face; a transparent overlay (a slab) is not.
+  const videos = new Map((doc.materials?.videos || []).map(m => [m.id, m]));
+  const fullFrame = t => allSegments(doc).some(({ segment }) => videos.get(segment.material_id)?.capcutctl_mograph?.scene
+    && startOf(segment) <= t && t < endOf(segment));
+  const out = [];
+  for (const { track, segment } of allSegments(doc)) {
+    if (!(track.name || '').startsWith('captions:')) continue;
+    const t = (startOf(segment) + endOf(segment)) / 2;
+    const face = faces.find(f => startOf(f) <= t && t < endOf(f));
+    if (!face || fullFrame(t)) continue;
+    const ty = face.clip?.transform?.y ?? 0, sc = face.clip?.scale?.y ?? 1;
+    const cy = 960 - (segment.clip?.transform?.y ?? 0) * 960;   // caption centre, px from the top
+    let band;
+    if (ty <= -0.2) band = [990, 1920];
+    else if (ty >= 0.2) band = [0, 930];
+    else { const top = 960 - ty * 960 - 960 * sc; band = [top + 0.10 * 1920 * sc, top + 0.75 * 1920 * sc]; }
+    if (cy > band[0] && cy < band[1]) out.push({ t: r2(startOf(segment)), y: segment.clip?.transform?.y ?? 0, layout: ty <= -0.2 ? 'split' : ty >= 0.2 ? 'split-top' : 'full' });
+  }
+  return out;
+}
+
+/**
+ * A shot that opens on one framing and snaps to another a few frames later: the first frames
+ * show the wrong crop. A deliberate punch lands later in the shot; a snap inside the opening
+ * 0.6s is a framing bug (a real edit, 2026-10-04: every terminal shot opened mis-cropped).
+ */
+export function openingSnaps(doc, { within = 0.6, snap = 0.15 } = {}) {
+  const out = [];
+  for (const { track, segment } of allSegments(doc)) {
+    if (track.type !== 'video' || GRAPHIC.test(segment.desc || '')) continue;
+    const t0 = startOf(segment), speed = speedOf(segment) || 1, src0 = S(segment.source_timerange?.start || 0);
+    const at = offset => t0 + (S(offset) - src0) / speed;
+    for (const block of segment.common_keyframes || []) {
+      if (!MOVE_PROPS.has(block.property_type)) continue;
+      const keys = [...(block.keyframe_list || [])].sort((a, b) => a.time_offset - b.time_offset);
+      for (let i = 1; i < keys.length; i++) {
+        const a = at(keys[i - 1].time_offset), b = at(keys[i].time_offset);
+        if (Math.abs((keys[i - 1].values?.[0] ?? 0) - (keys[i].values?.[0] ?? 0)) < 1e-3) continue;
+        if (a - t0 > 1e-3 && a - t0 < within && b - a < snap) { out.push({ t: r2(a), track: track.name || '' }); break; }
+      }
+    }
+  }
+  return [...new Map(out.map(o => [`${o.track}:${o.t}`, o])).values()].sort((x, y) => x.t - y.t);
 }
 
 /** Longest stretch in [from, to) with no graphic on screen. */
@@ -199,6 +260,22 @@ export function gateReport(doc, { projectDir = null, profile = loadProfile() } =
   add('graphic-sfx', 'FAIL', !unpaired.length, unpaired.length ? `graphics without a sound: ${unpaired.map(g => `${g.template || g.kind}@${g.t}s`).join(', ')}` : 'every graphic has a sound');
   const logos = graphics.filter(g => g.kind === 'logo').map(g => g.t);
   const chipClash = graphics.filter(g => g.template === 'brand-chip' && logos.some(t => Math.abs(t - g.t) <= d.brandChipLogoGap));
+  const onFace = captionsOnFace(doc).filter(c => c.t < end);
+  add('caption-face', 'FAIL', !onFace.length, onFace.length
+    ? `${onFace.length} caption(s) on the face, first at ${onFace.slice(0, 4).map(c => `${c.t}s (${c.layout}, y=${c.y})`).join(', ')}: full face → position 20, split → the seam (50)`
+    : 'captions clear of the face');
+  const snaps = openingSnaps(doc).filter(x => x.t < end);
+  add('opening-snap', 'FAIL', !snaps.length, snaps.length
+    ? `shot re-frames with a snap just after it opens at ${snaps.map(x => `${x.t}s`).join(', ')}: start the shot on its final framing`
+    : 'shots open on their final framing');
+  const blurred = blurredBackgrounds(doc).filter(b => b.t < end);
+  add('clear-background', 'FAIL', !blurred.length, blurred.length
+    ? `${blurred.length} blurred background(s) at ${blurred.slice(0, 4).map(b => `${b.t}s (${b.kind})`).join(', ')}: never a blurred background — capcutctl layout background --project NAME swaps in the clear room plate${blurred.some(b => b.kind === 'canvas') ? '; set Background to None in CapCut for canvas blurs' : ''}`
+    : 'no blurred backgrounds');
+  const drift = captionStyleDrift(doc);
+  add('caption-style', 'FAIL', !drift.off.length, drift.off.length
+    ? `${drift.off.length} caption word(s) not in the house caption style, first ${drift.off.slice(0, 4).map(w => `"${w.text}"@${w.t}s`).join(', ')}: every word takes ${drift.house} — capcutctl captions --restyle --project NAME`
+    : 'one caption style');
   add('chip-and-logo', 'FAIL', !chipClash.length, chipClash.length ? `brand-chip and logo pop on one mention at ${chipClash.map(g => g.t).join(', ')}s` : 'no doubled brand mentions');
 
   // Seams.
@@ -211,6 +288,15 @@ export function gateReport(doc, { projectDir = null, profile = loadProfile() } =
   const share = top ? top[1] / names.length : 0;
   add('seam-variety', 'FAIL', names.length < 4 || share <= profile.seams.maxShare,
     top ? `${top[0]} is ${Math.round(share * 100)}% of ${names.length} transitions` : 'no transitions', r2(share), profile.seams.maxShare);
+
+  // Alpha overlays must be premultiplied: CapCut adds a straight file's hidden colour to the frame.
+  if (projectDir) {
+    let leaks = null;
+    try { leaks = projectAlphaLeaks(doc, projectDir, { resolve: resolveMediaPath }); } catch { leaks = null; }
+    if (leaks) add('alpha-premultiplied', 'FAIL', !leaks.length, leaks.length
+      ? `${leaks.length} overlay(s) carry straight alpha CapCut paints as a haze: ${leaks.map(l => path.basename(l.file)).join(', ')} — capcutctl alpha --project NAME`
+      : 'alpha overlays premultiplied');
+  }
 
   // Things the gate cannot see.
   const unverified = graphics.filter(g => g.kind === 'mograph' && !g.importVerified);

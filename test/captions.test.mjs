@@ -6,9 +6,8 @@ import { buildProject } from './helpers/polish-project.mjs';
 import { applySpec, loadProject, validateDocument } from '../src/core.mjs';
 import { main, setOutput } from '../src/cli.mjs';
 import { opCaptions, captionDisplayText } from '../src/captions.mjs';
+import { captionStyleKey, captionStyleDrift } from '../src/house-rules.mjs';
 
-// Unit schema tests use the licensed bundled font as a path fixture on non-macOS CI.
-if (process.platform !== 'darwin') process.env.CAPCUTCTL_LATIN_FONT = new URL('../tools/caption_engine/fonts/Changa-ExtraBold.ttf', import.meta.url).pathname;
 const cues = [
   {id: 1, start: 0, end: .5, text: 'خليت', position: 20},
   {id: 2, start: .4, end: 1, text: 'الـ CV', position: 50},
@@ -40,8 +39,10 @@ test('caption operation inserts editable ordinary text, not baked media or paid 
     assert.ok(fs.existsSync(style.font.path));
     assert.ok(style.font.path.startsWith(project + path.sep));
   }
-  assert.equal(doc.materials.texts[0].font_name, 'Changa ExtraBold');
-  assert.equal(doc.materials.texts[1].font_name, 'Arial Unicode MS');
+  // English words take the Arabic style exactly: one font, size, colour and stroke.
+  assert.deepEqual(doc.materials.texts.map(m => m.font_name), ['Changa ExtraBold', 'Changa ExtraBold']);
+  assert.equal(new Set(doc.materials.texts.map(captionStyleKey)).size, 1);
+  assert.deepEqual(captionStyleDrift(doc).off, []);
   assert.deepEqual(validateDocument(doc, {checkFiles:true}).filter(x=>x.level==='error'), []);
 }));
 
@@ -134,3 +135,47 @@ test('CLI cues dry-run validates without snapshots, font copies, or draft writes
     assert.equal(fs.existsSync(path.join(project,'Resources')),false);
   } finally {restore(); fs.rmSync(dir,{recursive:true,force:true});}
 });
+
+test('a Latin caption word keeps Western digits; an Arabic one gets Arabic-Indic', () => {
+  assert.equal(captionDisplayText('GPT-5'), 'GPT-5');
+  assert.equal(captionDisplayText('5'), '٥');
+});
+
+test('caption-style catches an English word styled apart from the Arabic ones', () => fixture(project => {
+  applySpec(project, {version:1, operations:[operation()]}, {forceRunning:true});
+  const doc = loadProject(project).groups[0].doc;
+  const english = doc.materials.texts[1];
+  english.font_name = 'Arial Unicode MS';
+  const off = captionStyleDrift(doc).off;
+  assert.equal(off.length, 1); assert.equal(off[0].text, 'الـ CV');
+}));
+
+test('captions --restyle puts an Arial English word back in the house style, keeping its text and place', () => fixture(project => {
+  applySpec(project, {version:1, operations:[operation()]}, {forceRunning:true});
+  const mutate = file => {
+    const doc = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const m = doc.materials.texts[1];
+    m.font_name = 'Arial Unicode MS'; m.font_size = 15;
+    const content = JSON.parse(m.content); content.text = 'CV'; content.styles[0].size = 15; m.content = JSON.stringify(content);
+    fs.writeFileSync(file, JSON.stringify(doc));
+  };
+  for (const g of loadProject(project).groups) for (const f of [g.canonical, ...(g.mirrors || [])]) if (fs.existsSync(f)) mutate(f);
+  assert.equal(captionStyleDrift(loadProject(project).groups[0].doc).off.length, 1);
+  const before = captionTrack(loadProject(project).groups[0].doc).segments.map(s => s.clip.transform);
+  applySpec(project, {version:1, operations:[{op:'captions-restyle'}]}, {forceRunning:true});
+  const doc = loadProject(project).groups[0].doc;
+  assert.deepEqual(captionStyleDrift(doc).off, []);
+  assert.equal(JSON.parse(doc.materials.texts[1].content).text, 'CV', 'a hand correction survives');
+  assert.deepEqual(captionTrack(doc).segments.map(s => s.clip.transform), before);
+}));
+
+test('caption-style compares with the house spec: an all-Arial track and an English majority both fail', () => fixture(project => {
+  applySpec(project, {version:1, operations:[operation()]}, {forceRunning:true});
+  const doc = loadProject(project).groups[0].doc;
+  for (const m of doc.materials.texts) m.font_name = 'Arial Unicode MS';
+  assert.equal(captionStyleDrift(doc).off.length, 2, 'every word off the spec, even when they all agree');
+  doc.materials.texts[0].font_name = 'Changa ExtraBold';
+  assert.deepEqual(captionStyleDrift(doc).off.map(w => w.text), ['الـ CV'], 'the Arial word is the odd one, never the Changa one');
+  captionTrack(doc).segments[0].clip.scale = {x: 1.4, y: 1.4};
+  assert.equal(captionStyleDrift(doc).off.length, 2, 'a word scaled in the canvas is a different size');
+}));

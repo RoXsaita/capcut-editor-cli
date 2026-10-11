@@ -443,7 +443,7 @@
   }
  },
  "background": {
-  "description": "Blurred, slightly enlarged copy of the subject placed BELOW it. Applied under circle scenes.",
+  "description": "The profile's clear room plate (brand.background.plate), cover-fit, placed BELOW circle scenes and screen cards. Never a blurred copy of the subject (2026-10-11). clip/effect below are kept only for old drafts and are no longer applied.",
   "clip": {
    "scale": {
     "x": 1.12,

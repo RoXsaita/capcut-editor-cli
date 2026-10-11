@@ -7,7 +7,7 @@
  * frame by frame in headless Chromium (several browsers in parallel, since every frame is a
  * pure function of its index) and encoded to:
  *
- *  - `prores`  ProRes 4444 + PCM sound, straight alpha — what `mograph add --scene` places.
+ *  - `prores`  ProRes 4444 + PCM sound, premultiplied alpha — what `mograph add --scene` places.
  *              An `alpha` scene (a transition) is transparent where it reveals the footage.
  *  - `mp4`     H.264 + AAC, for watching and sharing. Alpha is flattened.
  *
@@ -21,6 +21,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { CapcutError, requireBinary } from './core.mjs';
+import { PREMULTIPLY_FILTER, PRORES_ALPHA_ARGS } from './alpha.mjs';
 import { loadProfile } from './profile.mjs';
 import { FONT_DIR, MOGRAPH_DIR, launch, loadPlaywright, pngPipeEncoder } from './mograph.mjs';
 
@@ -128,8 +129,8 @@ export async function probeScene({ scene, params = {}, profile = loadProfile(), 
 function encoderArgs(format, fps, out) {
   const input = ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'image2pipe', '-framerate', String(fps), '-c:v', 'png', '-i', '-'];
   if (format === 'prores') {
-    return [...input, '-c:v', 'prores_ks', '-profile:v', '4444', '-pix_fmt', 'yuva444p10le', '-alpha_bits', '16',
-      '-vendor', 'apl0', '-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709', out];
+    // Premultiplied: CapCut reads ProRes alpha that way (alpha.mjs).
+    return [...input, '-vf', PREMULTIPLY_FILTER, ...PRORES_ALPHA_ARGS, out];
   }
   return [...input, '-c:v', 'libx264', '-preset', 'slow', '-crf', '18', '-pix_fmt', 'yuv420p', '-profile:v', 'high', out];
 }

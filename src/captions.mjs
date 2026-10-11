@@ -2,32 +2,87 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import { CapcutError, loadPreset, seededId, localizeMedia, contentEndUs } from './core.mjs';
+import { CapcutError, loadPreset, seededId, localizeMedia, contentEndUs, resolveMediaPath } from './core.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fail = (code, message) => { throw new CapcutError(`${code}: ${message}`, {code}); };
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-const CHANGA = path.join(ROOT, 'tools/caption_engine/fonts/Changa-ExtraBold.ttf');
+export const CAPTION_FONT = {path:path.join(ROOT, 'tools/caption_engine/fonts/Changa-ExtraBold.ttf'), name:'Changa ExtraBold'};
 
 // Logical Unicode only. CapCut, not a manual bidi pre-pass, shapes native text.
 export function captionDisplayText(text, language = 'ar') {
   if (!['ar', 'fa', 'ur'].includes(language.split('-')[0])) return text.normalize('NFC');
-  return text.normalize('NFC').replace(/[0-9]/g, n => '٠١٢٣٤٥٦٧٨٩'[Number(n)])
-    .replace(/%/g, '٪').replace(/[\u064b-\u065f\u0670]/g, '');
-}
-function latinFont() {
-  const candidates = [process.env.CAPCUTCTL_LATIN_FONT,
-    '/System/Library/Fonts/Supplemental/Arial Unicode.ttf',
-    '/Library/Fonts/Arial Unicode.ttf'];
-  const result = candidates.find(p => p && fs.existsSync(p));
-  if (!result) fail('CAPTION_FONT_MISSING', 'Mixed Latin cues require Arial Unicode; set CAPCUTCTL_LATIN_FONT to your licensed font file.');
-  return result;
+  // A Latin word keeps Western digits: "GPT-5", never "GPT-٥".
+  return text.normalize('NFC').split(/(\s+)/).map(word => /[a-z]/i.test(word) ? word
+    : word.replace(/[0-9]/g, n => '٠١٢٣٤٥٦٧٨٩'[Number(n)]).replace(/%/g, '٪')).join('')
+    .replace(/[\u064b-\u065f\u0670]/g, '');
 }
 function ownedDigest(doc, track) {
   const ids = new Set(track.segments.map(s => s.material_id));
   const clean = structuredClone(track);
   for (const s of clean.segments) s.desc = '';
   return hash({track:clean, texts:(doc.materials.texts || []).filter(m => ids.has(m.id))});
+}
+
+// Measured in a native export: size 15 drew a word 49px tall on a 1080x1920 canvas, so the
+// 90px target is about 28.
+const NATIVE_SIZE = 28;
+
+/** The one caption style: white Changa ExtraBold, size 28, thin black stroke. Text is kept. */
+export function houseStyle(mat, text, fontPath = CAPTION_FONT.path) {
+  const style = {
+    fill:{alpha:1,content:{render_type:'solid',solid:{alpha:1,color:[1,1,1]}}},
+    font:{id:'',path:fontPath},range:[0,text.length],size:NATIVE_SIZE,
+    strokes:[{content:{solid:{alpha:1,color:[0,0,0]}},width:4/90}],
+  };
+  Object.assign(mat, {content:JSON.stringify({styles:[style],text}),font_name:CAPTION_FONT.name,font_title:CAPTION_FONT.name,
+    font_path:fontPath,font_size:NATIVE_SIZE,check_flag:15,alignment:1,has_shadow:false,background_style:0,
+    border_color:'#000000',border_width:4/90,border_alpha:1,text_color:'#FFFFFF'});
+}
+
+/**
+ * Put every word already on a captions:* track into the house style — the fix for drafts made
+ * before 2026-10-11, when English words were set in Arial Unicode. Text, timing and position
+ * stay exactly as they are (hand corrections included); only the look changes.
+ */
+/**
+ * Caption tracks, whoever wrote them: `captions` (captions:NAME), the older SRT `caption` op
+ * (a text track named captions… by default) and CapCut's own auto-captions (subtitle text).
+ */
+export function isCaptionTrack(doc, track) {
+  if (track.type !== 'text') return false;
+  if ((track.name || '').startsWith('captions')) return true;
+  const subtitles = new Set((doc.materials?.texts || []).filter(m => m.type === 'subtitle').map(m => m.id));
+  return (track.segments || []).some(s => subtitles.has(s.material_id));
+}
+
+export function opCaptionsRestyle(doc, op, context = {}) {
+  if (!fs.existsSync(CAPTION_FONT.path)) fail('CAPTION_FONT_MISSING', CAPTION_FONT.path);
+  const localized = context.projectDir ? localizeMedia(context.projectDir,CAPTION_FONT.path,undefined,{dryRun:context.dryRun}) : CAPTION_FONT.path;
+  const segments = doc.tracks.filter(t => isCaptionTrack(doc, t)).flatMap(t => t.segments);
+  const ids = new Set(segments.map(s => s.material_id));
+  if (!ids.size) fail('CAPTION_NONE', 'No caption track to restyle.');
+  // CapCut re-saves font paths as its ##_draftpath_placeholder_…## form; reuse the form this
+  // draft already has for the Changa file so words already in style stay byte-identical.
+  const same = p => p && (p === localized || (context.projectDir && resolveMediaPath(p, context.projectDir) === localized));
+  const fontPath = (doc.materials.texts || []).map(m => m.font_path).find(same) || localized;
+  let changed = 0;
+  // A word scaled in CapCut's canvas draws at another size whatever its font size says.
+  for (const seg of segments) {
+    const scale = seg.clip?.scale;
+    if (scale && (scale.x !== 1 || scale.y !== 1)) { seg.clip.scale = {x:1, y:1}; changed++; }
+  }
+  for (const mat of doc.materials.texts || []) {
+    if (!ids.has(mat.id)) continue;
+    let text = '';
+    try { text = JSON.parse(mat.content || '{}').text ?? ''; } catch { text = mat.content || ''; }
+    const look = m => { let st = {}; try { st = JSON.parse(m.content).styles?.[0] || {}; } catch { /* plain */ }
+      return JSON.stringify([m.font_name, m.font_path, m.font_size, st.size, st.font?.path, st.fill, st.strokes, m.border_width]); };
+    const before = look(mat);
+    houseStyle(mat, text, fontPath);
+    if (look(mat) !== before) changed++;
+  }
+  return {changed, words:ids.size};
 }
 
 export function validateCaptionCues(cues, duration) {
@@ -69,32 +124,23 @@ export function opCaptions(doc, op, context = {}) {
     }
     fail('CAPTION_CONFLICT', 'Caption layers already exist or were edited. Preserve them; explicitly remove them before generating a replacement.');
   }
-  const fonts = cues.map(c => /[a-z]/i.test(c.text) ? {path:latinFont(), name:'Arial Unicode MS'} : {path:CHANGA,name:'Changa ExtraBold'});
-  for (const font of fonts) if (!fs.existsSync(font.path)) fail('CAPTION_FONT_MISSING', font.path);
+  // One style for every word, Arabic or English (2026-10-11: "I want the English captions to
+  // match the Arabic ones"). Changa covers Latin, so Latin words no longer fall back to Arial.
+  const font = CAPTION_FONT;
+  if (!fs.existsSync(font.path)) fail('CAPTION_FONT_MISSING', font.path);
   const template = loadPreset('motion').text;
   const sourceTrack = template.tracks.find(t => t.type === 'text');
   const sourceText = template.materials.texts[0];
   const mint = key => seededId(op.__seed || fingerprint, `${trackName}:${key}`);
   const track = {...structuredClone(sourceTrack),id:mint('track'),name:trackName,is_default_name:false,segments:[]};
   const materials = [];
-  // Measured in a native export: size 15 drew a word 49px tall on a 1080x1920 canvas, so the
-  // 90px target is about 28.
-  const nativeSize = 28;
   for (const [i,cue] of cues.entries()) {
-    const font = fonts[i];
     const fontPath = context.projectDir ? localizeMedia(context.projectDir,font.path,undefined,{dryRun:context.dryRun}) : font.path;
     const text = captionDisplayText(cue.text,language);
     const mat = structuredClone(sourceText), seg = structuredClone(sourceTrack.segments[0]);
     mat.id = mint(`text:${cue.id}`);
-    const style = {
-      fill:{alpha:1,content:{render_type:'solid',solid:{alpha:1,color:[1,1,1]}}},
-      font:{id:'',path:fontPath},range:[0,text.length],size:nativeSize,
-      strokes:[{content:{solid:{alpha:1,color:[0,0,0]}},width:4/90}],
-    };
-    Object.assign(mat, {content:JSON.stringify({styles:[style],text}),font_name:font.name,font_title:font.name,
-      font_path:fontPath,font_size:nativeSize,check_flag:15,alignment:1,has_shadow:false,background_style:0,
-      border_color:'#000000',border_width:4/90,border_alpha:1,text_color:'#FFFFFF',recognize_task_id:'',
-      recognize_text:'',type:'text',language,words:{start_time:[],end_time:[],text:[]}});
+    houseStyle(mat, text, fontPath);
+    Object.assign(mat, {recognize_task_id:'',recognize_text:'',type:'text',language,words:{start_time:[],end_time:[],text:[]}});
     // Match Staging's half-open windows, retaining original timings in command output.
     const start = Math.round(cue.start*1e6);
     const end = Math.min(Math.round(cue.end*1e6),i+1<cues.length ? Math.round(cues[i+1].start*1e6)-1000 : Infinity);

@@ -66,7 +66,9 @@ function speechRegions(doc, op, context, opts) {
   const materials = new Map((doc.materials?.videos || []).map(m => [m.id, m]));
   const clips = (track.segments || []).filter(s => s.volume !== 0
     && classifyLoudnessRole(track, s, materials.get(s.material_id)) === 'speech');
-  if (new Set(clips.map(s => s.material_id)).size > 1 && (op.energy || op.transcript || op.words || op.wordsFile)) {
+  // one take can sit behind several material ids (per-clip relinks); count files, not ids
+  const takes = new Set(clips.map(s => materials.get(s.material_id)?.path || s.material_id));
+  if (takes.size > 1 && (op.energy || op.transcript || op.words || op.wordsFile)) {
     fail('An explicit speech index needs a single source take; use per-source cut caches for multiple takes.');
   }
   const cache = new Map(), intervals = [], sources = [];

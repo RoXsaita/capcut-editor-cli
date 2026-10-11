@@ -1,4 +1,5 @@
-import { CapcutError, clone, contentEndUs, loadPreset, seededId } from './core.mjs';
+import { CapcutError, clone, contentEndUs, loadPreset, seededId, localizeMedia } from './core.mjs';
+import { CAPTION_FONT, houseStyle } from './captions.mjs';
 
 const US = seconds => Math.round(Number(seconds) * 1e6);
 const S = microseconds => Number(microseconds) / 1e6;
@@ -117,12 +118,16 @@ export function opCaption(doc, op = {}, context = {}) {
   const seed = op.__seed || `caption:${trackName}`;
   const track = captionTrack(doc, preset.textTrackTemplate, trackName, seed);
   const texts = (doc.materials.texts ||= []);
+  // The same look as `captions`: one house style, whatever the script (2026-10-11).
+  const fontPath = context.projectDir ? localizeMedia(context.projectDir, CAPTION_FONT.path, undefined, { dryRun: context.dryRun }) : CAPTION_FONT.path;
 
   for (let index = 0; index < cues.length; index++) {
     const cue = cues[index];
     const materialId = seededId(seed, `caption:material:${index}`);
     const segmentId = seededId(seed, `caption:segment:${index}`);
-    texts.push(updateTextMaterial(preset.textMaterialTemplate, materialId, cue.text));
+    const material = updateTextMaterial(preset.textMaterialTemplate, materialId, cue.text);
+    houseStyle(material, cue.text, fontPath);
+    texts.push(material);
 
     const segment = clone(preset.textSegmentTemplate);
     segment.id = segmentId;

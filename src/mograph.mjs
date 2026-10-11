@@ -10,7 +10,7 @@
  * anchor, so `mograph rerender` can fix a typo without touching timing or placement.
  *
  * Formats:
- *  - `prores`    ProRes 4444 with straight alpha (yuva444p10le) — the default;
+ *  - `prores`    ProRes 4444 with PREMULTIPLIED alpha (yuva444p10le) — the default; CapCut reads it premultiplied;
  *  - `png-still` the hold frame as a transparent PNG, for graphics whose motion is only a
  *                pop or a slide: CapCut animates it with native eased keys, fully editable;
  *  - `webm`      VP9 alpha — debugging in a browser only; CapCut import is not supported.
@@ -25,6 +25,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { CapcutError, requireBinary } from './core.mjs';
+import { PREMULTIPLY_FILTER, PRORES_ALPHA_ARGS } from './alpha.mjs';
 import { loadProfile } from './profile.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -147,9 +148,8 @@ async function shoot(page, box, t) {
 function encoderArgs(format, fps, out) {
   const input = ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'image2pipe', '-framerate', String(fps), '-c:v', 'png', '-i', '-'];
   if (format === 'prores') {
-    return [...input, '-c:v', 'prores_ks', '-profile:v', '4444', '-pix_fmt', 'yuva444p10le',
-      '-alpha_bits', '16', '-vendor', 'apl0', '-color_primaries', 'bt709', '-color_trc', 'bt709',
-      '-colorspace', 'bt709', '-movflags', '+faststart', out];
+    // Premultiplied: CapCut reads ProRes alpha that way (alpha.mjs). Straight alpha painted glows solid.
+    return [...input, '-vf', PREMULTIPLY_FILTER, ...PRORES_ALPHA_ARGS, '-movflags', '+faststart', out];
   }
   return [...input, '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-b:v', '0', '-crf', '28', '-auto-alt-ref', '0', out];
 }

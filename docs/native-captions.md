@@ -53,10 +53,11 @@ captions. Normal snapshots and root/active-timeline mirror transactions apply.
 
 ## Dependencies
 
-Import mode needs the bundled Changa font, and a locally licensed Arial Unicode
-font for cues containing Latin letters. Arial Unicode is not redistributed.
-`CAPCUTCTL_LATIN_FONT=/absolute/path/to/font.ttf` overrides its location; use the
-same face for Staging parity. Font files are localized into the project. No
+Import mode needs only the bundled Changa ExtraBold font. Every word, Arabic or
+English, is set in it at the same size, colour and stroke (2026-10-11: English
+captions must match the Arabic ones; the old Arial Unicode fallback for Latin
+words is gone). `gate` fails `caption-style` when any caption word differs.
+Font files are localized into the project. No
 system-wide font install or CapCut effect-cache download is required.
 
 For generation, use the CLI's Python environment:

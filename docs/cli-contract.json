@@ -34,8 +34,10 @@
       "remove",
       "replace-media",
       "restore",
+      "ripple",
       "rm",
       "screen-motion",
+      "sfx",
       "shift",
       "sync",
       "trim",
@@ -71,6 +73,19 @@
         "--width"
       ],
       "transactional": true
+    },
+    "alpha": {
+      "group": "check",
+      "summary": "Premultiply ProRes alpha overlays in place; CapCut paints a straight file's hidden colour as a haze.",
+      "example": "capcutctl alpha --project NAME",
+      "options": [
+        "--check",
+        "--dry-run",
+        "--force",
+        "--force-running",
+        "--project"
+      ],
+      "transactional": false
     },
     "animate": {
       "group": "graphics",
@@ -138,7 +153,7 @@
     },
     "captions": {
       "group": "graphics",
-      "summary": "Word-by-word editable native captions from the edited narration (or --cues); EXPERIMENTAL styling.",
+      "summary": "Word-by-word native captions, one style for Arabic and English alike; --restyle fixes an existing track.",
       "example": "capcutctl captions --project NAME --dry-run",
       "options": [
         "--cues",
@@ -146,6 +161,7 @@
         "--lang",
         "--name",
         "--project",
+        "--restyle",
         "--script",
         "--track"
       ],
@@ -975,6 +991,18 @@
       ],
       "transactional": false
     },
+    "ripple": {
+      "group": "aroll",
+      "summary": "Delete a timeline range on every track and pull everything after it up, keeping each clip's speed.",
+      "example": "capcutctl ripple --project NAME --from 9.64 --to 10.18 --dry-run",
+      "options": [
+        "--dry-run",
+        "--from",
+        "--project",
+        "--to"
+      ],
+      "transactional": true
+    },
     "rm": {
       "group": "safety",
       "summary": "Move a project to the recycle bin (recoverable).",
@@ -1013,6 +1041,20 @@
         "--segment",
         "--zoom-in",
         "--zoom-out"
+      ],
+      "transactional": true
+    },
+    "sfx": {
+      "group": "graphics",
+      "summary": "Place a named palette sound at explicit times: typing under a typed command, a click on the real Enter.",
+      "example": "capcutctl sfx --project NAME --sound typing --cues 8.03:2.8:2,31.1:1.2:10 --volume 0.5 --dry-run",
+      "options": [
+        "--cues",
+        "--dry-run",
+        "--project",
+        "--sound",
+        "--track",
+        "--volume"
       ],
       "transactional": true
     },

@@ -35,7 +35,7 @@ and places them all (see the `capcut-editing` skill).
 
 | Format | Use | CapCut |
 |---|---|---|
-| `prores` (default for `motion: 'rich'`) | ProRes 4444, straight alpha, bt709 | Imported as a video clip. `importVerified: false` until the checklist below passes. |
+| `prores` (default for `motion: 'rich'`) | ProRes 4444, **premultiplied** alpha, bt709 — CapCut composites ProRes alpha as premultiplied; a straight file painted a callout's glow tail solid yellow (a real edit, 2026-10-11). `gate` fails `alpha-premultiplied` on any leaking overlay; `capcutctl alpha FILE` fixes one in place | Imported as a video clip. `importVerified: false` until the checklist below passes. |
 | `png-still` (default for `motion: 'pop'`/`'slide'`) | The template's hold frame as a transparent PNG | A native photo clip with an eased pop (harvested FreeCurveInOut handles), fully editable. |
 | `webm` | VP9 alpha, for looking at a render in a browser | **Never placed** — `mograph.place` refuses it. |
 

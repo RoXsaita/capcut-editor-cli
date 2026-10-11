@@ -47,11 +47,14 @@ export const COMMAND_DOCS = Object.freeze({
   'verify-shots': doc('broll', 'Blind before/action/after check of placed shots; CONTRADICTED blocks.', 'capcutctl verify-shots --project NAME --shots shots.json'),
   add: doc('broll', 'Place full-frame source media on an overlay track.', 'capcutctl add --project NAME --media screen.mp4 --at 5 --dur 3 --track broll --dry-run', true),
   'replace-media': doc('broll', 'Relink a clip to another file, keeping its keyframes.', 'capcutctl replace-media --project NAME --file new.mp4 --at 5 --track broll --dry-run', true),
+  alpha: doc('check', 'Premultiply ProRes alpha overlays in place; CapCut paints a straight file\'s hidden colour as a haze.', 'capcutctl alpha --project NAME'),
   localize: doc('broll', 'Copy outside media into the draft (fixes "Link media").', 'capcutctl localize --project NAME', true),
   trim: doc('broll', 'Change a clip\'s source window.', 'capcutctl trim --project NAME --at 5 --track broll --src 90-94 --dry-run', true),
   shift: doc('broll', 'Move a clip in time.', 'capcutctl shift --project NAME --at 5 --track broll --by 0.2 --dry-run', true),
+  ripple: doc('aroll', 'Delete a timeline range on every track and pull everything after it up, keeping each clip\'s speed.', 'capcutctl ripple --project NAME --from 9.64 --to 10.18 --dry-run', true),
   remove: doc('broll', 'Remove a clip.', 'capcutctl remove --project NAME --at 5 --track broll --dry-run', true),
   volume: doc('broll', 'Set a clip\'s volume.', 'capcutctl volume --project NAME --at 5 --track broll --level 0 --dry-run', true),
+  sfx: doc('graphics', 'Place a named palette sound at explicit times: typing under a typed command, a click on the real Enter.', 'capcutctl sfx --project NAME --sound typing --cues 8.03:2.8:2,31.1:1.2:10 --volume 0.5 --dry-run', true),
   fade: doc('broll', 'Native audio fade in/out on a clip.', 'capcutctl fade --project NAME --at 5 --track broll --in 0.08 --out 0.12 --dry-run', true),
 
   layout: doc('look', 'Locked layouts: auto, split-screen, circle, full-face, background, broll, screen; audit.', 'capcutctl layout auto --project NAME --plan', true),
@@ -74,7 +77,7 @@ export const COMMAND_DOCS = Object.freeze({
   brands: doc('graphics', 'Known brands, spoken aliases, and which have artwork.', 'capcutctl brands'),
   endcard: doc('graphics', 'The CTA card on the talking head near the end.', 'capcutctl endcard --project NAME --text Follow --dry-run', true),
   wrap: doc('graphics', 'Logos from what is said + the endcard in one pass.', 'capcutctl wrap --project NAME --plan', true),
-  captions: doc('graphics', 'Word-by-word editable native captions from the edited narration (or --cues); EXPERIMENTAL styling.', 'capcutctl captions --project NAME --dry-run', true),
+  captions: doc('graphics', 'Word-by-word native captions, one style for Arabic and English alike; --restyle fixes an existing track.', 'capcutctl captions --project NAME --dry-run', true),
   motion: doc('graphics', 'EXPERIMENTAL native text/logo recipes; prefer mograph.', 'capcutctl motion list', true),
   animate: doc('graphics', 'Native CapCut intro/outro animation on a clip.', 'capcutctl animate --project NAME --segments ID --intro fade-in --dry-run', true),
 

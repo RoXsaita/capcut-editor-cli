@@ -411,6 +411,54 @@ test('screen recording is visible footage for picture changes and cold-open cove
   'a helper overlay alone is not footage');
 });
 
+test('explicit screen footage above the principal counts as proof and wins its layer', () => {
+  const d = doc();
+  d.materials.videos.push({ id: 'SCREEN', type: 'video', path: '/takes/window__screen.mp4' });
+  d.tracks[1].segments = [];
+  d.tracks[3].segments = [{ ...seg(0, 8), id: 'SCREEN-ABOVE', material_id: 'SCREEN', desc: 'layout:screen-recording upper take' }];
+
+  assert.equal(brollWindows(d).some(window => window.id === 'SCREEN-ABOVE'), true);
+  assert.equal(coldOpen(d), null, 'marked footage above the face proves the opening');
+
+  const layered = doc();
+  layered.materials.videos.push({ id: 'SCREEN', type: 'video', path: '/takes/window__screen.mp4' });
+  layered.tracks[3].segments = [{ ...seg(0, 8), id: 'SCREEN-ABOVE', material_id: 'SCREEN', desc: 'layout:screen-recording upper take' }];
+  assert.equal(pictureChanges(layered).some(mark => mark.t === 5), false,
+    'a lower B-roll cut under the upper screen recording is not visible');
+
+  const changed = doc();
+  changed.materials.videos.push({ id: 'SCREEN', type: 'video', path: '/takes/window__screen.mp4' });
+  changed.tracks[1].segments = [];
+  changed.tracks[3].segments = [{ ...seg(5, 5), id: 'SCREEN-ABOVE', material_id: 'SCREEN', desc: 'layout:screen-recording upper take' }];
+  assert.equal(pictureChanges(changed).some(mark => mark.t === 5), true,
+    'the start of marked upper footage is a visible picture change');
+});
+
+test('mograph, scene, transparent, hidden, and disabled layers never count as B-roll proof', () => {
+  const d = doc();
+  d.materials.videos.push(
+    { id: 'SCREEN', type: 'video', path: '/takes/window__screen.mp4' },
+    { id: 'SCENE', type: 'video', path: '/renders/scene.mov', capcutctl_mograph: { scene: true } },
+  );
+  d.tracks[1].segments = [];
+  const alphaZero = { ...seg(0, 8), id: 'ALPHA-ZERO', material_id: 'SCREEN', desc: 'layout:screen-recording alpha zero', clip: { alpha: 0 } };
+  d.tracks[3].segments = [
+    { ...seg(0, 8), id: 'MOGRAPH', material_id: 'SCENE', desc: 'mograph:scene' },
+    { ...seg(0, 8), id: 'SCENE-MISLABEL', material_id: 'SCENE', desc: 'layout:screen-recording scene' },
+    alphaZero,
+    { ...seg(0, 8), id: 'DIRECTOR-STAGE', material_id: 'SCREEN', desc: 'layout:director-stage' },
+  ];
+  d.tracks.push({ ...track('video', [{ ...seg(0, 8), id: 'HIDDEN', material_id: 'SCREEN', desc: 'layout:screen-recording hidden' }]), hidden: true });
+  d.tracks.push({ ...track('video', [{ ...seg(0, 8), id: 'DISABLED', material_id: 'SCREEN', desc: 'layout:screen-recording disabled' }]), flag: 0 });
+
+  assert.deepEqual(brollWindows(d), []);
+  assert.ok(coldOpen(d), 'none of the non-footage layers covers the full-face opening');
+
+  d.tracks[3].segments.push({ ...alphaZero, id: 'ALPHA-ZERO-LATE', target_timerange: { start: US(5), duration: US(3) } });
+  assert.equal(pictureChanges(d).some(mark => mark.t === 5), false,
+    'a transparent marked segment does not create a visible picture change');
+});
+
 test('RL2 interaction sessions map only to their own same-basename take', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rl2-two-takes-'));
   const makeSession = (name, takeId, origin, eventHost) => {

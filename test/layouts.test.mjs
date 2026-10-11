@@ -18,6 +18,38 @@ import {
 } from '../src/layouts.mjs';
 
 /** A two-document project with one plain full-frame subject segment. */
+// The clear room plate the layouts put behind a circle or screen card (never a blur).
+import { execFileSync } from 'node:child_process';
+import { loadProfile } from '../src/profile.mjs';
+import { blurredBackgrounds } from '../src/house-rules.mjs';
+function withPlate(fn, { plate = true } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-plate-'));
+  const before = process.env.CAPCUTCTL_PRESET_DIR;
+  const file = path.join(dir, 'room.png');
+  if (plate) execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=0x806040:s=94x167', '-frames:v', '1', file]);
+  fs.writeFileSync(path.join(dir, 'profile.json'), JSON.stringify(plate ? { brand: { background: { plate: file } } } : {}));
+  process.env.CAPCUTCTL_PRESET_DIR = dir;
+  loadProfile({ refresh: true });
+  try { return fn(file); } finally {
+    if (before == null) delete process.env.CAPCUTCTL_PRESET_DIR; else process.env.CAPCUTCTL_PRESET_DIR = before;
+    loadProfile({ refresh: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+const assertClearPlate = (doc, plate) => {
+  const material = doc.materials.videos.find(m => m.id === plate.material_id);
+  assert.equal(material.type, 'photo', 'the background is the room photo, not the talking head');
+  assert.match(path.basename(material.path), /room\.png$/, 'the profile plate, localized into the project');
+  assert.equal(plate.clip.alpha, 1);
+  assert.deepEqual(plate.extra_material_refs, [], 'no Blur effect');
+  assert.ok(!(doc.materials.video_effects || []).some(e => e.name === 'Blur'), 'no Blur effect anywhere');
+  // cover-fit on the canvas: the larger fit over the smaller (CapCut's scale 1 is the smaller fit)
+  const W = doc.canvas_config?.width || 1080, H = doc.canvas_config?.height || 1920;
+  const fits = [W / 94, H / 167];
+  assert.ok(Math.abs(plate.clip.scale.x - Math.max(...fits) / Math.min(...fits)) < 1e-9);
+  assert.ok(plate.clip.scale.x >= 1);
+};
+
 function fixture() {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-layout-'));
   const project = path.join(temp, 'Layout Project');
@@ -221,7 +253,7 @@ test('layout auto is a no-op (not an error) when every clip already matches', ()
   assert.equal(spec.operations.length, 0);
 });
 
-test('background finds circle scenes and lands the blur plate below the subject', () => {
+test('background finds circle scenes and lands the clear room plate (never a blur) below the subject', () => withPlate(() => {
   const f = fixture();
   applySpec(f.project, buildLayoutSpec(f.project, 'circle', { segments: ['SUBJECT'] }), { forceRunning: true });
   assert.equal(findCircleScenes(activeDoc(f)).length, 1);
@@ -233,13 +265,66 @@ test('background finds circle scenes and lands the blur plate below the subject'
   assert.ok(bgIndex >= 0 && bgIndex < subjIndex, `blur track ${bgIndex} must render behind subject track ${subjIndex}`);
 
   const plate = doc.tracks[bgIndex].segments[0];
-  assert.equal(plate.clip.alpha, 0.72);
-  assert.equal(plate.clip.scale.x, 1.12);
-  assert.equal(plate.material_id, 'VIDEO', 'blur plate reuses the subject media, it does not invent one');
-  assert.ok(doc.materials.video_effects.some(e => plate.extra_material_refs.includes(e.id) && e.name === 'Blur'));
+  assertClearPlate(doc, plate);
   // track_render_index must keep mirroring track position after the insert
   doc.tracks.forEach((t, i) => (t.segments || []).forEach(s => assert.equal(s.track_render_index, i)));
-});
+}));
+
+test('with no room plate in the profile, background adds nothing — never a blurred face', () => withPlate(() => {
+  const f = fixture();
+  applySpec(f.project, buildLayoutSpec(f.project, 'circle', { segments: ['SUBJECT'] }), { forceRunning: true });
+  applySpec(f.project, buildLayoutSpec(f.project, 'background', {}), { forceRunning: true });
+  const doc = activeDoc(f);
+  assert.ok(!doc.tracks.some(t => t.segments?.some(s => s.desc === 'layout:background-blur')));
+  assert.ok(!(doc.materials.video_effects || []).some(e => e.name === 'Blur'));
+}, { plate: false }));
+
+test('background deletes a blurred face copy someone else added and lands the clear plate in its slot', () => withPlate(() => {
+  const f = fixture();
+  // What an old layout, Codex or a hand edit leaves: the face again, under it, with CapCut's Blur.
+  const mutate = dir => {
+    const doc = readJson(path.join(dir, 'draft_info.json'));
+    const subject = doc.tracks.flatMap(t => t.segments).find(s => s.id === 'SUBJECT');
+    (doc.materials.video_effects ||= []).push({ id: 'HAND-BLUR', name: 'Blur', type: 'video_effect', effect_id: '7399464929830423813' });
+    doc.tracks.splice(1, 0, { id: 'T-BLUR', type: 'video', flag: 2, attribute: 0, name: '',
+      segments: [{ ...structuredClone(subject), id: 'HAND-COPY', desc: 'whatever', extra_material_refs: ['HAND-BLUR'] }] });
+    writeDoc(dir, doc);
+  };
+  mutate(f.project); mutate(f.timelineDir);
+  assert.deepEqual(blurredBackgrounds(activeDoc(f)).map(b => [b.kind, b.id]), [['face-copy', 'HAND-COPY']]);
+
+  applySpec(f.project, buildLayoutSpec(f.project, 'background', {}), { forceRunning: true });
+  const doc = activeDoc(f);
+  assert.deepEqual(blurredBackgrounds(doc), []);
+  const plate = doc.tracks.find(t => t.id === 'T-BLUR').segments[0];
+  assertClearPlate(doc, plate);
+  assert.deepEqual(plate.target_timerange, subjectOf(doc).target_timerange);
+}));
+
+test('a blur cut from a since-swapped face becomes the plate; a blurred B-roll clip only loses its Blur', () => withPlate(() => {
+  const f = fixture();
+  const mutate = dir => {
+    const doc = readJson(path.join(dir, 'draft_info.json'));
+    const subject = doc.tracks.flatMap(t => t.segments).find(s => s.id === 'SUBJECT');
+    doc.materials.videos.push({ id: 'RAW-FACE', type: 'video', path: path.join(f.temp, 'face.mp4'), duration: 20_000_000, width: 1080, height: 1920 },
+      { id: 'BROLL', type: 'video', path: path.join(f.temp, 'face.mp4'), duration: 20_000_000, width: 1080, height: 1920 });
+    (doc.materials.video_effects ||= []).push({ id: 'B1', name: 'Blur', type: 'video_effect' }, { id: 'B2', name: 'Blur', type: 'video_effect' });
+    doc.tracks.splice(1, 0, { id: 'T-OLD', type: 'video', flag: 2, attribute: 0, name: '', segments: [
+      { ...structuredClone(subject), id: 'OLD-PLATE', material_id: 'RAW-FACE', desc: 'layout:screen-blur', extra_material_refs: ['B1'] }] },
+    { id: 'T-BROLL', type: 'video', flag: 2, attribute: 0, name: '', segments: [
+      { ...structuredClone(subject), id: 'BLURRY-BROLL', material_id: 'BROLL', desc: 'shot', extra_material_refs: ['B2'] }] });
+    writeDoc(dir, doc);
+  };
+  mutate(f.project); mutate(f.timelineDir);
+  assert.deepEqual(blurredBackgrounds(activeDoc(f)).map(b => [b.kind, b.id]).sort(),
+    [['blurred-video', 'BLURRY-BROLL'], ['face-copy', 'OLD-PLATE']]);
+  applySpec(f.project, buildLayoutSpec(f.project, 'background', {}), { forceRunning: true });
+  const doc = activeDoc(f);
+  assert.deepEqual(blurredBackgrounds(doc), []);
+  assertClearPlate(doc, doc.tracks.find(t => t.id === 'T-OLD').segments[0]);
+  const broll = doc.tracks.find(t => t.id === 'T-BROLL').segments[0];
+  assert.equal(broll.material_id, 'BROLL'); assert.deepEqual(broll.extra_material_refs, []);
+}));
 
 test('background is a no-op when no circle scene has a ring', () => {
   const f = fixture();
@@ -415,7 +500,7 @@ test('layout broll keeps the measured portrait window path available without exp
   assert.equal(focus.clamped, false);
 });
 
-test('layout screen applies recording, indigo frame, circle pip, ring and blur as deterministic layers', () => {
+test('layout screen applies recording, indigo frame, circle pip, ring and the clear room plate as deterministic layers', () => withPlate(() => {
   const f = fixture();
   addScreenRecording(f);
   const operation = {
@@ -450,19 +535,14 @@ test('layout screen applies recording, indigo frame, circle pip, ring and blur a
   assert.deepEqual(pip.clip, circle.subject.clip);
   assert.equal(pip.volume, 0);
   assert.deepEqual(ring.clip, circle.overlay.clip);
-  assert.deepEqual(blur.clip, background.clip);
-  assert.equal(blur.material_id, 'VIDEO', 'blur plate reuses the talking-head source');
-  assert.deepEqual(blur.source_timerange, subjectOf(active).source_timerange,
-    'blur plate follows the talking-head source timing');
+  assertClearPlate(active, blur);
+  assert.deepEqual(blur.target_timerange, recording.target_timerange);
   assert.equal(subjectOf(active).volume, 1, 'screen layout does not mute the talking head');
   assert.equal(subjectOf(active).clip.alpha, 0, 'the covered principal visual is hidden');
   const pipMask = active.materials.common_mask.find(m => pip.extra_material_refs.includes(m.id));
   const ringMask = active.materials.common_mask.find(m => ring.extra_material_refs.includes(m.id));
   assert.equal(pipMask.resource_type, 'circle');
   assert.equal(ringMask.resource_type, 'circle');
-  const effect = active.materials.video_effects.find(e => blur.extra_material_refs.includes(e.id));
-  assert.equal(effect.name, 'Blur');
-  assert.equal(effect.bind_segment_id, blur.id);
 
   const tracks = activeResult.layers[0].tracks;
   assert.ok(tracks.background < tracks.recording);
@@ -474,9 +554,9 @@ test('layout screen applies recording, indigo frame, circle pip, ring and blur a
     .concat(doc.materials.common_mask.map(m => m.id).sort())
     .concat(doc.materials.video_effects.map(m => m.id).sort());
   assert.deepEqual(ids(root), ids(active), 'root and active documents must receive identical layer ids');
-});
+}));
 
-test('layout screen source-times pip and blur across A-roll seams while preserving voice and native edits', () => {
+test('layout screen source-times the pip and lays the clear room plate across A-roll seams, preserving voice and native edits', () => withPlate(() => {
   const f = fixture();
   addScreenRecording(f);
   const doc = activeDoc(f);
@@ -519,9 +599,10 @@ test('layout screen source-times pip and blur across A-roll seams while preservi
   assert.deepEqual(pips.map(segment => [segment.source_timerange.start, segment.source_timerange.duration]), [
     [3_000_000, 1_500_000], [4_500_000, 1_500_000]
   ]);
-  assert.deepEqual(blurs.map(segment => [segment.material_id, segment.source_timerange.start, segment.source_timerange.duration]), [
-    ['VIDEO', 3_000_000, 1_500_000], ['VIDEO', 4_500_000, 1_500_000]
+  assert.deepEqual(blurs.map(segment => [segment.target_timerange.start, segment.target_timerange.duration]), [
+    [1_000_000, 1_500_000], [2_500_000, 1_500_000]
   ]);
+  for (const plate of blurs) assertClearPlate(doc, plate);
 
   const principalPieces = doc.tracks.find(track => track.id === 'T1').segments;
   assert.deepEqual(principalPieces.map(segment => [segment.target_timerange.start, segment.clip.alpha]), [
@@ -533,9 +614,9 @@ test('layout screen source-times pip and blur across A-roll seams while preservi
     assert.deepEqual(segment.keyframe_refs, ['NATIVE-REF']);
     assert.ok(segment.common_keyframes.some(group => group.property_type === 'KFTypePositionX'));
   }
-});
+}));
 
-test('twelve sequential screen shots reuse readable base lanes and layout switch restores one principal piece', () => {
+test('twelve sequential screen shots reuse readable base lanes and layout switch restores one principal piece', () => withPlate(() => {
   const f = fixture();
   addScreenRecording(f);
   const doc = addSequentialScreenRecordings(f);
@@ -563,7 +644,7 @@ test('twelve sequential screen shots reuse readable base lanes and layout switch
   assert.equal(screenLayers(doc).filter(segment => segment.screen_recording_id === 'RECORDING-3').length, 0,
     'switching one covered span cleans only that recording treatment');
   assert.equal(screenHelperTracks(doc).length, 4, 'nonempty helper lanes remain reusable');
-});
+}));
 
 test('layout switch restores a native-saved hidden alpha carrier without sidecar metadata', () => {
   const f = fixture();
@@ -592,7 +673,7 @@ test('switching a complete screen span removes its layers and prunes empty helpe
   assert.equal(screenHelperTracks(doc).length, 0);
 });
 
-test('overlapping screen owners stay isolated and foreign tracks remain untouched', () => {
+test('overlapping screen owners stay isolated and foreign tracks remain untouched', () => withPlate(() => {
   const f = fixture();
   addScreenRecording(f);
   const doc = activeDoc(f);
@@ -639,7 +720,7 @@ test('overlapping screen owners stay isolated and foreign tracks remain untouche
     assert.ok(roleIndex('frame') < roleIndex('pip'));
     assert.ok(roleIndex('pip') < roleIndex('pip-ring'));
   }
-});
+}));
 
 test('layout screen rejects an invalid source window without expanding shared media duration', () => {
   const f = fixture();
@@ -673,7 +754,7 @@ test('layout screen validates new media bounds and fills a missing stored durati
   assert.equal(doc.materials.videos.find(m => m.id === 'NEW').duration, 2_000_000);
 });
 
-test('layout screen is idempotent and buildLayoutSpec exposes the wiring operation', () => {
+test('layout screen is idempotent and buildLayoutSpec exposes the wiring operation', () => withPlate(() => {
   const f = fixture();
   addScreenRecording(f);
   const spec = buildLayoutSpec(f.project, 'screen', {
@@ -695,10 +776,10 @@ test('layout screen is idempotent and buildLayoutSpec exposes the wiring operati
   assert.equal(doc.tracks.flatMap(track => track.segments).filter(s => s.desc === 'layout:screen-pip-ring').length, 1);
   assert.equal(doc.tracks.flatMap(track => track.segments).filter(s => s.desc === 'layout:screen-blur').length, 1);
   assert.equal(doc.materials.common_mask.length, 2);
-  assert.equal(doc.materials.video_effects.length, 1);
-});
+  assert.equal((doc.materials.video_effects || []).length, 0, 'no Blur effect');
+}));
 
-test('layout screen accepts the media/at/duration contract emitted by the CLI', () => {
+test('layout screen accepts the media/at/duration contract emitted by the CLI', () => withPlate(() => {
   const f = fixture();
   const media = path.join(f.temp, 'rl2-take', 'screen.mp4');
   fs.mkdirSync(path.dirname(media), { recursive: true });
@@ -732,7 +813,7 @@ test('layout screen accepts the media/at/duration contract emitted by the CLI', 
   assert.ok(active.tracks.flatMap(track => track.segments).some(s => s.desc === 'layout:screen-pip'));
   assert.ok(active.tracks.flatMap(track => track.segments).some(s => s.desc === 'layout:screen-pip-ring'));
   assert.ok(active.tracks.flatMap(track => track.segments).some(s => s.desc === 'layout:screen-blur'));
-});
+}));
 
 test('layout screen requires a pip source when no principal clip overlaps the recording', () => {
   const f = fixture();
@@ -786,7 +867,7 @@ test('layout.screen repairs a misplaced generated lane and refuses an unsafe lan
   );
 });
 
-test('layout.screen --all scopes same-range cleanup and generated lanes by recording identity', () => {
+test('layout.screen --all scopes same-range cleanup and generated lanes by recording identity', () => withPlate(() => {
   const f = fixture();
   addScreenRecording(f);
   const doc = activeDoc(f);
@@ -819,7 +900,7 @@ test('layout.screen --all scopes same-range cleanup and generated lanes by recor
     .filter(segment => ['layout:screen-frame', 'layout:screen-pip', 'layout:screen-pip-ring', 'layout:screen-blur'].includes(segment.desc));
   assert.equal(after.filter(segment => segment.screen_recording_id === 'RECORDING').length, 4);
   assert.equal(after.filter(segment => segment.screen_recording_id === 'RECORDING-B').length, 4);
-});
+}));
 
 test('layout.screen runs transactionally across root and timeline mirrors and retries cleanly', () => {
   const f = fixture();
