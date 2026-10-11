@@ -183,6 +183,23 @@ export function captionLayers(doc) {
       start: r2(Math.min(...t.segments.map(startOf))), end: r2(Math.max(...t.segments.map(endOf))) }));
 }
 
+// The house ender: a native sig:endcard, or a follow-ender clip. `render` is not an ender.
+const ENDER = /end-?card|(^|[^a-z])ender([^a-z]|$)/i;
+
+/** The follow ender / endcard that closes the video (it runs to the last frame), or null. */
+export function endingCard(doc, end) {
+  const media = new Map([...(doc.materials?.videos || []), ...(doc.materials?.texts || [])].map(m => [m.id, m]));
+  for (const { track, segment } of allSegments(doc)) {
+    const desc = segment.desc || '';
+    if (/sfx/i.test(desc) || track.type === 'audio') continue;
+    const file = path.basename(media.get(segment.material_id)?.path || '');
+    if (!(ENDER.test(desc) || ENDER.test(track.name || '') || ENDER.test(file))) continue;
+    const a = startOf(segment), b = endOf(segment);
+    if (b >= end - 0.1 && a < end) return { t: r2(a), end: r2(b), desc: desc || track.name || file };
+  }
+  return null;
+}
+
 /** Longest stretch in [from, to) with no graphic on screen. */
 function longestClear(graphics, from, to) {
   const spans = graphics.map(g => [Math.max(from, g.t), Math.min(to, g.end)]).filter(([a, b]) => b > a).sort((a, b) => a[0] - b[0]);
@@ -292,6 +309,9 @@ export function gateReport(doc, { projectDir = null, profile = loadProfile() } =
       : layers.length ? `${layers.length} caption layers (${layers.map(l => l.name).join(', ')}): double captions — keep one`
         : 'no captions: capcutctl captions --project NAME');
   }
+  const ender = endingCard(doc, end);
+  add('ending', 'FAIL', Boolean(ender), ender ? `ends on the follow ender (${ender.desc} at ${ender.t}s)`
+    : 'no follow ender / endcard on the last frame: edit.json endcard, or the follow-ender clip');
   add('chip-and-logo', 'FAIL', !chipClash.length, chipClash.length ? `brand-chip and logo pop on one mention at ${chipClash.map(g => g.t).join(', ')}s` : 'no doubled brand mentions');
 
   // Seams.
