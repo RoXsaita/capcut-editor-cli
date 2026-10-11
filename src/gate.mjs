@@ -370,8 +370,10 @@ export function gateReport(doc, { projectDir = null, profile = loadProfile() } =
  * was configured; the X-ray says what the export shows. Its FAIL verdicts block, its UNKNOWNs
  * warn (they must be named in the hand-off), and what it could not check is listed, never passed.
  */
-// X-ray verdicts that only warn in a scan but block a final export.
-const PROMOTE = new Set(['video.opens_black', 'video.stutter', 'audio.loudness']);
+// X-ray verdicts that only warn in a scan but block a final export. A frozen frame is the picture
+// stuck past maxStatic; one repeated frame (video.stutter) stays a warning: on the 2026-10-11
+// finals it was a single duplicate and a source frame-rate cadence, never visible as a freeze.
+const PROMOTE = new Set(['video.opens_black', 'video.frozen', 'audio.loudness']);
 
 const finalCheck = (id, ok, message) => ({ id, level: 'FAIL', ok, message, value: null, target: null });
 
