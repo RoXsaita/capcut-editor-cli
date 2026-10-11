@@ -61,7 +61,7 @@ test('a final export (gate --xray with the profile) blocks on opens-black, stutt
   fs.writeFileSync(path.join(dir, 'speech.json'), JSON.stringify({ words: [{ word: 'a', start: 0.1, end: 9 }] }));
   const profile = { canvas: { width: 1080, height: 1920, fps: 30 }, final: {} };
   const report = foldXray(baseReport(), dir, null, { profile });
-  assert.deepEqual(report.failed, ['xray:video.stutter', 'xray:audio.loudness']);
+  assert.deepEqual(report.failed.filter(id => id.startsWith('xray:')), ['xray:video.stutter', 'xray:audio.loudness']);
   assert.ok(report.warned.includes('xray:audio.clicks'));
   assert.equal(foldXray(baseReport(), dir, null).failed.length, 0, 'a plain scan fold still only warns');
 });

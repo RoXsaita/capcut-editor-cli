@@ -32,21 +32,30 @@ const xray = (over = {}) => ({
   ...over,
 });
 const words = (...spans) => ({ words: spans.map(([start, end], i) => ({ word: `w${i}`, start, end })) });
+/** A voice-band envelope: -15 dB inside the voiced spans, -65 dB (room tone) elsewhere, 10 ms steps. */
+const envelope = (seconds, ...voiced) => ({ step: 0.01, db: Array.from({ length: seconds * 100 },
+  (_, i) => (voiced.some(([a, b]) => i / 100 >= a && i / 100 < b) ? -15 : -65)) });
 const byId = checks => Object.fromEntries(checks.map(c => [c.id, c]));
 
 test('export gates pass a clean export and hold every check at FAIL level', () => {
-  const checks = exportGates(xray(), words([0.2, 1], [1.2, 5], [5.3, 17.8]), { profile, enderAt: 18 });
+  const checks = exportGates(xray(), words([0, 1], [1, 5], [5, 17.8]), { profile, enderAt: 18,
+    envelope: envelope(20, [0.2, 1], [1.2, 5], [5.3, 17.6]) });
   assert.ok(checks.every(c => c.ok && c.level === 'FAIL'), JSON.stringify(checks.filter(c => !c.ok)));
 });
 
-test('slow start, a long gap, and a clipped last word fail; a declared pause is allowed', () => {
-  const c = byId(exportGates(xray(), words([0.8, 1], [2, 5], [5.1, 17.97]), { profile, enderAt: 18 }));
+test('slow start, a long gap, and a clipped last word fail from the audio, though Whisper stretches over them', () => {
+  // Whisper's words are contiguous from 0s (as on real exports); only the envelope knows better.
+  const stretched = words([0, 2], [2, 5], [5, 18]);
+  const c = byId(exportGates(xray(), stretched, { profile, enderAt: 18, envelope: envelope(20, [0.8, 1], [2, 5], [5.1, 18]) }));
   assert.equal(c['first-word'].ok, false);
+  assert.match(c['first-word'].message, /starts at 0\.8s/);
   assert.equal(c['speech-gaps'].ok, false);
-  assert.match(c['speech-gaps'].message, /1s \(1s\)/);
+  assert.match(c['speech-gaps'].message, /at 1s \(1s\)/);
   assert.equal(c['last-word'].ok, false);
-  const paused = byId(exportGates(xray(), words([0.1, 1], [2, 5], [5.1, 17]), { profile, enderAt: 18, pauses: [1.5] }));
+  const paused = byId(exportGates(xray(), stretched, { profile, enderAt: 18, pauses: [1.5], envelope: envelope(20, [0.1, 1], [2, 5], [5.1, 17.5]) }));
   assert.equal(paused['speech-gaps'].ok, true);
+  assert.equal(paused['last-word'].ok, true);
+  assert.equal(byId(exportGates(xray(), stretched, { profile, enderAt: 18 })).speech.ok, false, 'no envelope is a FAIL, not a pass');
 });
 
 test('wrong format, no audio, and no transcript fail by name rather than pass', () => {
@@ -59,7 +68,7 @@ test('wrong format, no audio, and no transcript fail by name rather than pass', 
 test('a dropout before the ender fails; silence running into the ender, and a step in level, are told apart', () => {
   const drop = xray();
   drop.audio.findings = [{ kind: 'silence', t: 9, dur_s: 0.4, where: 'inside' }, { kind: 'silence', t: 17.9, dur_s: 0.5, where: 'inside' }];
-  const c = byId(exportGates(drop, words([0, 17]), { profile, enderAt: 18 }));
+  const c = byId(exportGates(drop, words([0, 17]), { profile, enderAt: 18, envelope: envelope(20, [0, 17]) }));
   assert.equal(c['export-audio'].ok, false);
   assert.match(c['export-audio'].message, /9s \(0\.4s\)/);
   assert.doesNotMatch(c['export-audio'].message, /17\.9/);

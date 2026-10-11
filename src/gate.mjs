@@ -11,6 +11,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { allSegments, contentEndUs, resolveMediaPath } from './core.mjs';
 import { projectAlphaLeaks } from './alpha.mjs';
 import { blurredBackgrounds, captionStyleDrift } from './house-rules.mjs';
@@ -374,26 +375,75 @@ const PROMOTE = new Set(['video.opens_black', 'video.stutter', 'audio.loudness']
 
 const finalCheck = (id, ok, message) => ({ id, level: 'FAIL', ok, message, value: null, target: null });
 
-/** Speech timing on the export's own transcript: first word, gaps between words, a clipped last word. */
-export function speechGates(speech, { fin = {}, stop, enderAt = null, pauses = [] } = {}) {
+/**
+ * Voice-band loudness of a video, 10 ms steps, in dB: the clock for speech timing. Whisper says
+ * WHICH words were said but stretches each word over the silence around it (a 0.8s late start
+ * reads as a first word at 0.00s), so onsets, gaps and the cut are timed from energy.
+ */
+export function voiceEnvelope(video) {
+  const r = spawnSync('ffmpeg', ['-v', 'error', '-nostdin', '-i', video, '-map', '0:a:0', '-af', 'highpass=f=300,lowpass=f=3400',
+    '-ac', '1', '-ar', '16000', '-f', 's16le', '-'], { maxBuffer: 1 << 30, timeout: 120000 });
+  if (r.status !== 0 || !r.stdout?.length) return null;
+  const pcm = new Int16Array(r.stdout.buffer, r.stdout.byteOffset, Math.floor(r.stdout.length / 2));
+  const db = [];
+  for (let i = 0; i + 160 <= pcm.length; i += 160) {
+    let sum = 0;
+    for (let k = i; k < i + 160; k++) sum += (pcm[k] / 32768) ** 2;
+    db.push(Math.round(10 * Math.log10(sum / 160 + 1e-12) * 10) / 10);
+  }
+  return { step: 0.01, db };
+}
+
+/**
+ * Speech timing on the export: the first word by firstWordBy, no stretch of silence over
+ * maxSpeechGap inside the speech, and no word still sounding at the cut into the ender. The
+ * transcript must have words (proof there is speech); the envelope times them. Silence is
+ * 20 dB under the speech level, so a music bed within 20 dB of the voice hides a pause.
+ */
+export function speechGates(speech, { fin = {}, stop, enderAt = null, pauses = [], envelope = null } = {}) {
   if (!speech) return [finalCheck('speech', false, 'no transcript of the export: re-run the X-ray with --speech')];
   const words = (speech.words || []).filter(w => Number.isFinite(w.start) && w.start < stop);
   if (!words.length) return [finalCheck('speech', false, 'the export transcript has no words')];
-  const firstBy = fin.firstWordBy ?? 0.5, maxGap = fin.maxSpeechGap ?? 0.7, tailMin = fin.lastWordTail ?? 0.08;
-  const first = words[0];
-  const gaps = [];
-  for (let i = 1; i < words.length; i++) {
-    const a = words[i - 1].end, b = words[i].start;
-    if (b - a > maxGap && !pauses.some(p => p >= a - 0.1 && p <= b + 0.1)) gaps.push({ t: r2(a), gap: r2(b - a) });
-  }
+  if (!envelope?.db?.length) return [finalCheck('speech', false, 'cannot read the export audio to time the speech')];
+  const firstBy = fin.firstWordBy ?? 0.5, maxGap = fin.maxSpeechGap ?? 0.7;
+  const { step, db } = envelope;
+  const at = t => Math.max(0, Math.min(db.length - 1, Math.round(t / step)));
+  const inWords = words.flatMap(w => db.slice(at(w.start), at(w.end))).filter(v => v > -70).sort((x, y) => x - y);
+  const level = inWords.length ? inWords[Math.floor(inWords.length * 0.75)] : -30;
+  const voiced = db.map(v => v >= level - 20);
   const last = words.at(-1);
-  const tail = r2(stop - last.end);
+  const end = at(stop);
+  // Onset: the first 80 ms of continuous voice.
+  let onset = null;
+  for (let i = 0, run = 0; i < end; i++) { run = voiced[i] ? run + 1 : 0; if (run >= 8) { onset = (i - 7) * step; break; } }
+  let lastVoiced = null;
+  for (let i = end - 1; i >= 0; i--) if (voiced[i]) { lastVoiced = i; break; }
+  const gaps = [];
+  if (onset != null && lastVoiced != null) {
+    for (let i = at(onset), from = null; i <= lastVoiced; i++) {
+      if (!voiced[i]) { from ??= i; continue; }
+      if (from != null) {
+        const a = from * step, b = i * step;
+        if (b - a > maxGap && !pauses.some(p => p >= a - 0.1 && p <= b + 0.1)) gaps.push({ t: r2(a), gap: r2(b - a) });
+        from = null;
+      }
+    }
+  }
+  // Clipped: the voice is still sounding in the last 60 ms before the cut. A finished word has
+  // decayed to room tone by then (about 40 dB under the speech level on the 2026-10-11 finals);
+  // a word cut mid-syllable is still within ~16 dB of it.
+  const tail = db.slice(Math.max(0, end - 6), end);
+  const atCut = tail.length ? tail.reduce((x, y) => x + y, 0) / tail.length : -120;
+  const clipped = atCut >= level - 22 && last.end >= stop - 0.3;
   return [
-    finalCheck('first-word', first.start <= firstBy + 1e-6, `first word "${first.word}" at ${r2(first.start)}s (by ${firstBy}s)`),
+    finalCheck('first-word', onset != null && onset <= firstBy + 1e-6, onset == null ? 'no voice found before the ender'
+      : `speech starts at ${r2(onset)}s (by ${firstBy}s; first word "${words[0].word}")`),
     finalCheck('speech-gaps', !gaps.length, gaps.length
       ? `${gaps.length} silence(s) over ${maxGap}s inside the speech at ${gaps.slice(0, 5).map(g => `${g.t}s (${g.gap}s)`).join(', ')}: tighten, or declare a deliberate pause with --pause SECONDS`
-      : `no gap over ${maxGap}s between words`),
-    finalCheck('last-word', tail >= tailMin, `last word "${last.word}" ends ${tail}s before ${enderAt != null ? 'the ender' : 'the end'}${tail < tailMin ? ': clipped — extend the clip' : ''}`),
+      : `no silence over ${maxGap}s inside the speech`),
+    finalCheck('last-word', !clipped, clipped
+      ? `the voice is still sounding at the cut into ${enderAt != null ? 'the ender' : 'the end'} (${r2(stop)}s, "${last.word}"): clipped — extend the clip`
+      : `last word "${last.word}" finishes before ${enderAt != null ? 'the ender' : 'the end'}`),
   ];
 }
 
@@ -436,13 +486,13 @@ export function loudnessJumps(xray, { fin = {}, stop }) {
  * `enderAt` is where the follow ender starts (speech and sound rules stop there); `pauses` are
  * timeline seconds of deliberate pauses the editor declared.
  */
-export function exportGates(xray, speech, { profile = loadProfile(), enderAt = null, pauses = [] } = {}) {
+export function exportGates(xray, speech, { profile = loadProfile(), enderAt = null, pauses = [], envelope = null } = {}) {
   const fin = profile.final || {};
   const stop = enderAt ?? (Number(xray.info?.format?.duration) || 0);
   return [
     ...deliveryGates(xray, { profile, fin, stop }),
     ...(xray.audio?.present ? loudnessJumps(xray, { fin, stop }) : []),
-    ...speechGates(speech, { fin, stop, enderAt, pauses }),
+    ...speechGates(speech, { fin, stop, enderAt, pauses, envelope }),
   ];
 }
 
@@ -473,7 +523,9 @@ export function foldXray(report, xrayDir, projectDir, { profile = null, draft = 
     try { speech = JSON.parse(fs.readFileSync(path.join(path.resolve(xrayDir), 'speech.json'), 'utf8')); } catch { /* checked below */ }
     const end = draft ? S(contentEndUs(draft, projectDir)) : null;
     const ender = draft && end ? endingCard(draft, end) : null;
-    report.checks.push(...exportGates(doc, speech, { profile, enderAt: ender?.t ?? null, pauses }));
+    const video = doc.export?.path;
+    const envelope = video && fs.existsSync(video) ? voiceEnvelope(video) : null;
+    report.checks.push(...exportGates(doc, speech, { profile, enderAt: ender?.t ?? null, pauses, envelope }));
   }
   report.xray = { dir: path.resolve(xrayDir), export: doc.export?.path, sha256: doc.export?.sha256, notChecked };
   report.scope = `Draft structure plus the export X-ray (every frame and sample measured). Not checked: ${notChecked.join(', ') || 'nothing'}.`;
