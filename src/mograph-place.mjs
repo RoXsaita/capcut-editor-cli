@@ -31,6 +31,14 @@ const S = us => (us || 0) / 1e6;
 const r3 = n => Math.round(n * 1000) / 1000;
 export const MOGRAPH_LANE = /^mograph-\d+$/;
 export const MOGRAPH_SFX_LANE = 'mograph-sfx';
+export const FOLLOW_ENDING_ID = 'follow-ender';
+
+/** Only the ending command's owned scene extends the principal edit. */
+export function isFollowEnding(doc, segment) {
+  return segment.desc === `mograph:${FOLLOW_ENDING_ID}`
+    && doc.materials?.videos?.some(m => m.id === segment.material_id
+      && m.capcutctl_mograph?.template === 'scene:follow-ending');
+}
 
 export const mographDesc = id => `mograph:${id}`;
 export const mographSfxDesc = id => `mograph:sfx:${id}`;
@@ -176,14 +184,17 @@ export function opMographPlace(doc, op, context = {}) {
   };
 }
 
-/** Remove every placed graphic whose id is not in `keep` — so a rebuild drops graphics the plan no longer names. */
+/**
+ * Remove every placed graphic whose id is not in `keep` — so a rebuild drops graphics the plan no
+ * longer names. The follow ending is kept unless `dropEnding` (edit.json `"ending": false`).
+ */
 export function opMographPrune(doc, op = {}) {
   const keep = new Set(op.keep || []);
   const ids = new Set();
   for (const track of doc.tracks) {
     for (const s of track.segments || []) {
       const m = /^mograph:(?:sfx:)?(.+)$/.exec(s.desc || '');
-      if (m && !keep.has(m[1])) ids.add(m[1]);
+      if (m && !keep.has(m[1]) && (op.dropEnding || !isFollowEnding(doc, s))) ids.add(m[1]);
     }
   }
   for (const id of ids) removeOwned(doc, id);

@@ -76,6 +76,7 @@ export const COMMAND_DOCS = Object.freeze({
   logo: doc('graphics', 'Brand mark pop with its cue, timed off the transcript or --at.', 'capcutctl logo --project NAME --auto --plan', true),
   brands: doc('graphics', 'Known brands, spoken aliases, and which have artwork.', 'capcutctl brands'),
   endcard: doc('graphics', 'The CTA card on the talking head near the end.', 'capcutctl endcard --project NAME --text Follow --dry-run', true),
+  ending: doc('graphics', 'Append a repeatable 3-second avatar/follow ending using private profile data, or render it alone.', 'capcutctl ending --project NAME --dry-run', true),
   wrap: doc('graphics', 'Logos from what is said + the endcard in one pass.', 'capcutctl wrap --project NAME --plan', true),
   captions: doc('graphics', 'Word-by-word native captions, one style for Arabic and English alike; --restyle fixes an existing track.', 'capcutctl captions --project NAME --dry-run', true),
   motion: doc('graphics', 'EXPERIMENTAL native text/logo recipes; prefer mograph.', 'capcutctl motion list', true),

@@ -95,6 +95,20 @@ capcutctl mograph scene-render --scene particle-word --params '{"text":"Opus 5.5
 ```
 
 See [docs/mograph.md](docs/mograph.md), including the one-time CapCut import checklist.
+
+A reusable three-second follow ending: the edit's own last frame collapses into an avatar,
+then a dial, badge and follow/check button animate with deterministic sound. With
+`ending.auto` in your profile, `build` appends it to every video; on its own:
+
+```bash
+capcutctl ending --project "My Edit" --dry-run
+capcutctl ending --frame last-frame.png --out ending-preview.mp4
+```
+
+Copy and face position come from your private profile's `ending` section (or `edit.json`
+`ending` per video); colors and fonts come from its tokens. Reruns replace the command's own
+ending. Your image and identity are never bundled in the repository. See
+[the ending setup](docs/ending.md).
 The older native `motion` recipes remain available but experimental; see
 [docs/native-motion.md](docs/native-motion.md).
 
@@ -224,6 +238,7 @@ the mirrors, and rolls back if the post-write doctor fails.
 | Build the finished edit from a plan | `capcutctl build --project NAME --edit edit.json --dry-run` |
 | Is it ready to post? | `capcutctl gate --project NAME` |
 | Render or place a motion graphic | `capcutctl mograph add --project NAME --template keyword-super --params '{"text":"…"}' --say "…"` |
+| Append the reusable follow animation | `capcutctl ending --project NAME --dry-run` |
 | Show the effective style profile | `capcutctl profile` |
 | Start your own profile, outside the repo | `capcutctl profile init` |
 | Show the full command surface | `capcutctl help` |

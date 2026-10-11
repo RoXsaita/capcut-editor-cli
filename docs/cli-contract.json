@@ -13,6 +13,7 @@
       "cursor",
       "denoise",
       "endcard",
+      "ending",
       "fade",
       "finish",
       "grade",
@@ -288,6 +289,20 @@
         "--project",
         "--scale",
         "--text"
+      ],
+      "transactional": true
+    },
+    "ending": {
+      "group": "graphics",
+      "summary": "Append a repeatable 3-second avatar/follow ending using private profile data, or render it alone.",
+      "example": "capcutctl ending --project NAME --dry-run",
+      "options": [
+        "--dry-run",
+        "--frame",
+        "--no-sfx",
+        "--out",
+        "--profile",
+        "--project"
       ],
       "transactional": true
     },

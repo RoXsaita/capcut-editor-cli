@@ -30,6 +30,8 @@ const CASES = {
   'dot-signature': { params: { name: 'سهيل', role: 'صانع محتوى', footer: 'made in code' }, beats: 5, handoff: { in: 'ink', out: 'ink' } },
   'format-morph': { params: { labels: ['فيديو', 'تطبيق', 'موقع'], actions: ['اختار', 'ابني', 'شارك'], hero: ['فكرتك', 'جاهزة'] }, beats: 6, handoff: { in: 'seam', out: 'seam' } },
   'claude-brief': { params: { text: 'زيّه', then: 'بس عنّي' }, beats: 5, handoff: { in: 'seam', out: 'seam' } },
+  'follow-ending': { params: { imageData: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    pill: 'الجزء القادم', headline: 'تابعني', sub: 'للمزيد' }, beats: 6, handoff: { in: 'captured-frame', out: 'follow-card' } },
 };
 
 // ---- browser ----------------------------------------------------------------------------------

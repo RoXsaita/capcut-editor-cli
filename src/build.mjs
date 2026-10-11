@@ -9,7 +9,8 @@
  *   picture   reviewed shots (once) → layout auto → camera (stress pushes, optional reframe/cursor)
  *   graphics  mograph renders placed on their words, full-frame scenes cut in on theirs (their
  *             sound is inside the clip) → logo pops (or a brand-chip when the art is
- *             missing) → endcard
+ *             missing) → endcard → the follow ending (profile ending.auto or edit.json `ending`),
+ *             appended after the last frame, opening on that frame
  *   sound     motivated seams + SFX → music bed aligned to the graphics and picture changes →
  *             duck under speech → loudness
  *   gate      the blocking ready-to-post check
@@ -32,6 +33,7 @@ import { firstPictureProof } from './finish.mjs';
 import { gateReport, writeGateRecord } from './gate.mjs';
 
 export const EDIT_PLAN_VERSION = 1;
+const ENDING_KEYS = new Set(['frame', 'noSfx', 'pill', 'headline', 'sub', 'badge', 'faceX', 'faceY', 'faceScale']);
 const r3 = n => Math.round(n * 1000) / 1000;
 
 const fail = (code, message, details) => { throw new CapcutError(message, { code, exitCode: 2, details }); };
@@ -46,7 +48,7 @@ function workingDoc(projectDir) {
 export function normalizePlan(raw, { baseDir = process.cwd() } = {}) {
   if (!raw || typeof raw !== 'object') fail('PLAN_INVALID', 'edit plan must be a JSON object');
   if (raw.version !== EDIT_PLAN_VERSION) fail('PLAN_VERSION', `edit plan version must be ${EDIT_PLAN_VERSION}`);
-  const known = new Set(['version', 'profile', 'style', 'words', 'shots', 'layout', 'camera', 'graphics', 'scenes', 'logos', 'endcard', 'sound', 'notes']);
+  const known = new Set(['version', 'profile', 'style', 'words', 'shots', 'layout', 'camera', 'graphics', 'scenes', 'logos', 'endcard', 'ending', 'sound', 'notes']);
   const unknown = Object.keys(raw).filter(k => !known.has(k));
   if (unknown.length) fail('PLAN_INVALID', `unknown edit plan keys: ${unknown.join(', ')}`);
   const abs = file => (file ? path.resolve(baseDir, String(file).replace(/^~(?=$|\/)/, process.env.HOME || '~')) : null);
@@ -69,6 +71,13 @@ export function normalizePlan(raw, { baseDir = process.cwd() } = {}) {
   const ids = [...graphics, ...scenes].map(g => g.id);
   const dup = ids.find((id, i) => ids.indexOf(id) !== i);
   if (dup) fail('PLAN_INVALID', `duplicate graphic/scene id "${dup}"`);
+  let ending = raw.ending === undefined ? null : raw.ending;
+  if (ending !== null && typeof ending !== 'boolean') {
+    if (typeof ending !== 'object' || Array.isArray(ending)) fail('PLAN_INVALID', 'ending must be true, false or an object');
+    const bad = Object.keys(ending).filter(k => !ENDING_KEYS.has(k));
+    if (bad.length) fail('PLAN_INVALID', `unknown ending keys: ${bad.join(', ')}`);
+    ending = { ...ending, ...(ending.frame ? { frame: abs(ending.frame) } : {}) };
+  }
   const sound = { seams: 'motivated', music: false, duck: true, loudness: true, ...(raw.sound || {}) };
   if (sound.music && typeof sound.music === 'object' && sound.music.file) sound.music = { ...sound.music, file: abs(sound.music.file) };
   return {
@@ -83,6 +92,7 @@ export function normalizePlan(raw, { baseDir = process.cwd() } = {}) {
     scenes,
     logos: raw.logos === undefined ? 'auto' : raw.logos,
     endcard: raw.endcard === undefined ? null : raw.endcard,
+    ending,
     sound,
   };
 }
@@ -301,7 +311,9 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
     ...(await renderScenes(projectDir, sceneItems, { dryRun, profile })),
   ].sort((a, b) => a.at - b.at);
   for (const g of rendered) g.duration = r3(g.rendered.meta.duration);
-  const graphicOps = [{ op: 'mograph.prune', keep: rendered.map(g => g.id) }];
+  // null: profile ending.auto decides; false also removes an ending placed earlier.
+  const ending = plan.ending ?? (profile.ending?.auto ? true : null);
+  const graphicOps = [{ op: 'mograph.prune', keep: rendered.map(g => g.id), dropEnding: plan.ending === false }];
   for (const g of rendered) {
     if (g.scene) {
       graphicOps.push({
@@ -333,6 +345,16 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
     result: applySpec(projectDir, { version: 1, name: 'build-graphics', operations: applied }, txn('build-graphics')) };
   if (logoPlan.missingArt?.length) stages.logosMissingArt = logoPlan.missingArt;
   if (!dryRun) { writeSidecars(rendered); doc = workingDoc(projectDir); }
+
+  // ---- ending: after the picture and graphics are final, so it opens on the real last frame;
+  // before sound, so the music bed and loudness cover it.
+  if (ending) {
+    const { runEnding } = await import('./ending.mjs');
+    const o = typeof ending === 'object' ? ending : {};
+    stages.ending = await runEnding(projectDir, { frame: o.frame || null, copy: o, noSfx: Boolean(o.noSfx),
+      profileFile: plan.profile || null, dryRun, forceRunning, backup });
+    if (!dryRun) doc = workingDoc(projectDir);
+  }
 
   // ---- sound ----------------------------------------------------------------------------------
   const soundOps = [];

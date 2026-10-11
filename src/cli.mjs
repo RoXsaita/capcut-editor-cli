@@ -247,6 +247,12 @@ Usage:
                                 --asset aliases --logo; gradient is text-only; image variants remain experimental
                                 --dry-run validates without writing; creates editable layers, not an MP4
   capcutctl endcard             --project NAME_OR_PATH [--text Follow] [--at S] [--hold S] [--scale S] [--no-sfx]
+  capcutctl ending              --project NAME_OR_PATH [--frame FILE.png|FILE.jpg] [--profile FILE] [--no-sfx] [--dry-run]
+                                — append a deterministic 3-second avatar/dial/follow animation with sound.
+                                  Opens on the edit's own last frame (or --frame); copy and face position
+                                  come from profile ending; reruns replace it. build runs it when ending.auto.
+  capcutctl ending              --out PATH.mov|PATH.mp4 [--frame FILE.png|FILE.jpg] [--profile FILE] [--no-sfx] [--dry-run]
+                                — render the ending alone for review; no CapCut project needed.
   capcutctl zoom                --project NAME_OR_PATH --at S[,S...] | --auto | --stress
                                 [--min-length 2.5] [--to 1.15] [--hold 1.6] [--track N] [--plan]
                                 [--no-ease] [--ease] [--words FILE]
@@ -863,6 +869,15 @@ export async function main(argv, dependencies = {}) {
     if (sub === 'where') return print({ userDir: userDir(), layers: profileLayers({ file: args.profile || null }) }, true);
     if (sub === 'init') return print(initUserProfile({ force: !!args.force, dryRun: !!args.dryRun }), true);
     throw new CapcutError(`Unknown profile subcommand: ${sub}. Use show, where or init.`, { code: 'UNKNOWN_SUBCOMMAND', exitCode: 2 });
+  }
+  if (command === 'ending') {
+    const { runEnding } = await import('./ending.mjs');
+    if (args.project && args.out) throw new CapcutError('ending takes --project or --out, not both.', { code: 'ENDING_TARGET', exitCode: 2 });
+    if (!args.project && !args.out) throw new CapcutError('ending needs --project NAME or --out PATH.mov|PATH.mp4.', { code: 'ENDING_TARGET', exitCode: 2 });
+    return print(await runEnding(args.project ? resolveProject(args.project, root) : null, {
+      frame: args.frame, profileFile: args.profile, out: args.out, noSfx: Boolean(args.noSfx),
+      dryRun: Boolean(args.dryRun), forceRunning: Boolean(args.forceRunning), backup: !args.noBackup,
+    }), true);
   }
   if (command === 'mograph' && ['scenes', 'scene-preview', 'scene-render'].includes(args._[1])) {
     const scenes = await import('./mograph-scene.mjs');

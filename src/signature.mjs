@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { CapcutError, clone, seededId, loadPreset, localizeMedia, resolveMediaPath, contentEndUs } from './core.mjs';
+import { CapcutError, clone, seededId, loadPreset, localizeMedia, resolveMediaPath, principalEndUs } from './core.mjs';
 import { principalTrack, sfxPresets } from './polish.mjs';
 import { parkPresetLeftover, opScaleKeyframe } from './add.mjs';
 import { freeCurveControls } from './easing.mjs';
@@ -443,7 +443,7 @@ export function opSignature(doc, op, context = {}) {
   if (context.projectDir) parkPresetLeftover(doc, context, op);
 
   const pending = [];
-  const editUs = contentEndUs(doc, context.projectDir);
+  const editUs = principalEndUs(doc, context.projectDir);
 
   /* ---- logos ---- */
   for (const [i, l] of (op.logos || []).entries()) {

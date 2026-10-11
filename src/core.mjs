@@ -30,7 +30,7 @@ import {
 import { opMusic } from './music.mjs';
 import { opLoudness } from './loudness.mjs';
 import { opCaption } from './captions-srt.mjs';
-import { opMographPlace, opMographPrune } from './mograph-place.mjs';
+import { opMographPlace, opMographPrune, isFollowEnding } from './mograph-place.mjs';
 import { opAnimation } from './animations.mjs';
 import { isPreframed } from './origin.mjs';
 import { userDir } from './profile.mjs';
@@ -904,8 +904,19 @@ export function assertCapcutClosed({ forceRunning = false, probe = capcutProcess
   return state;
 }
 
-/** End of the actual editable content (normally the gapless talking-head track). */
+/**
+ * End of the principal edit plus its contiguous owned ending, excluding parked material.
+ * `principalEndUs` stops before the ending: what the speech, captions and the endcard end on.
+ */
 export function contentEndUs(doc, projectDir = null) {
+  return editEndUs(doc, projectDir, true);
+}
+
+export function principalEndUs(doc, projectDir = null) {
+  return editEndUs(doc, projectDir, false);
+}
+
+function editEndUs(doc, projectDir, withEnding) {
   const parked = preservedRange(projectDir);
   let end = 0;
   try {
@@ -920,7 +931,14 @@ export function contentEndUs(doc, projectDir = null) {
     // A malformed/partial draft may not have a principal track. Its declared duration is
     // still a useful read result, and validation will report the structural problem.
   }
-  if (end > 0) return parked ? Math.min(end, parked.start) : end;
+  if (end > 0) {
+    if (withEnding) for (const { track, segment } of allSegments(doc)) {
+      const target = segment.target_timerange;
+      if (track.type === 'video' && isFollowEnding(doc, segment) && target?.duration > 0
+          && Math.abs(target.start - end) <= DURATION_TOLERANCE_US) end = target.start + target.duration;
+    }
+    return parked ? Math.min(end, parked.start) : end;
+  }
   if (parked) return parked.start;
   return Number.isFinite(doc?.duration) ? doc.duration : 0;
 }
