@@ -162,6 +162,11 @@
     "brandChipLogoGap": 1.0
   },
 
+  "final": {
+    "_note": "The final-export gates (gate, and export through it). Speech numbers are measured on the export's own transcript (xray scan --speech), not the draft.",
+    "captionsRequired": true
+  },
+
   "grammar": {
     "hook":        { "camera": "snap-punch",          "graphic": "hook-title",    "sfx": "impact" },
     "claim":       { "camera": "stress",              "graphic": "keyword-super", "sfx": "pop" },

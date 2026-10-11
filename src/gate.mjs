@@ -15,6 +15,7 @@ import { allSegments, contentEndUs, resolveMediaPath } from './core.mjs';
 import { projectAlphaLeaks } from './alpha.mjs';
 import { blurredBackgrounds, captionStyleDrift } from './house-rules.mjs';
 import { coldOpen, cutPoints, pictureChanges, principalTrack } from './polish.mjs';
+import { isCaptionTrack } from './captions.mjs';
 import { firstPictureProof, finishScorecard } from './finish.mjs';
 import { safeZoneViolations } from './mograph-geometry.mjs';
 import { loadProfile } from './profile.mjs';
@@ -175,6 +176,13 @@ export function openingSnaps(doc, { within = 0.6, snap = 0.15 } = {}) {
   return [...new Map(out.map(o => [`${o.track}:${o.t}`, o])).values()].sort((x, y) => x.t - y.t);
 }
 
+/** Caption layers with words on them, whoever wrote them (captions:*, SRT, CapCut auto-captions). */
+export function captionLayers(doc) {
+  return (doc.tracks || []).filter(t => isCaptionTrack(doc, t) && (t.segments || []).length)
+    .map(t => ({ name: t.name || '(unnamed)', words: t.segments.length,
+      start: r2(Math.min(...t.segments.map(startOf))), end: r2(Math.max(...t.segments.map(endOf))) }));
+}
+
 /** Longest stretch in [from, to) with no graphic on screen. */
 function longestClear(graphics, from, to) {
   const spans = graphics.map(g => [Math.max(from, g.t), Math.min(to, g.end)]).filter(([a, b]) => b > a).sort((a, b) => a[0] - b[0]);
@@ -276,6 +284,14 @@ export function gateReport(doc, { projectDir = null, profile = loadProfile() } =
   add('caption-style', 'FAIL', !drift.off.length, drift.off.length
     ? `${drift.off.length} caption word(s) not in the house caption style, first ${drift.off.slice(0, 4).map(w => `"${w.text}"@${w.t}s`).join(', ')}: every word takes ${drift.house} — capcutctl captions --restyle --project NAME`
     : 'one caption style');
+  const fin = profile.final || {};
+  if (fin.captionsRequired !== false) {
+    const layers = captionLayers(doc);
+    add('captions', 'FAIL', layers.length === 1, layers.length === 1
+      ? `one caption layer (${layers[0].words} words)`
+      : layers.length ? `${layers.length} caption layers (${layers.map(l => l.name).join(', ')}): double captions — keep one`
+        : 'no captions: capcutctl captions --project NAME');
+  }
   add('chip-and-logo', 'FAIL', !chipClash.length, chipClash.length ? `brand-chip and logo pop on one mention at ${chipClash.map(g => g.t).join(', ')}s` : 'no doubled brand mentions');
 
   // Seams.
