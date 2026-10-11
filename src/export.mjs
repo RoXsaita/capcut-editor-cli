@@ -97,14 +97,15 @@ export async function exportProject(projectDir, args) {
  * draft plus the X-ray, then — only if the gates pass — the Gemini watch-review, folded back in.
  * A FAIL leaves the export in place and sets the verdict; the CLI exits 1 on it.
  */
-export async function finalGates(result, { projectDir, doc, args, xray = exportXray, review = null }) {
+export async function finalGates(result, { projectDir, doc, args, xray = exportXray, gate = null, review = null }) {
   const { gateReport, foldXray, finaliseReport, writeGateRecord } = await import('./gate.mjs');
   const { loadProfile } = await import('./profile.mjs');
   const profile = loadProfile();
   const xrayDir = typeof args.xray === 'string' ? args.xray : `${result.video.replace(/\.mp4$/i, '')}.xray`;
   result.xray = xray(result.video, projectDir, xrayDir, { speech: true });
   const pauses = [args.pause].flat().filter(v => v != null).flatMap(v => String(v).split(',')).map(Number).filter(Number.isFinite);
-  const report = foldXray(gateReport(doc, { projectDir, profile }), xrayDir, projectDir, { profile, draft: doc, pauses });
+  const report = gate ? gate({ doc, projectDir, profile, xrayDir, pauses })
+    : foldXray(gateReport(doc, { projectDir, profile }), xrayDir, projectDir, { profile, draft: doc, pauses });
   if (report.verdict !== 'FAIL' && !args.noReview) {
     const { reviewVideo, foldReview } = await import('./review-video.mjs');
     try {
