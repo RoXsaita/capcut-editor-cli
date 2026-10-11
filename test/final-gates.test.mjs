@@ -48,3 +48,10 @@ test('slow start, a long gap, and a clipped last word fail; a declared pause is 
   const paused = byId(exportGates(xray(), words([0.1, 1], [2, 5], [5.1, 17]), { profile, enderAt: 18, pauses: [1.5] }));
   assert.equal(paused['speech-gaps'].ok, true);
 });
+
+test('wrong format, no audio, and no transcript fail by name rather than pass', () => {
+  const c = byId(exportGates(xray({ info: { video: { width: 720, height: 1280, avg_frame_rate: '60/1' }, format: { duration: '20' } }, audio: { present: false } }), null, { profile }));
+  assert.equal(c['export-format'].ok, false);
+  assert.equal(c['export-audio'].ok, false);
+  assert.equal(c.speech.ok, false);
+});

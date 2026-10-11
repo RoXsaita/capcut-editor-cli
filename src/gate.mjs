@@ -369,6 +369,9 @@ export function gateReport(doc, { projectDir = null, profile = loadProfile() } =
  * was configured; the X-ray says what the export shows. Its FAIL verdicts block, its UNKNOWNs
  * warn (they must be named in the hand-off), and what it could not check is listed, never passed.
  */
+// X-ray verdicts that only warn in a scan but block a final export.
+const PROMOTE = new Set(['video.opens_black', 'video.stutter']);
+
 const finalCheck = (id, ok, message) => ({ id, level: 'FAIL', ok, message, value: null, target: null });
 
 /** Speech timing on the export's own transcript: first word, gaps between words, a clipped last word. */
@@ -394,6 +397,25 @@ export function speechGates(speech, { fin = {}, stop, enderAt = null, pauses = [
   ];
 }
 
+const ratio = text => { const [a, b] = String(text || '').split('/').map(Number); return b ? a / b : a; };
+
+/** The delivery file: canvas size and frame rate, an audio stream, and no silence before the ender. */
+export function deliveryGates(xray, { profile, fin = {}, stop }) {
+  const v = xray.info?.video || {};
+  const want = profile.canvas;
+  const fps = ratio(v.avg_frame_rate || v.r_frame_rate);
+  const out = [finalCheck('export-format', Number(v.width) === want.width && Number(v.height) === want.height && Math.abs(fps - want.fps) < 0.02,
+    `${v.width}x${v.height} at ${r2(fps)} fps (want ${want.width}x${want.height} at ${want.fps})`)];
+  const audio = xray.audio || {};
+  if (!audio.present) return [...out, finalCheck('export-audio', false, 'the export has no audio stream')];
+  // A dropout is silence with sound after it; silence that runs into the (silent) ender is the ending.
+  const drops = (audio.findings || []).filter(f => f.kind === 'silence' && f.where !== 'end' && f.t + f.dur_s < stop - 0.05)
+    .filter(f => f.where === 'inside' || f.dur_s > (fin.firstWordBy ?? 0.5));
+  return [...out, finalCheck('export-audio', !drops.length, drops.length
+    ? `audio drops to silence before the ender at ${drops.slice(0, 4).map(f => `${f.t}s (${f.dur_s}s)`).join(', ')}`
+    : 'sound all the way to the ender')];
+}
+
 /**
  * The final-export checks the X-ray measures but does not judge. Pure, so tests feed it numbers.
  * `enderAt` is where the follow ender starts (speech and sound rules stop there); `pauses` are
@@ -403,6 +425,7 @@ export function exportGates(xray, speech, { profile = loadProfile(), enderAt = n
   const fin = profile.final || {};
   const stop = enderAt ?? (Number(xray.info?.format?.duration) || 0);
   return [
+    ...deliveryGates(xray, { profile, fin, stop }),
     ...speechGates(speech, { fin, stop, enderAt, pauses }),
   ];
 }
@@ -426,7 +449,7 @@ export function foldXray(report, xrayDir, projectDir, { profile = null, draft = 
   const notChecked = [];
   for (const v of doc.verdicts || []) {
     if (v.verdict === 'NOT CHECKED') { notChecked.push(v.property); continue; }
-    add(`xray:${v.property}`, v.verdict === 'FAIL' ? 'FAIL' : 'WARN', v.verdict === 'PASS', v.detail);
+    add(`xray:${v.property}`, v.verdict === 'FAIL' || (profile && PROMOTE.has(v.property)) ? 'FAIL' : 'WARN', v.verdict === 'PASS', v.detail);
   }
   // Final-export gates: only when the caller holds the profile (gate --xray, export).
   if (profile) {
