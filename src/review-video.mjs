@@ -470,8 +470,11 @@ export async function reviewVideo({ media, projectDir = null, script = null, spe
   fs.writeFileSync(path.join(dir, 'gemini.json'), `${JSON.stringify(parsed, null, 2)}\n`);
   let facts = null;
   if (projectDir) {
-    const loaded = loadProject(projectDir);
-    facts = draftAudioFacts(loaded.groups.find(g => g.name.startsWith('timeline:'))?.doc || loaded.groups[0]?.doc, projectDir);
+    // No readable draft (a bare folder): the audio answer cannot be checked, the quote stands alone.
+    try {
+      const loaded = loadProject(projectDir);
+      facts = draftAudioFacts(loaded.groups.find(g => g.name.startsWith('timeline:'))?.doc || loaded.groups[0]?.doc, projectDir);
+    } catch { facts = null; }
   }
   const quoted = soundCheck(parsed.first_spoken_sentence, words);
   const audio = audioCheck(parsed.audio_check, facts);
