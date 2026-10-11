@@ -23,6 +23,7 @@ const fail = (code, message, exitCode = 2) => { throw new CapcutError(message, {
 const r2 = n => Math.round(n * 100) / 100;
 
 export const MAX_ROUNDS = 2;
+export const MAX_DISCARDS = 2;
 // file_upload takes at most 10 MB per call; the proxy and the instructions share it.
 const PROXY_BYTES = 9 * 1024 * 1024;
 
@@ -300,15 +301,26 @@ function similarity(a, b) {
 
 /**
  * Did Gemini hear the sound? Its quote of the first sentence against the export's own first words.
- * Share of quoted words found (≥0.75 similar) among the first spoken words; ≥0.6 of ≥3 words passes.
+ * Precision: the share of quoted words found (≥0.75 similar). Coverage: of the spoken words between
+ * the first and last one it matched, the share it quoted. Captions show every word, so a model
+ * reading them on sampled frames can quote real words; a muted copy of a real final (2026-10-11)
+ * quoted 5 of 10 in order (coverage 0.5) where a listening model quotes the run (0.9+).
+ * Heuristic, not proof: ≥3 words, precision ≥0.6 and coverage ≥0.75 pass.
  */
 export function soundCheck(quote, words) {
   const said = normaliseArabic(quote);
-  const reference = (words || []).slice(0, said.length + 4).map(w => w.word ?? w.text ?? '').join(' ');
-  const heard = normaliseArabic(reference);
-  const found = said.filter(w => heard.some(h => similarity(w, h) >= 0.75)).length;
-  const score = said.length ? r2(found / said.length) : 0;
-  return { ok: said.length >= 3 && score >= 0.6, score, quote: quote || null, reference };
+  const referenceWords = (words || []).slice(0, said.length + 6).map(w => w.word ?? w.text ?? '');
+  const heard = normaliseArabic(referenceWords.join(' '));
+  const hits = [];
+  let from = 0;
+  for (const w of said) {
+    const j = heard.findIndex((h, k) => k >= from && similarity(w, h) >= 0.75);
+    if (j >= 0) { hits.push(j); from = j + 1; }
+  }
+  const score = said.length ? r2(hits.length / said.length) : 0;
+  const span = hits.length ? hits.at(-1) - hits[0] + 1 : 0;
+  const coverage = span ? r2(hits.length / span) : 0;
+  return { ok: said.length >= 3 && score >= 0.6 && coverage >= 0.75, score, coverage, quote: quote || null, reference: referenceWords.join(' ') };
 }
 
 const toSeconds = ts => {
@@ -394,11 +406,17 @@ export async function reviewVideo({ media, projectDir = null, script = null, spe
   const words = JSON.parse(fs.readFileSync(speechFile, 'utf8')).words || [];
   const ledger = readRounds(projectDir);
   if (resetRounds) ledger.rounds = [];
-  const round = ledger.rounds.length + 1;
+  // A discarded review (no proof it heard the sound) is a retry of the same round, not a round.
+  const counted = ledger.rounds.filter(r => !r.discarded);
+  const round = counted.length + 1;
+  const retries = ledger.rounds.length - (ledger.rounds.findLastIndex(r => !r.discarded) + 1);
   if (projectDir && round > MAX_ROUNDS) {
-    fail('REVIEW_ROUNDS_EXHAUSTED', `${MAX_ROUNDS} Gemini review rounds are done for this edit: hand off to the creator with the remaining notes and the accepted/rejected log (${ledger.rounds.at(-1)?.file}). --reset-rounds only for a new edit.`, 3);
+    fail('REVIEW_ROUNDS_EXHAUSTED', `${MAX_ROUNDS} Gemini review rounds are done for this edit: hand off to the creator with the remaining notes and the accepted/rejected log (${counted.at(-1)?.file}). --reset-rounds only for a new edit.`, 3);
   }
-  const dir = path.join(`${media.replace(/\.[^.]+$/, '')}.review`, `round-${round}`);
+  if (projectDir && retries >= MAX_DISCARDS) {
+    fail('REVIEW_DISCARDED_AGAIN', `Gemini failed the sound check ${retries} times in round ${round}: hand off without a Gemini review and say so.`, 3);
+  }
+  const dir = path.join(`${media.replace(/\.[^.]+$/, '')}.review`, retries ? `round-${round}-retry${retries}` : `round-${round}`);
   fs.mkdirSync(dir, { recursive: true });
   const duration = probeDuration(media);
   const proxy = makeProxy(media, path.join(dir, 'review-proxy.mp4'), { duration });
@@ -433,7 +451,7 @@ export async function reviewVideo({ media, projectDir = null, script = null, spe
   const file = path.join(dir, 'review.json');
   fs.writeFileSync(file, `${JSON.stringify(record, null, 2)}\n`);
   if (projectDir) {
-    ledger.rounds.push({ round, at: record.at, media, file, status: record.status });
+    ledger.rounds.push({ round, at: record.at, media, file, ...(record.status === 'discarded' ? { discarded: true } : {}) });
     fs.mkdirSync(path.dirname(roundsFile(projectDir)), { recursive: true });
     fs.writeFileSync(roundsFile(projectDir), `${JSON.stringify(ledger, null, 2)}\n`);
   }
@@ -486,7 +504,7 @@ export function foldReview(report, file) {
 
 export function reviewText(record) {
   const lines = [`review-video: round ${record.round}/${record.maxRounds} · ${record.model || 'model?'} · ${record.status}`,
-    `  sound check: ${record.soundCheck.ok ? 'ok' : 'FAILED'} (${record.soundCheck.score}) — Gemini heard "${record.soundCheck.quote}"`];
+    `  sound check: ${record.soundCheck.ok ? 'ok' : 'FAILED'} (words ${record.soundCheck.score}, coverage ${record.soundCheck.coverage}) — Gemini heard "${record.soundCheck.quote}"`];
   for (const i of record.issues) {
     lines.push(`  ${i.id.padEnd(4)} ${i.blocker ? 'BLOCKER ' : ''}${i.kind.padEnd(10)} ${i.timestamp || '--:--'}  ${i.issue}${i.fix ? `  → ${i.fix}` : ''}`);
   }

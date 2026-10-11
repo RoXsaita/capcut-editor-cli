@@ -66,6 +66,9 @@ test('the sound check passes a close quote of the first sentence and discards an
   assert.equal(soundCheck('مرحبا بكم في قناتي اليوم', WORDS).ok, false);
   assert.equal(soundCheck('', WORDS).ok, false);
   assert.equal(soundCheck('استخدم', WORDS).ok, false, 'one word is not proof');
+  const skimmed = soundCheck('استخدم كأنه آدم يعملي لفيديو', WORDS);
+  assert.equal(skimmed.ok, false, 'real words read off captions, skipping half, are not a listen');
+  assert.equal(skimmed.coverage, 0.5);
 });
 
 test('JSON comes out of the code block, a fence, or the outer braces, with cite markers gone', () => {
@@ -138,12 +141,17 @@ test('a review round end to end with a fake driver: log, evidence, decisions, ga
 });
 
 test('a review that cannot quote the first sentence is discarded and blocks; bad JSON gets one follow-up', { skip: !hasFfmpeg }, async () => {
-  const { media, speech } = fixture();
+  const { media, speech, project } = fixture();
   const deaf = { ...REVIEW, first_spoken_sentence: 'مرحبا بكم في قناتي اليوم' };
-  const record = await reviewVideo({ media, speech, driver: async () => ({ lines: driverLines(answerFor(deaf)), code: 0, stderr: '' }) });
+  const deafDriver = async () => ({ lines: driverLines(answerFor(deaf)), code: 0, stderr: '' });
+  const record = await reviewVideo({ media, speech, projectDir: project, driver: deafDriver });
   assert.equal(record.status, 'discarded');
   assert.deepEqual(record.issues, []);
   assert.equal(foldReview({ checks: [] }, record.file).checks[0].ok, false);
+  const retry = await reviewVideo({ media, speech, projectDir: project, driver: deafDriver });
+  assert.equal(retry.round, 1, 'a discarded review does not use up a round');
+  assert.match(retry.file, /round-1-retry1/);
+  await assert.rejects(reviewVideo({ media, speech, projectDir: project, driver: deafDriver }), /sound check 2 times/);
 
   const calls = [];
   const driver = async options => { calls.push(options.prompt.includes('file_upload with') ? 'upload' : 'follow-up');
