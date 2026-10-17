@@ -26,6 +26,7 @@ const CASES = {
   'callout-box': { params: { box: [160, 760, 600, 280], label: 'اضغط هنا' }, words: 'اضغط هنا', sfx: 'enter', motion: 'rich' },
   'cta-card': { params: { keyword: 'ذكاء' }, words: 'اكتب ذكاء في التعليقات', sfx: 'select', motion: 'rich', frames: [90, 120] },
   'brand-chip': { params: { name: 'جوجل جيميني' }, words: 'جوجل جيميني', sfx: 'pop', motion: 'slide' },
+  'slab-super': { params: { text: 'تحل Usage Limit', key: 'Usage Limit', tag: 'حركة وحدة' }, words: 'حركة وحدة تحل Usage Limit', sfx: 'pop', motion: 'rich' },
 };
 const TIMES = [2, 7, 22].map(f => f / FPS);        // entrance, mid-entrance, hold — within every template
 

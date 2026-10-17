@@ -30,6 +30,7 @@ const CASES = {
   'dot-signature': { params: { name: 'سهيل', role: 'صانع محتوى', footer: 'made in code' }, beats: 5, handoff: { in: 'ink', out: 'ink' } },
   'format-morph': { params: { labels: ['فيديو', 'تطبيق', 'موقع'], actions: ['اختار', 'ابني', 'شارك'], hero: ['فكرتك', 'جاهزة'] }, beats: 6, handoff: { in: 'seam', out: 'seam' } },
   'claude-brief': { params: { text: 'زيّه', then: 'بس عنّي' }, beats: 5, handoff: { in: 'seam', out: 'seam' } },
+  'seam-wipe': { params: { text: 'الحل' }, beats: 3, handoff: { in: 'seam', out: 'seam' } },
   'follow-ending': { params: { imageData: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
     pill: 'الجزء القادم', headline: 'تابعني', sub: 'للمزيد' }, beats: 6, handoff: { in: 'captured-frame', out: 'follow-card' } },
 };
@@ -183,6 +184,33 @@ test('format-morph labels match format hits and the alpha aperture returns to it
     });
     assert.deepEqual(alpha, [0, 255], 'footage is revealed outside the 12px seam');
   } finally { await context.close(); }
+});
+
+test('seam-wipe opens out of the seam, lands its label on a brand slab, and hands off through the same seam', async t => {
+  const b = await sharedBrowser();
+  if (b.skip) return t.skip(b.skip);
+  for (const [params, beats] of [[{}, 1], [CASES['seam-wipe'].params, 3]]) {
+    const { context, page, meta } = await openPage(b.browser, 'seam-wipe', params);
+    try {
+      assert.equal(meta.alpha, true);
+      assert.equal(meta.beats, beats);
+      assert.equal(meta.cues[0].kind, 'whoosh');
+      if (params.text) {
+        const words = await page.evaluate(t => window.__scene.textAt(t).map(box => box.text), 1.6 * BEAT);
+        assert.deepEqual(words, ['الحل']);
+      }
+      await page.evaluate(() => window.__scene.frame(0, { samples: 3, grain: 0 }));
+      const first = await pixels(page);
+      await page.evaluate(i => window.__scene.frame(i, { samples: 3, grain: 0 }), meta.frames - 1);
+      assert.equal(await pixels(page), first, 'the wipe ends on exactly the seam it opened from');
+      const alpha = await page.evaluate(() => {
+        const ctx = document.getElementById('out').getContext('2d');
+        return [ctx.getImageData(540, 700, 1, 1).data[3], ctx.getImageData(540, 960, 1, 1).data[3]];
+      });
+      assert.deepEqual(alpha, [0, 255], 'footage shows outside the 12px seam');
+    } finally { await context.close(); }
+  }
+  await assert.rejects(probeScene({ scene: 'seam-wipe', params: { text: 'الحل', beats: 1 }, profile }), /SCENE_PARAM/);
 });
 
 test('claude-brief reveals two joined Arabic phrases and returns to its alpha seam', async t => {

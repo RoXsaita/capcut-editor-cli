@@ -20,6 +20,7 @@ its params changed.
 | Energy, a montage beat | `style-stinger` | a hard cut on either side |
 | Show a list of output formats | `format-morph` | footage revealed through its centre seam aperture, or `presentation: "overlay"` |
 | Reference-to-personal-result brief | `claude-brief` | footage revealed through its centre seam aperture, or `presentation: "overlay"` |
+| Chapter change between two shots | `seam-wipe` | the seam on both sides: a split-screen divider or a hard cut under the open band |
 | Sign-off | `dot-signature` | the end of the video |
 
 Both scenes accept `presentation: "overlay"` for transparent graphics bounded to x70–930/y230–600. Their default `full` presentation keeps the centre-seam aperture. `format-morph` also accepts an optional `imageData` PNG/JPEG base64 data URI: the captured result reflows continuously through its video, phone and browser viewports. The image is decoded during setup and travels with the params in the editable scene sidecar, with no external asset path required.
