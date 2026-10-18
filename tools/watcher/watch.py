@@ -22,6 +22,7 @@ import os
 import re
 import subprocess
 import time
+from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WINDOW_S = 900
@@ -49,7 +50,7 @@ def build_window(w, kfs, timeline, take, prev_summary, mode, kdir):
     content = [{"type": "text", "text": header + "\n\nTIMELINE\n" + "\n".join(tl_lines) + "\n\nKEYFRAMES"}]
     seen, n_images, ocr_chars = set(), 0, 0
     for k in kfs:
-        new = [l for l in k["ocr"] if len(l) >= 3 and l not in seen]
+        new = [ln for ln in k["ocr"] if len(ln) >= 3 and ln not in seen]
         seen.update(k["ocr"])
         text = " | ".join(new)
         if len(text) > MAX_OCR_CHARS:
@@ -59,7 +60,7 @@ def build_window(w, kfs, timeline, take, prev_summary, mode, kdir):
         label = f"{k['id']} {mmss(k['vt'])} [{k['app']}] {'+'.join(k['reasons'])}"
         content.append({"type": "text", "text": f"{label}{' (screenshot follows)' if with_image else ''}\nnew text: {text or '(none)'}"})
         if with_image:
-            b = base64.b64encode(open(os.path.join(kdir, f"{k['id']}.jpg"), "rb").read()).decode()
+            b = base64.b64encode(Path(kdir, f"{k['id']}.jpg").read_bytes()).decode()
             content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b}})
             n_images += 1
     return content, {"keyframes": len(kfs), "images": n_images, "ocr_chars": ocr_chars, "timeline_events": len(ev)}
@@ -146,9 +147,9 @@ def main():
     ap.add_argument("--mode", choices=("ocr", "images", "mixed"), default="mixed")
     ap.add_argument("--model", default="claude-haiku-5-5")
     a = ap.parse_args()
-    kfs = json.load(open(os.path.join(a.dir, "keyframes.json")))
-    timeline = json.load(open(os.path.join(a.dir, "timeline.json")))
-    system = open(os.path.join(HERE, "prompt.md")).read()
+    kfs = json.loads(Path(a.dir, "keyframes.json").read_text())
+    timeline = json.loads(Path(a.dir, "timeline.json").read_text())
+    system = Path(HERE, "prompt.md").read_text()
     take = timeline["take"]
     byid = {k["id"]: k for k in kfs}
     windows, prev = [], None
@@ -163,9 +164,9 @@ def main():
         windows.append({"window": w, "range": rng, "stats": stats, "usage": usage, "journal": j, "raw": raw})
         prev = (j or {}).get("summary")
         print(json.dumps({"take": take, "mode": a.mode, "window": rng, **stats, **usage}))
-    json.dump({"take": take, "mode": a.mode, "model": a.model, "windows": windows},
-              open(os.path.join(a.dir, f"journal-{a.mode}.json"), "w"), indent=1, ensure_ascii=False)
-    open(os.path.join(a.dir, f"journal-{a.mode}.md"), "w").write(render_md(take, windows, byid, a.mode))
+    Path(a.dir, f"journal-{a.mode}.json").write_text(json.dumps(
+        {"take": take, "mode": a.mode, "model": a.model, "windows": windows}, indent=1, ensure_ascii=False))
+    Path(a.dir, f"journal-{a.mode}.md").write_text(render_md(take, windows, byid, a.mode))
 
 
 if __name__ == "__main__":

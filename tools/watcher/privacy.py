@@ -21,6 +21,7 @@ Override or extend with ~/.config/capcutctl/watcher-denylist.json:
 import json
 import os
 import re
+from pathlib import Path
 
 APPS = {
     # password managers / keychain
@@ -48,7 +49,7 @@ def load():
     apps, rules = set(APPS), dict(OCR_RULES)
     path = os.path.expanduser("~/.config/capcutctl/watcher-denylist.json")
     if os.path.exists(path):
-        cfg = json.load(open(path))
+        cfg = json.loads(Path(path).read_text())
         if cfg.get("replace"):
             apps, rules = set(), {}
         apps |= set(cfg.get("apps", []))

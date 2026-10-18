@@ -15,6 +15,7 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -28,7 +29,7 @@ def main():
     ap.add_argument("--model", default="claude-haiku-5-5")
     a = ap.parse_args()
     summary_path = os.path.join(a.out, "summary.json")
-    summary = json.load(open(summary_path)) if os.path.exists(summary_path) else {}
+    summary = json.loads(Path(summary_path).read_text()) if os.path.exists(summary_path) else {}
     for take in a.takes:
         name = os.path.basename(take.rstrip("/"))
         dst = os.path.join(a.out, name)
@@ -40,13 +41,13 @@ def main():
         for mode in a.modes.split(","):
             w = subprocess.run([sys.executable, os.path.join(HERE, "watch.py"), dst, "--mode", mode,
                                 "--model", a.model], check=True, capture_output=True, text=True)
-            entry["modes"][mode] = [json.loads(l) for l in w.stdout.splitlines() if l.startswith("{")]
+            entry["modes"][mode] = [json.loads(ln) for ln in w.stdout.splitlines() if ln.startswith("{")]
         summary[name] = entry
         for mode, wins in entry["modes"].items():
             for w in wins:
                 print(f"{name} {mode} {w['window']}: {w['keyframes']} kf, {w['images']} img, "
                       f"{w['input_tokens']:,} in, {w['output_tokens']:,} out, ${w['cost_usd_list']:.4f}, {w['wall_s']}s")
-    json.dump(summary, open(summary_path, "w"), indent=1)
+    Path(summary_path).write_text(json.dumps(summary, indent=1))
 
 
 if __name__ == "__main__":

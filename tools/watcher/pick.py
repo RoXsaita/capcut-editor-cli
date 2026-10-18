@@ -29,9 +29,10 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import privacy  # noqa: E402
+import privacy
 
 BIG_BLOCKS = 12      # of 64 (8x8 mask)
 BIG_SCORE = 7.0      # ~99th percentile on 165029
@@ -58,14 +59,14 @@ def take_start(take_dir):
 
 
 def load_take(take_dir):
-    session = json.load(open(os.path.join(take_dir, "session.json")))
+    session = json.loads(Path(take_dir, "session.json").read_text())
     t0 = session["clock"]["first_frame_host"]
     frames = []
-    for line in open(os.path.join(take_dir, "change.ndjson")):
+    for line in Path(take_dir, "change.ndjson").read_text().splitlines():
         d = json.loads(line)
         frames.append((d["vt"], d["score"], d["blocks"], int(d["mask"], 16)))
     events = []
-    for line in open(os.path.join(take_dir, "trace.ndjson")):
+    for line in Path(take_dir, "trace.ndjson").read_text().splitlines():
         d = json.loads(line)
         if d.get("type") in ("focus_change", "typing_burst", "scroll_burst", "click", "drag", "session_end"):
             d.pop("samples", None)
@@ -161,7 +162,7 @@ def candidates(frames, events, duration):
     # drift: long gaps where the screen still changed (agent output streaming in)
     drift = []
     prev = 0.0
-    for c in out + [{"vt": duration}]:
+    for c in [*out, {"vt": duration}]:
         t = prev + DRIFT_GAP_S
         while c["vt"] - t > 10:
             if union_mask(frames, idx, prev, t) >= DRIFT_MIN_BLOCKS:
@@ -202,9 +203,7 @@ def frontmost(events, t):
     for e in events:
         if e["vt"] > t:
             break
-        if e["type"] == "focus_change":
-            app = e["app"]
-        elif e["type"] == "click" and e.get("app"):
+        if e["type"] == "focus_change" or (e["type"] == "click" and e.get("app")):
             app = e["app"]
     return app
 
@@ -257,7 +256,7 @@ def extract(video, vt, dst):
 
 
 def ocr_lines(rec, min_conf=0.3):
-    return [l["text"].strip() for l in rec["lines"] if l["conf"] >= min_conf and l["text"].strip()]
+    return [ln["text"].strip() for ln in rec["lines"] if ln["conf"] >= min_conf and ln["text"].strip()]
 
 
 def main():
@@ -270,7 +269,7 @@ def main():
     name = os.path.basename(take)
     timing = {}
     t = time.time()
-    session, frames, events, duration = load_take(take)
+    _session, frames, events, duration = load_take(take)
     apps, rules = privacy.load()
     cands, idx = candidates(frames, events, duration)
     merged = merge(cands)
@@ -325,7 +324,7 @@ def main():
         recs = {}
         if gated:
             res = subprocess.run([exe] + [k["tmp"] for k in gated], check=True, capture_output=True, text=True)
-            recs = {json.loads(l)["file"]: json.loads(l) for l in res.stdout.splitlines()}
+            recs = {json.loads(ln)["file"]: json.loads(ln) for ln in res.stdout.splitlines()}
         timing["ocr_s"] = round(time.time() - t, 2)
         final, prev_lines = [], set()
         for k in gated:
@@ -368,11 +367,12 @@ def main():
     filtered += tl_filtered
     stats["filtered"] = len(filtered)
     stats["timing"] = timing
-    json.dump(out, open(os.path.join(a.out, "keyframes.json"), "w"), indent=1, ensure_ascii=False)
-    json.dump({"take": name, "start": start.isoformat() if start else None, "duration_s": round(duration, 1),
-               "events": tl}, open(os.path.join(a.out, "timeline.json"), "w"), indent=1, ensure_ascii=False)
-    json.dump(sorted(filtered, key=lambda f: f["vt"]), open(os.path.join(a.out, "privacy.json"), "w"), indent=1)
-    json.dump(stats, open(os.path.join(a.out, "pick-stats.json"), "w"), indent=1)
+    Path(a.out, "keyframes.json").write_text(json.dumps(out, indent=1, ensure_ascii=False))
+    Path(a.out, "timeline.json").write_text(json.dumps(
+        {"take": name, "start": start.isoformat() if start else None, "duration_s": round(duration, 1),
+         "events": tl}, indent=1, ensure_ascii=False))
+    Path(a.out, "privacy.json").write_text(json.dumps(sorted(filtered, key=lambda f: f["vt"]), indent=1))
+    Path(a.out, "pick-stats.json").write_text(json.dumps(stats, indent=1))
     print(json.dumps(stats))
 
 

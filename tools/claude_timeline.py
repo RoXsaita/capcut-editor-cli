@@ -29,10 +29,12 @@ import argparse
 import bisect
 import glob
 import json
+import math
 import os
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 RECORDINGS = os.path.expanduser("~/Desktop/Screen Recordings")
 PROJECTS = os.path.expanduser("~/.claude/projects")
@@ -79,7 +81,7 @@ def find_take(arg):
     for c in cand:
         if os.path.isfile(os.path.join(c, "session.json")):
             return os.path.abspath(c)
-    sys.exit("no take %r (looked in %s)" % (arg, RECORDINGS))
+    sys.exit(f"no take {arg!r} (looked in {RECORDINGS})")
 
 
 def last_json_line(path, tail=65536):
@@ -97,7 +99,7 @@ def last_json_line(path, tail=65536):
 
 def take_clock(take):
     """-> (t0_host, wall0 (aware utc), duration_s)."""
-    sess = json.load(open(os.path.join(take, "session.json")))
+    sess = json.loads(Path(take, "session.json").read_text())
     t0 = sess["clock"]["first_frame_host"]
     name = os.path.basename(take.rstrip("/"))
     m = re.search(r"(\d{8})-(\d{6})", name)
@@ -105,13 +107,13 @@ def take_clock(take):
     wall0 = None
     mp4 = os.path.join(take, sess.get("video") or "screen.mp4")
     if os.path.exists(mp4):
-        b = datetime.fromtimestamp(os.stat(mp4).st_birthtime, timezone.utc)
+        b = datetime.fromtimestamp(os.stat(mp4).st_birthtime, UTC)
         if folder is None or -2 <= (b - folder).total_seconds() <= 5:
             wall0 = b          # file created as capture starts; ~0.1 s before the first frame
     if wall0 is None:
         if folder is None:
             sys.exit("cannot place the take on the wall clock (no usable birth time or folder stamp)")
-        wall0 = folder.astimezone(timezone.utc) + timedelta(seconds=0.4)   # folder name is second-truncated
+        wall0 = folder.astimezone(UTC) + timedelta(seconds=0.4)   # folder name is second-truncated
     dur = 0.0
     fr = os.path.join(take, "frames.ndjson")
     if os.path.exists(fr):
@@ -159,7 +161,7 @@ def load_meta():
     by_cli = {}
     for f in glob.glob(os.path.join(SESSIONS, "*", "*", "local_*.json")):
         try:
-            d = json.load(open(f))
+            d = json.loads(Path(f).read_text())
         except (OSError, ValueError):
             continue
         cli = d.get("cliSessionId")
@@ -200,9 +202,9 @@ def tool_line(name, inp):
         v = inp.get(k)
         if isinstance(v, str) and v:
             if name == "Bash" and inp.get("description"):
-                return "%s: %s  # %s" % (name, v, inp["description"])
-            return "%s %s: %s" % (name, k, v)
-    return "%s %s" % (name, json.dumps(inp, ensure_ascii=False)[:300])
+                return "{}: {}  # {}".format(name, v, inp["description"])
+            return f"{name} {k}: {v}"
+    return f"{name} {json.dumps(inp, ensure_ascii=False)[:300]}"
 
 
 def events_of(path, w_lo, w_hi):
@@ -223,7 +225,7 @@ def events_of(path, w_lo, w_hi):
             t = d.get("type")
             if t not in ("user", "assistant") or not ts:
                 continue
-            wall = datetime.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc) + \
+            wall = datetime.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=UTC) + \
                 timedelta(seconds=float("0" + ts[19:].rstrip("Z")) if len(ts) > 20 else 0)
             if wall < w_lo or wall > w_hi:
                 continue
@@ -271,7 +273,7 @@ def session_of(path, meta):
         title = m["title"] or m["name"] or sid[:8]
         short = m["name"] or re.sub(r"\W+", "-", title.lower()).strip("-")[:24]
     else:
-        title = short = "cli:%s/%s" % (proj.rsplit("-", 1)[-1], sid[:8])
+        title = short = "cli:{}/{}".format(proj.rsplit("-", 1)[-1], sid[:8])
     if sub:
         title, short = title + " >agent", short + ">agent"
     return sid, title, short
@@ -280,7 +282,8 @@ def session_of(path, meta):
 # ---------------------------------------------------------------- main
 
 def fmt_vt(v):
-    return "%d:%02d:%02d" % (v // 3600, v % 3600 // 60, v % 60) if v >= 3600 else "%d:%02d" % (v // 60, v % 60)
+    v = math.floor(v)
+    return f"{v // 3600:d}:{v % 3600 // 60:02d}:{v % 60:02d}" if v >= 3600 else f"{v // 60:d}:{v % 60:02d}"
 
 
 def main():
@@ -340,16 +343,16 @@ def main():
            and (sess is None or sess in (r["session"] + " " + r["name"] + " " + r["cli"]).lower())
            and all(n in r["text"].lower() or n in r["session"].lower() for n in needles)]
 
-    print("# %s  wall0=%s  duration=%s  rows=%d  matched=%d  -> %s"
-          % (os.path.basename(take), wall0.astimezone().strftime("%H:%M:%S"), fmt_vt(dur), len(rows), len(sel), OUT),
-          file=sys.stderr)
+    print(f"# {os.path.basename(take)}  wall0={wall0.astimezone().strftime('%H:%M:%S')}  duration={fmt_vt(dur)}"
+          f"  rows={len(rows)}  matched={len(sel)}  -> {OUT}", file=sys.stderr)
     for r in sel[:a.limit]:
         snip = one_line(r["text"])
         snip = snip[:SNIP] + ("…" if len(snip) > SNIP else "")
-        print("%8.1f %7s %s %s %-30.30s %-6s %s%s" % (r["vt"], fmt_vt(r["vt"]), r["wall"], "*" if r["on_screen"] else " ",
-                                                       r["session"], r["kind"], snip, "  [redacted]" if r["redacted"] else ""))
+        mark = "*" if r["on_screen"] else " "
+        print(f"{r['vt']:8.1f} {fmt_vt(r['vt']):>7} {r['wall']} {mark} {r['session']:<30.30} {r['kind']:<6} {snip}"
+              + ("  [redacted]" if r["redacted"] else ""))
     if len(sel) > a.limit:
-        print("# … %d more (raise --limit, or narrow with --grep/--session/--from/--to)" % (len(sel) - a.limit), file=sys.stderr)
+        print(f"# … {len(sel) - a.limit} more (raise --limit, or narrow with --grep/--session/--from/--to)", file=sys.stderr)
 
 
 if __name__ == "__main__":
