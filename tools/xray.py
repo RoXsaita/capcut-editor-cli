@@ -81,7 +81,8 @@ NOT_CHECKED = [
 # The finest time each frame-timed check must resolve, in seconds. A scan with a coarser frame
 # step (a ~6 fps proxy) cannot tell a one-frame flash from a fade, a repeated frame from the
 # proxy's own sampling, or a seam from motion, so what these checks flag there is a NOTE, never
-# a FAIL. Audio, size and layout checks do not depend on the frame rate. Full rate is >= 24 fps.
+# a FAIL; nor is its size and rate the delivery format. Audio and layout checks do not depend on
+# the frame rate. Full rate is >= 24 fps.
 FRAME_EXACT_S = 1 / 24
 RESOLUTION_S = {
     "video.black_frames": FRAME_EXACT_S,              # a flash of <=3 frames, not a fade dip
@@ -89,6 +90,7 @@ RESOLUTION_S = {
     "video.one_or_two_frame_glitch": FRAME_EXACT_S,
     "video.stutter": FRAME_EXACT_S,                   # one repeated frame
     "draft.visible_cuts": FRAME_EXACT_S,              # a cut within +-1 frame of a draft seam
+    "export.canvas": FRAME_EXACT_S,                   # the delivery format: under 24 fps it is a proxy
 }
 
 
@@ -1669,9 +1671,10 @@ def cmd_selftest(_args):
         check("true peak measured", lo["true_peak_dbtp"] is not None and lo["true_peak_dbtp"] > -1.0, f"{lo['true_peak_dbtp']}")
     noted = proxy_notes([{"property": "video.one_or_two_frame_glitch", "verdict": "FAIL", "detail": "1 event(s)"},
                          {"property": "video.stutter", "verdict": "UNKNOWN", "detail": "1 event(s)"},
+                         {"property": "export.canvas", "verdict": "FAIL", "detail": "360x640 at 6 fps"},
                          {"property": "audio.clipping", "verdict": "FAIL", "detail": "1 stretch"}], 6.0)
-    check("a 6 fps proxy notes frame-timed findings and keeps the audio FAIL",
-          [v["verdict"] for v in noted] == ["NOTE", "NOTE", "FAIL"] and "proxy-only at 6 fps" in noted[0]["detail"],
+    check("a 6 fps proxy notes frame-timed findings and its format, and keeps the audio FAIL",
+          [v["verdict"] for v in noted] == ["NOTE", "NOTE", "NOTE", "FAIL"] and "proxy-only at 6 fps" in noted[0]["detail"],
           f"{[v['verdict'] for v in noted]}")
     kept = proxy_notes([{"property": "video.white_flash", "verdict": "FAIL", "detail": "x"}], 30000 / 1001)
     check("a full-rate scan keeps the FAIL", kept[0]["verdict"] == "FAIL")

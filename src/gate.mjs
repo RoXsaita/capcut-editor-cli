@@ -453,14 +453,21 @@ export function speechGates(speech, { fin = {}, stop, enderAt = null, pauses = [
 }
 
 const ratio = text => { const [a, b] = String(text || '').split('/').map(Number); return b ? a / b : a; };
+// Under this rate the X-ray scanned a proxy (xray.py RESOLUTION_S), not the delivery file.
+const FULL_RATE_FPS = 24;
 
 /** The delivery file: canvas size and frame rate, an audio stream, and no silence before the ender. */
 export function deliveryGates(xray, { profile, fin = {}, stop }) {
   const v = xray.info?.video || {};
   const want = profile.canvas;
   const fps = ratio(v.avg_frame_rate || v.r_frame_rate);
-  const out = [finalCheck('export-format', Number(v.width) === want.width && Number(v.height) === want.height && Math.abs(fps - want.fps) < 0.02,
-    `${v.width}x${v.height} at ${r2(fps)} fps (want ${want.width}x${want.height} at ${want.fps})`)];
+  const format = finalCheck('export-format', Number(v.width) === want.width && Number(v.height) === want.height && Math.abs(fps - want.fps) < 0.02,
+    `${v.width}x${v.height} at ${r2(fps)} fps (want ${want.width}x${want.height} at ${want.fps})`);
+  if (!format.ok && fps > 0 && fps < FULL_RATE_FPS) {
+    format.level = 'NOTE';
+    format.message += '; proxy-only, verify on the full-rate export';
+  }
+  const out = [format];
   const audio = xray.audio || {};
   if (!audio.present) return [...out, finalCheck('export-audio', false, 'the export has no audio stream')];
   // A dropout is silence with sound after it; silence that runs into the (silent) ender is the ending.

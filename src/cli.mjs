@@ -61,7 +61,8 @@ Usage:
                         frame ledger, PASS/FAIL/UNKNOWN/NOTE/NOT CHECKED verdicts, score.txt,
                         overview sheets and a ranked queue of windows to look at. Exit 1 on FAIL.
                         On a low-fps proxy (under 24 fps) frame-timed findings (flashes, glitches,
-                        stutter, seams) are NOTE: proxy-only, verify on the full-rate export.
+                        stutter, seams) and the export size/rate are NOTE: proxy-only, verify on
+                        the full-rate export.
   capcutctl xray frame VIDEO [--frame N|--t S] [--crop X,Y,W,H] [--out PNG] [--xray DIR]
   capcutctl xray window VIDEO [--frames A-B|--from S --to S] [--crop X,Y,W,H] [--out PNG] [--xray DIR]
                       — exact frames, verified by PTS, at native resolution or as a strip.

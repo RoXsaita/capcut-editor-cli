@@ -87,3 +87,12 @@ test('integrated loudness blocks only outside -14 ±2.5 LU', () => {
   assert.equal(at(-11).ok, false);
   assert.equal(at(null).ok, false, 'unmeasured is not a pass');
 });
+
+test('a low-fps proxy notes the format instead of failing it; a full-rate wrong format still fails', () => {
+  const proxy = byId(exportGates(xray({ info: { video: { width: 360, height: 640, avg_frame_rate: '6/1' }, format: { duration: '20' } } }), null, { profile }));
+  assert.equal(proxy['export-format'].ok, false);
+  assert.equal(proxy['export-format'].level, 'NOTE');
+  assert.match(proxy['export-format'].message, /proxy-only, verify on the full-rate export/);
+  const wrong = byId(exportGates(xray({ info: { video: { width: 720, height: 1280, avg_frame_rate: '25/1' }, format: { duration: '20' } } }), null, { profile }));
+  assert.equal(wrong['export-format'].level, 'FAIL');
+});

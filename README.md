@@ -74,8 +74,10 @@ your own `~/.config/capcutctl/profile.json` merged over it (see [Your profile](#
 Gate levels: **FAIL** blocks (exit 1), **WARN** must be named in the hand-off, and **NOTE** neither
 blocks nor warns. NOTEs come from `gate --xray DIR` when the X-ray scanned a low-fps proxy: a check
 that needs finer timing than the scan's frame step (a one-frame flash or glitch, a repeated frame, a
-frame-exact seam) cannot be trusted at about 6 fps, so its finding reads "proxy-only, verify on the
-full-rate export" instead of failing. A scan at 24 fps or more keeps those checks at FAIL.
+frame-exact seam) cannot be trusted at about 6 fps, and a proxy's size and frame rate are not the
+delivery format, so those findings read "proxy-only, verify on the full-rate export" instead of
+failing. A scan at 24 fps or more keeps all of them at FAIL. Audio checks (peak, clipping, loudness)
+still judge the proxy's own audio.
 
 ## Motion graphics
 
