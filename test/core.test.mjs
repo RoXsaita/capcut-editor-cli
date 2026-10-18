@@ -154,6 +154,31 @@ test('identical CapCut material duplicates warn while conflicting duplicates fai
   assert.ok(failure.issues.some(item => item.code === 'CONFLICTING_MATERIAL_ID'));
 });
 
+test('sync merges a duplicate whose duration CapCut re-probed by one frame, not a real collision', () => {
+  const fx = fixture({ drift: false });
+  for (const dir of [fx.project, fx.timelineDir]) {
+    const doc = readJson(path.join(dir, 'draft_info.json'));
+    const copy = structuredClone(doc.materials.videos[0]);
+    copy.duration += 33_333;
+    doc.materials.videos.push(copy);
+    for (const name of ['draft_info.json', 'draft_info.json.bak', 'template-2.tmp']) fs.writeFileSync(path.join(dir, name), stableJson(doc));
+  }
+  assert.ok(doctor(fx.project).issues.some(item => item.code === 'CONFLICTING_MATERIAL_ID'));
+  const result = syncMirrors(fx.project, { forceRunning: true });
+  assert.equal(result.committed, true);
+  assert.ok(result.mergedDuplicateMaterials >= 1);
+  assert.equal(doctor(fx.project).issues.filter(item => item.code === 'CONFLICTING_MATERIAL_ID').length, 0);
+
+  const far = fixture({ drift: false });
+  const file = path.join(far.project, 'draft_info.json');
+  const doc = readJson(file);
+  const copy = structuredClone(doc.materials.videos[0]);
+  copy.duration += 1_000_000;
+  doc.materials.videos.push(copy);
+  for (const name of ['draft_info.json', 'draft_info.json.bak', 'template-2.tmp']) fs.writeFileSync(path.join(far.project, name), stableJson(doc));
+  assert.throws(() => syncMirrors(far.project, { forceRunning: true }));
+});
+
 test('sync repairs each document mirror without flattening root into timeline', () => {
   const fx = fixture();
   const rootName = readJson(path.join(fx.project, 'draft_info.json')).name;

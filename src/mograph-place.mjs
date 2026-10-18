@@ -16,6 +16,10 @@
  *
  * Lanes: graphics sit on `mograph-N` video tracks at the top of the stack, above the face and
  * the layout plates. The first lane with room is reused; a clash opens the next lane.
+ *
+ * Levels: a replaced id keeps the volume and fade its picture and cue had (a pop turned down in
+ * CapCut stays down after `mograph rerender` or a rebuild), unless the op names clipVolume /
+ * sfxVolume itself.
  */
 import path from 'node:path';
 import { CapcutError, seededId } from './core.mjs';
@@ -24,6 +28,7 @@ import { insertOverlayTrack, layoutAudit, renumberTracks } from './layouts.mjs';
 import { audioSegment, ensureAudio, ensureAudioTrack, sfxPresets, unavailableSfx } from './polish.mjs';
 import { placeStill } from './signature.mjs';
 import { placementFor } from './mograph-geometry.mjs';
+import { carryLevels, snapshotLevels } from './levels.mjs';
 import { loadProfile } from './profile.mjs';
 
 const US = s => Math.round(Number(s) * 1e6);
@@ -31,6 +36,14 @@ const S = us => (us || 0) / 1e6;
 const r3 = n => Math.round(n * 1000) / 1000;
 export const MOGRAPH_LANE = /^mograph-\d+$/;
 export const MOGRAPH_SFX_LANE = 'mograph-sfx';
+export const FOLLOW_ENDING_ID = 'follow-ender';
+
+/** Only the ending command's owned scene extends the principal edit. */
+export function isFollowEnding(doc, segment) {
+  return segment.desc === `mograph:${FOLLOW_ENDING_ID}`
+    && doc.materials?.videos?.some(m => m.id === segment.material_id
+      && m.capcutctl_mograph?.template === 'scene:follow-ending');
+}
 
 export const mographDesc = id => `mograph:${id}`;
 export const mographSfxDesc = id => `mograph:sfx:${id}`;
@@ -96,7 +109,11 @@ export function opMographPlace(doc, op, context = {}) {
   }
   const at = Number(op.at), duration = Number(op.duration);
   if (!(at >= 0) || !(duration > 0)) throw new CapcutError('mograph.place: bad at/duration.', { code: 'BAD_TIME', exitCode: 2 });
+  const owns = s => s.desc === mographDesc(op.id) || s.desc === mographSfxDesc(op.id);
+  // resetLevels opts back into the palette levels instead of carrying hand-set ones.
+  const levels = op.resetLevels ? [] : snapshotLevels(doc, owns);
   const replaced = removeOwned(doc, op.id);
+  const isScene = String(op.template || '').startsWith('scene:');
   const cc = doc.canvas_config || { width: 1080, height: 1920 };
   const geo = placementFor(box, { width: cc.width || 1080, height: cc.height || 1920 }, op.renderScale || 1);
   const atUs = US(at), durUs = US(duration);
@@ -116,7 +133,7 @@ export function opMographPlace(doc, op, context = {}) {
   } else if (op.format === 'prores') {
     const added = opClipAdd(doc, {
       op: 'clip.add', media: path.resolve(op.file), at, duration, track: lane, generated: true,
-      width: geo.width, height: geo.height, mediaDuration: durUs, volume: op.clipVolume ?? 0, desc: mographDesc(op.id),
+      width: geo.width, height: geo.height, mediaDuration: durUs, volume: op.clipVolume ?? (isScene ? 1 : 0), desc: mographDesc(op.id),
       forceNewMaterial: true, materialId: mint('material'), id: mint('segment'), __seed: seed,
     }, context);
     segment = doc.tracks.flatMap(t => t.segments || []).find(s => s.id === added.id);
@@ -126,7 +143,7 @@ export function opMographPlace(doc, op, context = {}) {
     if (material) {
       material.capcutctl_mograph = { template: op.template || null, fingerprint: op.fingerprint || null,
         importVerified: op.importVerified === true, box,
-        ...(String(op.template || '').startsWith('scene:') ? { scene: true } : {}) };
+        ...(isScene ? { scene: true } : {}) };
     }
   } else {
     throw new CapcutError(`mograph.place: format ${op.format} cannot be placed in CapCut (use prores or png-still).`,
@@ -154,6 +171,8 @@ export function opMographPlace(doc, op, context = {}) {
       sfx = { name, unavailable: true };
     }
   }
+  const carried = carryLevels(doc, levels, { owns, mint: key => mint(`carry:${key}`),
+    keepVolume: s => (s.desc === mographSfxDesc(op.id) ? op.sfxVolume : op.clipVolume) == null });
   renumberTracks(doc);
   if (atUs + durUs > (doc.duration || 0)) doc.duration = atUs + durUs;
   const profile = loadProfile();
@@ -169,6 +188,7 @@ export function opMographPlace(doc, op, context = {}) {
     scale: r3(geo.scale),
     transform: { x: r3(geo.x), y: r3(geo.y) },
     replaced,
+    ...(carried.length ? { carried } : {}),
     sfx,
     ...(sfx?.unavailable ? { unavailableSfx: unavailableSfx() } : {}),
     importVerified: op.importVerified === true,
@@ -176,14 +196,17 @@ export function opMographPlace(doc, op, context = {}) {
   };
 }
 
-/** Remove every placed graphic whose id is not in `keep` — so a rebuild drops graphics the plan no longer names. */
+/**
+ * Remove every placed graphic whose id is not in `keep` — so a rebuild drops graphics the plan no
+ * longer names. The follow ending is kept unless `dropEnding` (edit.json `"ending": false`).
+ */
 export function opMographPrune(doc, op = {}) {
   const keep = new Set(op.keep || []);
   const ids = new Set();
   for (const track of doc.tracks) {
     for (const s of track.segments || []) {
       const m = /^mograph:(?:sfx:)?(.+)$/.exec(s.desc || '');
-      if (m && !keep.has(m[1])) ids.add(m[1]);
+      if (m && !keep.has(m[1]) && (op.dropEnding || !isFollowEnding(doc, s))) ids.add(m[1]);
     }
   }
   for (const id of ids) removeOwned(doc, id);

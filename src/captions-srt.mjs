@@ -1,4 +1,4 @@
-import { CapcutError, clone, contentEndUs, loadPreset, seededId, localizeMedia } from './core.mjs';
+import { CapcutError, clone, principalEndUs, loadPreset, seededId, localizeMedia } from './core.mjs';
 import { CAPTION_FONT, houseStyle } from './captions.mjs';
 
 const US = seconds => Math.round(Number(seconds) * 1e6);
@@ -107,7 +107,7 @@ export function opCaption(doc, op = {}, context = {}) {
     throw new CapcutError('caption --y must be between -2 and 2.', { code: 'CAPTION_BAD_STYLE', exitCode: 2 });
   }
 
-  const end = contentEndUs(doc, context.projectDir);
+  const end = principalEndUs(doc, context.projectDir);
   if (end > 0 && cues.at(-1).endUs > end + 1000) {
     throw new CapcutError(`Last caption ends at ${S(cues.at(-1).endUs).toFixed(3)}s, after content ends at ${S(end).toFixed(3)}s.`, {
       code: 'CAPTION_PAST_END', exitCode: 2

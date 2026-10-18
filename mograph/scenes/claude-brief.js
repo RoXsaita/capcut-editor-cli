@@ -69,10 +69,8 @@ SCENE.define({
       }
       return;
     }
-    const seam = H / 2, end = K.duration - 1.5 / K.FPS;
-    const open = E.outExpo(prog(t, 0, b(0.6)));
-    const close = E.inExpo(prog(t, end - b(0.52), end));
-    const half = t <= 0.5 / K.FPS || t >= end ? 0 : seam * open * (1 - close);
+    const seam = H / 2;
+    const half = K.aperture(t);
     const cx = K.safe.x + K.safe.w / 2;
     const firstY = K.safe.y + K.safe.h * 0.42;
     const secondY = firstY + 270;
@@ -93,14 +91,6 @@ SCENE.define({
     K.text(ctx, s.then, cx, settle, { align: 'center' });
     ctx.restore();
 
-    const lineA = K.clamp(1 - E.outExpo(prog(t, b(0.1), b(0.7)))
-      + E.outExpo(prog(t, K.duration - b(0.66), K.duration - b(0.26))) + (half < 4 ? 1 : 0));
-    if (lineA > 0.01) {
-      ctx.fillStyle = K.rgba(s.transition, lineA); ctx.fillRect(0, seam - 6, W, 12);
-    }
-    if (half > 1 && half < seam - 1) {
-      ctx.fillStyle = K.color(s.transition);
-      ctx.fillRect(0, seam - half - 3, W, 6); ctx.fillRect(0, seam + half - 3, W, 6);
-    }
+    K.seamMarks(ctx, t, half, s.transition);
   },
 });

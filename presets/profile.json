@@ -52,7 +52,7 @@
   },
 
   "brand": {
-    "_about": "Who the videos are from and the rules that make them feel like one channel. Skills read this section; the engine does not. Fill it in your user profile.",
+    "_about": "Who the videos are from and the rules that make them feel like one channel. The ending command can use your handle/name. Fill it in your user profile.",
     "name": null,
     "handle": null,
     "languages": ["en"],
@@ -65,6 +65,19 @@
       "Real material over illustration, illustration over stock: captured UI, real numbers, real frames."
     ],
     "avoid": []
+  },
+
+  "ending": {
+    "_note": "The follow ending: auto appends it on every build; copy and face position. Keep your frame path and personal copy in your private profile. --frame overrides frame per video; coordinates are canvas pixels.",
+    "auto": false,
+    "frame": null,
+    "faceX": 540,
+    "faceY": 920,
+    "faceScale": 0.46,
+    "pill": "Next up",
+    "headline": "Follow",
+    "sub": null,
+    "badge": "2"
   },
 
   "styles": {
@@ -160,6 +173,17 @@
     "templateRepeatGap": 10,
     "entranceMinGapFrames": 6,
     "brandChipLogoGap": 1.0
+  },
+
+  "final": {
+    "_note": "The final-export gates (gate, and export through it). Speech numbers are measured on the export's own transcript (xray scan --speech), not the draft.",
+    "captionsRequired": true,
+    "firstWordBy": 0.5,
+    "maxSpeechGap": 0.7,
+    "lastWordTail": 0.08,
+    "loudnessTolerance": 2.5,
+    "maxLoudnessJump": 6,
+    "lengthWarnAbove": 90
   },
 
   "grammar": {
