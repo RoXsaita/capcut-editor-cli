@@ -9,9 +9,10 @@
  *   picture   reviewed shots (once) → layout auto → camera (stress pushes, optional reframe/cursor)
  *   graphics  mograph renders placed on their words, full-frame scenes cut in on theirs (their
  *             sound is inside the clip) → logo pops (or a brand-chip when the art is
- *             missing) → endcard
+ *             missing) → endcard → the follow ending (profile ending.auto or edit.json `ending`),
+ *             appended after the last frame, opening on that frame
  *   sound     motivated seams + SFX → music bed aligned to the graphics and picture changes →
- *             duck under speech → loudness
+ *             loudness (true peak held under the ceiling by lowering levels) → duck under speech
  *   gate      the blocking ready-to-post check
  *
  * Every stage owns its output (mograph:*, sig:*, polish:*, finish:music), so running `build`
@@ -22,7 +23,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { CapcutError, stableJson, applySpec, loadProject, readJson } from './core.mjs';
+import { CapcutError, stableJson, applySpec, loadProject, readJson, resolveMediaPath } from './core.mjs';
 import { findWordsFile, resolveAnchors } from './anchors.mjs';
 import { layoutAt } from './mograph-place.mjs';
 import { safeZoneViolations } from './mograph-geometry.mjs';
@@ -32,6 +33,7 @@ import { firstPictureProof } from './finish.mjs';
 import { gateReport, writeGateRecord } from './gate.mjs';
 
 export const EDIT_PLAN_VERSION = 1;
+const ENDING_KEYS = new Set(['frame', 'noSfx', 'pill', 'headline', 'sub', 'badge', 'faceX', 'faceY', 'faceScale']);
 const r3 = n => Math.round(n * 1000) / 1000;
 
 const fail = (code, message, details) => { throw new CapcutError(message, { code, exitCode: 2, details }); };
@@ -46,7 +48,7 @@ function workingDoc(projectDir) {
 export function normalizePlan(raw, { baseDir = process.cwd() } = {}) {
   if (!raw || typeof raw !== 'object') fail('PLAN_INVALID', 'edit plan must be a JSON object');
   if (raw.version !== EDIT_PLAN_VERSION) fail('PLAN_VERSION', `edit plan version must be ${EDIT_PLAN_VERSION}`);
-  const known = new Set(['version', 'profile', 'style', 'words', 'shots', 'layout', 'camera', 'graphics', 'scenes', 'logos', 'endcard', 'sound', 'notes']);
+  const known = new Set(['version', 'profile', 'style', 'words', 'shots', 'layout', 'camera', 'graphics', 'scenes', 'logos', 'endcard', 'ending', 'sound', 'notes']);
   const unknown = Object.keys(raw).filter(k => !known.has(k));
   if (unknown.length) fail('PLAN_INVALID', `unknown edit plan keys: ${unknown.join(', ')}`);
   const abs = file => (file ? path.resolve(baseDir, String(file).replace(/^~(?=$|\/)/, process.env.HOME || '~')) : null);
@@ -69,6 +71,13 @@ export function normalizePlan(raw, { baseDir = process.cwd() } = {}) {
   const ids = [...graphics, ...scenes].map(g => g.id);
   const dup = ids.find((id, i) => ids.indexOf(id) !== i);
   if (dup) fail('PLAN_INVALID', `duplicate graphic/scene id "${dup}"`);
+  let ending = raw.ending === undefined ? null : raw.ending;
+  if (ending !== null && typeof ending !== 'boolean') {
+    if (typeof ending !== 'object' || Array.isArray(ending)) fail('PLAN_INVALID', 'ending must be true, false or an object');
+    const bad = Object.keys(ending).filter(k => !ENDING_KEYS.has(k));
+    if (bad.length) fail('PLAN_INVALID', `unknown ending keys: ${bad.join(', ')}`);
+    ending = { ...ending, ...(ending.frame ? { frame: abs(ending.frame) } : {}) };
+  }
   const sound = { seams: 'motivated', music: false, duck: true, loudness: true, ...(raw.sound || {}) };
   if (sound.music && typeof sound.music === 'object' && sound.music.file) sound.music = { ...sound.music, file: abs(sound.music.file) };
   return {
@@ -83,6 +92,7 @@ export function normalizePlan(raw, { baseDir = process.cwd() } = {}) {
     scenes,
     logos: raw.logos === undefined ? 'auto' : raw.logos,
     endcard: raw.endcard === undefined ? null : raw.endcard,
+    ending,
     sound,
   };
 }
@@ -93,17 +103,23 @@ export function readEditPlan(file) {
   return normalizePlan(readJson(resolved), { baseDir: path.dirname(resolved) });
 }
 
-function principalSignature(doc) {
+function principalSignature(doc, projectDir = null) {
   const { track } = principalTrack(doc);
-  return (track.segments || []).map(s => [s.material_id, s.source_timerange?.start, s.source_timerange?.duration,
+  const media = new Map((doc.materials?.videos || []).map(m => [m.id, m.path]));
+  // A relink keeps the material id; the file stamp is what tells the ending its frame changed.
+  const stamp = id => {
+    try { const st = fs.statSync(resolveMediaPath(media.get(id), projectDir)); return `${st.size}@${st.mtimeMs}`; }
+    catch { return ''; }
+  };
+  return (track.segments || []).map(s => [s.material_id, stamp(s.material_id), s.source_timerange?.start, s.source_timerange?.duration,
     s.target_timerange?.start, s.target_timerange?.duration].join(':')).join('|');
 }
 
-function planHash(plan, profile, doc, wordsFile, templateHashes) {
+function planHash(plan, profile, doc, wordsFile, templateHashes, projectDir = null) {
   let wordsStamp = null;
   if (wordsFile && fs.existsSync(wordsFile)) { const st = fs.statSync(wordsFile); wordsStamp = `${st.size}:${st.mtimeMs}`; }
   return crypto.createHash('sha256').update(JSON.stringify({
-    plan, profile, principal: principalSignature(doc), wordsStamp, templateHashes,
+    plan, profile, principal: principalSignature(doc, projectDir), wordsStamp, templateHashes,
   })).digest('hex').slice(0, 24);
 }
 
@@ -233,7 +249,7 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
     if (unknown) fail('PLAN_INVALID', `unknown scene "${unknown.scene}" (see capcutctl mograph scenes)`);
     for (const id of new Set(plan.scenes.map(x => x.scene))) templateHashes[`scene:${id}`] = sceneFingerprint(id, {}, profile);
   }
-  const hash = planHash(plan, profile, doc, wordsFile, templateHashes);
+  const hash = planHash(plan, profile, doc, wordsFile, templateHashes, projectDir);
   const stateFile = path.join(projectDir, '.capcutctl', 'build.json');
   const state = fs.existsSync(stateFile) ? readJson(stateFile) : {};
   if (!force && !dryRun && state.hash === hash) {
@@ -301,13 +317,15 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
     ...(await renderScenes(projectDir, sceneItems, { dryRun, profile })),
   ].sort((a, b) => a.at - b.at);
   for (const g of rendered) g.duration = r3(g.rendered.meta.duration);
-  const graphicOps = [{ op: 'mograph.prune', keep: rendered.map(g => g.id) }];
+  // null: profile ending.auto decides; false also removes an ending placed earlier.
+  const ending = plan.ending ?? (profile.ending?.auto ? true : null);
+  const graphicOps = [{ op: 'mograph.prune', keep: rendered.map(g => g.id), dropEnding: plan.ending === false }];
   for (const g of rendered) {
     if (g.scene) {
       graphicOps.push({
         op: 'mograph.place', id: g.id, template: `scene:${g.scene}`, file: g.rendered.file, format: 'prores',
         at: g.at, duration: g.duration, box: g.box, fingerprint: g.fingerprint, sfx: null,
-        clipVolume: g.volume ?? 1, importVerified: false,
+        ...(g.volume != null ? { clipVolume: g.volume } : {}), importVerified: false,
       });
       continue;
     }
@@ -334,6 +352,16 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
   if (logoPlan.missingArt?.length) stages.logosMissingArt = logoPlan.missingArt;
   if (!dryRun) { writeSidecars(rendered); doc = workingDoc(projectDir); }
 
+  // ---- ending: after the picture and graphics are final, so it opens on the real last frame;
+  // before sound, so the music bed and loudness cover it.
+  if (ending) {
+    const { runEnding } = await import('./ending.mjs');
+    const o = typeof ending === 'object' ? ending : {};
+    stages.ending = await runEnding(projectDir, { frame: o.frame || null, copy: o, noSfx: Boolean(o.noSfx),
+      profileFile: plan.profile || null, dryRun, forceRunning, backup });
+    if (!dryRun) doc = workingDoc(projectDir);
+  }
+
   // ---- sound ----------------------------------------------------------------------------------
   const soundOps = [];
   if (plan.sound.seams) {
@@ -354,10 +382,15 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
     if (!dryRun) {
       soundOps.push({ op: 'music', file: prepared.file, duration: prepared.duration, volume: prepared.volume,
         srcOffset: off < 0 ? -off : 0, at: off > 0 ? off : 0, fadeIn: 0.4, fadeOut: 1.2 });
-      if (plan.sound.duck && profile.sound.duck) soundOps.push({ op: 'music', duck: true, ...(wordsFile ? { wordsFile } : {}) });
     }
   }
+  // Loudness before the duck: the measurement cannot render volume keyframes, and the duck only
+  // lowers the bed, so the peak ceiling loudness proves on the full bed still holds once ducked.
+  // Loudness may lower the music (never raise it); the duck then keys from that level.
   if (plan.sound.loudness) soundOps.push({ op: 'loudness', target: profile.sound.loudnessTarget, peak: profile.sound.peak });
+  if (plan.sound.music && !dryRun && plan.sound.duck && profile.sound.duck) {
+    soundOps.push({ op: 'music', duck: true, ...(wordsFile ? { wordsFile } : {}) });
+  }
   if (soundOps.length) {
     try {
       stages.sound = applySpec(projectDir, { version: 1, name: 'build-sound', operations: soundOps }, txn('build-sound'));
@@ -370,6 +403,9 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
         : null;
       stages.loudness = { skipped: error.message.split('\n')[0] };
     }
+    // what the peak limiter lowered to keep the mix under the ceiling (loudness reports it per segment)
+    const loud = stages.sound?.result?.[0]?.operations?.find(r => r.op === 'loudness');
+    if (loud?.peakLimit) stages.peakLimit = loud.peakLimit;
     if (!dryRun) doc = workingDoc(projectDir);
   }
 
@@ -378,7 +414,7 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
   if (!dryRun) {
     if (record) writeGateRecord(projectDir, gate);
     fs.mkdirSync(path.dirname(stateFile), { recursive: true });
-    const next = { version: 1, hash: planHash(plan, profile, workingDoc(projectDir), wordsFile, templateHashes), builtFrom: hash,
+    const next = { version: 1, hash: planHash(plan, profile, workingDoc(projectDir), wordsFile, templateHashes, projectDir), builtFrom: hash,
       shots: stages.shots?.key || state.shots || null, at: new Date().toISOString(), verdict: gate.verdict };
     fs.writeFileSync(stateFile, stableJson(next));
   }

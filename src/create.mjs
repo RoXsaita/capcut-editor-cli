@@ -297,7 +297,7 @@ function addScenes(doc, mediaPath, probe, scenes, ids, templates = {}, context =
   return doc.tracks.length - 1;
 }
 
-function registerDraft(root, projectDir, name, draftId, durationUs) {
+export function registerDraft(root, projectDir, name, draftId, durationUs) {
   const file = path.join(root, 'root_meta_info.json');
   if (!fs.existsSync(file)) return { registered: false };
   const meta = readJson(file);
@@ -540,7 +540,7 @@ function finishCreate(projectDir, { name, root, templateDir, options, probe, sce
 export function removeProject(name, options = {}) {
   const root = options.root ? path.resolve(options.root) : DEFAULT_ROOT;
   assertCapcutClosed({ forceRunning: options.forceRunning || options.dryRun });
-  const projectDir = resolveProject(name, root);
+  const projectDir = resolveProject(name, root, { live: true });
   const label = path.basename(projectDir);
   if (path.resolve(projectDir) === path.resolve(root)) {
     throw new CapcutError('refusing to remove the drafts root itself.', { exitCode: 2 });

@@ -13,6 +13,7 @@
       "cursor",
       "denoise",
       "endcard",
+      "ending",
       "fade",
       "finish",
       "grade",
@@ -39,8 +40,10 @@
       "screen-motion",
       "sfx",
       "shift",
+      "stage",
       "sync",
       "trim",
+      "variant",
       "volume",
       "wrap",
       "zoom"
@@ -267,10 +270,14 @@
     },
     "doctor": {
       "group": "check",
-      "summary": "Structural integrity; must be error-free before hand-off.",
-      "example": "capcutctl doctor --project NAME",
+      "summary": "Structural integrity; must be error-free before hand-off. --fix repairs a CapCut resave first.",
+      "example": "capcutctl doctor --project NAME --fix --dry-run",
       "options": [
+        "--dry-run",
+        "--fix",
+        "--force-running",
         "--json",
+        "--no-backup",
         "--project",
         "--root"
       ],
@@ -291,15 +298,34 @@
       ],
       "transactional": true
     },
+    "ending": {
+      "group": "graphics",
+      "summary": "Append a repeatable 3-second avatar/follow ending using private profile data, or render it alone.",
+      "example": "capcutctl ending --project NAME --dry-run",
+      "options": [
+        "--dry-run",
+        "--frame",
+        "--no-sfx",
+        "--out",
+        "--profile",
+        "--project"
+      ],
+      "transactional": true
+    },
     "export": {
       "group": "export",
       "summary": "Native CapCut export through the macOS bridge; explicit request only.",
       "example": "capcutctl export --project NAME --out final.mp4 --grid grid.png",
       "options": [
         "--grid",
+        "--no-gate",
+        "--no-review",
         "--out",
         "--overwrite",
+        "--pause",
         "--project",
+        "--review-model",
+        "--script",
         "--times",
         "--xray"
       ],
@@ -381,9 +407,11 @@
       "example": "capcutctl gate --project NAME",
       "options": [
         "--json",
+        "--pause",
         "--profile",
         "--project",
         "--record",
+        "--review",
         "--style",
         "--xray"
       ],
@@ -991,6 +1019,25 @@
       ],
       "transactional": false
     },
+    "review-video": {
+      "group": "check",
+      "summary": "Gemini watches the final export in your own Chrome; a verified second opinion, two rounds max.",
+      "example": "capcutctl review-video --media final.mp4 --project NAME",
+      "options": [
+        "--decide",
+        "--issue",
+        "--json",
+        "--media",
+        "--model",
+        "--project",
+        "--reason",
+        "--reset-rounds",
+        "--script",
+        "--speech",
+        "--verdict"
+      ],
+      "transactional": false
+    },
     "ripple": {
       "group": "aroll",
       "summary": "Delete a timeline range on every track and pull everything after it up, keeping each clip's speed.",
@@ -1082,6 +1129,25 @@
       ],
       "transactional": false
     },
+    "stage": {
+      "group": "safety",
+      "summary": "Stage-and-swap: edit a copy outside CapCut's folder with CapCut open; commit is the one closed-CapCut step.",
+      "example": "capcutctl stage start --project NAME",
+      "options": [
+        "--dry-run",
+        "--fix",
+        "--force-running",
+        "--no-backup",
+        "--project"
+      ],
+      "subcommands": [
+        "commit",
+        "discard",
+        "start",
+        "status"
+      ],
+      "transactional": true
+    },
     "status": {
       "group": "start",
       "summary": "Is CapCut running; optionally wait for it to close.",
@@ -1129,6 +1195,26 @@
         "--src",
         "--start",
         "--track"
+      ],
+      "transactional": true
+    },
+    "variant": {
+      "group": "build",
+      "summary": "A duplicate of a signed-off edit with another hook: body shifted, opening re-timed, levels kept, gated.",
+      "example": "capcutctl variant --project NAME --hooks hooks.json --hook b --dry-run",
+      "options": [
+        "--dry-run",
+        "--force-running",
+        "--hook",
+        "--hooks",
+        "--json",
+        "--lang",
+        "--name",
+        "--no-gate",
+        "--opening",
+        "--project",
+        "--src",
+        "--words"
       ],
       "transactional": true
     },

@@ -6,15 +6,18 @@
  * rhythm is contrast, so it checks for dead stretches AND for crowding, for a hook AND for
  * rest windows, for graphics that have a sound, and for graphics inside the platform UI.
  *
- * Levels: FAIL blocks (exit 1). WARN is reported and must be named in the hand-off. The gate
+ * Levels: FAIL blocks (exit 1). WARN is reported and must be named in the hand-off. NOTE (from an
+ * X-ray of a low-fps proxy) neither blocks nor warns: verify it on the full-rate export. The gate
  * reads the draft only; it cannot see pixels or hear the mix, so its scope line says so.
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { allSegments, contentEndUs, resolveMediaPath } from './core.mjs';
 import { projectAlphaLeaks } from './alpha.mjs';
 import { blurredBackgrounds, captionStyleDrift } from './house-rules.mjs';
 import { coldOpen, cutPoints, pictureChanges, principalTrack } from './polish.mjs';
+import { isCaptionTrack } from './captions.mjs';
 import { firstPictureProof, finishScorecard } from './finish.mjs';
 import { safeZoneViolations } from './mograph-geometry.mjs';
 import { loadProfile } from './profile.mjs';
@@ -175,6 +178,30 @@ export function openingSnaps(doc, { within = 0.6, snap = 0.15 } = {}) {
   return [...new Map(out.map(o => [`${o.track}:${o.t}`, o])).values()].sort((x, y) => x.t - y.t);
 }
 
+/** Caption layers with words on them, whoever wrote them (captions:*, SRT, CapCut auto-captions). */
+export function captionLayers(doc) {
+  return (doc.tracks || []).filter(t => isCaptionTrack(doc, t) && (t.segments || []).length)
+    .map(t => ({ name: t.name || '(unnamed)', words: t.segments.length,
+      start: r2(Math.min(...t.segments.map(startOf))), end: r2(Math.max(...t.segments.map(endOf))) }));
+}
+
+// The house ender: a native sig:endcard, or a follow-ender clip. `render` is not an ender.
+const ENDER = /end-?card|(^|[^a-z])ender([^a-z]|$)/i;
+
+/** The follow ender / endcard that closes the video (it runs to the last frame), or null. */
+export function endingCard(doc, end) {
+  const media = new Map([...(doc.materials?.videos || []), ...(doc.materials?.texts || [])].map(m => [m.id, m]));
+  for (const { track, segment } of allSegments(doc)) {
+    const desc = segment.desc || '';
+    if (/sfx/i.test(desc) || track.type === 'audio') continue;
+    const file = path.basename(media.get(segment.material_id)?.path || '');
+    if (!(ENDER.test(desc) || ENDER.test(track.name || '') || ENDER.test(file))) continue;
+    const a = startOf(segment), b = endOf(segment);
+    if (b >= end - 0.1 && a < end) return { t: r2(a), end: r2(b), desc: desc || track.name || file };
+  }
+  return null;
+}
+
 /** Longest stretch in [from, to) with no graphic on screen. */
 function longestClear(graphics, from, to) {
   const spans = graphics.map(g => [Math.max(from, g.t), Math.min(to, g.end)]).filter(([a, b]) => b > a).sort((a, b) => a[0] - b[0]);
@@ -276,6 +303,20 @@ export function gateReport(doc, { projectDir = null, profile = loadProfile() } =
   add('caption-style', 'FAIL', !drift.off.length, drift.off.length
     ? `${drift.off.length} caption word(s) not in the house caption style, first ${drift.off.slice(0, 4).map(w => `"${w.text}"@${w.t}s`).join(', ')}: every word takes ${drift.house} — capcutctl captions --restyle --project NAME`
     : 'one caption style');
+  const fin = profile.final || {};
+  if (fin.captionsRequired !== false) {
+    const layers = captionLayers(doc);
+    add('captions', 'FAIL', layers.length === 1, layers.length === 1
+      ? `one caption layer (${layers[0].words} words)`
+      : layers.length ? `${layers.length} caption layers (${layers.map(l => l.name).join(', ')}): double captions — keep one`
+        : 'no captions: capcutctl captions --project NAME');
+  }
+  const ender = endingCard(doc, end);
+  add('ending', 'FAIL', Boolean(ender), ender ? `ends on the follow ender (${ender.desc} at ${ender.t}s)`
+    : 'no follow ender / endcard on the last frame: edit.json endcard, or the follow-ender clip');
+  if (fin.lengthWarnAbove) {
+    add('length', 'WARN', end <= fin.lengthWarnAbove, `${r2(end)}s (45–60s ideal, 75s fine, warn above ${fin.lengthWarnAbove}s)`, r2(end), fin.lengthWarnAbove);
+  }
   add('chip-and-logo', 'FAIL', !chipClash.length, chipClash.length ? `brand-chip and logo pop on one mention at ${chipClash.map(g => g.t).join(', ')}s` : 'no doubled brand mentions');
 
   // Seams.
@@ -328,15 +369,162 @@ export function gateReport(doc, { projectDir = null, profile = loadProfile() } =
 /**
  * Fold an export X-ray (capcutctl xray scan --project) into a gate report. The draft says what
  * was configured; the X-ray says what the export shows. Its FAIL verdicts block, its UNKNOWNs
- * warn (they must be named in the hand-off), and what it could not check is listed, never passed.
+ * warn (they must be named in the hand-off), its NOTEs (proxy-only findings) are listed without
+ * blocking, and what it could not check is listed, never passed.
  */
-export function foldXray(report, xrayDir, projectDir) {
+// X-ray verdicts that only warn in a scan but block a final export. A frozen frame is the picture
+// stuck past maxStatic; one repeated frame (video.stutter) stays a warning: on the 2026-10-11
+// finals it was a single duplicate and a source frame-rate cadence, never visible as a freeze.
+// Integrated loudness is judged by exportGates against final.loudnessTolerance instead.
+const PROMOTE = new Set(['video.opens_black', 'video.frozen']);
+
+const finalCheck = (id, ok, message) => ({ id, level: 'FAIL', ok, message, value: null, target: null });
+
+/**
+ * Voice-band loudness of a video, 10 ms steps, in dB: the clock for speech timing. Whisper says
+ * WHICH words were said but stretches each word over the silence around it (a 0.8s late start
+ * reads as a first word at 0.00s), so onsets, gaps and the cut are timed from energy.
+ */
+export function voiceEnvelope(video) {
+  const r = spawnSync('ffmpeg', ['-v', 'error', '-nostdin', '-i', video, '-map', '0:a:0', '-af', 'highpass=f=300,lowpass=f=3400',
+    '-ac', '1', '-ar', '16000', '-f', 's16le', '-'], { maxBuffer: 1 << 30, timeout: 120000 });
+  if (r.status !== 0 || !r.stdout?.length) return null;
+  const pcm = new Int16Array(r.stdout.buffer, r.stdout.byteOffset, Math.floor(r.stdout.length / 2));
+  const db = [];
+  for (let i = 0; i + 160 <= pcm.length; i += 160) {
+    let sum = 0;
+    for (let k = i; k < i + 160; k++) sum += (pcm[k] / 32768) ** 2;
+    db.push(Math.round(10 * Math.log10(sum / 160 + 1e-12) * 10) / 10);
+  }
+  return { step: 0.01, db };
+}
+
+/**
+ * Speech timing on the export: the first word by firstWordBy, no stretch of silence over
+ * maxSpeechGap inside the speech, and no word still sounding at the cut into the ender. The
+ * transcript must have words (proof there is speech); the envelope times them. Silence is
+ * 20 dB under the speech level, so a music bed within 20 dB of the voice hides a pause.
+ */
+export function speechGates(speech, { fin = {}, stop, enderAt = null, pauses = [], envelope = null } = {}) {
+  if (!speech) return [finalCheck('speech', false, 'no transcript of the export: re-run the X-ray with --speech')];
+  const words = (speech.words || []).filter(w => Number.isFinite(w.start) && w.start < stop);
+  if (!words.length) return [finalCheck('speech', false, 'the export transcript has no words')];
+  if (!envelope?.db?.length) return [finalCheck('speech', false, 'cannot read the export audio to time the speech')];
+  const firstBy = fin.firstWordBy ?? 0.5, maxGap = fin.maxSpeechGap ?? 0.7;
+  const { step, db } = envelope;
+  const at = t => Math.max(0, Math.min(db.length - 1, Math.round(t / step)));
+  const inWords = words.flatMap(w => db.slice(at(w.start), at(w.end))).filter(v => v > -70).sort((x, y) => x - y);
+  const level = inWords.length ? inWords[Math.floor(inWords.length * 0.75)] : -30;
+  const voiced = db.map(v => v >= level - 20);
+  const last = words.at(-1);
+  const end = at(stop);
+  // Onset: the first 80 ms of continuous voice.
+  let onset = null;
+  for (let i = 0, run = 0; i < end; i++) { run = voiced[i] ? run + 1 : 0; if (run >= 8) { onset = (i - 7) * step; break; } }
+  let lastVoiced = null;
+  for (let i = end - 1; i >= 0; i--) if (voiced[i]) { lastVoiced = i; break; }
+  const gaps = [];
+  if (onset != null && lastVoiced != null) {
+    for (let i = at(onset), from = null; i <= lastVoiced; i++) {
+      if (!voiced[i]) { from ??= i; continue; }
+      if (from != null) {
+        const a = from * step, b = i * step;
+        if (b - a > maxGap && !pauses.some(p => p >= a - 0.1 && p <= b + 0.1)) gaps.push({ t: r2(a), gap: r2(b - a) });
+        from = null;
+      }
+    }
+  }
+  // Clipped: the voice is still sounding in the last 60 ms before the cut. A finished word has
+  // decayed to room tone by then (about 40 dB under the speech level on the 2026-10-11 finals);
+  // a word cut mid-syllable is still within ~16 dB of it.
+  const tail = db.slice(Math.max(0, end - 6), end);
+  const atCut = tail.length ? tail.reduce((x, y) => x + y, 0) / tail.length : -120;
+  const clipped = atCut >= level - 22 && last.end >= stop - 0.3;
+  return [
+    finalCheck('first-word', onset != null && onset <= firstBy + 1e-6, onset == null ? 'no voice found before the ender'
+      : `speech starts at ${r2(onset)}s (by ${firstBy}s; first word "${words[0].word}")`),
+    finalCheck('speech-gaps', !gaps.length, gaps.length
+      ? `${gaps.length} silence(s) over ${maxGap}s inside the speech at ${gaps.slice(0, 5).map(g => `${g.t}s (${g.gap}s)`).join(', ')}: tighten, or declare a deliberate pause with --pause SECONDS`
+      : `no silence over ${maxGap}s inside the speech`),
+    finalCheck('last-word', !clipped, clipped
+      ? `the voice is still sounding at the cut into ${enderAt != null ? 'the ender' : 'the end'} (${r2(stop)}s, "${last.word}"): clipped — extend the clip`
+      : `last word "${last.word}" finishes before ${enderAt != null ? 'the ender' : 'the end'}`),
+  ];
+}
+
+const ratio = text => { const [a, b] = String(text || '').split('/').map(Number); return b ? a / b : a; };
+// Under this rate the X-ray scanned a proxy (xray.py RESOLUTION_S), not the delivery file.
+const FULL_RATE_FPS = 24;
+
+/** The delivery file: canvas size and frame rate, an audio stream, and no silence before the ender. */
+export function deliveryGates(xray, { profile, fin = {}, stop }) {
+  const v = xray.info?.video || {};
+  const want = profile.canvas;
+  const fps = ratio(v.avg_frame_rate || v.r_frame_rate);
+  const format = finalCheck('export-format', Number(v.width) === want.width && Number(v.height) === want.height && Math.abs(fps - want.fps) < 0.02,
+    `${v.width}x${v.height} at ${r2(fps)} fps (want ${want.width}x${want.height} at ${want.fps})`);
+  if (!format.ok && fps > 0 && fps < FULL_RATE_FPS) {
+    format.level = 'NOTE';
+    format.message += '; proxy-only, verify on the full-rate export';
+  }
+  const out = [format];
+  const audio = xray.audio || {};
+  if (!audio.present) return [...out, finalCheck('export-audio', false, 'the export has no audio stream')];
+  // A dropout is silence with sound after it; silence that runs into the (silent) ender is the ending.
+  const drops = (audio.findings || []).filter(f => f.kind === 'silence' && f.where !== 'end' && f.t + f.dur_s < stop - 0.05)
+    .filter(f => f.where === 'inside' || f.dur_s > (fin.firstWordBy ?? 0.5));
+  return [...out, finalCheck('export-audio', !drops.length, drops.length
+    ? `audio drops to silence before the ender at ${drops.slice(0, 4).map(f => `${f.t}s (${f.dur_s}s)`).join(', ')}`
+    : 'sound all the way to the ender')];
+}
+
+/**
+ * Loudness on the export: integrated within final.loudnessTolerance of the target (-14 ±2.5 by
+ * Suheil's call, 2026-10-11: platforms normalise, and the finals sit at -15.4 to -16.3 that
+ * `loudness` cannot lift without breaking the peak ceiling), and no sudden steps — short-term
+ * loudness (3s window) moving more than maxLoudnessJump LU in 1s.
+ */
+export function loudnessJumps(xray, { profile = null, fin = {}, stop }) {
+  const out = [];
+  const il = xray.audio?.loudness?.integrated_lufs;
+  const target = profile?.sound?.loudnessTarget ?? -14, tol = fin.loudnessTolerance ?? 2.5;
+  out.push(finalCheck('export-loudness', il != null && Math.abs(il - target) <= tol,
+    `${il ?? '?'} LUFS integrated (target ${target} ±${tol} LU)${il != null && Math.abs(il - target) > tol ? ': capcutctl loudness --project NAME, then re-export' : ''}`));
+  const limit = fin.maxLoudnessJump ?? 6;
+  const series = (xray.audio?.loudness?.momentary || []).filter(([t, , st]) => t < stop && st != null && st > -40);
+  const at = new Map(series.map(([t, , st]) => [Math.round(t * 10), st]));
+  const jumps = [];
+  for (const [t, , st] of series) {
+    const before = at.get(Math.round(t * 10) - 10);
+    if (before != null && Math.abs(st - before) > limit && !(jumps.length && t - jumps.at(-1).t <= 1)) jumps.push({ t: r2(t), lu: r2(st - before) });
+  }
+  return [...out, finalCheck('loudness-jumps', !jumps.length, jumps.length
+    ? `short-term loudness steps over ${limit} LU in 1s at ${jumps.slice(0, 4).map(j => `${j.t}s (${j.lu > 0 ? '+' : ''}${j.lu} LU)`).join(', ')}`
+    : 'no sudden loudness steps')];
+}
+
+/**
+ * The final-export checks the X-ray measures but does not judge. Pure, so tests feed it numbers.
+ * `enderAt` is where the follow ender starts (speech and sound rules stop there); `pauses` are
+ * timeline seconds of deliberate pauses the editor declared.
+ */
+export function exportGates(xray, speech, { profile = loadProfile(), enderAt = null, pauses = [], envelope = null } = {}) {
+  const fin = profile.final || {};
+  const stop = enderAt ?? (Number(xray.info?.format?.duration) || 0);
+  return [
+    ...deliveryGates(xray, { profile, fin, stop }),
+    ...(xray.audio?.present ? loudnessJumps(xray, { profile, fin, stop }) : []),
+    ...speechGates(speech, { fin, stop, enderAt, pauses, envelope }),
+  ];
+}
+
+export function foldXray(report, xrayDir, projectDir, { profile = null, draft = null, pauses = [] } = {}) {
   const file = path.join(path.resolve(xrayDir), 'xray.json');
   let doc;
   try { doc = JSON.parse(fs.readFileSync(file, 'utf8')); }
   catch (error) {
     report.checks.push({ id: 'xray', level: 'FAIL', ok: false, message: `cannot read ${file}: ${error.message}`, value: null, target: null });
-    return finalise(report);
+    return finaliseReport(report);
   }
   const add = (id, level, ok, message) => report.checks.push({ id, level, ok, message, value: null, target: null });
   const draftPath = doc.draft?.draft_path;
@@ -349,24 +537,36 @@ export function foldXray(report, xrayDir, projectDir) {
   const notChecked = [];
   for (const v of doc.verdicts || []) {
     if (v.verdict === 'NOT CHECKED') { notChecked.push(v.property); continue; }
-    add(`xray:${v.property}`, v.verdict === 'FAIL' ? 'FAIL' : 'WARN', v.verdict === 'PASS', v.detail);
+    if (v.verdict === 'NOTE') { add(`xray:${v.property}`, 'NOTE', false, v.detail); continue; }
+    add(`xray:${v.property}`, v.verdict === 'FAIL' || (profile && PROMOTE.has(v.property)) ? 'FAIL' : 'WARN', v.verdict === 'PASS', v.detail);
+  }
+  // Final-export gates: only when the caller holds the profile (gate --xray, export).
+  if (profile) {
+    let speech = null;
+    try { speech = JSON.parse(fs.readFileSync(path.join(path.resolve(xrayDir), 'speech.json'), 'utf8')); } catch { /* checked below */ }
+    const end = draft ? S(contentEndUs(draft, projectDir)) : null;
+    const ender = draft && end ? endingCard(draft, end) : null;
+    const video = doc.export?.path;
+    const envelope = video && fs.existsSync(video) ? voiceEnvelope(video) : null;
+    report.checks.push(...exportGates(doc, speech, { profile, enderAt: ender?.t ?? null, pauses, envelope }));
   }
   report.xray = { dir: path.resolve(xrayDir), export: doc.export?.path, sha256: doc.export?.sha256, notChecked };
   report.scope = `Draft structure plus the export X-ray (every frame and sample measured). Not checked: ${notChecked.join(', ') || 'nothing'}.`;
-  return finalise(report);
+  return finaliseReport(report);
 }
 
-function finalise(report) {
+export function finaliseReport(report) {
   const failed = report.checks.filter(c => !c.ok && c.level === 'FAIL');
   const warned = report.checks.filter(c => !c.ok && c.level === 'WARN');
   report.failed = failed.map(c => c.id);
   report.warned = warned.map(c => c.id);
+  report.noted = report.checks.filter(c => !c.ok && c.level === 'NOTE').map(c => c.id);
   report.verdict = failed.length ? 'FAIL' : warned.length ? 'WARN' : 'PASS';
   return report;
 }
 
 export function gateText(report) {
-  const mark = c => (c.ok ? 'ok  ' : c.level === 'FAIL' ? 'FAIL' : 'warn');
+  const mark = c => (c.ok ? 'ok  ' : c.level === 'FAIL' ? 'FAIL' : c.level === 'NOTE' ? 'note' : 'warn');
   const lines = [`gate: ${report.verdict}  (profile ${report.profile}, ${report.duration}s)`];
   for (const c of report.checks) lines.push(`  ${mark(c)} ${c.id.padEnd(24)} ${c.message}`);
   const m = report.metrics;

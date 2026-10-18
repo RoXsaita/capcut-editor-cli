@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { applySpec, assertCapcutClosed, CapcutError, loadProject, contentEndUs, resolveMediaPath } from './core.mjs';
+import { applySpec, assertCapcutClosed, CapcutError, loadProject, principalEndUs, resolveMediaPath } from './core.mjs';
 import { principalTrack } from './polish.mjs';
 import { layoutAudit } from './layouts.mjs';
 import { pythonForTool } from './python.mjs';
@@ -50,7 +50,7 @@ export async function runCaptions(projectDir,args,options={}) {
       if(matches.length!==1 || !['video','audio'].includes(matches[0].t.type))fail('CAPTION_TRACK','Select one narration video/audio track.');
       trackIndex=matches[0].i;
     }else trackIndex=principalTrack(doc).index;
-    const duration=contentEndUs(doc,projectDir)/1e6;
+    const duration=principalEndUs(doc,projectDir)/1e6;
     if(!(duration>0))fail('CAPTION_EMPTY','No edited content.');
     const script=args.script?fs.readFileSync(path.resolve(args.script),'utf8'):'';
     let scenes=[];

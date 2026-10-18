@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import { CapcutError, loadPreset, seededId, localizeMedia, contentEndUs, resolveMediaPath } from './core.mjs';
+import { CapcutError, loadPreset, seededId, localizeMedia, principalEndUs, resolveMediaPath } from './core.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fail = (code, message) => { throw new CapcutError(`${code}: ${message}`, {code}); };
@@ -110,7 +110,7 @@ export function validateCaptionCues(cues, duration) {
 export function opCaptions(doc, op, context = {}) {
   const name = op.name ?? 'suheil';
   if (!/^[\w.-]{1,80}$/.test(name)) fail('CAPTION_NAME', 'Use a stable alphanumeric name.');
-  const duration = contentEndUs(doc, context.projectDir) / 1e6;
+  const duration = principalEndUs(doc, context.projectDir) / 1e6;
   const cues = validateCaptionCues(op.cues, duration);
   const language = op.language || 'ar';
   const fingerprint = hash({name, cues, language, profile:'suheil-native-v1'});

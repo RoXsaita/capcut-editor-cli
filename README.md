@@ -66,10 +66,25 @@ capcutctl gate  --project "My Edit"                       # the ready-to-post ch
 ```
 
 Graphics are anchored to **source words**, so a recut rebuilds exactly; an unchanged plan on an
-unchanged cut is a no-op. The gate checks the hook, proof on screen, dead stretches, crowding,
+unchanged cut is a no-op. Levels you set by hand survive a rebuild: a replaced graphic, pop,
+endcard or seam cue keeps the volume and fade its predecessor had (seam and signature cues when
+they land within 0.25 s of where they were). The loudness step holds the mix at or under the
+profile's true-peak ceiling (`sound.peak`, −1 dBTP): when overlapping SFX or music push it over,
+it lowers the layers around the voice first, then the whole mix if needed, and reports each change
+under `stages.peakLimit`. It never raises a level, so the music volume you chose is a ceiling. It
+measures before the duck (the measurement cannot render volume keyframes); the duck only lowers
+the bed. The gate checks the hook, proof on screen, dead stretches, crowding,
 repeats, platform-UI safe zones, graphics without a sound and seam variety, with thresholds from
 the style profile: the shipped, brand-neutral [`presets/profile.json`](presets/profile.json) with
 your own `~/.config/capcutctl/profile.json` merged over it (see [Your profile](#your-profile)).
+
+Gate levels: **FAIL** blocks (exit 1), **WARN** must be named in the hand-off, and **NOTE** neither
+blocks nor warns. NOTEs come from `gate --xray DIR` when the X-ray scanned a low-fps proxy: a check
+that needs finer timing than the scan's frame step (a one-frame flash or glitch, a repeated frame, a
+frame-exact seam) cannot be trusted at about 6 fps, and a proxy's size and frame rate are not the
+delivery format, so those findings read "proxy-only, verify on the full-rate export" instead of
+failing. A scan at 24 fps or more keeps all of them at FAIL. Audio checks (peak, clipping, loudness)
+still judge the proxy's own audio.
 
 ## Motion graphics
 
@@ -95,6 +110,20 @@ capcutctl mograph scene-render --scene particle-word --params '{"text":"Opus 5.5
 ```
 
 See [docs/mograph.md](docs/mograph.md), including the one-time CapCut import checklist.
+
+A reusable three-second follow ending: the edit's own last frame collapses into an avatar,
+then a dial, badge and follow/check button animate with deterministic sound. With
+`ending.auto` in your profile, `build` appends it to every video; on its own:
+
+```bash
+capcutctl ending --project "My Edit" --dry-run
+capcutctl ending --frame last-frame.png --out ending-preview.mp4
+```
+
+Copy and face position come from your private profile's `ending` section (or `edit.json`
+`ending` per video); colors and fonts come from its tokens. Reruns replace the command's own
+ending. Your image and identity are never bundled in the repository. See
+[the ending setup](docs/ending.md).
 The older native `motion` recipes remain available but experimental; see
 [docs/native-motion.md](docs/native-motion.md).
 
@@ -184,6 +213,64 @@ capcutctl layout split-screen \
 Every committed transaction snapshots the project, validates the result, synchronizes
 the mirrors, and rolls back if the post-write doctor fails.
 
+## Long edits with CapCut open: stage and swap
+
+A multi-step edit is dozens of writes. Instead of keeping CapCut closed for all of them, stage
+the draft once, edit the staged copy with CapCut open, and close CapCut only for the swap:
+
+```bash
+capcutctl stage start  --project "My Edit"   # copy outside CapCut's drafts folder (+ repair, below)
+capcutctl build        --project "My Edit" --edit edit.json   # every command now edits the stage
+capcutctl gate         --project "My Edit"
+capcutctl stage status --project "My Edit"   # what the swap will write; anything CapCut saved meanwhile
+capcutctl close
+capcutctl stage commit --project "My Edit"   # the one step that needs CapCut closed
+```
+
+While a stage is active, every command that takes `--project` resolves to the staged copy
+(`$CAPCUTCTL_STAGE_DIR`, default `~/.capcutctl/stage`), so writes need no `--force-running`.
+`stage commit` keeps the usual guard (CapCut must be closed), then swaps the changed files in
+atomically, with a `before-stage-commit` snapshot and rollback. If CapCut saved the live draft
+after `stage start`, the commit refuses with `STAGE_CONFLICT` and names the files: nothing is
+written and the CapCut edits are kept. `stage discard` drops the copy. `export` refuses while a
+stage is active, because CapCut would export the draft without the staged edits.
+
+## After a CapCut save: `doctor --fix`
+
+Saving in CapCut duplicates material ids, strips capcutctl's own keys (`capcutctl_origin`, the
+mograph identity of seam-wipe / slab-super / follow-ending clips, provenance) and can leave a
+B-roll clip reading past the end of its source. Every committed transaction records those keys
+in `.capcutctl/meta-ledger.json`; `doctor --fix` (and `stage start`, automatically) restores them
+from it (falling back to the history snapshots and `media-map.json` for older projects), merges
+the duplicate ids and shortens the overrunning B-roll at its own speed:
+
+```bash
+capcutctl doctor --project "My Edit" --fix --dry-run
+capcutctl doctor --project "My Edit" --fix
+```
+
+It only fills keys that are missing on materials and segments that still exist: it never moves,
+re-levels or re-creates anything you edited or deleted in CapCut, never stamps provenance on a
+material you relinked to another file, and never shortens the talking-head track (that would open
+a gap; it is reported instead).
+
+## Hook variants for trial reels
+
+```bash
+capcutctl variant --project "My Edit" --hooks hooks.json --hook b --dry-run
+capcutctl variant --project "My Edit" --hooks hooks.json --hook b      # → "My Edit hook-b", gated
+capcutctl variant --project "My Edit" --src 41.2-44.9 --opening 3.8
+```
+
+`hooks.json` is `[{"id": "b", "in": 41.2, "out": 44.9}, …]` (or `{"hooks": […]}`; `src_in`/`src_out`
+also work): source seconds in the talking-head take. The signed-off project is duplicated under a
+unique name and its opening — the face up to the first cut, or `--opening S` — becomes that window.
+The body shifts by the difference, so every shot, graphic, caption and cue stays on its word; the
+opening's graphics and pops are re-timed into the new opening; a frame or bed that runs from the
+top is stretched to the new seam; a scene across the seam (seam-wipe) moves with it. The old
+hook's captions are replaced by the hook's own words, in the same style, from `--words` (default:
+the transcript `cut` cached). No volume is changed. The gate runs at the end; exit 1 on FAIL.
+
 ## Common workflows
 
 | Goal | Command |
@@ -192,6 +279,9 @@ the mirrors, and rolls back if the post-write doctor fails.
 | List local CapCut projects | `capcutctl projects` |
 | Inspect structure and timeline | `capcutctl inspect --project NAME` |
 | Validate a project | `capcutctl doctor --project NAME` |
+| Repair what a CapCut save stripped or duplicated | `capcutctl doctor --project NAME --fix` |
+| Edit with CapCut open; close it only for the swap | `capcutctl stage start --project NAME` … `stage commit` |
+| Same edit, another hook, for a trial reel | `capcutctl variant --project NAME --hooks hooks.json --hook b` |
 | Create an empty project | `capcutctl new --project NAME --blank --dry-run` |
 | Analyze talking-head footage | `capcutctl cut VIDEO --lang en` |
 | Apply a reviewed A-roll cut | `capcutctl cut VIDEO --review decisions.json --project NAME --dry-run` |
@@ -205,7 +295,7 @@ the mirrors, and rolls back if the post-write doctor fails.
 | Match spoken sentences to screen moments (shot list; `--apply` writes) | `capcutctl match --project NAME --screen FILE` then `match --apply` |
 | Blind-verify placed B-roll (before/action/after strip) | `capcutctl verify-shots --project NAME [--shots shots.json]` |
 | Punch-in on stressed words (full-face, 1.08×, energy10) | `capcutctl zoom --project NAME --stress --plan` |
-| Match speech/SFX loudness via clip volume (−14 LUFS) | `capcutctl loudness --project NAME --dry-run` |
+| Match speech/SFX loudness via clip volume (−14 LUFS), mix held at or under −1 dBTP | `capcutctl loudness --project NAME --dry-run` |
 | Measure edited audio and the combined mix | `capcutctl loudness --project NAME --measure` |
 | Review selected music emphasis points | `capcutctl music --project NAME --file music.mp3 --hits 2.4,8.1 --plan --json` |
 | Preview an editable shared color layer | `capcutctl grade --project NAME --layer Finish --set 'contrast=0.1,saturation=0.05' --plan` |
@@ -224,6 +314,7 @@ the mirrors, and rolls back if the post-write doctor fails.
 | Build the finished edit from a plan | `capcutctl build --project NAME --edit edit.json --dry-run` |
 | Is it ready to post? | `capcutctl gate --project NAME` |
 | Render or place a motion graphic | `capcutctl mograph add --project NAME --template keyword-super --params '{"text":"…"}' --say "…"` |
+| Append the reusable follow animation | `capcutctl ending --project NAME --dry-run` |
 | Show the effective style profile | `capcutctl profile` |
 | Start your own profile, outside the repo | `capcutctl profile init` |
 | Show the full command surface | `capcutctl help` |
@@ -242,7 +333,8 @@ than copying one over the other.
 
 For each committed transaction it:
 
-1. refuses to write while CapCut is running unless explicitly overridden;
+1. refuses to write while CapCut is running unless explicitly overridden (a staged copy,
+   which CapCut cannot see, is the exception; its `stage commit` keeps the guard);
 2. loads the root draft and active timeline;
 3. applies the requested operation to both documents;
 4. validates media, IDs, references, timing, transforms, masks, and overlaps;

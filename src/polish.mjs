@@ -4,6 +4,7 @@ import path from 'node:path';
 import {
   CapcutError, clone, seededId, allSegments, loadPreset, resolveMediaPath, contentEndUs
 } from './core.mjs';
+import { carryLevels, snapshotLevels } from './levels.mjs';
 
 export function sfxPresets() {
   return loadPreset('sfx');
@@ -946,6 +947,8 @@ export function opPolish(doc, op, context = {}) {
   const p = sfxPresets();
   const lead = op.lead ?? p.rules.sfxLeadSeconds;
   const volume = op.volume ?? p.rules.volume;
+  const ownsCue = s => /^polish:/.test(s.desc || '');
+  const levels = snapshotLevels(doc, ownsCue);
 
   // start clean so re-running is idempotent
   for (const track of doc.tracks) {
@@ -1024,7 +1027,12 @@ export function opPolish(doc, op, context = {}) {
     : opCalloutSfx(doc, { volume, __seed: op.__seed, projectDir: context.projectDir });
   const interactions = opInteractions(doc, { volume, __seed: op.__seed, skip: op.noSfx || op.noInteractions }, context);
   const unavailable = unavailableSfx();
+  // a cue re-placed on the same beat keeps the volume and fade it was given in CapCut
+  SEED = op.__seed || null;
+  const carried = carryLevels(doc, levels, { owns: ownsCue, tolerance: 0.25, mint: key => mint(`carry:${key}`),
+    keepVolume: () => op.volume == null });
   return { changed: plan.length, transitions, removedTransitions: removed, sfx: sfxPlaced,
+           ...(carried.length ? { carried } : {}),
            // Named, not silent: a palette entry whose CapCut cache file is not on this machine
            // is skipped rather than written as a broken reference. `capcutctl harvest` after
            // downloading the same sounds in CapCut re-points them.

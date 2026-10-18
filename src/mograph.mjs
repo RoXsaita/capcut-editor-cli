@@ -86,15 +86,19 @@ export async function loadPlaywright() {
     + `Tried: ${attempts.join('; ')}`);
 }
 
+// Raster on the CPU: system Chrome rasters on the GPU (Metal on a Mac), asynchronously and not
+// bit-exact, so a screenshot could catch tiles from before the seek and blur() differed run to run.
+const LAUNCH_ARGS = ['--font-render-hinting=none', '--disable-lcd-text', '--disable-gpu-rasterization'];
+
 export async function launch(playwright) {
   const executablePath = process.env.CAPCUTCTL_CHROMIUM || undefined;
   try {
-    return await playwright.chromium.launch({ executablePath, args: ['--font-render-hinting=none', '--disable-lcd-text'] });
+    return await playwright.chromium.launch({ executablePath, args: LAUNCH_ARGS });
   } catch (error) {
     if (executablePath || process.platform !== 'darwin') {
       fail('MOGRAPH_BROWSER', `could not launch Chromium: ${error.message.split('\n')[0]}`);
     }
-    return playwright.chromium.launch({ channel: 'chrome' });
+    return playwright.chromium.launch({ channel: 'chrome', args: LAUNCH_ARGS });
   }
 }
 

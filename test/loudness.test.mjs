@@ -41,10 +41,81 @@ test('edited-range measurement, peak-limited gain, mixed clipping and mute prese
   bed.id = 'music'; bed.volume = 4; bed.desc = 'finish:music';
   d.tracks.push({ type: 'audio', name: 'finish-music', segments: [bed] });
   const before = structuredClone(d);
-  assert.throws(() => opLoudness(d, { target: -14 }, { projectDir: root }), { code: 'MIX_PEAK_EXCEEDED' });
+  assert.throws(() => opLoudness(d, { target: -14, limitPeak: false }, { projectDir: root }), { code: 'MIX_PEAK_EXCEEDED' });
   assert.deepEqual(d, before);
+  // by default the over is limited, not refused: the bed only ever goes down
+  const limited = opLoudness(d, { target: -14 }, { projectDir: root });
+  assert.ok(limited.afterMix.truePeak <= -1);
+  assert.ok(bed.volume < 4 || d.tracks[1].segments[0].volume < 4);
+  assert.ok(d.tracks[1].segments[0].volume < 4);
   d.materials.audios[0].path = path.join(root, 'missing.wav');
   assert.throws(() => analyzeAudio(d, root), { code: 'AUDIO_MEASURE_FAILED' });
+});
+
+/** Synthetic stems: a voice, a hot 0.3 s hit (too short to gate, so loudness keeps its level), a bed. */
+function stems(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'audio-peaks-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  // lavfi's sine is 1/8 full scale, so `peak` is the tone's peak amplitude after the ×8
+  const tone = (name, freq, duration, peak) => {
+    const file = path.join(root, `${name}.wav`);
+    execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', `sine=frequency=${freq}:duration=${duration}:sample_rate=48000`,
+      '-af', `volume=${peak * 8}`, '-c:a', 'pcm_f32le', file]);
+    return file;
+  };
+  const audio = (id, material, start, duration, volume, desc, name = '') => ({ type: 'audio', name, segments: [{
+    id, material_id: material, volume, desc, extra_material_refs: [],
+    source_timerange: { start: 0, duration: US(duration) }, target_timerange: { start: US(start), duration: US(duration) } }] });
+  const d = {
+    duration: US(6),
+    materials: { audios: [
+      { id: 'V', type: 'extract', path: tone('voice', 220, 6, 0.5) },
+      { id: 'LOUD', type: 'extract', path: tone('loud', 220, 6, 1) },
+      { id: 'HIT', type: 'extract', path: tone('hit', 1000, 0.3, 1) },
+      { id: 'BED', type: 'music', name: 'finish-music', path: tone('bed', 110, 6, 0.8) },
+    ] },
+    tracks: [
+      audio('voice', 'V', 0, 6, 1, 'voice'),
+      audio('hit', 'HIT', 2, 0.3, 1, 'mograph:sfx:kw-1'),
+      audio('music', 'BED', 0, 6, 0.211, 'finish:music', 'finish-music'),
+    ],
+  };
+  return { root, d, audio };
+}
+
+test('a hot hit over the voice is limited to the ceiling by lowering the layers around the voice', t => {
+  const { root, d } = stems(t);
+  const level = id => d.tracks.flatMap(x => x.segments).find(s => s.id === id).volume;
+  const out = opLoudness(d, { target: -14, peak: -1 }, { projectDir: root });
+  assert.ok(out.beforeMix.truePeak > -1, 'the fixture really is over before');
+  assert.ok(out.afterMix.truePeak <= -1, `mix true peak ${out.afterMix.truePeak} dBTP`);
+  assert.ok(out.refused.some(r => r.id === 'hit' && r.code === 'LUFS_UNMEASURABLE'), 'the short hit keeps its level in the clip pass');
+  assert.equal(out.peakLimit.ceiling, -1);
+  assert.equal(out.peakLimit.afterTruePeak, out.afterMix.truePeak);
+  assert.ok(out.peakLimit.steps.length >= 1);
+  assert.ok(out.peakLimit.steps.every(step => step.stage === 'around-voice'), 'the voice stays at its target');
+  assert.deepEqual(out.peakLimit.steps[0].segments.map(r => r.id).sort(), ['hit', 'music']);
+  assert.ok(level('hit') < 1);
+  assert.ok(level('music') < 0.211, 'music only ever goes down from the level the user set');
+  const voiceRow = out.segments.find(r => r.id === 'voice');
+  assert.ok(Math.abs(level('voice') - voiceRow.volume) < 1e-6, 'the limiter left the voice where the clip pass put it');
+});
+
+test('when the voice itself makes the over, the whole mix comes down and music never rises', t => {
+  const { root, d, audio } = stems(t);
+  // no hit: two voices in phase are the over, and a bed far below them cannot fix it
+  d.tracks.splice(1, 1);
+  d.tracks[0].segments[0].material_id = 'LOUD';
+  d.tracks.push(audio('voice2', 'LOUD', 0, 6, 1, 'voice'));
+  d.tracks[1].segments[0].volume = 0.02;
+  const out = opLoudness(d, { target: -6, peak: -1 }, { projectDir: root });
+  assert.ok(out.beforeMix.truePeak > -1);
+  assert.ok(out.afterMix.truePeak <= -1, `mix true peak ${out.afterMix.truePeak} dBTP`);
+  assert.equal(out.peakLimit.steps.at(-1).stage, 'whole-mix');
+  assert.ok(!out.peakLimit.steps.some(step => step.stage === 'around-voice'), 'a step that did not help was undone');
+  const music = d.tracks.flatMap(x => x.segments).find(s => s.id === 'music');
+  assert.ok(music.volume < 0.02);
+  assert.ok(out.changed >= 3);
 });
 
 function doc() {
@@ -142,6 +213,8 @@ test('music vs speech vs sfx vs b-roll classification', () => {
   assert.equal(classifyLoudnessRole(d.tracks[3], sfx, audios.SFX), 'sfx');
   assert.equal(classifyLoudnessRole(d.tracks[4], mus, audios.BED), 'music');
   assert.equal(isMusicSegment(d.tracks[4], mus, audios.BED), true);
+  // a graphic's paired cue is an effect around the voice, not a second voice
+  assert.equal(classifyLoudnessRole({ type: 'audio', name: 'mograph-sfx' }, { ...sfx, desc: 'mograph:sfx:kw-1' }, audios.SFX), 'sfx');
 });
 
 test('opLoudness attenuates speech and SFX to −14 LUFS and leaves music/b-roll/fades', () => {
