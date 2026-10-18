@@ -30,6 +30,7 @@
  *   impacts?(params, K) -> [[t, s], …]    // hits: camera shake + chromatic aberration
  *   cues?(params, K) -> [{ at, kind, …}]  // the paired sound (sound.mjs), times in seconds
  *   still?(params, K) -> seconds          // the representative frame for previews
+ *   grain?: false                         // no film grain (a layout frame that must match native artwork)
  * }
  *
  * The kit K (also passed to setup/draw/cues) — everything a scene needs, so scenes never
@@ -392,7 +393,7 @@
     }
     const img = octx.createImageData(W, H), o = img.data;
     const ca = Math.round(8 * impactAt(T0, 12));
-    const g0 = Math.floor(hash(i, 91) * 4096), gk = grain;
+    const g0 = Math.floor(hash(i, 91) * 4096), gk = spec.grain === false ? 0 : grain;
     for (let y = 0; y < H; y++) {
       const row = y * W;
       for (let x = 0; x < W; x++) {

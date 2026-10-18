@@ -2088,6 +2088,21 @@ function opTrackClone(doc, op) {
   return { changed: 1, id: copied.id, index: at };
 }
 
+/** Remove a whole track by name (a caption layer before it is regenerated). Refuses one that still
+ *  holds segments unless `all: true`, and an ambiguous name. Unused materials are left for doctor. */
+function opTrackRemove(doc, op) {
+  const hits = doc.tracks.map((track, index) => ({ track, index }))
+    .filter(({ track, index }) => (op.name != null ? track.name === op.name : index === op.index));
+  if (!hits.length) throw new CapcutError(`track.remove: no track matched ${JSON.stringify(op.name ?? op.index)}.`, { code: 'SELECTOR_EMPTY' });
+  if (hits.length > 1) throw new CapcutError(`track.remove: ${hits.length} tracks are called "${op.name}".`, { code: 'SELECTOR_AMBIGUOUS' });
+  const { track, index } = hits[0];
+  if ((track.segments || []).length && op.all !== true) {
+    throw new CapcutError(`track.remove: "${track.name}" still holds ${track.segments.length} segment(s); pass "all": true to drop them too.`, { code: 'TRACK_NOT_EMPTY' });
+  }
+  doc.tracks.splice(index, 1);
+  return { changed: 1, removed: track.name, index, segments: (track.segments || []).length };
+}
+
 function opTimelineSet(doc, op) {
   if (Object.hasOwn(op, 'exportRange')) {
     if (op.exportRange !== null) throw new CapcutError('timeline.set exportRange only supports null (clear selection).', { code: 'BAD_EXPORT_RANGE' });
@@ -2895,6 +2910,8 @@ export function applyOperations(doc, operations, context) {
     else if (op.op === 'material.relink') result = opMaterialRelink(doc, op, context);
     else if (op.op === 'material.clone') result = opMaterialClone(doc, op, context);
     else if (op.op === 'track.clone') result = opTrackClone(doc, op);
+    else if (op.op === 'track.remove') result = opTrackRemove(doc, op);
+    else if (op.op === 'materials.dedupe') { const merged = dedupeMaterials(doc); result = { changed: merged.length, merged }; }
     else if (op.op === 'timeline.set') result = opTimelineSet(doc, op);
     else if (op.op === 'layout.apply') result = opLayoutApply(doc, op, context);
     else if (op.op === 'layout.background') result = opLayoutBackground(doc, op, context);
@@ -3584,8 +3601,11 @@ function dedupeMaterials(doc) {
       if (!value?.id) { keep.push(value); continue; }
       const prev = seen.get(value.id);
       if (!prev) { seen.set(value.id, value); keep.push(value); continue; }
-      const same = ['path', 'width', 'height', 'duration', 'type', 'name']
-        .every(k => JSON.stringify(prev[k]) === JSON.stringify(value[k]));
+      // CapCut's re-probe can also move a duration by a frame (135000000 vs 135033333 on one
+      // stream-copied mp4); within a frame it is the same file, and the first copy is kept.
+      const same = ['path', 'width', 'height', 'type', 'name']
+        .every(k => JSON.stringify(prev[k]) === JSON.stringify(value[k]))
+        && (prev.duration === value.duration || Math.abs((prev.duration || 0) - (value.duration || 0)) <= 34_000);
       if (same) merged.push({ kind, id: value.id });
       else keep.push(value);                       // a real collision: leave it for doctor
     }

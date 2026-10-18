@@ -31,6 +31,7 @@ const CASES = {
   'format-morph': { params: { labels: ['فيديو', 'تطبيق', 'موقع'], actions: ['اختار', 'ابني', 'شارك'], hero: ['فكرتك', 'جاهزة'] }, beats: 6, handoff: { in: 'seam', out: 'seam' } },
   'claude-brief': { params: { text: 'زيّه', then: 'بس عنّي' }, beats: 5, handoff: { in: 'seam', out: 'seam' } },
   'seam-wipe': { params: { text: 'الحل' }, beats: 3, handoff: { in: 'seam', out: 'seam' } },
+  'frame-travel': { params: { keys: [{ at: 0, to: 'seam' }, { at: 0, to: [40, 480, 1000, 903] }, { at: 0.8, to: 'full' }, { at: 1.2, to: [40, 480, 1000, 903] }], beats: 3 }, beats: 3, handoff: { in: 'footage', out: 'footage' } },
   'follow-ending': { params: { imageData: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
     pill: 'الجزء القادم', headline: 'تابعني', sub: 'للمزيد' }, beats: 6, handoff: { in: 'captured-frame', out: 'follow-card' } },
 };
