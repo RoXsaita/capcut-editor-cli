@@ -58,8 +58,10 @@ Usage:
                         the thing; implied when the query contains a verb like click/tap/hit.
   capcutctl xray scan VIDEO [--project NAME] [--out DIR] [--json] [--no-text] [--speech [--lang ar]] [--jev]
                       — measure every frame and audio sample of a real export: an exact
-                        frame ledger, PASS/FAIL/UNKNOWN/NOT CHECKED verdicts, score.txt,
+                        frame ledger, PASS/FAIL/UNKNOWN/NOTE/NOT CHECKED verdicts, score.txt,
                         overview sheets and a ranked queue of windows to look at. Exit 1 on FAIL.
+                        On a low-fps proxy (under 24 fps) frame-timed findings (flashes, glitches,
+                        stutter, seams) are NOTE: proxy-only, verify on the full-rate export.
   capcutctl xray frame VIDEO [--frame N|--t S] [--crop X,Y,W,H] [--out PNG] [--xray DIR]
   capcutctl xray window VIDEO [--frames A-B|--from S --to S] [--crop X,Y,W,H] [--out PNG] [--xray DIR]
                       — exact frames, verified by PTS, at native resolution or as a strip.
@@ -278,7 +280,8 @@ Usage:
                         Thresholds come from the profile; --style NAME applies that style's pace (build
                         passes edit.json's "style"). Exit 1 on FAIL; WARNs go in the hand-off.
                         Also: captions present on one layer, the follow ender on the last frame, length (warn).
-                        --xray DIR folds an export X-ray in: its FAILs block, its UNKNOWNs warn, and the final
+                        --xray DIR folds an export X-ray in: its FAILs block, its UNKNOWNs warn, its NOTEs
+                        (proxy-only) are listed without blocking, and the final
                         gates run on it: first word by 0.5s, no gap over 0.7s (--pause allows one), last word
                         not clipped, 1080x1920@30 with sound to the ender, -14 LUFS with no sudden steps.
                         --review folds a review-video log in: undecided or accepted Gemini blockers block.

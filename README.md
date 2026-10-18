@@ -71,6 +71,12 @@ repeats, platform-UI safe zones, graphics without a sound and seam variety, with
 the style profile: the shipped, brand-neutral [`presets/profile.json`](presets/profile.json) with
 your own `~/.config/capcutctl/profile.json` merged over it (see [Your profile](#your-profile)).
 
+Gate levels: **FAIL** blocks (exit 1), **WARN** must be named in the hand-off, and **NOTE** neither
+blocks nor warns. NOTEs come from `gate --xray DIR` when the X-ray scanned a low-fps proxy: a check
+that needs finer timing than the scan's frame step (a one-frame flash or glitch, a repeated frame, a
+frame-exact seam) cannot be trusted at about 6 fps, so its finding reads "proxy-only, verify on the
+full-rate export" instead of failing. A scan at 24 fps or more keeps those checks at FAIL.
+
 ## Motion graphics
 
 Kinetic type, counters, callouts and the CTA card are deterministic HTML/JS templates rendered in

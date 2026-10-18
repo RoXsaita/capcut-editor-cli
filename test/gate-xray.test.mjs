@@ -67,3 +67,18 @@ test('a final export (gate --xray with the profile) blocks on a frozen picture t
   assert.ok(report.warned.includes('xray:audio.clicks') && report.warned.includes('xray:video.stutter'));
   assert.equal(foldXray(baseReport(), dir, null).failed.length, 0, 'a plain scan fold still only warns');
 });
+
+test('a proxy-only X-ray NOTE neither blocks nor warns, and PROMOTE does not lift it', () => {
+  const dir = xrayDir({ export: {}, draft: null, verdicts: [
+    { property: 'video.one_or_two_frame_glitch', verdict: 'NOTE', detail: '1 event(s); proxy-only at 6 fps, verify on the full-rate export' },
+    { property: 'video.frozen', verdict: 'NOTE', detail: 'proxy-only' },
+    { property: 'audio.clipping', verdict: 'FAIL', detail: '1 stretch' },
+  ] });
+  const report = foldXray(baseReport(), dir, null);
+  assert.deepEqual(report.failed, ['xray:audio.clipping']);
+  assert.ok(!report.warned.some(id => id.startsWith('xray:video')));
+  assert.deepEqual(report.noted, ['xray:video.one_or_two_frame_glitch', 'xray:video.frozen']);
+  const promoted = foldXray(baseReport(), dir, null, { profile: { canvas: { width: 1080, height: 1920, fps: 30 }, final: {} } });
+  assert.ok(!promoted.failed.includes('xray:video.frozen'), 'a NOTE is never promoted to a final-export FAIL');
+  assert.ok(promoted.noted.includes('xray:video.frozen'));
+});

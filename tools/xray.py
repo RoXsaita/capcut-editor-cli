@@ -5,6 +5,8 @@ Every frame and every audio sample of the export is measured by cheap detectors;
 they flag, plus an overview and a few blind spot-checks, is put in front of a model's eyes.
 The export is the truth (what appeared). The draft is what was configured. Neither proves
 intent, so properties this tool cannot see are reported as NOT CHECKED, never as clean.
+Frame-timed findings on a low-fps proxy are reported as NOTE (proxy-only, verify on the
+full-rate export), never as FAIL: see RESOLUTION_S.
 
   xray scan VIDEO [--project NAME] [--out DIR] [--json]
   xray frame VIDEO (--frame N | --t SECONDS) [--crop X,Y,W,H] [--out PNG]
@@ -75,6 +77,19 @@ NOT_CHECKED = [
     ("sync.lip", "no lip-sync estimator yet"),
     ("video.undeclared_motion", "needs a draft renderer comparison with declared support; not built yet"),
 ]
+
+# The finest time each frame-timed check must resolve, in seconds. A scan with a coarser frame
+# step (a ~6 fps proxy) cannot tell a one-frame flash from a fade, a repeated frame from the
+# proxy's own sampling, or a seam from motion, so what these checks flag there is a NOTE, never
+# a FAIL. Audio, size and layout checks do not depend on the frame rate. Full rate is >= 24 fps.
+FRAME_EXACT_S = 1 / 24
+RESOLUTION_S = {
+    "video.black_frames": FRAME_EXACT_S,              # a flash of <=3 frames, not a fade dip
+    "video.white_flash": FRAME_EXACT_S,
+    "video.one_or_two_frame_glitch": FRAME_EXACT_S,
+    "video.stutter": FRAME_EXACT_S,                   # one repeated frame
+    "draft.visible_cuts": FRAME_EXACT_S,              # a cut within +-1 frame of a draft seam
+}
 
 
 class XrayError(SystemExit):
@@ -977,6 +992,16 @@ def _shot_of(cuts, n):
     return shots
 
 
+def proxy_notes(verdicts, fps):
+    """FAIL/UNKNOWN from a check finer than the scan's frame step becomes NOTE: proxy-only."""
+    for v in verdicts:
+        need = RESOLUTION_S.get(v["property"])
+        if need and v["verdict"] in ("FAIL", "UNKNOWN") and 1 / fps > need * 1.01:
+            v["verdict"] = "NOTE"
+            v["detail"] += f"; proxy-only at {fps:g} fps, verify on the full-rate export"
+    return verdicts
+
+
 def build_verdicts(vid, audio, draft, ledger, sx, dims=(0, 0)):
     P = POLICY
     v = []
@@ -1130,7 +1155,7 @@ def build_verdicts(vid, audio, draft, ledger, sx, dims=(0, 0)):
             if short else "no video clip shorter than 0.25s", origin="A")
     for prop, why in NOT_CHECKED:
         add(prop, "NOT CHECKED", why, origin="-")
-    return v
+    return proxy_notes(v, fps)
 
 
 def build_queue(vid, ledger, ident, audio, text=None):
@@ -1642,6 +1667,14 @@ def cmd_selftest(_args):
         check("queue commands quote hostile filenames",
               shlex.split(f"capcutctl xray window {shlex.quote(hostile)} --frames 1-2")[3] == hostile)
         check("true peak measured", lo["true_peak_dbtp"] is not None and lo["true_peak_dbtp"] > -1.0, f"{lo['true_peak_dbtp']}")
+    noted = proxy_notes([{"property": "video.one_or_two_frame_glitch", "verdict": "FAIL", "detail": "1 event(s)"},
+                         {"property": "video.stutter", "verdict": "UNKNOWN", "detail": "1 event(s)"},
+                         {"property": "audio.clipping", "verdict": "FAIL", "detail": "1 stretch"}], 6.0)
+    check("a 6 fps proxy notes frame-timed findings and keeps the audio FAIL",
+          [v["verdict"] for v in noted] == ["NOTE", "NOTE", "FAIL"] and "proxy-only at 6 fps" in noted[0]["detail"],
+          f"{[v['verdict'] for v in noted]}")
+    kept = proxy_notes([{"property": "video.white_flash", "verdict": "FAIL", "detail": "x"}], 30000 / 1001)
+    check("a full-rate scan keeps the FAIL", kept[0]["verdict"] == "FAIL")
     _selftest_text(check)
     failed = [c for c in checks if not c[1]]
     print(f"xray selftest: {len(checks) - len(failed)}/{len(checks)} passed")

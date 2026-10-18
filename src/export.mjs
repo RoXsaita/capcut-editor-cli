@@ -40,7 +40,7 @@ export function exportXray(video, projectDir, outDir, { speech = false } = {}) {
   const report = JSON.parse(result.stdout);
   const count = verdict => report.verdicts.filter(v => v.verdict === verdict).length;
   return { dir: report.out, score: report.score, sheets: report.sheets,
-    fail: count('FAIL'), unknown: count('UNKNOWN'), notChecked: count('NOT CHECKED'), pass: count('PASS') };
+    fail: count('FAIL'), unknown: count('UNKNOWN'), note: count('NOTE'), notChecked: count('NOT CHECKED'), pass: count('PASS') };
 }
 export async function exportProject(projectDir, args) {
   if (process.platform !== 'darwin') fail('EXPORT_MACOS_ONLY');

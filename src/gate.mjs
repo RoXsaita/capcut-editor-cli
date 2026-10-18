@@ -6,7 +6,8 @@
  * rhythm is contrast, so it checks for dead stretches AND for crowding, for a hook AND for
  * rest windows, for graphics that have a sound, and for graphics inside the platform UI.
  *
- * Levels: FAIL blocks (exit 1). WARN is reported and must be named in the hand-off. The gate
+ * Levels: FAIL blocks (exit 1). WARN is reported and must be named in the hand-off. NOTE (from an
+ * X-ray of a low-fps proxy) neither blocks nor warns: verify it on the full-rate export. The gate
  * reads the draft only; it cannot see pixels or hear the mix, so its scope line says so.
  */
 import fs from 'node:fs';
@@ -368,7 +369,8 @@ export function gateReport(doc, { projectDir = null, profile = loadProfile() } =
 /**
  * Fold an export X-ray (capcutctl xray scan --project) into a gate report. The draft says what
  * was configured; the X-ray says what the export shows. Its FAIL verdicts block, its UNKNOWNs
- * warn (they must be named in the hand-off), and what it could not check is listed, never passed.
+ * warn (they must be named in the hand-off), its NOTEs (proxy-only findings) are listed without
+ * blocking, and what it could not check is listed, never passed.
  */
 // X-ray verdicts that only warn in a scan but block a final export. A frozen frame is the picture
 // stuck past maxStatic; one repeated frame (video.stutter) stays a warning: on the 2026-10-11
@@ -528,6 +530,7 @@ export function foldXray(report, xrayDir, projectDir, { profile = null, draft = 
   const notChecked = [];
   for (const v of doc.verdicts || []) {
     if (v.verdict === 'NOT CHECKED') { notChecked.push(v.property); continue; }
+    if (v.verdict === 'NOTE') { add(`xray:${v.property}`, 'NOTE', false, v.detail); continue; }
     add(`xray:${v.property}`, v.verdict === 'FAIL' || (profile && PROMOTE.has(v.property)) ? 'FAIL' : 'WARN', v.verdict === 'PASS', v.detail);
   }
   // Final-export gates: only when the caller holds the profile (gate --xray, export).
@@ -550,12 +553,13 @@ export function finaliseReport(report) {
   const warned = report.checks.filter(c => !c.ok && c.level === 'WARN');
   report.failed = failed.map(c => c.id);
   report.warned = warned.map(c => c.id);
+  report.noted = report.checks.filter(c => !c.ok && c.level === 'NOTE').map(c => c.id);
   report.verdict = failed.length ? 'FAIL' : warned.length ? 'WARN' : 'PASS';
   return report;
 }
 
 export function gateText(report) {
-  const mark = c => (c.ok ? 'ok  ' : c.level === 'FAIL' ? 'FAIL' : 'warn');
+  const mark = c => (c.ok ? 'ok  ' : c.level === 'FAIL' ? 'FAIL' : c.level === 'NOTE' ? 'note' : 'warn');
   const lines = [`gate: ${report.verdict}  (profile ${report.profile}, ${report.duration}s)`];
   for (const c of report.checks) lines.push(`  ${mark(c)} ${c.id.padEnd(24)} ${c.message}`);
   const m = report.metrics;
