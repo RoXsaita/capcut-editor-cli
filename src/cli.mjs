@@ -271,9 +271,12 @@ Usage:
                       — after A-roll sign-off, one edit plan becomes the finished project:
                         shots (once), layout auto, stress pushes, mograph graphics on their
                         words, logo pops (brand-chip when art is missing), endcard, motivated
-                        seams, music aligned to the graphics, duck, loudness, then the gate.
+                        seams, music aligned to the graphics, loudness, duck, then the gate.
                         Graphics anchor to SOURCE words, so a recut rebuilds exactly; an
                         unchanged plan on an unchanged cut is a no-op. Exit 1 when the gate fails.
+                        Replaced graphics, pops and seam cues keep their hand-set volume and fade.
+                        Loudness holds the mix true peak at or under profile sound.peak by
+                        lowering levels (never raising music); stages.peakLimit lists the changes.
   capcutctl gate                --project NAME [--profile FILE] [--style NAME] [--record] [--json] [--xray DIR]
                                 [--pause SECONDS] [--review REVIEW.json]
                       — the blocking ready-to-post check: hook, proof, longest static stretch,
@@ -310,7 +313,7 @@ Usage:
                       — render into <project>/mograph/ and place it above the picture, with its sound,
                         on the exact canvas pixels the template drew. --say anchors to source words.
   capcutctl mograph rerender    --project NAME --id ID [--params JSON|--params-file FILE] [--dry-run]
-                      — fix text or a value; timing, anchor and placement are kept.
+                      — fix text or a value; timing, anchor, placement, volume and fades are kept.
   capcutctl pace                --project NAME_OR_PATH [--track N] [--max 100] [--min-gap 5.0]
                                 no flags = print the plan; --auto applies it
                                 --at T --speed X | --at T --cover IN-OUT for one clip
@@ -329,10 +332,12 @@ Usage:
                         --no-interactions skips that pass.
   capcutctl loudness            --project NAME [--target -14] [--segments ID[,ID...]] [--allow-boost] [--plan] [--measure] [--peak -1]
                                 — measure edited ranges and mix; match speech/SFX to −14 LUFS with peak headroom.
-                                  --measure is read-only. --peak limits true peak (dBTP); unsafe mixed peaks refuse.
+                                  --measure is read-only. --peak is the true-peak ceiling (dBTP): a mix still
+                                  over it after the clip pass is limited by lowering the SFX/music around the
+                                  voice, then the whole mix; the result's peakLimit lists every change.
                                   Attenuation < 1.0 is round-tripped. A needed boost is
                                   VOLUME_BOOST_UNVERIFIED unless --allow-boost (UNVERIFIED).
-                                  Music beds are left alone. Does not touch loudnesses.enable.
+                                  Music beds are never raised. Does not touch loudnesses.enable.
   capcutctl grade               --project NAME [--measure] [--plan] [--strength 1] [--samples 3]
                                 [--apply] [--dry-run] [--target JSON] [--reference FILE] [--reference-at S]
                                 [--set 'FILE:brightness=0.05,white=0.2'] [--reset [--source FILE]]
@@ -1816,7 +1821,7 @@ export async function main(argv, dependencies = {}) {
       }
       const box = { x: 0, y: 0, w: profile.canvas.width, h: profile.canvas.height };
       const op = { op: 'mograph.place', id: item.id, template: `scene:${item.scene}`, file: rendered.file, format: 'prores',
-        at: item.at, duration: rendered.meta.duration, box, fingerprint, sfx: null, clipVolume: args.noSfx ? 0 : 1,
+        at: item.at, duration: rendered.meta.duration, box, fingerprint, sfx: null, ...(args.noSfx ? { clipVolume: 0 } : {}),
         importVerified: false };
       if (args.dryRun) return print({ dryRun: true, placement: op, meta: rendered.meta, unsafe: rendered.unsafe }, true);
       const result = applySpec(projectDir, { version: 1, name: `mograph-${sub}`, operations: [op] }, options);

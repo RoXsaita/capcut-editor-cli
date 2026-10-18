@@ -162,7 +162,7 @@ export function planEnding(doc, projectDir, fingerprint, file, { noSfx = false }
   return {
     op: 'mograph.place', id: FOLLOW_ENDING_ID, template: `scene:${SCENE}`, format: 'prores',
     file, fingerprint, at: end / 1e6, duration: DURATION,
-    box: { x: 0, y: 0, w: 1080, h: 1920 }, sfx: null, clipVolume: noSfx ? 0 : 1, importVerified: false,
+    box: { x: 0, y: 0, w: 1080, h: 1920 }, sfx: null, ...(noSfx ? { clipVolume: 0 } : {}), importVerified: false,
   };
 }
 
