@@ -26,7 +26,8 @@ function withPlate(fn, { plate = true } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-plate-'));
   const before = process.env.CAPCUTCTL_PRESET_DIR;
   const file = path.join(dir, 'room.png');
-  if (plate) execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=0x806040:s=94x167', '-frames:v', '1', file]);
+  // format=rgb24 in the graph: a yuv420p lavfi source rounds the odd 167 down to 166 (ffmpeg 6.x)
+  if (plate) execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=0x806040:s=94x167,format=rgb24', '-frames:v', '1', file]);
   fs.writeFileSync(path.join(dir, 'profile.json'), JSON.stringify(plate ? { brand: { background: { plate: file } } } : {}));
   process.env.CAPCUTCTL_PRESET_DIR = dir;
   loadProfile({ refresh: true });
