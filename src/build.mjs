@@ -12,7 +12,7 @@
  *             missing) → endcard → the follow ending (profile ending.auto or edit.json `ending`),
  *             appended after the last frame, opening on that frame
  *   sound     motivated seams + SFX → music bed aligned to the graphics and picture changes →
- *             duck under speech → loudness
+ *             loudness (true peak held under the ceiling by lowering levels) → duck under speech
  *   gate      the blocking ready-to-post check
  *
  * Every stage owns its output (mograph:*, sig:*, polish:*, finish:music), so running `build`
@@ -325,7 +325,7 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
       graphicOps.push({
         op: 'mograph.place', id: g.id, template: `scene:${g.scene}`, file: g.rendered.file, format: 'prores',
         at: g.at, duration: g.duration, box: g.box, fingerprint: g.fingerprint, sfx: null,
-        clipVolume: g.volume ?? 1, importVerified: false,
+        ...(g.volume != null ? { clipVolume: g.volume } : {}), importVerified: false,
       });
       continue;
     }
@@ -382,10 +382,15 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
     if (!dryRun) {
       soundOps.push({ op: 'music', file: prepared.file, duration: prepared.duration, volume: prepared.volume,
         srcOffset: off < 0 ? -off : 0, at: off > 0 ? off : 0, fadeIn: 0.4, fadeOut: 1.2 });
-      if (plan.sound.duck && profile.sound.duck) soundOps.push({ op: 'music', duck: true, ...(wordsFile ? { wordsFile } : {}) });
     }
   }
+  // Loudness before the duck: the measurement cannot render volume keyframes, and the duck only
+  // lowers the bed, so the peak ceiling loudness proves on the full bed still holds once ducked.
+  // Loudness may lower the music (never raise it); the duck then keys from that level.
   if (plan.sound.loudness) soundOps.push({ op: 'loudness', target: profile.sound.loudnessTarget, peak: profile.sound.peak });
+  if (plan.sound.music && !dryRun && plan.sound.duck && profile.sound.duck) {
+    soundOps.push({ op: 'music', duck: true, ...(wordsFile ? { wordsFile } : {}) });
+  }
   if (soundOps.length) {
     try {
       stages.sound = applySpec(projectDir, { version: 1, name: 'build-sound', operations: soundOps }, txn('build-sound'));
@@ -398,6 +403,9 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
         : null;
       stages.loudness = { skipped: error.message.split('\n')[0] };
     }
+    // what the peak limiter lowered to keep the mix under the ceiling (loudness reports it per segment)
+    const loud = stages.sound?.result?.[0]?.operations?.find(r => r.op === 'loudness');
+    if (loud?.peakLimit) stages.peakLimit = loud.peakLimit;
     if (!dryRun) doc = workingDoc(projectDir);
   }
 

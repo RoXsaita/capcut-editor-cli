@@ -66,7 +66,14 @@ capcutctl gate  --project "My Edit"                       # the ready-to-post ch
 ```
 
 Graphics are anchored to **source words**, so a recut rebuilds exactly; an unchanged plan on an
-unchanged cut is a no-op. The gate checks the hook, proof on screen, dead stretches, crowding,
+unchanged cut is a no-op. Levels you set by hand survive a rebuild: a replaced graphic, pop,
+endcard or seam cue keeps the volume and fade its predecessor had (seam and signature cues when
+they land within 0.25 s of where they were). The loudness step holds the mix at or under the
+profile's true-peak ceiling (`sound.peak`, −1 dBTP): when overlapping SFX or music push it over,
+it lowers the layers around the voice first, then the whole mix if needed, and reports each change
+under `stages.peakLimit`. It never raises a level, so the music volume you chose is a ceiling. It
+measures before the duck (the measurement cannot render volume keyframes); the duck only lowers
+the bed. The gate checks the hook, proof on screen, dead stretches, crowding,
 repeats, platform-UI safe zones, graphics without a sound and seam variety, with thresholds from
 the style profile: the shipped, brand-neutral [`presets/profile.json`](presets/profile.json) with
 your own `~/.config/capcutctl/profile.json` merged over it (see [Your profile](#your-profile)).
@@ -219,7 +226,7 @@ the mirrors, and rolls back if the post-write doctor fails.
 | Match spoken sentences to screen moments (shot list; `--apply` writes) | `capcutctl match --project NAME --screen FILE` then `match --apply` |
 | Blind-verify placed B-roll (before/action/after strip) | `capcutctl verify-shots --project NAME [--shots shots.json]` |
 | Punch-in on stressed words (full-face, 1.08×, energy10) | `capcutctl zoom --project NAME --stress --plan` |
-| Match speech/SFX loudness via clip volume (−14 LUFS) | `capcutctl loudness --project NAME --dry-run` |
+| Match speech/SFX loudness via clip volume (−14 LUFS), mix held at or under −1 dBTP | `capcutctl loudness --project NAME --dry-run` |
 | Measure edited audio and the combined mix | `capcutctl loudness --project NAME --measure` |
 | Review selected music emphasis points | `capcutctl music --project NAME --file music.mp3 --hits 2.4,8.1 --plan --json` |
 | Preview an editable shared color layer | `capcutctl grade --project NAME --layer Finish --set 'contrast=0.1,saturation=0.05' --plan` |

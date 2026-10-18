@@ -3,8 +3,13 @@
  *
  * Measure edited ranges and the mix with ffmpeg ebur128, then set speech/SFX
  * clip volume toward −14 LUFS, constrained by true-peak headroom. Music beds are
- * out of scope (F23 / F20). Only attenuation (volume < 1.0) is round-tripped;
+ * never raised (F23 / F20). Only attenuation (volume < 1.0) is round-tripped;
  * a needed boost is VOLUME_BOOST_UNVERIFIED unless --allow-boost.
+ *
+ * Clip headroom cannot guarantee mix headroom where SFX, music or a scene's sound
+ * overlap the voice, so a mix still over the peak ceiling is brought under it by
+ * lowering clip volumes (see limitMixPeak) and the change is reported, rather than
+ * refused for someone to fix by hand.
  *
  * Does not touch CapCut's `loudnesses.enable` / `target_loudness`. Fades stay
  * on `audio_fades` extras; stereo layout is not rewritten.
@@ -105,21 +110,22 @@ function isPlate(segment, material) {
 
 /**
  * speech = talking-head video (and leftover voice audio).
- * sfx = polish/signature audio that is not the bed.
+ * sfx = polish/signature/mograph audio that is not the bed, and a scene's own sound.
  * music / skip are left alone.
  */
 export function classifyLoudnessRole(track, segment, material) {
   if (isMusicSegment(track, segment, material)) return 'music';
+  const graphic = String(segment?.desc || '').startsWith('mograph:');   // a graphic's cue, a scene's own sound
   if (track?.type === 'audio') {
     const desc = String(segment?.desc || '');
-    if (desc.startsWith('polish:') || desc.startsWith('sig:sfx') || desc === 'sig:sfx') return 'sfx';
+    if (graphic || desc.startsWith('polish:') || desc.startsWith('sig:sfx') || desc === 'sig:sfx') return 'sfx';
     return 'speech';
   }
   if (track?.type !== 'video' || track?.flag === 0) return 'skip';
   if (isPlate(segment, material)) return 'skip';
   if (isBrollSegment(segment, material)) return 'skip';
   if (material?.type && material.type !== 'video') return 'skip';
-  return 'speech';
+  return graphic ? 'sfx' : 'speech';
 }
 
 function snapshotFades(doc, segment) {
@@ -132,6 +138,65 @@ function snapshotFades(doc, segment) {
     fade_type: fades.get(id).fade_type,
   }));
   return { refs, extras };
+}
+
+// Land a little under the ceiling: ebur128 reports true peak to 0.1 dB, and -1.0 must read as ≤ -1.0.
+const PEAK_MARGIN_DB = 0.2;
+// A step around the voice that moved the peak less than this did not touch what makes it.
+const MIN_HELP_DB = 0.1;
+
+/**
+ * Bring the measured mix under `peak` dBTP by lowering clip volumes, never raising one (a music
+ * level the user set stays a ceiling). First the layers around the voice — SFX, pops, music, a
+ * scene's own sound — by the excess: they cause most overlap peaks and barely move integrated
+ * loudness; up to three times, and a step that did not help (the voice itself peaks) is undone.
+ * Then, if the mix is still over, every layer by the remaining excess: gain is linear, so that
+ * step lands.
+ */
+function limitMixPeak(doc, analysis, mix, peak, { projectDir, selected }) {
+  const layers = [];
+  for (const track of doc.tracks || []) {
+    for (const segment of track.segments || []) {
+      if (!analysis.segments[segment.id] || !((segment.volume ?? 1) > 0)) continue;
+      if (selected && !selected.has(segment.id)) continue;
+      const role = classifyLoudnessRole(track, segment, materialFor(doc, segment.material_id));
+      layers.push({ segment, around: role === 'sfx' || role === 'music' });
+    }
+  }
+  const steps = [];
+  const lower = (rows, stage) => {
+    const gainDb = peak - PEAK_MARGIN_DB - mix.truePeak;
+    const g = 10 ** (gainDb / 20);
+    const undo = rows.map(({ segment }) => [segment, segment.volume, segment.last_nonzero_volume]);
+    const segments = rows.map(({ segment }) => {
+      const from = segment.volume ?? 1;
+      segment.volume = from * g;
+      if ('last_nonzero_volume' in segment) segment.last_nonzero_volume = segment.volume;
+      return { id: segment.id, from: r6(from), to: r6(segment.volume) };
+    });
+    const prev = mix;
+    const after = analyzeAudio(doc, projectDir, { mixOnly: true }).mix;
+    steps.push({ stage, gainDb: r3(gainDb), segments, truePeak: after.truePeak == null ? null : r3(after.truePeak) });
+    return { prev, after, undo };
+  };
+  const beforeTruePeak = mix.truePeak;
+  const around = layers.filter(l => l.around);
+  // The voice adds to the overlap peak too, so one step rarely lands; a few more converge.
+  for (let i = 0; i < 3 && around.length && around.length < layers.length && mix.truePeak > peak; i++) {
+    const step = lower(around, 'around-voice');
+    if (step.after.truePeak == null || step.prev.truePeak - step.after.truePeak < MIN_HELP_DB) {
+      for (const [segment, volume, last] of step.undo) {
+        if (volume === undefined) delete segment.volume; else segment.volume = volume;
+        if (last !== undefined) segment.last_nonzero_volume = last;
+      }
+      steps.pop();
+      break;
+    }
+    mix = step.after;
+  }
+  if (layers.length && mix.truePeak != null && mix.truePeak > peak) mix = lower(layers, 'whole-mix').after;
+  return { mix, report: { ceiling: peak, beforeTruePeak: r3(beforeTruePeak), afterTruePeak: mix.truePeak == null ? null : r3(mix.truePeak),
+    afterLufs: mix.lufs == null ? null : r3(mix.lufs), steps } };
 }
 
 export function opLoudness(doc, op = {}, context = {}) {
@@ -260,22 +325,32 @@ export function opLoudness(doc, op = {}, context = {}) {
     });
   }
 
-  const after = analysis ? analyzeAudio(doc, context.projectDir, { mixOnly: true }).mix : null;
-  if (after?.truePeak != null && after.truePeak > peak + 0.05) {
-    // Clip headroom cannot guarantee mix headroom when music/SFX overlap.
+  let after = analysis ? analyzeAudio(doc, context.projectDir, { mixOnly: true }).mix : null;
+  let peakLimit = null;
+  if (after?.truePeak != null && after.truePeak > peak && op.limitPeak !== false) {
+    ({ mix: after, report: peakLimit } = limitMixPeak(doc, analysis, after, peak,
+      { projectDir: context.projectDir, selected }));
+  }
+  if (after?.truePeak != null && after.truePeak > peak + (op.limitPeak === false ? 0.05 : 0)) {
+    // Nothing left to lower (a --segments selection that misses the overlap), or limiting was turned off.
     if (before) {
       for (const key of Object.keys(doc)) delete doc[key];
       Object.assign(doc, before);
     }
     throw new CapcutError('The combined mix exceeds the peak ceiling. Lower overlapping music/SFX or choose a lower loudness target.', {
-      code: 'MIX_PEAK_EXCEEDED', exitCode: 2, details: { peak, before: analysis.mix, proposed: after },
+      code: 'MIX_PEAK_EXCEEDED', exitCode: 2, details: { peak, before: analysis.mix, proposed: after, peakLimit },
     });
+  }
+  if (peakLimit) {
+    const matched = new Set(segments.map(row => row.id));
+    changed += new Set(peakLimit.steps.flatMap(step => step.segments.map(row => row.id)).filter(id => !matched.has(id))).size;
   }
 
   return {
     target,
     peak,
     ...(analysis ? { beforeMix: analysis.mix, afterMix: after, measurementScope: analysis.scope } : {}),
+    ...(peakLimit ? { peakLimit } : {}),
     changed,
     segments,
     refused,
