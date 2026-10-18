@@ -63,6 +63,7 @@ export const COMMAND_DOCS = Object.freeze({
   'blur-broll': doc('look', 'Opt-in motion blur for B-roll already ramped past 8x.', 'capcutctl blur-broll --project NAME --segment ID --plan', true),
 
   build: doc('build', 'After A-roll sign-off: one edit plan → shots, layout, camera, graphics, sound, gate.', 'capcutctl build --project NAME --edit edit.json --dry-run', true),
+  variant: doc('build', 'A duplicate of a signed-off edit with another hook: body shifted, opening re-timed, levels kept, gated.', 'capcutctl variant --project NAME --hooks hooks.json --hook b --dry-run', true),
 
   zoom: doc('camera', 'Face pushes on stressed words (--stress), or at explicit times.', 'capcutctl zoom --project NAME --stress --plan', true),
   punch: doc('camera', 'Eased push onto a named on-screen element (OCR locates it).', 'capcutctl punch --project NAME --on Publish --segment ID --dry-run', true),
@@ -89,7 +90,7 @@ export const COMMAND_DOCS = Object.freeze({
   finish: doc('sound', 'Scorecard + ASCII (read-only), or --music / --polish writes.', 'capcutctl finish --project NAME', true),
 
   gate: doc('check', 'Blocking ready-to-post check from the profile\'s motion grammar.', 'capcutctl gate --project NAME'),
-  doctor: doc('check', 'Structural integrity; must be error-free before hand-off.', 'capcutctl doctor --project NAME'),
+  doctor: doc('check', 'Structural integrity; must be error-free before hand-off. --fix repairs a CapCut resave first.', 'capcutctl doctor --project NAME --fix --dry-run'),
   qa: doc('check', 'Composite real frames (incl. keyframes, grades, mograph clips); --expect gates text.', 'capcutctl qa --project NAME --times 3,9,15 --sheet'),
   xray: doc('check', 'Every frame and sample of a real export measured; exact-frame queries; honest verdicts.', 'capcutctl xray scan export.mp4 --project NAME'),
   preview: doc('check', 'Lightweight proxy with audio.', 'capcutctl preview --project NAME --out preview.mp4'),
@@ -102,6 +103,7 @@ export const COMMAND_DOCS = Object.freeze({
   notes: doc('safety', 'Creative log: rejected looks and why, accepted look, decisions, outstanding; survives restore.', 'capcutctl notes --project NAME --reject "orange captions" --why "fights the indigo frame"'),
   restore: doc('safety', 'Restore a snapshot.', 'capcutctl restore --project NAME --snapshot NAME --dry-run', true),
   sync: doc('safety', 'Repair mirror drift and duplicate material ids.', 'capcutctl sync --project NAME --dry-run', true),
+  stage: doc('safety', 'Stage-and-swap: edit a copy outside CapCut\'s folder with CapCut open; commit is the one closed-CapCut step.', 'capcutctl stage start --project NAME', true),
   apply: doc('safety', 'Apply a v1 spec of operations transactionally.', 'capcutctl apply --project NAME --spec spec.json --dry-run', true),
   'init-spec': doc('safety', 'A blank v1 spec to fill in.', 'capcutctl init-spec --output spec.json'),
   rm: doc('safety', 'Move a project to the recycle bin (recoverable).', 'capcutctl rm --project NAME --dry-run', true),

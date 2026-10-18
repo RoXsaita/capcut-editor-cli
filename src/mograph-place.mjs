@@ -110,7 +110,8 @@ export function opMographPlace(doc, op, context = {}) {
   const at = Number(op.at), duration = Number(op.duration);
   if (!(at >= 0) || !(duration > 0)) throw new CapcutError('mograph.place: bad at/duration.', { code: 'BAD_TIME', exitCode: 2 });
   const owns = s => s.desc === mographDesc(op.id) || s.desc === mographSfxDesc(op.id);
-  const levels = snapshotLevels(doc, owns);
+  // resetLevels opts back into the palette levels instead of carrying hand-set ones.
+  const levels = op.resetLevels ? [] : snapshotLevels(doc, owns);
   const replaced = removeOwned(doc, op.id);
   const isScene = String(op.template || '').startsWith('scene:');
   const cc = doc.canvas_config || { width: 1080, height: 1920 };

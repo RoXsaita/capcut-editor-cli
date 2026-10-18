@@ -213,6 +213,64 @@ capcutctl layout split-screen \
 Every committed transaction snapshots the project, validates the result, synchronizes
 the mirrors, and rolls back if the post-write doctor fails.
 
+## Long edits with CapCut open: stage and swap
+
+A multi-step edit is dozens of writes. Instead of keeping CapCut closed for all of them, stage
+the draft once, edit the staged copy with CapCut open, and close CapCut only for the swap:
+
+```bash
+capcutctl stage start  --project "My Edit"   # copy outside CapCut's drafts folder (+ repair, below)
+capcutctl build        --project "My Edit" --edit edit.json   # every command now edits the stage
+capcutctl gate         --project "My Edit"
+capcutctl stage status --project "My Edit"   # what the swap will write; anything CapCut saved meanwhile
+capcutctl close
+capcutctl stage commit --project "My Edit"   # the one step that needs CapCut closed
+```
+
+While a stage is active, every command that takes `--project` resolves to the staged copy
+(`$CAPCUTCTL_STAGE_DIR`, default `~/.capcutctl/stage`), so writes need no `--force-running`.
+`stage commit` keeps the usual guard (CapCut must be closed), then swaps the changed files in
+atomically, with a `before-stage-commit` snapshot and rollback. If CapCut saved the live draft
+after `stage start`, the commit refuses with `STAGE_CONFLICT` and names the files: nothing is
+written and the CapCut edits are kept. `stage discard` drops the copy. `export` refuses while a
+stage is active, because CapCut would export the draft without the staged edits.
+
+## After a CapCut save: `doctor --fix`
+
+Saving in CapCut duplicates material ids, strips capcutctl's own keys (`capcutctl_origin`, the
+mograph identity of seam-wipe / slab-super / follow-ending clips, provenance) and can leave a
+B-roll clip reading past the end of its source. Every committed transaction records those keys
+in `.capcutctl/meta-ledger.json`; `doctor --fix` (and `stage start`, automatically) restores them
+from it (falling back to the history snapshots and `media-map.json` for older projects), merges
+the duplicate ids and shortens the overrunning B-roll at its own speed:
+
+```bash
+capcutctl doctor --project "My Edit" --fix --dry-run
+capcutctl doctor --project "My Edit" --fix
+```
+
+It only fills keys that are missing on materials and segments that still exist: it never moves,
+re-levels or re-creates anything you edited or deleted in CapCut, never stamps provenance on a
+material you relinked to another file, and never shortens the talking-head track (that would open
+a gap; it is reported instead).
+
+## Hook variants for trial reels
+
+```bash
+capcutctl variant --project "My Edit" --hooks hooks.json --hook b --dry-run
+capcutctl variant --project "My Edit" --hooks hooks.json --hook b      # → "My Edit hook-b", gated
+capcutctl variant --project "My Edit" --src 41.2-44.9 --opening 3.8
+```
+
+`hooks.json` is `[{"id": "b", "in": 41.2, "out": 44.9}, …]` (or `{"hooks": […]}`; `src_in`/`src_out`
+also work): source seconds in the talking-head take. The signed-off project is duplicated under a
+unique name and its opening — the face up to the first cut, or `--opening S` — becomes that window.
+The body shifts by the difference, so every shot, graphic, caption and cue stays on its word; the
+opening's graphics and pops are re-timed into the new opening; a frame or bed that runs from the
+top is stretched to the new seam; a scene across the seam (seam-wipe) moves with it. The old
+hook's captions are replaced by the hook's own words, in the same style, from `--words` (default:
+the transcript `cut` cached). No volume is changed. The gate runs at the end; exit 1 on FAIL.
+
 ## Common workflows
 
 | Goal | Command |
@@ -221,6 +279,9 @@ the mirrors, and rolls back if the post-write doctor fails.
 | List local CapCut projects | `capcutctl projects` |
 | Inspect structure and timeline | `capcutctl inspect --project NAME` |
 | Validate a project | `capcutctl doctor --project NAME` |
+| Repair what a CapCut save stripped or duplicated | `capcutctl doctor --project NAME --fix` |
+| Edit with CapCut open; close it only for the swap | `capcutctl stage start --project NAME` … `stage commit` |
+| Same edit, another hook, for a trial reel | `capcutctl variant --project NAME --hooks hooks.json --hook b` |
 | Create an empty project | `capcutctl new --project NAME --blank --dry-run` |
 | Analyze talking-head footage | `capcutctl cut VIDEO --lang en` |
 | Apply a reviewed A-roll cut | `capcutctl cut VIDEO --review decisions.json --project NAME --dry-run` |
@@ -272,7 +333,8 @@ than copying one over the other.
 
 For each committed transaction it:
 
-1. refuses to write while CapCut is running unless explicitly overridden;
+1. refuses to write while CapCut is running unless explicitly overridden (a staged copy,
+   which CapCut cannot see, is the exception; its `stage commit` keeps the guard);
 2. loads the root draft and active timeline;
 3. applies the requested operation to both documents;
 4. validates media, IDs, references, timing, transforms, masks, and overlaps;

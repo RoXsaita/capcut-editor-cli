@@ -20,7 +20,9 @@ import {
   listProjects,
   capcutStatus,
   closeCapcut,
+  isStageDir,
   readJson,
+  repairProject,
   resolveProject,
   restoreProjectSnapshot,
   stableJson,
@@ -113,7 +115,12 @@ Usage:
                 [--no-localize] [--generated] [--derived-from ORIGINAL [--derived-offset S]] [--allow-ephemeral]
                 [--new-timeline-id] [--width W --height H --duration S]   (probe override when ffprobe is missing)
   capcutctl inspect --project NAME_OR_PATH [--root PATH] [--json]
-  capcutctl doctor --project NAME_OR_PATH [--root PATH] [--json]
+  capcutctl doctor --project NAME_OR_PATH [--root PATH] [--json] [--fix [--dry-run] [--force-running] [--no-backup]]
+                      — --fix repairs what a CapCut save did, before reporting: merges duplicate
+                        material ids, restores capcutctl's metadata (capcutctl_origin, mograph
+                        identity, provenance) from .capcutctl/meta-ledger.json and history, and
+                        shortens B-roll that reads past its source. Never moves, re-levels or
+                        re-creates anything the user edited or deleted.
   capcutctl snapshot --project NAME_OR_PATH [--label NAME]
   capcutctl history --project NAME_OR_PATH
   capcutctl alpha FILE… | --project NAME [--check] [--force] [--dry-run] [--force-running]
@@ -127,6 +134,24 @@ Usage:
                         so it survives restore, compaction and new sessions. Read --brief first each round.
   capcutctl restore --project NAME_OR_PATH --snapshot NAME [--force-running] [--no-backup]
   capcutctl sync --project NAME_OR_PATH [--dry-run] [--force-running] [--no-backup]
+  capcutctl stage start   --project NAME [--dry-run]
+  capcutctl stage status  --project NAME
+  capcutctl stage commit  --project NAME [--dry-run] [--force-running] [--no-backup]
+  capcutctl stage discard --project NAME [--dry-run]
+                      — stage-and-swap for multi-step edits. start copies the draft outside CapCut's
+                        drafts folder (and repairs it, as doctor --fix); every later command on
+                        --project NAME edits that copy, with CapCut open. commit is the one step that
+                        needs CapCut closed: an atomic swap-in with a snapshot and rollback. It
+                        refuses (exit 5, STAGE_CONFLICT) if CapCut saved the live draft since start,
+                        so those edits are never overwritten. Stages live in $CAPCUTCTL_STAGE_DIR
+                        (default ~/.capcutctl/stage).
+  capcutctl variant --project NAME --hooks hooks.json [--hook ID] | --src IN-OUT [--name NEW]
+                    [--opening S] [--words FILE] [--lang ar] [--no-gate] [--dry-run] [--force-running] [--json]
+                      — duplicate a signed-off project under a unique name with another hook: the face
+                        source window IN-OUT replaces the opening (up to the first cut, or --opening S),
+                        the body shifts, opening graphics / frames / scenes are re-timed, the hook's
+                        words are captioned from --words (default: cut's cached transcript), and every
+                        audio level is kept. Then the gate runs; exit 1 when it fails.
   capcutctl apply --project NAME_OR_PATH --spec FILE [--dry-run] [--force-running] [--no-backup]
   capcutctl add --project NAME --media FILE --at S --dur S --track NAME|N
                 [--src S] [--src-dur S | --cover IN-OUT] [--volume 0] [--desc TEXT] [--no-localize]
@@ -437,7 +462,7 @@ export function parseArgs(argv) {
          'generated', 'allowEphemeral', 'measure', 'apply', 'native', 'noCache', 'noGrade',
          'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'noEase', 'easePosition', 'stress', 'allowBoost', 'values',
          'faceDetail', 'replaceExisting', 'replace', 'record', 'allowUnsafe', 'markdown', 'brief', 'check', 'restyle',
-         'resetRounds', 'noReview', 'noGate'].includes(key)) result[key] = true;
+         'resetRounds', 'noReview', 'noGate', 'fix'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
       const value = argv[++i];
@@ -508,6 +533,12 @@ function print(value, asJson = false) {
 
 function printDoctor(report, asJson) {
   if (asJson) return print(report, true);
+  const fix = report.repair;
+  if (fix?.error) emit(`Repair failed [${fix.error.code}]: ${fix.error.message}\n`);
+  else if (fix) {
+    emit(`Repair${fix.dryRun ? ' (dry run)' : ''}: merged ${fix.merged} duplicate id(s), restored ${fix.restored} key(s), `
+      + `clamped ${fix.clamped} clip(s)${fix.unclamped ? `, ${fix.unclamped} overrun(s) left for you (principal track)` : ''}.\n`);
+  }
   emit(`Project: ${report.project}\nActive timeline: ${report.activeTimelineId || 'root only'}\nErrors: ${report.errors}  Warnings: ${report.warnings}\n`);
   for (const item of report.issues) emit(`${item.level === 'error' ? 'ERROR' : 'WARN '} ${item.code}: ${item.message}\n`);
   if (!report.issues.length) emit('OK: no issues found.\n');
@@ -883,7 +914,9 @@ export async function main(argv, dependencies = {}) {
     const { runEnding } = await import('./ending.mjs');
     if (args.project && args.out) throw new CapcutError('ending takes --project or --out, not both.', { code: 'ENDING_TARGET', exitCode: 2 });
     if (!args.project && !args.out) throw new CapcutError('ending needs --project NAME or --out PATH.mov|PATH.mp4.', { code: 'ENDING_TARGET', exitCode: 2 });
-    return print(await runEnding(args.project ? resolveProject(args.project, root) : null, {
+    const endingDir = args.project ? resolveProject(args.project, root) : null;
+    if (isStageDir(endingDir)) args.forceRunning = true;
+    return print(await runEnding(endingDir, {
       frame: args.frame, profileFile: args.profile, out: args.out, noSfx: Boolean(args.noSfx),
       dryRun: Boolean(args.dryRun), forceRunning: Boolean(args.forceRunning), backup: !args.noBackup,
     }), true);
@@ -1112,7 +1145,13 @@ export async function main(argv, dependencies = {}) {
   if (command === 'export') {
     if (!args.project) throw new CapcutError('export requires --project NAME', { exitCode: 2 });
     const { exportProject } = await import('./export.mjs');
-    const result = await exportProject(resolveProject(args.project, root), args);
+    const liveDir = resolveProject(args.project, root, { live: true });
+    const { activeStage } = await import('./core.mjs');
+    if (activeStage(liveDir)) {
+      throw new CapcutError('This project has an active stage: CapCut would export the draft without its staged edits. '
+        + 'Run `capcutctl stage commit --project NAME` (or discard) first.', { code: 'STAGE_ACTIVE', exitCode: 2 });
+    }
+    const result = await exportProject(liveDir, args);
     if (result.gate?.verdict === 'FAIL') process.exitCode = 1;
     return print(result, true);
   }
@@ -1169,6 +1208,7 @@ export async function main(argv, dependencies = {}) {
     if (args.project) {
       const { resolveMediaPath } = await import('./core.mjs');
       const dir = resolveProject(args.project, root);
+      if (isStageDir(dir)) args.forceRunning = true;
       targets.push(...projectAlphaLeaks(await loadWorking(dir), dir, { resolve: resolveMediaPath }).map(l => l.file));
     }
     if (!args.dryRun && !args.check) assertCapcutClosed({ forceRunning: Boolean(args.forceRunning) });
@@ -1203,6 +1243,49 @@ export async function main(argv, dependencies = {}) {
     return emit(data);
   }
 
+  if (command === 'stage') {
+    const sub = args._[1] || 'status';
+    const liveDir = resolveProject(args.project, root, { live: true });
+    const stage = await import('./stage.mjs');
+    if (sub === 'status') return print(stage.stageStatus(liveDir), true);
+    if (sub === 'start') {
+      if (args.dryRun) return print({ dryRun: true, live: liveDir, stageRoot: stage.stageRoot(), ...stage.stageStatus(liveDir) }, true);
+      return print(stage.startStage(liveDir), true);
+    }
+    if (sub === 'commit') {
+      return print(stage.commitStage(liveDir, { dryRun: Boolean(args.dryRun), forceRunning: Boolean(args.forceRunning),
+        backup: !args.noBackup }), true);
+    }
+    if (sub === 'discard') {
+      if (args.dryRun) return print({ dryRun: true, ...stage.stageStatus(liveDir) }, true);
+      return print(stage.discardStage(liveDir), true);
+    }
+    throw new CapcutError('stage takes start | status | commit | discard.', { code: 'STAGE_SUBCOMMAND', exitCode: 2 });
+  }
+  if (command === 'variant') {
+    const projectDir = resolveProject(args.project, root, { live: true });
+    const { readHook, normalizeHook, runVariant } = await import('./variant.mjs');
+    if (Boolean(args.hooks) === Boolean(args.src)) {
+      throw new CapcutError('variant takes --hooks hooks.json [--hook ID] or --src IN-OUT.', { code: 'HOOK_MISSING', exitCode: 2 });
+    }
+    const hook = args.hooks ? readHook(path.resolve(args.hooks), args.hook ?? null)
+      : normalizeHook({ src: String(args.src), id: args.hook });
+    const { findWordsFile, loadWords } = await import('./anchors.mjs');
+    let wordsFile = args.words ? path.resolve(args.words) : null;
+    if (!wordsFile) try { wordsFile = findWordsFile(await loadWorking(projectDir)); } catch { wordsFile = null; }
+    const result = await runVariant(projectDir, {
+      hook, name: args.name || null, opening: args.opening != null ? Number(args.opening) : null,
+      words: wordsFile ? loadWords(wordsFile) : null, language: args.lang || 'ar',
+      dryRun: Boolean(args.dryRun), forceRunning: Boolean(args.forceRunning), gate: !args.noGate,
+    });
+    if (result.gate?.verdict === 'FAIL') process.exitCode = 1;
+    if (args.json || !result.gate) return print(result, true);
+    const { gateText } = await import('./gate.mjs');
+    const plan = result.plan;
+    return print(`variant: ${result.name} (hook ${plan.hook.id}: opening ${plan.opening.was}s → ${plan.opening.now}s)\n`
+      + `${result.project}\n${plan.warnings.map(w => `WARN ${w}`).join('\n')}${plan.warnings.length ? '\n' : ''}${gateText(result.gate)}`);
+  }
+
   const NEEDS_PROJECT = new Set([
     'inspect', 'doctor', 'snapshot', 'history', 'restore', 'sync', 'scenes',
     'denoise', 'blur-broll', 'reframe', 'cursor', 'screen-motion', 'pace', 'ramp', 'punch', 'match', 'verify-shots', 'captions', 'motion', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
@@ -1211,9 +1294,24 @@ export async function main(argv, dependencies = {}) {
   ]);
   if (!NEEDS_PROJECT.has(command)) throw new CapcutError(`Unknown command: ${command}\n\n${HELP}`, { exitCode: 2 });
   const projectDir = resolveProject(args.project, root);
+  // A staged copy is outside CapCut's drafts folder: no write to it waits for CapCut to close.
+  if (isStageDir(projectDir)) args.forceRunning = true;
   if (command === 'inspect') return print(inspectProject(projectDir), true);
   if (command === 'doctor') {
+    let repair = null;
+    if (args.fix) {
+      try {
+        const fixed = repairProject(projectDir, { dryRun: Boolean(args.dryRun), forceRunning: Boolean(args.forceRunning),
+          backup: !args.noBackup, label: 'doctor-fix' });
+        repair = { dryRun: fixed.dryRun, committed: fixed.committed, snapshot: fixed.snapshot, ...fixed.repaired,
+          details: { merged: fixed.merged, restored: fixed.restored, clamped: fixed.clamped, unclamped: fixed.unclamped } };
+      } catch (error) {
+        if (error.code === 'CAPCUT_RUNNING' || error.code === 'CAPCUT_PROCESS_UNKNOWN') throw error;
+        repair = { error: { code: error.code, message: error.message, details: error.details } };
+      }
+    }
     const report = doctor(projectDir);
+    if (repair) report.repair = repair;
     try {
       const { lintProjectBroll } = await import('./broll-lint.mjs');
       const loaded = loadProject(projectDir);
