@@ -30,6 +30,7 @@
  *   impacts?(params, K) -> [[t, s], …]    // hits: camera shake + chromatic aberration
  *   cues?(params, K) -> [{ at, kind, …}]  // the paired sound (sound.mjs), times in seconds
  *   still?(params, K) -> seconds          // the representative frame for previews
+ *   grain?: false                         // no film grain (a layout frame that must match native artwork)
  * }
  *
  * The kit K (also passed to setup/draw/cues) — everything a scene needs, so scenes never
@@ -42,6 +43,8 @@
  *   isArabic(text) words(ctx, text) text(ctx, str, x, y, opts) mark(x, y, w, h) textPoints(text, opts)
  *   circle superellipse shape(ctx, type, x, y, s, rot, role) scramble(str, p, t, seed)
  *   camera(ctx, { x, y, zoom, rot })       transform about a focus point
+ *   aperture(t) seamMarks(ctx, t, half, role)   the centre-seam band (house transition): half-height
+ *                                          of the open band, then the 12px seam and 6px moving edges
  *   zones                                  forbidden platform-UI rects; `safe` is the info box
  *
  * K.text() is how readable text is drawn: it records the box it painted, and the renderer
@@ -282,8 +285,31 @@
     W, H, CX, CY, TAU, FPS, BPM, BEAT, b: n => n * BEAT,
     clamp, lerp, prog, E, spring, wobble, hash, rand: s => mulberry32(s >>> 0), noise1, noise2, fbm, cubicBezier,
     color, rgba, mix, font, isArabic, dir: t => (isArabic(t) ? 'rtl' : 'ltr'), words, text, mark, textPoints, scramble,
-    circle, superellipse, shape, SHAPES, camera, zones: forbidden, safe,
+    circle, superellipse, shape, SHAPES, camera, zones: forbidden, safe, aperture, seamMarks,
   };
+
+  // ---- the centre-seam aperture (the house transition) ----------------------------------------
+  // Ink opens out of a 12px seam at H/2 over 0.30 s (outExpo) and collapses back into it over the
+  // last 0.26 s (inExpo), with 6px moving edges. The first and last half-frames are seam-only, so
+  // the encoded frames on either side of the cut hand over through the line alone.
+  /** Half-height of the open band at time t (0 = only the seam). */
+  function aperture(t, { openAt = 0 } = {}) {
+    const seam = H / 2, end = K.duration - 1.5 / FPS;
+    const open = E.outExpo(prog(t, openAt, openAt + 0.6 * BEAT));
+    const close = E.inExpo(prog(t, end - 0.52 * BEAT, end));
+    return t <= openAt + 0.5 / FPS || t >= end ? 0 : seam * open * (1 - close);
+  }
+  /** The seam line (bright at both ends of the scene) and the band's moving edges, in `role`. */
+  function seamMarks(ctx, t, half, role = 'brand') {
+    const seam = H / 2, b = n => n * BEAT;
+    const lineA = clamp(1 - E.outExpo(prog(t, b(0.1), b(0.7)))
+      + E.outExpo(prog(t, K.duration - b(0.66), K.duration - b(0.26))) + (half < 4 ? 1 : 0));
+    if (lineA > 0.01) { ctx.fillStyle = rgba(role, lineA); ctx.fillRect(0, seam - 6, W, 12); }
+    if (half > 1 && half < seam - 1) {
+      ctx.fillStyle = color(role);
+      ctx.fillRect(0, seam - half - 3, W, 6); ctx.fillRect(0, seam + half - 3, W, 6);
+    }
+  }
 
   // ---- fonts -------------------------------------------------------------------------------
   async function loadFonts() {
@@ -367,7 +393,7 @@
     }
     const img = octx.createImageData(W, H), o = img.data;
     const ca = Math.round(8 * impactAt(T0, 12));
-    const g0 = Math.floor(hash(i, 91) * 4096), gk = grain;
+    const g0 = Math.floor(hash(i, 91) * 4096), gk = spec.grain === false ? 0 : grain;
     for (let y = 0; y < H; y++) {
       const row = y * W;
       for (let x = 0; x < W; x++) {

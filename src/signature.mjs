@@ -1,10 +1,11 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { CapcutError, clone, seededId, loadPreset, localizeMedia, resolveMediaPath, contentEndUs } from './core.mjs';
+import { CapcutError, clone, seededId, loadPreset, localizeMedia, resolveMediaPath, principalEndUs } from './core.mjs';
 import { principalTrack, sfxPresets } from './polish.mjs';
 import { parkPresetLeftover, opScaleKeyframe } from './add.mjs';
 import { freeCurveControls } from './easing.mjs';
+import { carryLevels, snapshotLevels } from './levels.mjs';
 
 const US = s => Math.round(s * 1e6);
 const S = us => us / 1e6;
@@ -394,6 +395,8 @@ export function opSignature(doc, op, context = {}) {
   const rules = p.rules;
   const result = { logos: [], endcard: null, zooms: [], sfx: 0 };
   const unavailable = [];
+  const ownsSig = s => (s.desc || '').startsWith('sig:');
+  const levels = snapshotLevels(doc, ownsSig);
 
   // Start clean — but ONLY for the kinds this op actually writes. Wiping all three
   // unconditionally meant `capcutctl zoom` (which writes neither a logo nor an endcard)
@@ -443,7 +446,7 @@ export function opSignature(doc, op, context = {}) {
   if (context.projectDir) parkPresetLeftover(doc, context, op);
 
   const pending = [];
-  const editUs = contentEndUs(doc, context.projectDir);
+  const editUs = principalEndUs(doc, context.projectDir);
 
   /* ---- logos ---- */
   for (const [i, l] of (op.logos || []).entries()) {
@@ -668,6 +671,9 @@ export function opSignature(doc, op, context = {}) {
       { code: 'NOTHING_TO_SIGN', exitCode: 2 });
   }
   if (unavailable.length) result.unavailableSfx = [...new Set(unavailable)];
+  // a pop or cue re-placed on the same beat keeps the volume and fade it was given in CapCut
+  const carried = carryLevels(doc, levels, { owns: ownsSig, tolerance: 0.25, mint: key => mint(`carry:${key}`) });
+  if (carried.length) result.carried = carried;
   return result;
 }
 

@@ -20,7 +20,9 @@ import {
   listProjects,
   capcutStatus,
   closeCapcut,
+  isStageDir,
   readJson,
+  repairProject,
   resolveProject,
   restoreProjectSnapshot,
   stableJson,
@@ -58,8 +60,11 @@ Usage:
                         the thing; implied when the query contains a verb like click/tap/hit.
   capcutctl xray scan VIDEO [--project NAME] [--out DIR] [--json] [--no-text] [--speech [--lang ar]] [--jev]
                       — measure every frame and audio sample of a real export: an exact
-                        frame ledger, PASS/FAIL/UNKNOWN/NOT CHECKED verdicts, score.txt,
+                        frame ledger, PASS/FAIL/UNKNOWN/NOTE/NOT CHECKED verdicts, score.txt,
                         overview sheets and a ranked queue of windows to look at. Exit 1 on FAIL.
+                        On a low-fps proxy (under 24 fps) frame-timed findings (flashes, glitches,
+                        stutter, seams) and the export size/rate are NOTE: proxy-only, verify on
+                        the full-rate export.
   capcutctl xray frame VIDEO [--frame N|--t S] [--crop X,Y,W,H] [--out PNG] [--xray DIR]
   capcutctl xray window VIDEO [--frames A-B|--from S --to S] [--crop X,Y,W,H] [--out PNG] [--xray DIR]
                       — exact frames, verified by PTS, at native resolution or as a strip.
@@ -76,8 +81,12 @@ Usage:
   capcutctl status [--json] [--wait-for-close [--timeout MS]]
                                 report CapCut state; optionally request quit and return a branchable close result
   capcutctl export --project NAME --out FILE.mp4 [--overwrite] [--grid FILE.png] [--times 3,9,15] [--xray DIR]
-                      — explicitly requested native macOS export, verified before replacing output.
-                        --xray DIR then measures every frame and sample of it into DIR (see xray scan).
+                   [--pause SECONDS] [--script FILE] [--review-model sonnet] [--no-review] [--no-gate]
+                      — explicitly requested native macOS export, verified before replacing output, then the
+                        final gates: X-ray with the export's transcript (into --xray DIR, default FILE.xray),
+                        gate + X-ray, and — only if that passes — the Gemini watch-review (review-video).
+                        Exit 1 when the gates fail; the export stays. --pause allows a deliberate pause;
+                        --no-gate is for a render that is not a final (no X-ray unless --xray).
   capcutctl export-grid --media FILE --out GRID.png [--times 3,9,15]
                       — fast labelled grid from an existing exported video; no CapCut UI.
   capcutctl check-export --media FILE.mp4 [--project NAME] [--target -14] [--peak -1] [--sheet FILE.png] [--json]
@@ -91,6 +100,14 @@ Usage:
                         by section, first visual event, longest static stretch, median shot, speech ratio,
                         loudness; side by side with the profile (and the project with --project).
                         --profile-out writes the density override; --sheet the first frame of every shot.
+  capcutctl review-video --media FINAL.mp4 [--project NAME] [--script FILE] [--speech FILE] [--model sonnet]
+                   [--reset-rounds] [--json]
+                      — Gemini (the free web app, in your signed-in Chrome via Claude in Chrome) watches the
+                        export as a cold viewer and returns JSON. Discarded unless it quotes the first
+                        sentence; every issue gets evidence frames in FINAL.review/round-N/. Two rounds per
+                        edit (--project), then hand off. Exit 1 on blockers or a discarded review.
+  capcutctl review-video --decide REVIEW.json --issue ID --verdict accept|reject --reason "one line"
+                      — log the verdict on one Gemini issue after checking its evidence.
   capcutctl review --project NAME [--out DIR] [--id NAME] [--fps 6] [--width 240]
                       — write outputs/<id>/proxy.mp4, edl.json, and contact-sheet.png (never CapCut export)
   capcutctl new --project NAME [--media FILE] [--scenes 0:6,6:12,12:18]
@@ -98,7 +115,12 @@ Usage:
                 [--no-localize] [--generated] [--derived-from ORIGINAL [--derived-offset S]] [--allow-ephemeral]
                 [--new-timeline-id] [--width W --height H --duration S]   (probe override when ffprobe is missing)
   capcutctl inspect --project NAME_OR_PATH [--root PATH] [--json]
-  capcutctl doctor --project NAME_OR_PATH [--root PATH] [--json]
+  capcutctl doctor --project NAME_OR_PATH [--root PATH] [--json] [--fix [--dry-run] [--force-running] [--no-backup]]
+                      — --fix repairs what a CapCut save did, before reporting: merges duplicate
+                        material ids, restores capcutctl's metadata (capcutctl_origin, mograph
+                        identity, provenance) from .capcutctl/meta-ledger.json and history, and
+                        shortens B-roll that reads past its source. Never moves, re-levels or
+                        re-creates anything the user edited or deleted.
   capcutctl snapshot --project NAME_OR_PATH [--label NAME]
   capcutctl history --project NAME_OR_PATH
   capcutctl alpha FILE… | --project NAME [--check] [--force] [--dry-run] [--force-running]
@@ -112,6 +134,24 @@ Usage:
                         so it survives restore, compaction and new sessions. Read --brief first each round.
   capcutctl restore --project NAME_OR_PATH --snapshot NAME [--force-running] [--no-backup]
   capcutctl sync --project NAME_OR_PATH [--dry-run] [--force-running] [--no-backup]
+  capcutctl stage start   --project NAME [--dry-run]
+  capcutctl stage status  --project NAME
+  capcutctl stage commit  --project NAME [--dry-run] [--force-running] [--no-backup]
+  capcutctl stage discard --project NAME [--dry-run]
+                      — stage-and-swap for multi-step edits. start copies the draft outside CapCut's
+                        drafts folder (and repairs it, as doctor --fix); every later command on
+                        --project NAME edits that copy, with CapCut open. commit is the one step that
+                        needs CapCut closed: an atomic swap-in with a snapshot and rollback. It
+                        refuses (exit 5, STAGE_CONFLICT) if CapCut saved the live draft since start,
+                        so those edits are never overwritten. Stages live in $CAPCUTCTL_STAGE_DIR
+                        (default ~/.capcutctl/stage).
+  capcutctl variant --project NAME --hooks hooks.json [--hook ID] | --src IN-OUT [--name NEW]
+                    [--opening S] [--words FILE] [--lang ar] [--no-gate] [--dry-run] [--force-running] [--json]
+                      — duplicate a signed-off project under a unique name with another hook: the face
+                        source window IN-OUT replaces the opening (up to the first cut, or --opening S),
+                        the body shifts, opening graphics / frames / scenes are re-timed, the hook's
+                        words are captioned from --words (default: cut's cached transcript), and every
+                        audio level is kept. Then the gate runs; exit 1 when it fails.
   capcutctl apply --project NAME_OR_PATH --spec FILE [--dry-run] [--force-running] [--no-backup]
   capcutctl add --project NAME --media FILE --at S --dur S --track NAME|N
                 [--src S] [--src-dur S | --cover IN-OUT] [--volume 0] [--desc TEXT] [--no-localize]
@@ -235,6 +275,12 @@ Usage:
                                 --asset aliases --logo; gradient is text-only; image variants remain experimental
                                 --dry-run validates without writing; creates editable layers, not an MP4
   capcutctl endcard             --project NAME_OR_PATH [--text Follow] [--at S] [--hold S] [--scale S] [--no-sfx]
+  capcutctl ending              --project NAME_OR_PATH [--frame FILE.png|FILE.jpg] [--profile FILE] [--no-sfx] [--dry-run]
+                                — append a deterministic 3-second avatar/dial/follow animation with sound.
+                                  Opens on the edit's own last frame (or --frame); copy and face position
+                                  come from profile ending; reruns replace it. build runs it when ending.auto.
+  capcutctl ending              --out PATH.mov|PATH.mp4 [--frame FILE.png|FILE.jpg] [--profile FILE] [--no-sfx] [--dry-run]
+                                — render the ending alone for review; no CapCut project needed.
   capcutctl zoom                --project NAME_OR_PATH --at S[,S...] | --auto | --stress
                                 [--min-length 2.5] [--to 1.15] [--hold 1.6] [--track N] [--plan]
                                 [--no-ease] [--ease] [--words FILE]
@@ -250,15 +296,24 @@ Usage:
                       — after A-roll sign-off, one edit plan becomes the finished project:
                         shots (once), layout auto, stress pushes, mograph graphics on their
                         words, logo pops (brand-chip when art is missing), endcard, motivated
-                        seams, music aligned to the graphics, duck, loudness, then the gate.
+                        seams, music aligned to the graphics, loudness, duck, then the gate.
                         Graphics anchor to SOURCE words, so a recut rebuilds exactly; an
                         unchanged plan on an unchanged cut is a no-op. Exit 1 when the gate fails.
+                        Replaced graphics, pops and seam cues keep their hand-set volume and fade.
+                        Loudness holds the mix true peak at or under profile sound.peak by
+                        lowering levels (never raising music); stages.peakLimit lists the changes.
   capcutctl gate                --project NAME [--profile FILE] [--style NAME] [--record] [--json] [--xray DIR]
+                                [--pause SECONDS] [--review REVIEW.json]
                       — the blocking ready-to-post check: hook, proof, longest static stretch,
                         crowding, template repeats, safe zones, graphics without a sound, seams.
                         Thresholds come from the profile; --style NAME applies that style's pace (build
                         passes edit.json's "style"). Exit 1 on FAIL; WARNs go in the hand-off.
-                        --xray DIR folds an export X-ray in: its FAILs block, its UNKNOWNs warn.
+                        Also: captions present on one layer, the follow ender on the last frame, length (warn).
+                        --xray DIR folds an export X-ray in: its FAILs block, its UNKNOWNs warn, its NOTEs
+                        (proxy-only) are listed without blocking, and the final
+                        gates run on it: first word by 0.5s, no gap over 0.7s (--pause allows one), last word
+                        not clipped, 1080x1920@30 with sound to the ender, -14 LUFS with no sudden steps.
+                        --review folds a review-video log in: undecided or accepted Gemini blockers block.
   capcutctl profile show        [--profile FILE] [--json]   — the effective style profile (tokens, brand, styles, camera, sound, density, grammar);
                         bare "capcutctl profile" is the same
   capcutctl profile where       [--profile FILE]   — each layer in merge order (bundled → yours → --profile) and whether it exists
@@ -283,7 +338,7 @@ Usage:
                       — render into <project>/mograph/ and place it above the picture, with its sound,
                         on the exact canvas pixels the template drew. --say anchors to source words.
   capcutctl mograph rerender    --project NAME --id ID [--params JSON|--params-file FILE] [--dry-run]
-                      — fix text or a value; timing, anchor and placement are kept.
+                      — fix text or a value; timing, anchor, placement, volume and fades are kept.
   capcutctl pace                --project NAME_OR_PATH [--track N] [--max 100] [--min-gap 5.0]
                                 no flags = print the plan; --auto applies it
                                 --at T --speed X | --at T --cover IN-OUT for one clip
@@ -302,10 +357,12 @@ Usage:
                         --no-interactions skips that pass.
   capcutctl loudness            --project NAME [--target -14] [--segments ID[,ID...]] [--allow-boost] [--plan] [--measure] [--peak -1]
                                 — measure edited ranges and mix; match speech/SFX to −14 LUFS with peak headroom.
-                                  --measure is read-only. --peak limits true peak (dBTP); unsafe mixed peaks refuse.
+                                  --measure is read-only. --peak is the true-peak ceiling (dBTP): a mix still
+                                  over it after the clip pass is limited by lowering the SFX/music around the
+                                  voice, then the whole mix; the result's peakLimit lists every change.
                                   Attenuation < 1.0 is round-tripped. A needed boost is
                                   VOLUME_BOOST_UNVERIFIED unless --allow-boost (UNVERIFIED).
-                                  Music beds are left alone. Does not touch loudnesses.enable.
+                                  Music beds are never raised. Does not touch loudnesses.enable.
   capcutctl grade               --project NAME [--measure] [--plan] [--strength 1] [--samples 3]
                                 [--apply] [--dry-run] [--target JSON] [--reference FILE] [--reference-at S]
                                 [--set 'FILE:brightness=0.05,white=0.2'] [--reset [--source FILE]]
@@ -393,7 +450,7 @@ const r2 = n => Math.round(n * 100) / 100;
 
 export function parseArgs(argv) {
   const result = { _: [] };
-  const repeatValueKeys = new Set(['trimBeat', 'recoverBeat', 'set', 'allow']);
+  const repeatValueKeys = new Set(['trimBeat', 'recoverBeat', 'set', 'allow', 'pause']);
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i];
     if (!token.startsWith('--')) { result._.push(token); continue; }
@@ -404,7 +461,8 @@ export function parseArgs(argv) {
          'waitForClose', 'force', 'reindex', 'noRepair', 'inPlace',
          'generated', 'allowEphemeral', 'measure', 'apply', 'native', 'noCache', 'noGrade',
          'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'noEase', 'easePosition', 'stress', 'allowBoost', 'values',
-         'faceDetail', 'replaceExisting', 'replace', 'record', 'allowUnsafe', 'markdown', 'brief', 'check', 'restyle'].includes(key)) result[key] = true;
+         'faceDetail', 'replaceExisting', 'replace', 'record', 'allowUnsafe', 'markdown', 'brief', 'check', 'restyle',
+         'resetRounds', 'noReview', 'noGate', 'fix'].includes(key)) result[key] = true;
     else {
       if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
       const value = argv[++i];
@@ -463,6 +521,11 @@ async function planOrApply(projectDir, name, op, args, options, loadPlanner) {
   return print(applySpec(projectDir, { version: 1, name, operations: [op] }, options), true);
 }
 
+/** --pause 12.3,40 (repeatable): timeline seconds of deliberate pauses the speech-gap gate allows. */
+function pauseList(value) {
+  return [value].flat().filter(v => v != null && v !== true).flatMap(v => String(v).split(',')).map(Number).filter(Number.isFinite);
+}
+
 function print(value, asJson = false) {
   if (asJson || typeof value !== 'string') emit(stableJson(value));
   else emit(`${value}\n`);
@@ -470,6 +533,12 @@ function print(value, asJson = false) {
 
 function printDoctor(report, asJson) {
   if (asJson) return print(report, true);
+  const fix = report.repair;
+  if (fix?.error) emit(`Repair failed [${fix.error.code}]: ${fix.error.message}\n`);
+  else if (fix) {
+    emit(`Repair${fix.dryRun ? ' (dry run)' : ''}: merged ${fix.merged} duplicate id(s), restored ${fix.restored} key(s), `
+      + `clamped ${fix.clamped} clip(s)${fix.unclamped ? `, ${fix.unclamped} overrun(s) left for you (principal track)` : ''}.\n`);
+  }
   emit(`Project: ${report.project}\nActive timeline: ${report.activeTimelineId || 'root only'}\nErrors: ${report.errors}  Warnings: ${report.warnings}\n`);
   for (const item of report.issues) emit(`${item.level === 'error' ? 'ERROR' : 'WARN '} ${item.code}: ${item.message}\n`);
   if (!report.issues.length) emit('OK: no issues found.\n');
@@ -841,6 +910,17 @@ export async function main(argv, dependencies = {}) {
     if (sub === 'init') return print(initUserProfile({ force: !!args.force, dryRun: !!args.dryRun }), true);
     throw new CapcutError(`Unknown profile subcommand: ${sub}. Use show, where or init.`, { code: 'UNKNOWN_SUBCOMMAND', exitCode: 2 });
   }
+  if (command === 'ending') {
+    const { runEnding } = await import('./ending.mjs');
+    if (args.project && args.out) throw new CapcutError('ending takes --project or --out, not both.', { code: 'ENDING_TARGET', exitCode: 2 });
+    if (!args.project && !args.out) throw new CapcutError('ending needs --project NAME or --out PATH.mov|PATH.mp4.', { code: 'ENDING_TARGET', exitCode: 2 });
+    const endingDir = args.project ? resolveProject(args.project, root) : null;
+    if (isStageDir(endingDir)) args.forceRunning = true;
+    return print(await runEnding(endingDir, {
+      frame: args.frame, profileFile: args.profile, out: args.out, noSfx: Boolean(args.noSfx),
+      dryRun: Boolean(args.dryRun), forceRunning: Boolean(args.forceRunning), backup: !args.noBackup,
+    }), true);
+  }
   if (command === 'mograph' && ['scenes', 'scene-preview', 'scene-render'].includes(args._[1])) {
     const scenes = await import('./mograph-scene.mjs');
     const sub = args._[1];
@@ -1065,7 +1145,29 @@ export async function main(argv, dependencies = {}) {
   if (command === 'export') {
     if (!args.project) throw new CapcutError('export requires --project NAME', { exitCode: 2 });
     const { exportProject } = await import('./export.mjs');
-    return print(await exportProject(resolveProject(args.project, root), args), true);
+    const liveDir = resolveProject(args.project, root, { live: true });
+    const { activeStage } = await import('./core.mjs');
+    if (activeStage(liveDir)) {
+      throw new CapcutError('This project has an active stage: CapCut would export the draft without its staged edits. '
+        + 'Run `capcutctl stage commit --project NAME` (or discard) first.', { code: 'STAGE_ACTIVE', exitCode: 2 });
+    }
+    const result = await exportProject(liveDir, args);
+    if (result.gate?.verdict === 'FAIL') process.exitCode = 1;
+    return print(result, true);
+  }
+  if (command === 'review-video') {
+    const { reviewVideo, decideIssue, reviewText } = await import('./review-video.mjs');
+    if (args.decide) {
+      const verdict = { accept: 'accepted', reject: 'rejected' }[args.verdict];
+      if (!args.issue || !verdict) throw new CapcutError('review-video --decide FILE --issue ID --verdict accept|reject --reason "…"', { exitCode: 2 });
+      return print(decideIssue(path.resolve(args.decide), args.issue, verdict, args.reason), true);
+    }
+    if (!args.media) throw new CapcutError('review-video requires --media FINAL.mp4', { exitCode: 2 });
+    const record = await reviewVideo({ media: path.resolve(args.media), projectDir: args.project ? resolveProject(args.project, root) : null,
+      script: args.script ? path.resolve(args.script) : null, speech: args.speech ? path.resolve(args.speech) : null,
+      model: args.model || 'sonnet', resetRounds: Boolean(args.resetRounds) });
+    if (record.status === 'discarded' || record.issues.some(i => i.blocker)) process.exitCode = 1;
+    return args.json ? print(record, true) : print(reviewText(record));
   }
   if (command === 'review') {
     if (!args.project) throw new CapcutError('review requires --project NAME.', { exitCode: 2 });
@@ -1106,6 +1208,7 @@ export async function main(argv, dependencies = {}) {
     if (args.project) {
       const { resolveMediaPath } = await import('./core.mjs');
       const dir = resolveProject(args.project, root);
+      if (isStageDir(dir)) args.forceRunning = true;
       targets.push(...projectAlphaLeaks(await loadWorking(dir), dir, { resolve: resolveMediaPath }).map(l => l.file));
     }
     if (!args.dryRun && !args.check) assertCapcutClosed({ forceRunning: Boolean(args.forceRunning) });
@@ -1140,6 +1243,49 @@ export async function main(argv, dependencies = {}) {
     return emit(data);
   }
 
+  if (command === 'stage') {
+    const sub = args._[1] || 'status';
+    const liveDir = resolveProject(args.project, root, { live: true });
+    const stage = await import('./stage.mjs');
+    if (sub === 'status') return print(stage.stageStatus(liveDir), true);
+    if (sub === 'start') {
+      if (args.dryRun) return print({ dryRun: true, live: liveDir, stageRoot: stage.stageRoot(), ...stage.stageStatus(liveDir) }, true);
+      return print(stage.startStage(liveDir), true);
+    }
+    if (sub === 'commit') {
+      return print(stage.commitStage(liveDir, { dryRun: Boolean(args.dryRun), forceRunning: Boolean(args.forceRunning),
+        backup: !args.noBackup }), true);
+    }
+    if (sub === 'discard') {
+      if (args.dryRun) return print({ dryRun: true, ...stage.stageStatus(liveDir) }, true);
+      return print(stage.discardStage(liveDir), true);
+    }
+    throw new CapcutError('stage takes start | status | commit | discard.', { code: 'STAGE_SUBCOMMAND', exitCode: 2 });
+  }
+  if (command === 'variant') {
+    const projectDir = resolveProject(args.project, root, { live: true });
+    const { readHook, normalizeHook, runVariant } = await import('./variant.mjs');
+    if (Boolean(args.hooks) === Boolean(args.src)) {
+      throw new CapcutError('variant takes --hooks hooks.json [--hook ID] or --src IN-OUT.', { code: 'HOOK_MISSING', exitCode: 2 });
+    }
+    const hook = args.hooks ? readHook(path.resolve(args.hooks), args.hook ?? null)
+      : normalizeHook({ src: String(args.src), id: args.hook });
+    const { findWordsFile, loadWords } = await import('./anchors.mjs');
+    let wordsFile = args.words ? path.resolve(args.words) : null;
+    if (!wordsFile) try { wordsFile = findWordsFile(await loadWorking(projectDir)); } catch { wordsFile = null; }
+    const result = await runVariant(projectDir, {
+      hook, name: args.name || null, opening: args.opening != null ? Number(args.opening) : null,
+      words: wordsFile ? loadWords(wordsFile) : null, language: args.lang || 'ar',
+      dryRun: Boolean(args.dryRun), forceRunning: Boolean(args.forceRunning), gate: !args.noGate,
+    });
+    if (result.gate?.verdict === 'FAIL') process.exitCode = 1;
+    if (args.json || !result.gate) return print(result, true);
+    const { gateText } = await import('./gate.mjs');
+    const plan = result.plan;
+    return print(`variant: ${result.name} (hook ${plan.hook.id}: opening ${plan.opening.was}s → ${plan.opening.now}s)\n`
+      + `${result.project}\n${plan.warnings.map(w => `WARN ${w}`).join('\n')}${plan.warnings.length ? '\n' : ''}${gateText(result.gate)}`);
+  }
+
   const NEEDS_PROJECT = new Set([
     'inspect', 'doctor', 'snapshot', 'history', 'restore', 'sync', 'scenes',
     'denoise', 'blur-broll', 'reframe', 'cursor', 'screen-motion', 'pace', 'ramp', 'punch', 'match', 'verify-shots', 'captions', 'motion', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
@@ -1148,9 +1294,24 @@ export async function main(argv, dependencies = {}) {
   ]);
   if (!NEEDS_PROJECT.has(command)) throw new CapcutError(`Unknown command: ${command}\n\n${HELP}`, { exitCode: 2 });
   const projectDir = resolveProject(args.project, root);
+  // A staged copy is outside CapCut's drafts folder: no write to it waits for CapCut to close.
+  if (isStageDir(projectDir)) args.forceRunning = true;
   if (command === 'inspect') return print(inspectProject(projectDir), true);
   if (command === 'doctor') {
+    let repair = null;
+    if (args.fix) {
+      try {
+        const fixed = repairProject(projectDir, { dryRun: Boolean(args.dryRun), forceRunning: Boolean(args.forceRunning),
+          backup: !args.noBackup, label: 'doctor-fix' });
+        repair = { dryRun: fixed.dryRun, committed: fixed.committed, snapshot: fixed.snapshot, ...fixed.repaired,
+          details: { merged: fixed.merged, restored: fixed.restored, clamped: fixed.clamped, unclamped: fixed.unclamped } };
+      } catch (error) {
+        if (error.code === 'CAPCUT_RUNNING' || error.code === 'CAPCUT_PROCESS_UNKNOWN') throw error;
+        repair = { error: { code: error.code, message: error.message, details: error.details } };
+      }
+    }
     const report = doctor(projectDir);
+    if (repair) report.repair = repair;
     try {
       const { lintProjectBroll } = await import('./broll-lint.mjs');
       const loaded = loadProject(projectDir);
@@ -1665,13 +1826,19 @@ export async function main(argv, dependencies = {}) {
     return print(applySpec(projectDir, { version: 1, name: command, operations: [op] }, options), true);
   }
   if (command === 'gate') {
-    const { gateReport, gateText, writeGateRecord } = await import('./gate.mjs');
+    const { gateReport, gateText, writeGateRecord, finaliseReport } = await import('./gate.mjs');
     const { loadProfile, applyStyle } = await import('./profile.mjs');
     const profile = applyStyle(loadProfile({ file: args.profile || null }), args.style || null);
-    const report = gateReport(await loadWorking(projectDir), { projectDir, profile });
+    const doc = await loadWorking(projectDir);
+    const report = gateReport(doc, { projectDir, profile });
     if (args.xray) {
       const { foldXray } = await import('./gate.mjs');
-      foldXray(report, args.xray, projectDir);
+      foldXray(report, args.xray, projectDir, { profile, draft: doc, pauses: pauseList(args.pause) });
+    }
+    if (args.review) {
+      const { foldReview } = await import('./review-video.mjs');
+      foldReview(report, path.resolve(args.review));
+      finaliseReport(report);
     }
     if (args.record) report.recorded = writeGateRecord(projectDir, report);
     if (report.verdict === 'FAIL') process.exitCode = 1;
@@ -1752,7 +1919,7 @@ export async function main(argv, dependencies = {}) {
       }
       const box = { x: 0, y: 0, w: profile.canvas.width, h: profile.canvas.height };
       const op = { op: 'mograph.place', id: item.id, template: `scene:${item.scene}`, file: rendered.file, format: 'prores',
-        at: item.at, duration: rendered.meta.duration, box, fingerprint, sfx: null, clipVolume: args.noSfx ? 0 : 1,
+        at: item.at, duration: rendered.meta.duration, box, fingerprint, sfx: null, ...(args.noSfx ? { clipVolume: 0 } : {}),
         importVerified: false };
       if (args.dryRun) return print({ dryRun: true, placement: op, meta: rendered.meta, unsafe: rendered.unsafe }, true);
       const result = applySpec(projectDir, { version: 1, name: `mograph-${sub}`, operations: [op] }, options);

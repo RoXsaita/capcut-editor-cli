@@ -50,3 +50,35 @@ test('an unreadable X-ray folder fails by name', () => {
   assert.equal(report.verdict, 'FAIL');
   assert.deepEqual(report.failed, ['xray']);
 });
+
+test('a final export (gate --xray with the profile) blocks on a frozen picture the scan only warns on; stutter still warns', () => {
+  const dir = xrayDir({ export: {}, draft: null, info: { video: { width: 1080, height: 1920, avg_frame_rate: '30/1' }, format: { duration: '10' } },
+    audio: { present: true, findings: [], loudness: { momentary: [] } }, verdicts: [
+      { property: 'video.frozen', verdict: 'UNKNOWN', detail: 'still 4.2s' },
+      { property: 'video.stutter', verdict: 'UNKNOWN', detail: '2 events' },
+      { property: 'audio.loudness', verdict: 'UNKNOWN', detail: '-16 LUFS' },
+      { property: 'audio.clicks', verdict: 'UNKNOWN', detail: 'listen' },
+    ] });
+  fs.writeFileSync(path.join(dir, 'speech.json'), JSON.stringify({ words: [{ word: 'a', start: 0.1, end: 9 }] }));
+  const profile = { canvas: { width: 1080, height: 1920, fps: 30 }, final: {} };
+  const report = foldXray(baseReport(), dir, null, { profile });
+  assert.deepEqual(report.failed.filter(id => id.startsWith('xray:')), ['xray:video.frozen']);
+  assert.ok(report.warned.includes('xray:audio.loudness'), 'the scan\'s ±1 LU verdict only warns; export-loudness judges');
+  assert.ok(report.warned.includes('xray:audio.clicks') && report.warned.includes('xray:video.stutter'));
+  assert.equal(foldXray(baseReport(), dir, null).failed.length, 0, 'a plain scan fold still only warns');
+});
+
+test('a proxy-only X-ray NOTE neither blocks nor warns, and PROMOTE does not lift it', () => {
+  const dir = xrayDir({ export: {}, draft: null, verdicts: [
+    { property: 'video.one_or_two_frame_glitch', verdict: 'NOTE', detail: '1 event(s); proxy-only at 6 fps, verify on the full-rate export' },
+    { property: 'video.frozen', verdict: 'NOTE', detail: 'proxy-only' },
+    { property: 'audio.clipping', verdict: 'FAIL', detail: '1 stretch' },
+  ] });
+  const report = foldXray(baseReport(), dir, null);
+  assert.deepEqual(report.failed, ['xray:audio.clipping']);
+  assert.ok(!report.warned.some(id => id.startsWith('xray:video')));
+  assert.deepEqual(report.noted, ['xray:video.one_or_two_frame_glitch', 'xray:video.frozen']);
+  const promoted = foldXray(baseReport(), dir, null, { profile: { canvas: { width: 1080, height: 1920, fps: 30 }, final: {} } });
+  assert.ok(!promoted.failed.includes('xray:video.frozen'), 'a NOTE is never promoted to a final-export FAIL');
+  assert.ok(promoted.noted.includes('xray:video.frozen'));
+});

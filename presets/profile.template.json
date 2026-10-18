@@ -39,6 +39,19 @@
 
   "motion": { "color": "3D3D3D", "accent": "FFB020" },
 
+  "ending": {
+    "_about": "Optional three-second follow animation. Set frame to a private PNG/JPEG path (relative to this profile), or pass --frame per video. sub falls back to brand.handle/name. build appends it when auto is true (edit.json \"ending\": false skips one video) and opens it on the edit's own last frame; badge \"\" hides the badge.",
+    "auto": false,
+    "frame": null,
+    "faceX": 540,
+    "faceY": 920,
+    "faceScale": 0.46,
+    "pill": "Next up",
+    "headline": "Follow",
+    "sub": null,
+    "badge": "2"
+  },
+
   "styles": {
     "_about": "Your video types. Each keeps the brand and flexes pace and emphasis. `edit.json` picks one with \"style\".",
     "explainer": {

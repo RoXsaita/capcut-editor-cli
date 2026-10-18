@@ -30,6 +30,7 @@ and places them all (see the `capcut-editing` skill).
 | **Safe** | Default placements stay inside the profile's text bands; a box in the platform UI zones refuses (`MOGRAPH_SAFE_ZONE`) unless `--allow-unsafe`. |
 | **Paired sound** | Each template names its cue (`pop`, `impact`, `enter`, `select`…, mapped through `presets/sfx.json` accents). `mograph.place` writes it on `mograph-sfx`; a cue missing on this machine is reported, not faked. |
 | **Owned & idempotent** | Output is tagged `mograph:<id>` / `mograph:sfx:<id>`; placing the same id replaces it with the same ids. `build` prunes graphics its plan no longer names. |
+| **Keeps your levels** | `rerender` and a rebuild carry the replaced clip's and cue's volume and audio fade onto the new ones, so a pop turned down in CapCut stays down. An explicit `clipVolume` / `sfxVolume` on the op (or `--no-sfx` for a scene) still wins. |
 
 ## Formats
 

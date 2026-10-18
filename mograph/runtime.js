@@ -7,6 +7,8 @@
  * then calls `window.__mograph.seek(t)` once per frame and screenshots only that box with a
  * transparent background. The clip is therefore tight (never a full-frame overlay) and its
  * canvas position is known exactly, so placement in CapCut is arithmetic, not a guess.
+ * seek(t) resolves only after Chrome has painted that frame, so a screenshot never catches the
+ * composite from before the seek (frame N never depends on the frame seeked before it).
  *
  * Determinism is the whole contract: the picture at time t is a pure function of (params, t).
  *  - no wall clock: Date.now / performance.now are frozen, requestAnimationFrame never fires,
@@ -57,6 +59,9 @@
     };
   }
   Math.random = mulberry32(seed);
+  // The renderer's own frame clock, kept before templates lose theirs: seek(t) waits on it.
+  const nativeFrame = window.requestAnimationFrame.bind(window);
+  const painted = () => new Promise(resolve => nativeFrame(() => nativeFrame(() => resolve())));
   Date.now = () => 0;
   if (window.performance) window.performance.now = () => 0;
   window.requestAnimationFrame = () => 0;
@@ -366,7 +371,8 @@
           const h = even(Math.min(canvas.height, Math.ceil(y1 + pad)) - y);
           return { x, y, w, h };
         },
-        seek(t) { spec.seek(t, state, MG); return document.body.offsetHeight; },
+        /** Set frame t and resolve once it is on screen (two native frames: committed, then presented). */
+        seek(t) { spec.seek(t, state, MG); void document.body.offsetHeight; return painted(); },
       };
       window.__mograph = api;
       return api;

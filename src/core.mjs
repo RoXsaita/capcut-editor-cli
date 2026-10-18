@@ -30,11 +30,13 @@ import {
 import { opMusic } from './music.mjs';
 import { opLoudness } from './loudness.mjs';
 import { opCaption } from './captions-srt.mjs';
-import { opMographPlace, opMographPrune } from './mograph-place.mjs';
+import { opMographPlace, opMographPrune, isFollowEnding } from './mograph-place.mjs';
 import { opAnimation } from './animations.mjs';
+import { opVariantHook } from './variant.mjs';
 import { isPreframed } from './origin.mjs';
 import { userDir } from './profile.mjs';
 import { preflightPython } from './python.mjs';
+import { LEDGER_RELATIVE, clampOverruns, nextLedger, readLedgerFile, readMetaRecord, restoreMeta } from './repair.mjs';
 
 export const DEFAULT_ROOT = path.join(
   process.env.HOME || '',
@@ -904,8 +906,19 @@ export function assertCapcutClosed({ forceRunning = false, probe = capcutProcess
   return state;
 }
 
-/** End of the actual editable content (normally the gapless talking-head track). */
+/**
+ * End of the principal edit plus its contiguous owned ending, excluding parked material.
+ * `principalEndUs` stops before the ending: what the speech, captions and the endcard end on.
+ */
 export function contentEndUs(doc, projectDir = null) {
+  return editEndUs(doc, projectDir, true);
+}
+
+export function principalEndUs(doc, projectDir = null) {
+  return editEndUs(doc, projectDir, false);
+}
+
+function editEndUs(doc, projectDir, withEnding) {
   const parked = preservedRange(projectDir);
   let end = 0;
   try {
@@ -920,7 +933,14 @@ export function contentEndUs(doc, projectDir = null) {
     // A malformed/partial draft may not have a principal track. Its declared duration is
     // still a useful read result, and validation will report the structural problem.
   }
-  if (end > 0) return parked ? Math.min(end, parked.start) : end;
+  if (end > 0) {
+    if (withEnding) for (const { track, segment } of allSegments(doc)) {
+      const target = segment.target_timerange;
+      if (track.type === 'video' && isFollowEnding(doc, segment) && target?.duration > 0
+          && Math.abs(target.start - end) <= DURATION_TOLERANCE_US) end = target.start + target.duration;
+    }
+    return parked ? Math.min(end, parked.start) : end;
+  }
   if (parked) return parked.start;
   return Number.isFinite(doc?.duration) ? doc.duration : 0;
 }
@@ -989,14 +1009,42 @@ export function listProjects(root = DEFAULT_ROOT) {
   return entries.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-export function resolveProject(input, root = DEFAULT_ROOT) {
+/**
+ * A project name or path → its directory. While `stage start` is active for the project, this
+ * answers with the staged copy, so every read and write of a multi-step edit lands there and
+ * CapCut can stay open; `{ live: true }` asks for CapCut's own folder (stage, export).
+ */
+export function resolveProject(input, root = DEFAULT_ROOT, { live = false } = {}) {
   if (!input) throw new CapcutError('Missing --project <name-or-path>.', { code: 'MISSING_PROJECT', exitCode: 2 });
   const direct = path.resolve(input);
   const projectDir = fs.existsSync(path.join(direct, 'draft_info.json')) ? direct : path.join(root, input);
   if (!fs.existsSync(path.join(projectDir, 'draft_info.json'))) {
     throw new CapcutError(`CapCut project not found: ${input}`, { code: 'PROJECT_NOT_FOUND', exitCode: 2 });
   }
+  if (!live) {
+    const stage = activeStage(projectDir);
+    if (stage) return stage.stage;
+  }
   return projectDir;
+}
+
+export const STAGE_MARKER = path.join('.capcutctl', 'stage.json');
+export const STAGE_OF = path.join('.capcutctl', 'stage-of.json');
+
+/** The staged copy recorded in a live project's marker, when it still exists. */
+export function activeStage(projectDir) {
+  const file = path.join(projectDir, STAGE_MARKER);
+  if (!fs.existsSync(file)) return null;
+  let marker;
+  try { marker = readJson(file); } catch { return null; }
+  if (marker?.version !== 1 || typeof marker.stage !== 'string') return null;
+  if (!fs.existsSync(path.join(marker.stage, 'draft_info.json'))) return null;
+  return marker;
+}
+
+/** A staged copy lives outside CapCut's drafts folder, so CapCut can neither see nor save it. */
+export function isStageDir(projectDir) {
+  return Boolean(projectDir) && fs.existsSync(path.join(projectDir, STAGE_OF));
 }
 
 export function activeTimelineId(projectDir) {
@@ -2070,6 +2118,21 @@ function opTrackClone(doc, op) {
   return { changed: 1, id: copied.id, index: at };
 }
 
+/** Remove a whole track by name (a caption layer before it is regenerated). Refuses one that still
+ *  holds segments unless `all: true`, and an ambiguous name. Unused materials are left for doctor. */
+function opTrackRemove(doc, op) {
+  const hits = doc.tracks.map((track, index) => ({ track, index }))
+    .filter(({ track, index }) => (op.name != null ? track.name === op.name : index === op.index));
+  if (!hits.length) throw new CapcutError(`track.remove: no track matched ${JSON.stringify(op.name ?? op.index)}.`, { code: 'SELECTOR_EMPTY' });
+  if (hits.length > 1) throw new CapcutError(`track.remove: ${hits.length} tracks are called "${op.name}".`, { code: 'SELECTOR_AMBIGUOUS' });
+  const { track, index } = hits[0];
+  if ((track.segments || []).length && op.all !== true) {
+    throw new CapcutError(`track.remove: "${track.name}" still holds ${track.segments.length} segment(s); pass "all": true to drop them too.`, { code: 'TRACK_NOT_EMPTY' });
+  }
+  doc.tracks.splice(index, 1);
+  return { changed: 1, removed: track.name, index, segments: (track.segments || []).length };
+}
+
 function opTimelineSet(doc, op) {
   if (Object.hasOwn(op, 'exportRange')) {
     if (op.exportRange !== null) throw new CapcutError('timeline.set exportRange only supports null (clear selection).', { code: 'BAD_EXPORT_RANGE' });
@@ -2877,6 +2940,8 @@ export function applyOperations(doc, operations, context) {
     else if (op.op === 'material.relink') result = opMaterialRelink(doc, op, context);
     else if (op.op === 'material.clone') result = opMaterialClone(doc, op, context);
     else if (op.op === 'track.clone') result = opTrackClone(doc, op);
+    else if (op.op === 'track.remove') result = opTrackRemove(doc, op);
+    else if (op.op === 'materials.dedupe') { const merged = dedupeMaterials(doc); result = { changed: merged.length, merged }; }
     else if (op.op === 'timeline.set') result = opTimelineSet(doc, op);
     else if (op.op === 'layout.apply') result = opLayoutApply(doc, op, context);
     else if (op.op === 'layout.background') result = opLayoutBackground(doc, op, context);
@@ -2914,6 +2979,7 @@ export function applyOperations(doc, operations, context) {
     else if (op.op === 'mograph.place') result = opMographPlace(doc, op, context);
     else if (op.op === 'mograph.prune') result = opMographPrune(doc, op, context);
     else if (op.op === 'animation.apply') result = opAnimation(doc, op, context);
+    else if (op.op === 'variant.hook') result = opVariantHook(doc, op, context);
     else if (op.op === 'grade.apply') result = opGradeApply(doc, op, context);
     else if (op.op === 'grade.reset') result = opGradeReset(doc, op, context);
     else if (op.op === 'grade.layer') result = opGradeLayer(doc, op, context);
@@ -3349,7 +3415,8 @@ export function executeTransaction(projectDir, mutator, {
   // A dry run writes nothing, so refusing it while CapCut is open cost a quit-and-relaunch
   // just to see a plan — and his loop is "look in CapCut, then edit". Reads can be torn by an
   // auto-save; that yields a parse error or a stale plan, never a damaged project.
-  assertCapcutClosed({ forceRunning: forceRunning || dryRun, probe: processProbe || capcutProcess });
+  // A staged copy is outside CapCut's drafts folder; only `stage commit` needs CapCut closed.
+  assertCapcutClosed({ forceRunning: forceRunning || dryRun || isStageDir(projectDir), probe: processProbe || capcutProcess });
   // Dry runs intentionally remain write-free, including the lock directory. Real writes
   // acquire the project lock before the first project read and keep it through post-doctor.
   const lock = dryRun ? null : acquireLock(projectDir);
@@ -3380,6 +3447,12 @@ export function executeTransaction(projectDir, mutator, {
     for (const group of changedGroups) {
       const data = stableJson(group.doc);
       for (const file of group.mirrors) writes.push({ file, data });
+    }
+    // The record of what capcutctl wrote, outside the draft: CapCut strips our keys when it
+    // saves, and `doctor --fix` / `stage start` put them back from here (repair.mjs).
+    if (changedGroups.length) {
+      const ledger = nextLedger(readLedgerFile(projectDir), working.map(group => group.doc));
+      if (ledger) pendingWrites.push({ file: path.join(projectDir, LEDGER_RELATIVE), data: stableJson(ledger) });
     }
     for (const write of pendingWrites) {
       if (!write?.file || typeof write.data !== 'string') throw new CapcutError('Transaction extra write is invalid.', { code: 'BAD_TRANSACTION_WRITE' });
@@ -3432,6 +3505,63 @@ export function executeTransaction(projectDir, mutator, {
   } finally {
     cleanStaged(staged);
     if (lock) releaseLock(lock);
+  }
+}
+
+/**
+ * Put files that are already final bytes into a project, atomically: the swap half of
+ * `stage commit`. The same guarantees as executeTransaction — CapCut closed, the project lock,
+ * a history snapshot, temp files renamed into place, a post-write doctor, rollback on any
+ * failure. `check` runs under the lock before anything is touched and may throw to refuse.
+ * A write is `{ file, data, json }` (text, parsed before the rename when `json`) or
+ * `{ file, source }` (copied, cloned where the filesystem can).
+ */
+export function commitProjectFiles(projectDir, { writes = [], removes = [] } = {}, {
+  forceRunning = false, processProbe = null, backup = true, label = 'commit', check = null,
+} = {}) {
+  assertCapcutClosed({ forceRunning, probe: processProbe || capcutProcess });
+  const lock = acquireLock(projectDir);
+  let snapshot = null;
+  let journal = null;
+  const staged = [];
+  let commitAttempted = false;
+  try {
+    if (check) check();
+    journal = captureRollbackJournal([...writes.map(write => write.file), ...removes]);
+    if (backup) snapshot = createSnapshot(projectDir, label);
+    const transactionId = uuid();
+    for (const write of writes) {
+      fs.mkdirSync(path.dirname(write.file), { recursive: true });
+      const temp = `${write.file}.capcutctl-${transactionId}.tmp`;
+      staged.push({ file: write.file, temp });
+      if (write.source) fs.copyFileSync(write.source, temp, fs.constants.COPYFILE_FICLONE);
+      else {
+        const fd = fs.openSync(temp, 'wx');
+        try { fs.writeFileSync(fd, write.data); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+      }
+      if (write.json) readJson(temp);
+    }
+    commitAttempted = true;
+    commitStaged(staged);
+    for (const file of removes) if (fs.existsSync(file)) fs.unlinkSync(file);
+    const post = doctor(projectDir, { checkFiles: true });
+    if (post.errors) throw new CapcutError(`Post-write validation found ${post.errors} errors.`, { code: 'POST_WRITE_VALIDATION', details: post.issues });
+    return { committed: true, snapshot, postDoctor: post };
+  } catch (error) {
+    if (!commitAttempted && !snapshot) throw error;
+    let rollbackError = null;
+    if (snapshot) try { restoreSnapshot(snapshot, projectDir); } catch (caught) { rollbackError = caught; }
+    if (journal) try { restoreRollbackJournal(journal); } catch (caught) { rollbackError = rollbackError || caught; }
+    const cause = error instanceof CapcutError
+      ? { code: error.code, message: error.message, details: error.details }
+      : { message: error?.message || String(error) };
+    throw new CapcutError(`Commit rolled back: ${error.message}`, {
+      code: 'ROLLED_BACK',
+      details: { snapshot, cause, ...(rollbackError ? { rollbackError: rollbackError.message } : {}) }
+    });
+  } finally {
+    cleanStaged(staged);
+    releaseLock(lock);
   }
 }
 
@@ -3556,7 +3686,7 @@ export function restoreProjectSnapshot(projectDir, snapshotNameOrPath, options =
  * them — but only when they are the same LOGICAL material, so a genuine id collision
  * between two different clips is still reported rather than silently merged.
  */
-function dedupeMaterials(doc) {
+export function dedupeMaterials(doc) {
   const merged = [];
   for (const [kind, values] of Object.entries(doc.materials || {})) {
     if (!Array.isArray(values)) continue;
@@ -3566,8 +3696,11 @@ function dedupeMaterials(doc) {
       if (!value?.id) { keep.push(value); continue; }
       const prev = seen.get(value.id);
       if (!prev) { seen.set(value.id, value); keep.push(value); continue; }
-      const same = ['path', 'width', 'height', 'duration', 'type', 'name']
-        .every(k => JSON.stringify(prev[k]) === JSON.stringify(value[k]));
+      // CapCut's re-probe can also move a duration by a frame (135000000 vs 135033333 on one
+      // stream-copied mp4); within a frame it is the same file, and the first copy is kept.
+      const same = ['path', 'width', 'height', 'type', 'name']
+        .every(k => JSON.stringify(prev[k]) === JSON.stringify(value[k]))
+        && (prev.duration === value.duration || Math.abs((prev.duration || 0) - (value.duration || 0)) <= 34_000);
       if (same) merged.push({ kind, id: value.id });
       else keep.push(value);                       // a real collision: leave it for doctor
     }
@@ -3586,6 +3719,31 @@ export function syncMirrors(projectDir, options = {}) {
     return groups.map(group => ({ group: group.name, mirrors: group.mirrors }));
   }, { ...options, forceWriteAll: true, label: options.label || 'sync' });
   return { ...result, mergedDuplicateMaterials: merged.length, merged };
+}
+
+/**
+ * Repair what a CapCut save did: merge its duplicate material ids, put back the capcutctl
+ * metadata it stripped (from the ledger / history / media-map), and shorten B-roll that reads
+ * past its source. Nothing the user edited on purpose is changed (see repair.mjs).
+ */
+export function repairProject(projectDir, options = {}) {
+  const record = readMetaRecord(projectDir);
+  const rows = { merged: [], restored: [], clamped: [], unclamped: [] };
+  const result = executeTransaction(projectDir, groups => {
+    for (const group of groups) {
+      const tag = row => ({ ...row, group: group.name });
+      rows.merged.push(...dedupeMaterials(group.doc).map(tag));
+      rows.restored.push(...restoreMeta(group.doc, record).map(tag));
+      let principalIndex = null;
+      try { principalIndex = principalTrack(group.doc).index; } catch { /* no principal: clamp nothing on it */ }
+      const { clamped, left } = clampOverruns(group.doc, { principalIndex });
+      rows.clamped.push(...clamped.map(tag));
+      rows.unclamped.push(...left.map(tag));
+    }
+    return rows;
+  }, { ...options, forceWriteAll: true, label: options.label || 'repair' });
+  return { ...result, repaired: { merged: rows.merged.length, restored: rows.restored.length,
+    clamped: rows.clamped.length, unclamped: rows.unclamped.length }, ...rows };
 }
 
 export function inspectProject(projectDir) {
