@@ -78,6 +78,17 @@ function removeOwned(doc, id) {
   return orphaned.size > 0;
 }
 
+/** The volumes of the picture and paired cue this id already owns, if it is placed. */
+function ownedLevels(doc, id) {
+  const levels = {};
+  for (const s of doc.tracks.flatMap(t => t.segments || [])) {
+    if (!Number.isFinite(s.volume)) continue;
+    if (s.desc === mographDesc(id)) levels.picture = s.volume;
+    else if (s.desc === mographSfxDesc(id)) levels.sfx = s.volume;
+  }
+  return levels;
+}
+
 function freeLane(doc, atUs, durUs, mint) {
   const lanes = doc.tracks.filter(t => t.type === 'video' && MOGRAPH_LANE.test(t.name || ''));
   for (const lane of lanes) {
@@ -104,6 +115,9 @@ export function opMographPlace(doc, op, context = {}) {
   }
   const at = Number(op.at), duration = Number(op.duration);
   if (!(at >= 0) || !(duration > 0)) throw new CapcutError('mograph.place: bad at/duration.', { code: 'BAD_TIME', exitCode: 2 });
+  // A re-place (rerender, rebuild) keeps the levels the graphic already has: someone may have
+  // turned its pop down in CapCut, and rerender used to reset every pop to 1.0.
+  const prior = op.resetLevels ? {} : ownedLevels(doc, op.id);
   const replaced = removeOwned(doc, op.id);
   const cc = doc.canvas_config || { width: 1080, height: 1920 };
   const geo = placementFor(box, { width: cc.width || 1080, height: cc.height || 1920 }, op.renderScale || 1);
@@ -124,7 +138,7 @@ export function opMographPlace(doc, op, context = {}) {
   } else if (op.format === 'prores') {
     const added = opClipAdd(doc, {
       op: 'clip.add', media: path.resolve(op.file), at, duration, track: lane, generated: true,
-      width: geo.width, height: geo.height, mediaDuration: durUs, volume: op.clipVolume ?? 0, desc: mographDesc(op.id),
+      width: geo.width, height: geo.height, mediaDuration: durUs, volume: op.clipVolume === 0 ? 0 : prior.picture ?? op.clipVolume ?? 0, desc: mographDesc(op.id),
       forceNewMaterial: true, materialId: mint('material'), id: mint('segment'), __seed: seed,
     }, context);
     segment = doc.tracks.flatMap(t => t.segments || []).find(s => s.id === added.id);
@@ -153,7 +167,7 @@ export function opMographPlace(doc, op, context = {}) {
       const lead = op.sfxLead ?? 0;
       const len = Math.min(S(tpl.duration || US(0.5)), 1.2, duration + lead);
       const lane = ensureAudioTrack(doc, MOGRAPH_SFX_LANE, key => mint(key));
-      const volume = op.sfxVolume ?? presets.rules?.volume ?? 1;
+      const volume = prior.sfx ?? op.sfxVolume ?? presets.rules?.volume ?? 1;
       lane.segments.push(audioSegment(doc, audioId, Math.max(0, at - lead), len, `mograph:${op.id}:sfx`, volume,
         mographSfxDesc(op.id), key => mint(key)));
       lane.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
