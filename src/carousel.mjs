@@ -13,10 +13,13 @@
  *  - `steps`: an rl2 take (trace.ndjson + frames.ndjson + screen*.mp4) → one candidate
  *             frame per real click or typing burst, with the click in video pixels and a
  *             crop sized so the UI text lands at ≥36 px on a 1080-wide slide;
- *  - `build`: a pack spec → 1080×1350 PNG slides rendered by headless Chrome
- *             (mograph/carousel/guide.html), a contact sheet, index.html and metadata.json,
- *             then measured: OCR line height inside every step's UI shot, privacy rules on
- *             every slide's OCR text, headline length and slide count. Exit 1 on a fail.
+ *  - `build`: a pack spec (docs/carousel-spec.md) → static PNG slides, 1080×1440 by default,
+ *             rendered by headless Chrome (mograph/carousel/guide.html), a contact sheet,
+ *             index.html and metadata.json, then measured: OCR line height inside every step's
+ *             UI shot, how much of the slide the shot fills, text cut at the shot's edge, text
+ *             outside the safe zone, privacy rules, headline length and slide count. The
+ *             thresholds are the spec's `rules`, the look is its `theme`: taste is data, not code.
+ *             Exit 1 on a fail. The reel twin is one feeder; any slide spec builds the same way.
  *  - `stage`: copy the pack to a carousel dashboard, mark it draft, link it to the reel's
  *             item and create one DRAFT publish job. It never calls a publish route.
  */
@@ -32,15 +35,68 @@ export const PACKAGE_ROOT = path.join(HERE, '..');
 export const TEMPLATE = path.join(PACKAGE_ROOT, 'mograph', 'carousel', 'guide.html');
 export const FONT_DIR = path.join(PACKAGE_ROOT, 'mograph', 'fonts');
 
-export const SLIDE = Object.freeze({ width: 1080, height: 1350 });
+/** Canvases a pack renders at. 3:4 is the feed's own ratio; 4:5 stays for ads and old packs. */
+export const CANVASES = Object.freeze({
+  '3x4': Object.freeze({ width: 1080, height: 1440 }),
+  '4x5': Object.freeze({ width: 1080, height: 1350 }),
+});
+export const SLIDE = CANVASES['3x4'];
 /** Step shots must read at this OCR line-box height (px, on the 1080-wide slide) or the build fails. */
 export const MIN_TEXT_PX = 36;
 export const MAX_HEADLINE_WORDS = 12;
 export const SLIDE_COUNT = Object.freeze([6, 8]);
+
+/**
+ * What QA enforces, overridable per spec (`rules`). `safe` is the margin every text line keeps
+ * (x from the sides, y from top and bottom: y 45 keeps text inside a centred 1080×1350, so a
+ * 4:5 crop loses nothing). `minShotFill` is the step shot's share of the slide height;
+ * `edgePadPx` is how close OCR text may come to the shot's left or right edge.
+ */
+export const DEFAULT_RULES = Object.freeze({
+  canvas: '3x4',
+  safe: Object.freeze({ x: 72, y: 45 }),
+  minTextPx: MIN_TEXT_PX,
+  maxHeadlineWords: MAX_HEADLINE_WORDS,
+  slideCount: SLIDE_COUNT,
+  minShotFill: 0.55,
+  edgePadPx: 20,
+  maxUpscale: 2.8,
+  requirePrompt: true,
+  requireKeyword: true,
+});
+
+/**
+ * The template's look, overridable per spec (`theme`). Numbers are CSS pixels, strings are CSS
+ * values; each key becomes a `--kebab-case` custom property in guide.html. Colours come from the
+ * profile's brand tokens unless the theme names them.
+ */
+export const DEFAULT_THEME = Object.freeze({
+  bg: '#F5F5F9', card: '#FFFFFF', muted: '#4A4A5C',
+  padX: 90, padTop: 48, padBottom: 40,
+  badge: 104, kicker: 30, h1: 60, h1Cover: 80, sub: 34, body: 38, footer: 30,
+  gap: 40, cardMargin: 60, cardBorder: 4, cardRadius: 36, shadow: '0 18px 48px rgba(11, 11, 20, 0.12)',
+});
+
+export function resolveRules(spec = {}) {
+  const rules = { ...DEFAULT_RULES, ...(spec.rules || {}) };
+  rules.canvas = spec.canvas || rules.canvas;
+  if (!CANVASES[rules.canvas]) fail('CAROUSEL_SPEC', `canvas must be one of ${Object.keys(CANVASES).join(', ')}`);
+  rules.safe = { ...DEFAULT_RULES.safe, ...(spec.rules?.safe || {}) };
+  return rules;
+}
+
+export function resolveTheme(spec = {}) {
+  return { ...DEFAULT_THEME, ...(spec.theme || {}) };
+}
+
+/** The pixel width a shot image is cut at: the card's inner width on the canvas. */
+export function shotWidth(theme, canvas) {
+  return canvas.width - 2 * (theme.cardMargin + theme.cardBorder);
+}
 /** A reel is judged on its first ~day: older than this and its reach is lifetime, not momentum. */
 export const WINDOW_HOURS = 36;
 /** Upscaling a screen capture past this reads soft; `steps` warns instead of silently zooming. */
-export const MAX_SHOT_UPSCALE = 2.8;
+export const MAX_SHOT_UPSCALE = DEFAULT_RULES.maxUpscale;
 
 const fail = (code, message) => { throw new CapcutError(message, { code, exitCode: 2 }); };
 const r1 = n => Math.round(n * 10) / 10;
@@ -215,6 +271,14 @@ export function readTake(dir, { probe = probeSize } = {}) {
   return { dir: root, name: path.basename(root), video, width: size.width, height: size.height, steps };
 }
 
+/** A still image (a screenshot, an exported frame) as a shot source: no trace, no steps. */
+export function readStill(file, { probe = probeSize } = {}) {
+  const image = path.resolve(file);
+  if (!fs.existsSync(image)) fail('CAROUSEL_SPEC', `shot image ${image} does not exist`);
+  const size = probe(image);
+  return { dir: path.dirname(image), name: path.basename(image), video: image, still: true, width: size.width, height: size.height, steps: [] };
+}
+
 /**
  * A crop around a click, sized for reading (cf. rl2's ClickCrop, which is sized for one label):
  * the width is what fits `textPx`-high source text to MIN_TEXT_PX on a `slideWidth` shot, so
@@ -231,33 +295,34 @@ export function readableCrop({ x, y }, frame, { textPx = 18, slideWidth = SLIDE.
 
 // ─── Pack spec ──────────────────────────────────────────────────────────────────────────────
 
-const KINDS = new Set(['cover', 'step', 'prompt', 'cta']);
+const KINDS = new Set(['cover', 'step', 'text', 'prompt', 'cta']);
 export const countWords = text => String(text || '').trim().split(/\s+/).filter(Boolean).length;
 
 /** Problems with a spec, as strings; empty when it can be built. */
 export function validateSpec(spec) {
   const problems = [];
   if (!spec || typeof spec !== 'object') return ['spec must be a JSON object'];
+  const rules = resolveRules(spec);
+  const [minSlides, maxSlides] = rules.slideCount;
   if (!/^[a-z0-9][a-z0-9-]{2,80}$/.test(String(spec.slug || ''))) problems.push('slug must be lower-case letters, digits and dashes');
   const slides = Array.isArray(spec.slides) ? spec.slides : [];
-  if (slides.length < SLIDE_COUNT[0] || slides.length > SLIDE_COUNT[1]) problems.push(`a guide carousel has ${SLIDE_COUNT[0]}–${SLIDE_COUNT[1]} slides, this has ${slides.length}`);
-  if (slides[0]?.kind !== 'cover') problems.push('slide 1 must be the cover (the promise and what you need)');
+  if (slides.length < minSlides || slides.length > maxSlides) problems.push(`a carousel here has ${minSlides}–${maxSlides} slides, this has ${slides.length}`);
+  if (slides[0]?.kind !== 'cover') problems.push('slide 1 must be the cover (the promise)');
   if (slides.at(-1)?.kind !== 'cta') problems.push('the last slide must be the CTA');
-  if (!slides.some(s => s.kind === 'prompt')) problems.push('a guide carousel needs a "copy this" prompt slide');
-  if (!slides.some(s => s.kind === 'cta' && s.keyword)) problems.push('the CTA needs the reel\'s comment keyword');
+  if (rules.requirePrompt && !slides.some(s => s.kind === 'prompt')) problems.push('this carousel needs a "copy this" prompt slide (rules.requirePrompt)');
+  if (rules.requireKeyword && !slides.some(s => s.kind === 'cta' && s.keyword)) problems.push('the CTA needs a comment keyword (rules.requireKeyword)');
   slides.forEach((slide, i) => {
     const at = `slide ${i + 1}`;
     if (!KINDS.has(slide.kind)) problems.push(`${at}: kind must be one of ${[...KINDS].join(', ')}`);
     if (!slide.headline) problems.push(`${at}: headline is required`);
-    if (countWords(slide.headline) > MAX_HEADLINE_WORDS) problems.push(`${at}: headline is ${countWords(slide.headline)} words (max ${MAX_HEADLINE_WORDS})`);
+    if (countWords(slide.headline) > rules.maxHeadlineWords) problems.push(`${at}: headline is ${countWords(slide.headline)} words (max ${rules.maxHeadlineWords})`);
     if (slide.kind === 'step' && !slide.shot) problems.push(`${at}: a step needs a real UI shot`);
-    if (slide.kind === 'cover' && !(slide.needs || []).length) problems.push(`${at}: the cover lists what you need`);
     if (slide.kind === 'prompt' && !(slide.blocks || []).length) problems.push(`${at}: the prompt slide needs at least one block to copy`);
     if (slide.shot) {
       const shot = slide.shot;
-      if (!shot.take) problems.push(`${at}: shot.take is required`);
-      if (shot.t == null && shot.click == null && shot.typing == null) problems.push(`${at}: shot needs t (seconds), click or typing (trace event ids)`);
-      if (!Array.isArray(shot.crop) || shot.crop.length !== 4) problems.push(`${at}: shot.crop is [x, y, w, h] in video pixels`);
+      if (!shot.take && !shot.image) problems.push(`${at}: shot needs take (an rl2 folder) or image (a still)`);
+      if (shot.take && shot.t == null && shot.click == null && shot.typing == null) problems.push(`${at}: a take shot needs t (seconds), click or typing (trace event ids)`);
+      if (!Array.isArray(shot.crop) || shot.crop.length !== 4) problems.push(`${at}: shot.crop is [x, y, w, h] in source pixels`);
     }
   });
   return problems;
@@ -271,55 +336,60 @@ export const arabicNumeral = n => String(n).replace(/\d/g, d => ARABIC_DIGITS[Nu
  * marker from the trace (never guessed), and the on-slide geometry. Pure apart from reading
  * the take, so the plan prints before anything renders.
  */
-export function planPack(spec, { specDir = process.cwd(), takes = {}, readTakeFn = readTake } = {}) {
+export function planPack(spec, { specDir = process.cwd(), takes = {}, readTakeFn = readTake, readStillFn = readStill } = {}) {
   const problems = validateSpec(spec);
   if (problems.length) fail('CAROUSEL_SPEC', `the pack spec is not buildable:\n  - ${problems.join('\n  - ')}`);
+  const rules = resolveRules(spec);
+  const theme = resolveTheme(spec);
+  const canvas = CANVASES[rules.canvas];
   const cache = new Map(Object.entries(takes));
-  const take = ref => {
-    const dir = path.resolve(specDir, ref);
-    if (!cache.has(dir)) cache.set(dir, readTakeFn(dir));
-    return cache.get(dir);
+  const source = shot => {
+    const file = path.resolve(specDir, shot.take || shot.image);
+    if (!cache.has(file)) cache.set(file, shot.take ? readTakeFn(file) : readStillFn(file));
+    return cache.get(file);
   };
   let step = 0;
+  const numbered = spec.slides.map(slide => (slide.kind === 'step' ? (slide.number ?? ++step) : null));
+  const moves = Math.max(0, ...numbered.filter(n => n != null));
   const slides = spec.slides.map((slide, i) => {
     const out = { ...slide, index: i + 1 };
-    if (slide.kind === 'step') out.number = slide.number ?? ++step;
+    if (slide.kind === 'step') { out.number = numbered[i]; out.moves = moves; }
     if (!slide.shot) return out;
     const shot = slide.shot;
-    const source = take(shot.take);
-    let t = shot.t;
+    const src = source(shot);
+    let t = src.still ? 0 : shot.t;
     let marker = null;
     if (shot.typing != null) {
-      const burst = source.steps.find(s => s.type === 'typing' && String(s.id) === String(shot.typing));
-      if (!burst) fail('CAROUSEL_SPEC', `slide ${i + 1}: ${source.name} has no typing burst with id ${shot.typing}`);
+      const burst = src.steps.find(s => s.type === 'typing' && String(s.id) === String(shot.typing));
+      if (!burst) fail('CAROUSEL_SPEC', `slide ${i + 1}: ${src.name} has no typing burst with id ${shot.typing}`);
       // A burst usually ends on Enter, which clears the input: the typed text is on screen just before.
       t ??= burst.vt + (shot.after ?? -0.3);
     }
     if (shot.click != null) {
-      const click = source.steps.find(s => s.type === 'click' && String(s.id) === String(shot.click));
-      if (!click) fail('CAROUSEL_SPEC', `slide ${i + 1}: ${source.name} has no in-capture click with id ${shot.click}`);
+      const click = src.steps.find(s => s.type === 'click' && String(s.id) === String(shot.click));
+      if (!click) fail('CAROUSEL_SPEC', `slide ${i + 1}: ${src.name} has no in-capture click with id ${shot.click}`);
       t ??= click.vt + (shot.after ?? 0.35);
       if (shot.marker !== false) marker = { x: click.x, y: click.y };
     }
     const [cx, cy, cw, ch] = shot.crop.map(Number);
-    if (cx < 0 || cy < 0 || cx + cw > source.width || cy + ch > source.height) {
-      fail('CAROUSEL_SPEC', `slide ${i + 1}: crop ${shot.crop.join(',')} leaves the ${source.width}×${source.height} frame`);
+    if (cx < 0 || cy < 0 || cx + cw > src.width || cy + ch > src.height) {
+      fail('CAROUSEL_SPEC', `slide ${i + 1}: crop ${shot.crop.join(',')} leaves the ${src.width}×${src.height} frame`);
     }
-    const width = shot.width || SLIDE.width;
+    const width = shot.width || shotWidth(theme, canvas);
     const scale = width / cw;
     const toSlide = ([x, y, w, h]) => [(x - cx) * scale, (y - cy) * scale, w * scale, h * scale].map(Math.round);
     out.shot = {
-      ...shot, takeName: source.name, video: source.video, t: r3(t), crop: [cx, cy, cw, ch],
+      ...shot, takeName: src.name, video: src.video, still: Boolean(src.still), t: r3(t), crop: [cx, cy, cw, ch],
       width, height: Math.round(ch * scale), scale: r3(scale),
       marker: marker && marker.x >= cx && marker.x <= cx + cw && marker.y >= cy && marker.y <= cy + ch
         ? { x: Math.round((marker.x - cx) * scale), y: Math.round((marker.y - cy) * scale) } : null,
       highlight: shot.highlight ? toSlide(shot.highlight) : null,
       masks: (shot.masks || []).map(m => ({ rect: toSlide(m.rect || m), color: m.color || null })),
-      warnings: scale > MAX_SHOT_UPSCALE ? [`upscaled ${r1(scale)}× from the capture: it will read soft`] : [],
+      warnings: scale > rules.maxUpscale ? [`upscaled ${r1(scale)}× from the capture: it will read soft`] : [],
     };
     return out;
   });
-  return { ...spec, slides };
+  return { ...spec, rules, theme, canvas: { name: rules.canvas, ...canvas }, slides };
 }
 
 // ─── Render ─────────────────────────────────────────────────────────────────────────────────
@@ -330,32 +400,45 @@ export function extractShot(shot, file) {
   const [x, y, w, h] = shot.crop;
   const filter = `crop=${w}:${h}:${x}:${y},scale=${shot.width}:${shot.height}:flags=lanczos`
     + (shot.scale > 1.2 ? ',unsharp=5:5:0.45:5:5:0' : '');
-  const run = spawnSync('ffmpeg', ['-v', 'error', '-y', '-ss', String(shot.t), '-i', shot.video, '-frames:v', '1', '-vf', filter, file], { encoding: 'utf8' });
+  const seek = shot.still ? [] : ['-ss', String(shot.t)];
+  const run = spawnSync('ffmpeg', ['-v', 'error', '-y', ...seek, '-i', shot.video, '-frames:v', '1', '-vf', filter, file], { encoding: 'utf8' });
   if (run.status !== 0 || !fs.existsSync(file)) fail('CAROUSEL_FRAME', `ffmpeg could not cut ${shot.takeName} at ${shot.t}s: ${String(run.stderr).trim().split('\n').pop()}`);
   return file;
 }
 
 /** The template's fixed words; a spec's `labels` overrides any of them. */
-export const DEFAULT_LABELS = Object.freeze({ eyebrow: 'دليل خطوة بخطوة', needs: 'شو بتحتاج:', cta: 'اكتب بالتعليقات' });
+export const DEFAULT_LABELS = Object.freeze({
+  eyebrow: 'دليل خطوة بخطوة', needs: 'شو بتحتاج:', cta: 'اكتب بالتعليقات', stepOf: 'الحركة {n} من {total}',
+});
 
-export function slideData(slide, { total, handle, tokens, shotUrl, labels }) {
+const kicker = (template, n, total) => (n == null || !template ? '' : template.replace('{n}', arabicNumeral(n)).replace('{total}', arabicNumeral(total)));
+
+export function slideData(slide, { total, handle, tokens, shotUrl, labels, theme = DEFAULT_THEME, canvas = SLIDE, safe = DEFAULT_RULES.safe }) {
+  const words = { ...DEFAULT_LABELS, ...(labels || {}) };
   return {
     kind: slide.kind, index: slide.index, total, number: slide.number != null ? arabicNumeral(slide.number) : null,
-    headline: slide.headline, sub: slide.sub || '', needs: slide.needs || [], blocks: slide.blocks || [],
+    kicker: slide.kind === 'step' ? (slide.kicker ?? kicker(words.stepOf, slide.number, slide.moves || slide.number)) : (slide.kicker || ''),
+    headline: slide.headline, sub: slide.sub || '', body: slide.body || '', needs: slide.needs || [], blocks: slide.blocks || [],
     keyword: slide.keyword || '', after: slide.after || '', handle: handle || '',
+    canvas: { width: canvas.width, height: canvas.height }, safe, theme,
     shot: slide.shot ? { url: shotUrl, width: slide.shot.width, height: slide.shot.height, marker: slide.shot.marker,
       highlight: slide.shot.highlight, masks: slide.shot.masks, dark: Boolean(slide.shot.dark) } : null,
     // The bundled profile's neutrals; a creator's own brand comes from their profile layer.
     colors: { brand: tokens?.color?.brand || '#3D3D3D', accent: tokens?.color?.accent || '#FFB020', ink: tokens?.color?.ink || '#0B0B14' },
-    labels: { ...DEFAULT_LABELS, ...(labels || {}) },
+    labels: words,
     fontsBase: `${pathToFileURL(FONT_DIR).href}/`,
   };
 }
 
-/** Render every slide to exports/instagram-4x5/slide-NN.png. Returns the slide files and the shot boxes. */
+/** Where a canvas's slides go: exports/instagram-3x4 or exports/instagram-4x5. */
+export const exportDirName = canvasName => `instagram-${canvasName}`;
+
+/** Render every slide to exports/instagram-<canvas>/slide-NN.png. Returns the slide files and the boxes QA measures. */
 export async function renderSlides(plan, { out, profile, browserFactory } = {}) {
-  const exportsDir = path.join(out, 'exports', 'instagram-4x5');
+  const canvas = plan.canvas || { name: '3x4', ...SLIDE };
+  const exportsDir = path.join(out, 'exports', exportDirName(canvas.name));
   const shotsDir = path.join(out, 'shots');
+  for (const stale of fs.existsSync(exportsDir) ? fs.readdirSync(exportsDir).filter(f => /^slide-\d+\.png$/.test(f)) : []) fs.rmSync(path.join(exportsDir, stale));
   fs.mkdirSync(exportsDir, { recursive: true });
   fs.mkdirSync(shotsDir, { recursive: true });
   const total = plan.slides.length;
@@ -366,7 +449,7 @@ export async function renderSlides(plan, { out, profile, browserFactory } = {}) 
   const browser = await launchBrowser();
   const results = [];
   try {
-    const context = await browser.newContext({ viewport: { ...SLIDE }, deviceScaleFactor: 1 });
+    const context = await browser.newContext({ viewport: { width: canvas.width, height: canvas.height }, deviceScaleFactor: 1 });
     const page = await context.newPage();
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
@@ -375,12 +458,13 @@ export async function renderSlides(plan, { out, profile, browserFactory } = {}) 
       const name = `slide-${String(slide.index).padStart(2, '0')}`;
       let shotUrl = null;
       if (slide.shot) shotUrl = pathToFileURL(extractShot(slide.shot, path.join(shotsDir, `${name}.png`))).href;
-      const data = slideData(slide, { total, handle: plan.handle, tokens: profile?.tokens, shotUrl, labels: plan.labels });
+      const data = slideData(slide, { total, handle: plan.handle, tokens: profile?.tokens, shotUrl, labels: plan.labels,
+        theme: plan.theme || DEFAULT_THEME, canvas, safe: (plan.rules || DEFAULT_RULES).safe });
       const box = await page.evaluate(async value => window.renderSlide(value), data);
       if (errors.length) fail('CAROUSEL_RENDER', `${name}: ${errors.join('; ')}`);
       const file = path.join(exportsDir, `${name}.png`);
-      await page.screenshot({ path: file, clip: { x: 0, y: 0, ...SLIDE } });
-      results.push({ index: slide.index, kind: slide.kind, file, shotBox: box?.shot || null, displayScale: box?.shotScale ?? null });
+      await page.screenshot({ path: file, clip: { x: 0, y: 0, width: canvas.width, height: canvas.height } });
+      results.push({ index: slide.index, kind: slide.kind, file, shotBox: box?.shot || null, cardBox: box?.card || null, displayScale: box?.shotScale ?? null });
     }
   } finally {
     await browser.close();
@@ -433,29 +517,57 @@ export function checkPrivacy(texts) {
   return [...names].sort();
 }
 
+/** OCR lines (3+ visible characters) inside the shot box that come within `pad` px of its left or right edge. */
+export function edgeCut(lines, box, pad) {
+  if (!box) return [];
+  return lines.filter(l => String(l.text || '').replace(/[^\p{L}\p{N}]/gu, '').length >= 3)
+    .filter(l => {
+      const cy = l.y + l.h / 2;
+      return cy >= box.y && cy <= box.y + box.h && l.x + l.w > box.x && l.x < box.x + box.w;
+    })
+    .filter(l => l.x < box.x + pad || l.x + l.w > box.x + box.w - pad)
+    .map(l => l.text);
+}
+
+/** Text lines outside the safe margins (the shot's own UI text is the shot's business, not this check's). */
+export function outsideSafe(lines, canvas, safe, box) {
+  const inBox = l => box && l.x + l.w / 2 >= box.x && l.x + l.w / 2 <= box.x + box.w && l.y + l.h / 2 >= box.y && l.y + l.h / 2 <= box.y + box.h;
+  return lines.filter(l => !inBox(l))
+    .filter(l => l.x < safe.x - 2 || l.x + l.w > canvas.width - safe.x + 2 || l.y < safe.y - 2 || l.y + l.h > canvas.height - safe.y + 2)
+    .map(l => l.text);
+}
+
 export function qaPack(plan, rendered, { ocr = ocrImage, privacy = checkPrivacy } = {}) {
+  const rules = plan.rules || DEFAULT_RULES;
+  const canvas = plan.canvas || SLIDE;
   const slides = rendered.map(result => {
     const slide = plan.slides.find(s => s.index === result.index);
     const lines = ocr(result.file);
     const textPx = slide.kind === 'step' ? shotTextPx(lines, result.shotBox) : null;
-    const rules = privacy(lines.map(l => l.text));
+    const fill = result.cardBox ? r3(result.cardBox.h / canvas.height) : null;
+    const cut = edgeCut(lines, result.shotBox, rules.edgePadPx);
+    const unsafe = outsideSafe(lines, canvas, rules.safe, result.cardBox);
+    const names = privacy(lines.map(l => l.text));
     const problems = [];
-    if (slide.kind === 'step' && (textPx == null || textPx < MIN_TEXT_PX)) problems.push(`UI text reads at ${textPx ?? 'no'} px (min ${MIN_TEXT_PX})`);
-    if (rules.length) problems.push(`privacy: ${rules.join(', ')}`);
-    if (countWords(slide.headline) > MAX_HEADLINE_WORDS) problems.push(`headline over ${MAX_HEADLINE_WORDS} words`);
-    return { index: result.index, kind: slide.kind, textPx, privacy: rules, warnings: slide.shot?.warnings || [], verdict: problems.length ? 'FAIL' : 'PASS', problems };
+    if (slide.kind === 'step' && (textPx == null || textPx < rules.minTextPx)) problems.push(`UI text reads at ${textPx ?? 'no'} px (min ${rules.minTextPx})`);
+    if (slide.kind === 'step' && fill != null && fill < rules.minShotFill) problems.push(`the shot fills ${Math.round(fill * 100)}% of the slide (min ${Math.round(rules.minShotFill * 100)}%)`);
+    if (cut.length) problems.push(`text cut at the shot's edge: ${cut.map(t => `"${String(t).slice(0, 32)}"`).join(', ')}`);
+    if (unsafe.length) problems.push(`text outside the safe zone: ${unsafe.map(t => `"${String(t).slice(0, 32)}"`).join(', ')}`);
+    if (names.length) problems.push(`privacy: ${names.join(', ')}`);
+    if (countWords(slide.headline) > rules.maxHeadlineWords) problems.push(`headline over ${rules.maxHeadlineWords} words`);
+    return { index: result.index, kind: slide.kind, textPx, fill, privacy: names, warnings: slide.shot?.warnings || [], verdict: problems.length ? 'FAIL' : 'PASS', problems };
   });
-  return { verdict: slides.some(s => s.verdict === 'FAIL') ? 'FAIL' : 'PASS', minTextPx: MIN_TEXT_PX, slides };
+  return { verdict: slides.some(s => s.verdict === 'FAIL') ? 'FAIL' : 'PASS', minTextPx: rules.minTextPx, minShotFill: rules.minShotFill, slides };
 }
 
 // ─── Pack files ─────────────────────────────────────────────────────────────────────────────
 
-export function contactSheet(files, out, { columns = 4, width = 360 } = {}) {
+export function contactSheet(files, out, { columns = 4, width = 360, canvas = SLIDE } = {}) {
   requireBinary('ffmpeg', 'carousel');
   const rows = Math.ceil(files.length / columns);
   const inputs = files.flatMap(file => ['-i', file]);
   const scaled = files.map((_, i) => `[${i}:v]scale=${width}:-1[s${i}]`).join(';');
-  const layout = files.map((_, i) => `${(i % columns) * width}_${Math.floor(i / columns) * Math.round(width * SLIDE.height / SLIDE.width)}`).join('|');
+  const layout = files.map((_, i) => `${(i % columns) * width}_${Math.floor(i / columns) * Math.round(width * canvas.height / canvas.width)}`).join('|');
   const filter = `${scaled};${files.map((_, i) => `[s${i}]`).join('')}xstack=inputs=${files.length}:layout=${layout}:fill=white[out]`;
   const run = spawnSync('ffmpeg', ['-v', 'error', '-y', ...inputs, '-filter_complex', filter, '-map', '[out]', '-frames:v', '1', '-q:v', '3', out], { encoding: 'utf8' });
   if (run.status !== 0) fail('CAROUSEL_SHEET', `contact sheet failed: ${String(run.stderr).trim().split('\n').pop()}`);
@@ -466,7 +578,8 @@ const escapeHtml = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': 
 
 /** The pack's source page: every slide in order, the captions, and the spec it was built from. */
 export function indexHtml(plan, files) {
-  const imgs = files.map(f => `<img src="exports/instagram-4x5/${path.basename(f)}" alt="" width="360" height="450">`).join('\n  ');
+  const canvas = plan.canvas || { name: '3x4', ...SLIDE };
+  const imgs = files.map(f => `<img src="exports/${exportDirName(canvas.name)}/${path.basename(f)}" alt="" width="360" height="${Math.round(360 * canvas.height / canvas.width)}">`).join('\n  ');
   const spec = JSON.stringify(stripLocal(plan), null, 2).replace(/</g, '\\u003c');
   return `<!doctype html>
 <html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -488,7 +601,7 @@ export function indexHtml(plan, files) {
 function stripLocal(plan) {
   return {
     ...plan,
-    slides: plan.slides.map(s => (s.shot ? { ...s, shot: { ...s.shot, video: undefined, take: s.shot.takeName } } : s)),
+    slides: plan.slides.map(s => (s.shot ? { ...s, shot: { ...s.shot, video: undefined, take: s.shot.still ? undefined : s.shot.takeName, image: s.shot.still ? s.shot.takeName : undefined } } : s)),
   };
 }
 
@@ -499,8 +612,8 @@ export function packMetadata(plan, { qa, sheet, now = new Date().toISOString() }
     concept_id: plan.conceptId || plan.slug.replace(/-v\d+$/, ''),
     concept_title: plan.title || plan.slug,
     iteration_label: plan.iterationLabel || 'Guide twin v1',
-    format: '4x5',
-    output_size: [SLIDE.width, SLIDE.height],
+    format: plan.canvas?.name || '3x4',
+    output_size: [plan.canvas?.width || SLIDE.width, plan.canvas?.height || SLIDE.height],
     generator: 'capcutctl carousel build',
     source_item_id: plan.sourceItemId ?? '',
     source_url: plan.sourceUrl || '',
@@ -510,7 +623,7 @@ export function packMetadata(plan, { qa, sheet, now = new Date().toISOString() }
     archived: false,
     posted: false,
     captions: { instagram: plan.caption || '', tiktok: plan.tiktokCaption || plan.caption || '' },
-    qa_notes: `capcutctl carousel QA ${qa.verdict}: ${qa.slides.map(s => `${s.index}:${s.kind}${s.textPx ? ` ${s.textPx}px` : ''}${s.problems.length ? ` (${s.problems.join('; ')})` : ''}`).join(', ')}`,
+    qa_notes: `capcutctl carousel QA ${qa.verdict}: ${qa.slides.map(s => `${s.index}:${s.kind}${s.textPx ? ` ${s.textPx}px` : ''}${s.fill != null ? ` fill ${Math.round(s.fill * 100)}%` : ''}${s.problems.length ? ` (${s.problems.join('; ')})` : ''}`).join(', ')}`,
     qa,
     slide_boxes: plan.slides.map(s => ({ slide: s.index, kind: s.kind, headline: s.headline,
       ...(s.shot ? { take: s.shot.takeName, t: s.shot.t, crop: s.shot.crop, scale: s.shot.scale, marker: Boolean(s.shot.marker) } : {}) })),
@@ -526,11 +639,26 @@ export async function buildPack(spec, { out, specDir, profile, browserFactory, o
   fs.mkdirSync(dir, { recursive: true });
   const rendered = await renderSlides(plan, { out: dir, profile, browserFactory });
   const files = rendered.map(r => r.file);
-  const sheet = contactSheet(files, path.join(dir, 'exports', 'contact-sheet-instagram-4x5.jpg'));
+  const sheet = contactSheet(files, path.join(dir, 'exports', `contact-sheet-${exportDirName(plan.canvas.name)}.jpg`), { canvas: plan.canvas });
+  mirrorForDashboard(dir, plan.canvas.name, files, sheet.file);
   const qa = qaPack(plan, rendered, { ...(ocr ? { ocr } : {}), ...(privacy ? { privacy } : {}) });
   fs.writeFileSync(path.join(dir, 'index.html'), indexHtml(plan, files));
   fs.writeFileSync(path.join(dir, 'metadata.json'), JSON.stringify(packMetadata(plan, { qa, sheet }), null, 2) + '\n');
   return { pack: dir, slides: files, contactSheet: sheet.file, qa };
+}
+
+/**
+ * The dashboard publishes from exports/instagram-4x5 and shows contact-sheet-instagram-4x5.jpg
+ * first, whatever their size; its own 3:4 packs mirror their 1080×1440 slides there and keep
+ * metadata `format: "3x4"`. Do the same, and drop stale slides a longer earlier build left.
+ */
+function mirrorForDashboard(dir, canvasName, files, sheetFile) {
+  if (canvasName === '4x5') return;
+  const mirror = path.join(dir, 'exports', exportDirName('4x5'));
+  fs.rmSync(mirror, { recursive: true, force: true });
+  fs.mkdirSync(mirror, { recursive: true });
+  for (const file of files) fs.copyFileSync(file, path.join(mirror, path.basename(file)));
+  fs.copyFileSync(sheetFile, path.join(dir, 'exports', 'contact-sheet-instagram-4x5.jpg'));
 }
 
 // ─── Stage ──────────────────────────────────────────────────────────────────────────────────
@@ -540,6 +668,8 @@ export const STAGE_ROUTES = Object.freeze([
   ['PATCH', /^\/api\/carousels\/[a-z0-9-]+\/metadata$/],
   ['GET', /^\/api\/carousels\/[a-z0-9-]+\/publish\/jobs$/],
   ['POST', /^\/api\/carousels\/[a-z0-9-]+\/publish\/jobs$/],
+  // Edits a draft job's captions in place; sending is /tiktok, /instagram, /youtube, never listed.
+  ['PATCH', /^\/api\/carousels\/publish\/jobs\/\d+$/],
   ['GET', /^\/api\/carousels$/],
 ]);
 
@@ -583,14 +713,22 @@ export async function stagePack({ pack, dashboard, remote, item, platforms = 'in
   });
   const existing = await call('GET', `/api/carousels/${slug}/publish/jobs`);
   const active = Array.isArray(existing.json) ? existing.json.find(j => ['draft', 'rendering', 'publishing'].includes(j.status)) : null;
-  const job = active ? { status: 200, json: active, reused: true } : await call('POST', `/api/carousels/${slug}/publish/jobs`, {
-    slug, title: meta.title, caption: meta.captions?.instagram || '', instagram_caption: meta.captions?.instagram || '',
-    tiktok_caption: meta.captions?.tiktok || '', platforms,
-  });
+  const captions = {
+    title: meta.title, caption: meta.captions?.instagram || '', instagram_caption: meta.captions?.instagram || '',
+    tiktok_caption: meta.captions?.tiktok || '',
+  };
+  let job;
+  if (active) {
+    // Restaging updates the same draft job: its captions follow the pack, nothing new is created.
+    const patched = active.status === 'draft' ? await call('PATCH', `/api/carousels/publish/jobs/${active.id}`, captions) : null;
+    job = { status: 200, json: patched?.json?.id ? patched.json : active, reused: true, captionsUpdated: Boolean(patched && !patched.dryRun) };
+  } else {
+    job = await call('POST', `/api/carousels/${slug}/publish/jobs`, { slug, ...captions, platforms });
+  }
   const listed = await call('GET', '/api/carousels');
   const found = Array.isArray(listed.json?.packs) ? listed.json.packs.find(p => p.slug === slug) : null;
   return {
-    slug, copied, metadata: metadata.status ?? 'dry-run', job: job.json?.id ? { id: job.json.id, status: job.json.status, platforms: job.json.platforms, reused: Boolean(job.reused) } : job,
+    slug, copied, metadata: metadata.status ?? 'dry-run', job: job.json?.id ? { id: job.json.id, status: job.json.status, platforms: job.json.platforms, reused: Boolean(job.reused), captionsUpdated: Boolean(job.captionsUpdated) } : job,
     listed: found ? { slideCount: found.slide_count, lifecycle: found.lifecycle_status, sourceItemId: found.source_item_id } : (dryRun ? 'dry-run' : 'NOT LISTED'),
     next: 'Nothing was sent anywhere. Posting to Instagram, or sending the TikTok photo draft to the TikTok inbox, is a separate yes in the dashboard.',
   };
@@ -601,5 +739,11 @@ function rsyncPack(dir, remote, slug) {
   const target = `${remote.replace(/\/+$/, '')}/${slug}/`;
   const run = spawnSync('rsync', ['-a', '--exclude', 'shots/', `${dir}/`, target], { encoding: 'utf8' });
   if (run.status !== 0) fail('CAROUSEL_STAGE', `rsync to ${target} failed: ${String(run.stderr).trim()}`);
+  // The slide folders are this pack's own: mirror them exactly, so a shorter rebuild leaves no
+  // stale slide behind. Everything else in the remote folder (the dashboard's publish files) stays.
+  for (const sub of fs.readdirSync(path.join(dir, 'exports')).filter(name => /^instagram-\dx\d$/.test(name))) {
+    const exact = spawnSync('rsync', ['-a', '--delete', `${dir}/exports/${sub}/`, `${target}exports/${sub}/`], { encoding: 'utf8' });
+    if (exact.status !== 0) fail('CAROUSEL_STAGE', `rsync of exports/${sub} failed: ${String(exact.stderr).trim()}`);
+  }
   return { to: target };
 }

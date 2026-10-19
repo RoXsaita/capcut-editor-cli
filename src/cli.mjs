@@ -117,13 +117,15 @@ Usage:
                       — one candidate frame per real click / typing burst in an rl2 take, in video time
                         and pixels, with a crop sized so the UI text reads at ≥36 px on a 1080-wide slide.
   capcutctl carousel build --spec PACK.json [--out DIR] [--json]
-                      — render a 6–8 slide 1080×1350 guide (cover, numbered steps on real UI crops with the
-                        click drawn, a copy-this slide, the keyword CTA) with headless Chrome, then QA it:
-                        UI text ≥36 px (OCR line height), privacy rules, headline ≤12 words. Exit 1 on FAIL.
+                      — render a static carousel from a slide spec (docs/carousel-spec.md; 1080×1440 by
+                        default: cover, steps on real UI crops with the click drawn, copy-this, keyword CTA)
+                        with headless Chrome, then QA it against the spec's rules: UI text ≥36 px, shot fill,
+                        no text cut at the shot edge or outside the safe zone, privacy. Exit 1 on FAIL.
   capcutctl carousel stage --pack DIR --dashboard URL --remote HOST:DIR [--item ID] [--platforms instagram,tiktok]
                       [--dry-run] [--json]
                       — copy a passing pack to a carousel dashboard as a DRAFT linked to the reel's item and
-                        create one draft publish job. Never publishes or sends to any platform.
+                        create one draft publish job (a restage updates that job's captions in place).
+                        Never publishes or sends to any platform.
   capcutctl review --project NAME [--out DIR] [--id NAME] [--fps 6] [--width 240]
                       — write outputs/<id>/proxy.mp4, edl.json, and contact-sheet.png (never CapCut export)
   capcutctl new --project NAME [--media FILE] [--scenes 0:6,6:12,12:18]

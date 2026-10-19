@@ -6,6 +6,7 @@ import path from 'node:path';
 import {
   classifyTopic, scanReels, logVerdicts, median, hostToVt, readTake, readableCrop, validateSpec, planPack,
   shotTextPx, qaPack, checkPrivacy, EXTRA_PRIVACY_RULES, stagePack, indexHtml, arabicNumeral, MIN_TEXT_PX, slideData, DEFAULT_LABELS,
+  resolveRules, resolveTheme, shotWidth, edgeCut, outsideSafe, CANVASES,
 } from '../src/carousel.mjs';
 
 // Synthetic captions in the style the trigger has to read (Levantine Arabic + English names).
@@ -161,7 +162,10 @@ test('validateSpec enforces the winning structure', () => {
 
 test('planPack takes time and the click marker from the trace, in slide pixels', () => {
   const dir = fakeTake();
-  const plan = planPack(spec(dir), { readTakeFn: d => readTake(d, { probe }) });
+  // A full-bleed theme keeps the arithmetic round: shots are cut 1080 wide.
+  const plan = planPack({ ...spec(dir), theme: { cardMargin: 0, cardBorder: 0 } }, { readTakeFn: d => readTake(d, { probe }) });
+  assert.deepEqual([plan.canvas.width, plan.canvas.height], [1080, 1440], '3:4 is the default canvas');
+  assert.equal(planPack(spec(dir), { readTakeFn: d => readTake(d, { probe }) }).slides[1].shot.width, 952, 'by default a shot is cut to the card');
   const [click, typing, plain] = plan.slides.filter(s => s.kind === 'step');
   assert.deepEqual([click.number, typing.number, plain.number], [1, 2, 3]);
   assert.equal(click.shot.t, 1.85, 'a click frame is just after the click');
@@ -196,7 +200,7 @@ test('shotTextPx is the median OCR line height inside the shot box', () => {
 test('qaPack fails small UI text and any privacy rule, by name only', () => {
   const plan = { slides: [{ index: 1, kind: 'step', headline: 'خطوة', shot: { warnings: [] } }, { index: 2, kind: 'cta', headline: 'تابع' }] };
   const rendered = [{ index: 1, file: 'a.png', shotBox: { x: 0, y: 0, w: 1080, h: 400 } }, { index: 2, file: 'b.png', shotBox: null }];
-  const ocr = file => (file === 'a.png' ? [{ text: 'small text', x: 10, y: 10, w: 200, h: 30 }] : [{ text: 'card ending 4242', x: 0, y: 0, w: 1, h: 1 }]);
+  const ocr = file => (file === 'a.png' ? [{ text: 'small text', x: 200, y: 100, w: 200, h: 30 }] : [{ text: 'card ending 4242', x: 200, y: 200, w: 100, h: 20 }]);
   const privacy = texts => (texts.some(t => t.includes('card ending')) ? ['billing'] : []);
   const qa = qaPack(plan, rendered, { ocr, privacy });
   assert.equal(qa.verdict, 'FAIL');
@@ -218,8 +222,8 @@ test('privacy: home paths, shell prompts and the watcher denylist', () => {
 test('the pack page records take names, never local paths', () => {
   const plan = { slug: 'demo', title: 'Demo', caption: 'c', slides: [{ index: 1, kind: 'step', headline: 'h',
     shot: { take: '/private/somewhere/take-1', takeName: 'take-1', video: '/private/somewhere/take-1/screen.mp4' } }] };
-  const html = indexHtml(plan, ['/x/exports/instagram-4x5/slide-01.png']);
-  assert.match(html, /exports\/instagram-4x5\/slide-01\.png/);
+  const html = indexHtml(plan, ['/x/exports/instagram-3x4/slide-01.png']);
+  assert.match(html, /exports\/instagram-3x4\/slide-01\.png/);
   assert.doesNotMatch(html, /\/private\/somewhere/);
 });
 
@@ -272,7 +276,7 @@ test('stagePack: copies, marks draft, creates ONE draft job, and never calls a p
     'POST /api/carousels/demo-guide-v1/publish/jobs', 'GET /api/carousels']);
   assert.equal(posted[0].platforms, 'instagram,tiktok');
   assert.equal(posted[0].tiktok_caption, 'tt');
-  assert.deepEqual(result.job, { id: 41, status: 'draft', platforms: 'instagram,tiktok', reused: false });
+  assert.deepEqual(result.job, { id: 41, status: 'draft', platforms: 'instagram,tiktok', reused: false, captionsUpdated: false });
   assert.equal(result.listed.lifecycle, 'draft');
   assert.ok(calls.every(c => !/\/(instagram|tiktok|youtube|render)$/.test(c)), 'no publish or render route');
   fs.rmSync(pack, { recursive: true, force: true });
@@ -280,13 +284,17 @@ test('stagePack: copies, marks draft, creates ONE draft job, and never calls a p
 
 test('stagePack reuses an active job, refuses a failing pack, and dry-runs without I/O', async () => {
   const pack = fakePack();
-  const { fn, calls } = fakeFetch((method, route) => {
+  const patched = [];
+  const { fn, calls } = fakeFetch((method, route, body) => {
     if (method === 'GET' && route.endsWith('/publish/jobs')) return [200, [{ id: 9, status: 'draft', platforms: 'instagram,tiktok' }]];
+    if (method === 'PATCH' && route === '/api/carousels/publish/jobs/9') { patched.push(body); return [200, { id: 9, status: 'draft', platforms: 'instagram,tiktok' }]; }
     if (route === '/api/carousels') return [200, { packs: [] }];
     return [200, {}];
   });
   const result = await stagePack({ pack, dashboard: 'http://dash.test', remote: 'h:/c', fetchFn: fn, copyFn: () => ({}) });
   assert.equal(result.job.reused, true);
+  assert.equal(result.job.captionsUpdated, true, 'a restage updates the same draft job in place');
+  assert.equal(patched[0].tiktok_caption, 'tt', 'the pack\'s own TikTok caption, as written');
   assert.ok(!calls.some(c => c.startsWith('POST')));
 
   const dry = await stagePack({ pack, dashboard: 'http://dash.test', remote: 'h:/c', dryRun: true,
@@ -298,4 +306,48 @@ test('stagePack reuses an active job, refuses a failing pack, and dry-runs witho
   await assert.rejects(stagePack({ pack, remote: 'h:/c' }), /--dashboard/);
   fs.rmSync(pack, { recursive: true, force: true });
   fs.rmSync(failing, { recursive: true, force: true });
+});
+
+test('rules and theme come from the spec, over the defaults', () => {
+  const rules = resolveRules({ canvas: '4x5', rules: { minTextPx: 40, safe: { y: 60 } } });
+  assert.equal(rules.canvas, '4x5');
+  assert.equal(rules.minTextPx, 40);
+  assert.deepEqual(rules.safe, { x: 72, y: 60 });
+  assert.equal(rules.minShotFill, 0.55);
+  assert.throws(() => resolveRules({ canvas: '16x9' }), /canvas must be one of/);
+  const theme = resolveTheme({ theme: { h1: 72, cardMargin: 40 } });
+  assert.equal(theme.h1, 72);
+  assert.equal(shotWidth(theme, CANVASES['3x4']), 1080 - 2 * (40 + theme.cardBorder));
+  // A scout's carousel need not be a twin: structure rules switch off, the cover need not list needs.
+  const loose = spec('t');
+  loose.rules = { requirePrompt: false, requireKeyword: false, slideCount: [3, 10] };
+  loose.slides = [{ kind: 'cover', headline: 'وعد' }, { kind: 'text', headline: 'فكرة', body: 'نص' }, { kind: 'cta', headline: 'تابع' }];
+  assert.deepEqual(validateSpec(loose), []);
+});
+
+test('a still image is a shot source too, and step slides carry their move count', () => {
+  const still = { ...spec('t'), slides: spec('t').slides.map(s => (s.shot ? { ...s, shot: { image: 'shot.png', crop: [0, 0, 400, 300] } } : s)) };
+  const plan = planPack(still, { readStillFn: file => ({ name: path.basename(file), video: file, still: true, width: 800, height: 600, steps: [] }) });
+  const step = plan.slides[1];
+  assert.equal(step.shot.still, true);
+  assert.equal(step.shot.t, 0);
+  assert.equal(step.moves, 3);
+  assert.equal(slideData(step, { total: 6 }).kicker, 'الحركة ١ من ٣');
+  assert.equal(slideData({ ...step, kicker: '' }, { total: 6 }).kicker, '', 'a spec can drop the kicker');
+});
+
+test('edgeCut and outsideSafe find text at the shot edge and outside the margins', () => {
+  const box = { x: 60, y: 400, w: 960, h: 600 };
+  const lines = [
+    { text: 'Auto-compact window', x: 62, y: 500, w: 400, h: 30 },
+    { text: 'Select a trigger', x: 200, y: 600, w: 300, h: 30 },
+    { text: 'ok', x: 1010, y: 700, w: 20, h: 30 },
+    { text: 'headline', x: 20, y: 100, w: 400, h: 60 },
+  ];
+  assert.deepEqual(edgeCut(lines, box, 20), ['Auto-compact window']);
+  assert.deepEqual(outsideSafe(lines, CANVASES['3x4'], { x: 72, y: 45 }, box), ['headline']);
+  const qa = qaPack({ rules: resolveRules({}), canvas: CANVASES['3x4'], slides: [{ index: 1, kind: 'step', headline: 'h', shot: { warnings: [] } }] },
+    [{ index: 1, file: 'a.png', shotBox: box, cardBox: { ...box, h: 500 } }], { ocr: () => lines.slice(0, 2), privacy: () => [] });
+  assert.match(qa.slides[0].problems.join('\n'), /fills 35% of the slide \(min 55%\)/);
+  assert.match(qa.slides[0].problems.join('\n'), /text cut at the shot's edge/);
 });

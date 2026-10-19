@@ -114,7 +114,7 @@ export const COMMAND_DOCS = Object.freeze({
   reference: doc('check', 'Measure a reference reel\'s pacing in the gate\'s terms; --profile-out writes the density override.', 'capcutctl reference --media reel.mp4 --project NAME --sheet shots.png'),
   'export-grid': doc('export', 'Labelled frame grid from an existing video.', 'capcutctl export-grid --media final.mp4 --out grid.png --times 0,8,15'),
 
-  carousel: doc('social', 'Guide-carousel twin of a reel that took off: trigger scan, rl2 click frames, 1080×1350 pack + QA, stage as a draft.', 'capcutctl carousel build --spec pack.json'),
+  carousel: doc('social', 'Static carousels from a slide spec (reel twins first): trigger scan, rl2 click frames, 3:4 pack + QA, stage as a draft.', 'capcutctl carousel build --spec pack.json'),
 
   harvest: doc('dev', 'Catalogue transitions/SFX/masks/keyframes from real drafts.', 'capcutctl harvest --plan'),
   oracle: doc('dev', 'Dev-only round-trip capture/diff of a disposable project.', 'capcutctl oracle diff --before A --after B'),

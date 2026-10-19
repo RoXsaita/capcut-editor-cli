@@ -172,7 +172,7 @@
     },
     "carousel": {
       "group": "social",
-      "summary": "Guide-carousel twin of a reel that took off: trigger scan, rl2 click frames, 1080×1350 pack + QA, stage as a draft.",
+      "summary": "Static carousels from a slide spec (reel twins first): trigger scan, rl2 click frames, 3:4 pack + QA, stage as a draft.",
       "example": "capcutctl carousel build --spec pack.json",
       "options": [
         "--analytics",
