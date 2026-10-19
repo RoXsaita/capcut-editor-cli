@@ -170,30 +170,6 @@
       ],
       "transactional": true
     },
-    "carousel": {
-      "group": "social",
-      "summary": "Static carousels from a slide spec (reel twins first): trigger scan, rl2 click frames, 3:4 pack + QA, stage as a draft.",
-      "example": "capcutctl carousel build --spec pack.json",
-      "options": [
-        "--analytics",
-        "--content",
-        "--dashboard",
-        "--dry-run",
-        "--item",
-        "--json",
-        "--log",
-        "--out",
-        "--pack",
-        "--platform",
-        "--platforms",
-        "--remote",
-        "--spec",
-        "--take",
-        "--text-px",
-        "--window-hours"
-      ],
-      "transactional": false
-    },
     "check-export": {
       "group": "check",
       "summary": "QA the rendered file: black, flash frames, freezes, dead air, loudness, true peak, canvas and length.",
