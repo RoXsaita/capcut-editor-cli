@@ -1,0 +1,19 @@
+{
+  "name": "plain",
+  "about": "The neutral fallback look: light paper, one framed proof card per shot, IBM Plex Sans Arabic. Brand colours come from the user profile; sizes meet the carousel skill's floors.",
+  "template": "template.html",
+  "fonts": [
+    { "family": "Plex Arabic", "file": "../../../fonts/ibm-plex-sans-arabic-arabic-600-normal.woff2", "weight": 600, "range": "U+0600-06FF, U+0750-077F, U+FB50-FDFF, U+FE70-FEFF, U+200C-200E" },
+    { "family": "Plex Arabic", "file": "../../../fonts/ibm-plex-sans-arabic-arabic-700-normal.woff2", "weight": 700, "range": "U+0600-06FF, U+0750-077F, U+FB50-FDFF, U+FE70-FEFF, U+200C-200E" },
+    { "family": "Plex Arabic", "file": "../../../fonts/ibm-plex-sans-arabic-latin-600-normal.woff2", "weight": 600, "range": "U+0000-00FF, U+2000-206F" },
+    { "family": "Plex Arabic", "file": "../../../fonts/ibm-plex-sans-arabic-latin-700-normal.woff2", "weight": 700, "range": "U+0000-00FF, U+2000-206F" },
+    { "family": "Mono", "file": "../../../fonts/jetbrains-mono-latin-400-normal.woff2", "weight": 400, "range": "U+0000-00FF, U+2000-206F" },
+    { "family": "Mono", "file": "../../../fonts/jetbrains-mono-latin-700-normal.woff2", "weight": 700, "range": "U+0000-00FF, U+2000-206F" }
+  ],
+  "vars": {
+    "bg": "#F5F5F9", "card": "#FFFFFF", "muted": "#4A4A5C",
+    "padTop": 0, "padBottom": 0,
+    "badge": 108, "kicker": 30, "h1": 72, "h1Cover": 96, "sub": 44, "body": 44, "code": 40, "label": 32, "figure": 120, "footer": 30,
+    "gap": 36, "cardMargin": 100, "cardBorder": 4, "cardRadius": 32, "shadow": "0 18px 48px rgba(11, 11, 20, 0.12)"
+  }
+}

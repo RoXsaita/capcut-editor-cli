@@ -1,17 +1,18 @@
 # Carousel slide spec
 
 `capcutctl carousel build --spec pack.json` turns one JSON file into a static carousel:
-PNG slides, a contact sheet, `index.html` and `metadata.json`, measured by QA before anything
-can be staged. A reel twin is one feeder of this file; an idea scout, or a person, is another.
-The engine holds no taste of its own: what QA enforces is `rules`, what the slides look like is
-`theme`, and the template's fixed words are `labels`. A carousel skill tunes those three.
+PNG slides, a 9:16 copy for TikTok, a contact sheet, `index.html` and `metadata.json`, measured
+by QA before anything can be staged. A reel twin is one feeder of this file; an idea scout, or a
+person, is another. The engine holds no taste of its own: what QA enforces is `rules`, what the
+slides look like is the `theme` folder, and the template's fixed words are `labels`. A carousel
+skill tunes those three.
 
 ```bash
 capcutctl carousel build --spec pack.json [--out DIR] [--json]
 capcutctl carousel stage --pack DIR --dashboard URL --remote HOST:DIR [--item ID] [--dry-run]
 ```
 
-Rendering needs a Chrome (`CAPCUTCTL_CHROMIUM`) and, for QA, the Vision OCR helper
+Rendering needs a Chrome (`CAPCUTCTL_CHROMIUM`), ffmpeg, and for QA the Vision OCR helper
 (`swiftc -O -o tools/vision/ocr tools/vision/ocr.swift`, macOS).
 
 ## Output
@@ -20,13 +21,19 @@ Rendering needs a Chrome (`CAPCUTCTL_CHROMIUM`) and, for QA, the Vision OCR help
 <out>/
   exports/instagram-3x4/slide-01.png …   the slides at the canvas size (1080×1440)
   exports/instagram-4x5/slide-01.png …   the same files, for dashboards that publish from that folder
+  exports/tiktok-9x16/slide-01.png …     each slide on a 1080×1920 page, bottom 10% left clear
   exports/contact-sheet-instagram-3x4.jpg (and a -4x5 copy)
   shots/                                  the cut UI frames (not staged)
   index.html                              slides + captions + the resolved spec (no local paths)
-  metadata.json                           format, output_size, captions, QA verdict per slide
+  metadata.json                           format, theme, captions, alt text, QA verdict per slide
 ```
 
-`build` exits 1 when QA fails, and `stage` refuses a pack whose QA is not PASS.
+The 9:16 copy pads the slide with the theme's `bg`, centred in the top 90% of the page
+(a 1440 slide starts at y 144), so TikTok's caption and buttons cover no text.
+
+`build` exits 1 when QA fails, and `stage` refuses a pack whose QA is not PASS. Staging an
+updated pack under the same `slug` replaces its files and updates the captions of its open
+draft job in place.
 
 ## Top level
 
@@ -40,21 +47,25 @@ Rendering needs a Chrome (`CAPCUTCTL_CHROMIUM`) and, for QA, the Vision OCR help
 | `sourceItemId`, `sourcePostId`, `sourceUrl` | | what the carousel is a twin of, if anything |
 | `labels` | | the template's fixed words, see below |
 | `rules` | | what QA enforces, see below |
-| `theme` | | the look, see below |
-| `slides` | required | the slides, in order |
+| `theme` | `"plain"` | the look, see below |
+| `slides` | required | the slides, in order: a `cover` first, a `cta` last |
 
 ## Slides
 
 Every slide has a `kind` and a `headline`. Text anywhere may put `code` in backticks: it renders
-as a mono chip in the accent colour.
+as a mono chip. `alt` sets the slide's alt text (default: the headline plus each shot's `alt`).
 
 | kind | fields | renders |
 |---|---|---|
-| `cover` | `headline`, `sub`, `shot`, `needs` (list) | eyebrow label, the promise, the payoff shot, optional "what you need" chips |
-| `step` | `headline`, `sub`, `shot` (required), `number`, `kicker`, `body` | badge + kicker + headline + one-line sub, then the shot in a framed card |
-| `text` | `headline`, `sub`, `body`, `shot` | headline and paragraphs (blank line = new paragraph), optional shot |
+| `cover` | `headline`, `sub`, `shot`, `needs` (list) | eyebrow label, the promise, the payoff shot, optional "what you need" chips, the swipe cue |
+| `step` | `headline`, `sub`, `shot` (required), `number`, `kicker` | badge + kicker + headline + one-line sub, then the shot in a framed card |
+| `proof` | `headline`, `sub`, `shot` (required), `figure` | a receipt: headline, the one number large (`figure`), the shot as evidence |
+| `compare` | `headline`, `sub`, `shots: [a, b]` (each with `label`) | two results, equal treatment, each labelled |
+| `note` | `headline`, `body` or `items`, `shot` | an honest step, takeaway or timeline: paragraphs (blank line = new one) or a numbered list, optional shot |
 | `prompt` | `headline`, `sub`, `blocks: [{label, text}]` | copy-this blocks in mono |
-| `cta` | `headline`, `keyword`, `after` | the comment keyword in a large card, or the save line without one |
+| `cta` | `headline`, `keyword`, `after` | the comment keyword in a large card, or `labels.save` without one |
+
+`text` is accepted as an older name for `note`. A slide takes `shot` (one) or `shots` (a list).
 
 Steps number themselves 1, 2, 3 … unless `number` is set; give two slides the same `number`
 when one move takes two slides. The kicker reads `labels.stepOf` with `{n}` and `{total}`
@@ -76,12 +87,15 @@ A shot is a crop of a real frame. Coordinates are source pixels: `[x, y, w, h]`.
 | `masks` | `[{rect: [x, y, w, h], color}]`, painted over private text |
 | `dark` | `true` for a dark UI (the card's backing colour) |
 | `marker` | `false` to hide the click marker |
-| `width` | the pixel width to cut at (default: the card's inner width) |
+| `label` | the shot's caption (required on `compare`) |
+| `alt` | what the shot shows, for the slide's alt text |
+| `width` | the pixel width to cut at (default: the card's inner width, 872 on the plain theme) |
 
 The crop is scaled to the card width, so its width sets how large the UI text reads:
 `text px on the slide ≈ source line height × card width / crop width`. A 1x capture with
-~18 px lines needs a crop ≤ ~470 px wide to reach 36 px on a 952 px card; ~24 px terminal lines
-allow ~630 px. Keep whole lines inside the crop: QA fails text that touches the card's edge.
+~18 px lines needs a crop ≤ ~430 px wide to reach 36 px on an 872 px card; ~24 px terminal
+lines allow ~580 px, which is too narrow for a full terminal line: record terminal moments at a
+larger font. Keep whole lines inside the crop: QA fails text that touches the card's edge.
 
 ## labels
 
@@ -92,42 +106,76 @@ allow ~630 px. Keep whole lines inside the crop: QA fails text that touches the 
 | `cta` | `اكتب بالتعليقات` |
 | `stepOf` | `الحركة {n} من {total}` |
 | `save` | `احفظه، وارجعله وقت ما تحتاجه` (the CTA when there is no keyword) |
+| `swipe` | `اسحب` (the cover's swipe cue; `""` hides it) |
 
 ## rules
+
+QA measures the rendered page itself (every text's role, font size and box, every card's box),
+and OCR only inside the shots.
 
 | key | default | QA |
 |---|---|---|
 | `canvas` | `"3x4"` | same as the top-level `canvas` |
-| `safe` | `{x: 88, y: 45}` | every text line outside the shot stays this far from the sides and from top and bottom (OCR boxes run ~10 px past the glyphs, so x sits under the 100 px design inset `theme.padX`); y 45 keeps a centred 1080×1350 crop intact |
-| `minTextPx` | 36 | the median OCR line height inside a step's shot |
-| `minShotFill` | 0.55 | a step's card height ÷ the canvas height |
+| `inset` | 100 | every text and card stays this far inside all four edges |
+| `bottomClear` | 0.10 | nothing but the footer in the bottom 10% of the canvas |
+| `minPx` | `{coverHeadline: 96, headline: 72, sub: 44, body: 44, code: 40, any: 28}` | the rendered font size per text role |
+| `maxWords` | `{coverHeadline: 8, headline: 7}` | headline length, checked before rendering |
+| `slideWords` | `[8, 22]` | words per slide; outside is a warning |
+| `maxSlideWords` | 30 | over this fails, except on a dense slide (`dense: true`; `prompt` is dense) |
+| `minTextPx` | 36 | the smallest shot's median OCR line height, on every slide with a shot except the cover |
+| `minShotFill` | 0.55 | a step's card heights ÷ the canvas height |
 | `edgePadPx` | 20 | no OCR text (3+ characters) closer than this to the shot's left or right edge |
-| `maxHeadlineWords` | 12 | |
 | `slideCount` | `[6, 10]` | |
 | `maxUpscale` | 2.8 | warns when a crop is scaled past this (reads soft) |
 | `requirePrompt` | true | the carousel has a `prompt` slide |
-| `requireKeyword` | false | the CTA has a `keyword` (a reel twin sets it: the reel promised one). Without a keyword the CTA is `labels.save` |
+| `requireKeyword` | false | the CTA has a `keyword`. Set it only when something real answers the keyword |
 
-Privacy runs on every slide's OCR text and always fails the build: the screen watcher's rules,
-home paths, shell prompts and emails. QA records rule names, never the matched text.
+`minPx` and `maxWords` merge with the defaults key by key. Privacy runs on every slide's OCR text
+and always fails the build: the screen watcher's rules, home paths, shell prompts and emails.
+QA records rule names, never the matched text.
 
-## theme
+## Themes
 
-Each key becomes a `--kebab-case` CSS custom property in `mograph/carousel/guide.html`.
-Numbers are pixels; strings are CSS values. The brand and accent colours come from the
-user profile's `tokens.color` (the bundled defaults are neutral).
+A theme is a folder: `theme.json` plus the template it names. The bundled one is
+`mograph/carousel/themes/plain`. `theme` in the spec is
 
-| key | default | | key | default |
-|---|---|---|---|---|
-| `bg` | `#F5F5F9` | | `h1` | 60 |
-| `card` | `#FFFFFF` | | `h1Cover` | 80 |
-| `muted` | `#4A4A5C` | | `sub` | 34 |
-| `padX` | 100 | | `body` | 38 |
-| `padTop` | 48 | | `kicker` | 30 |
-| `padBottom` | 40 | | `badge` | 104 |
-| `gap` | 40 | | `footer` | 30 |
-| `cardMargin` | 60 | | `cardBorder` | 4 |
-| `cardRadius` | 36 | | `shadow` | `0 18px 48px rgba(11,11,20,.12)` |
+- a name: `"plain"`, a folder under `mograph/carousel/themes/`;
+- a path (anything with a `/`): a theme folder anywhere, resolved against the spec's folder;
+- an object: `{ "name": "plain", "h1": 80 }`, a theme plus overrides of its `vars`.
+
+```json
+{
+  "name": "plain",
+  "about": "one line on the look",
+  "template": "template.html",
+  "fonts": [{ "family": "Plex Arabic", "file": "fonts/x.woff2", "weight": 700, "range": "U+0600-06FF" }],
+  "vars": { "bg": "#F5F5F9", "h1": 72, "cardMargin": 100 }
+}
+```
+
+Font `file`s resolve against the theme folder. Each `vars` key reaches the template as data and
+is meant to become a `--kebab-case` CSS custom property; numbers are pixels. `cardMargin` and
+`cardBorder` also set the width shots are cut at (canvas width − 2 × (cardMargin + cardBorder)).
+The brand, accent and ink colours come from the user profile's `tokens.color`.
+
+### The template contract
+
+The engine opens the template once, then for every slide calls `window.renderSlide(data)` and
+screenshots the canvas. `data` holds `kind`, `index`, `total`, `number` (Arabic digits),
+`kicker`, `headline`, `sub`, `body`, `items`, `figure`, `needs`, `blocks`, `keyword`, `after`,
+`handle`, `canvas {width, height}`, `inset`, `vars`, `fonts`, `colors {brand, accent, ink}`,
+`labels`, and `shots: [{url, label, width, height, marker, highlight, masks, dark}]`, with
+`marker`, `highlight` and `masks` already in the shot image's pixels. The template must
+
+- size the page to `data.canvas` and keep every text and card inside `data.inset`;
+- load `data.fonts` and apply `data.vars`;
+- tag every piece of text with `data-role`: `coverHeadline`, `headline`, `kicker`, `sub`, `body`,
+  `figure`, `label`, `code`, `eyebrow`, `hint`, `keyword`, `after`, `swipe`, `footer`;
+- return `{ shots: [rect], cards: [rect], texts: [{role, px, rect, text}] }`, rects
+  `{x, y, width, height}` in canvas pixels, one shot and one card per entry of `data.shots`.
+
+QA reads only that return value and the screenshot, so any layout that keeps the contract passes
+or fails on the same rules.
 
 ## A minimal spec
 
@@ -136,16 +184,16 @@ user profile's `tokens.color` (the bundled defaults are neutral).
   "slug": "routine-every-5h-guide-v1",
   "handle": "yourhandle",
   "caption": "…",
+  "rules": { "slideCount": [5, 10], "requirePrompt": false },
   "slides": [
     { "kind": "cover", "headline": "روتين بيشتغل لحاله كل ٥ ساعات",
-      "shot": { "image": "history.png", "crop": [30, 400, 410, 372] } },
+      "shot": { "image": "history.png", "crop": [30, 400, 410, 372], "alt": "four scheduled runs" } },
     { "kind": "step", "headline": "اعمل روتين جديد",
-      "shot": { "take": "takes/Claude-20261010", "click": 22, "crop": [0, 120, 432, 330] } },
+      "shot": { "take": "takes/Claude-20261010", "click": 22, "crop": [0, 120, 420, 330] } },
     { "kind": "step", "headline": "خلّيه يشتغل كل ٥ ساعات", "sub": "التوقيت `1 */5 * * *`",
-      "shot": { "take": "takes/Claude-20261010", "t": 10.4, "crop": [30, 540, 440, 365], "highlight": [56, 668, 140, 40] } },
-    { "kind": "prompt", "headline": "انسخ والصق", "blocks": [{ "label": "التوقيت", "text": "1 */5 * * *" }] },
-    { "kind": "cta", "headline": "بدك الدليل الكامل؟", "keyword": "روتين" }
-  ],
-  "rules": { "slideCount": [5, 8] }
+      "shot": { "take": "takes/Claude-20261010", "t": 10.4, "crop": [34, 540, 420, 382], "highlight": [56, 668, 140, 40] } },
+    { "kind": "note", "headline": "ليش ٥ ساعات؟", "body": "الليمت بيتجدد كل ٥ ساعات." },
+    { "kind": "cta", "headline": "جرّبه بجلستك الجاية" }
+  ]
 }
 ```

@@ -6,7 +6,7 @@ import path from 'node:path';
 import {
   classifyTopic, scanReels, logVerdicts, median, hostToVt, readTake, readableCrop, validateSpec, planPack,
   shotTextPx, qaPack, checkPrivacy, EXTRA_PRIVACY_RULES, stagePack, indexHtml, arabicNumeral, MIN_TEXT_PX, slideData, DEFAULT_LABELS,
-  resolveRules, resolveTheme, shotWidth, edgeCut, outsideSafe, CANVASES,
+  resolveRules, resolveTheme, shotWidth, edgeCut, layoutProblems, altText, CANVASES, DEFAULT_RULES, TIKTOK_CANVAS,
 } from '../src/carousel.mjs';
 
 // Synthetic captions in the style the trigger has to read (Levantine Arabic + English names).
@@ -158,7 +158,7 @@ test('validateSpec enforces the winning structure', () => {
   assert.match(problems, /prompt slide/);
   assert.doesNotMatch(problems, /comment keyword/, 'a save CTA is fine by default');
   assert.match(validateSpec({ ...bad, rules: { requireKeyword: true } }).join('\n'), /comment keyword/);
-  assert.match(problems, /words \(max 12\)/);
+  assert.match(problems, /words \(max 7\)/);
 });
 
 test('planPack takes time and the click marker from the trace, in slide pixels', () => {
@@ -166,8 +166,8 @@ test('planPack takes time and the click marker from the trace, in slide pixels',
   // A full-bleed theme keeps the arithmetic round: shots are cut 1080 wide.
   const plan = planPack({ ...spec(dir), theme: { cardMargin: 0, cardBorder: 0 } }, { readTakeFn: d => readTake(d, { probe }) });
   assert.deepEqual([plan.canvas.width, plan.canvas.height], [1080, 1440], '3:4 is the default canvas');
-  assert.equal(planPack(spec(dir), { readTakeFn: d => readTake(d, { probe }) }).slides[1].shot.width, 952, 'by default a shot is cut to the card');
-  const [click, typing, plain] = plan.slides.filter(s => s.kind === 'step');
+  assert.equal(planPack(spec(dir), { readTakeFn: d => readTake(d, { probe }) }).slides[1].shots[0].width, 872, 'by default a shot is cut to the card');
+  const [click, typing, plain] = plan.slides.filter(s => s.kind === 'step').map(s => ({ ...s, shot: s.shots[0] }));
   assert.deepEqual([click.number, typing.number, plain.number], [1, 2, 3]);
   assert.equal(click.shot.t, 1.85, 'a click frame is just after the click');
   assert.equal(click.shot.scale, 2);
@@ -199,8 +199,8 @@ test('shotTextPx is the median OCR line height inside the shot box', () => {
 });
 
 test('qaPack fails small UI text and any privacy rule, by name only', () => {
-  const plan = { slides: [{ index: 1, kind: 'step', headline: 'خطوة', shot: { warnings: [] } }, { index: 2, kind: 'cta', headline: 'تابع' }] };
-  const rendered = [{ index: 1, file: 'a.png', shotBox: { x: 0, y: 0, w: 1080, h: 400 } }, { index: 2, file: 'b.png', shotBox: null }];
+  const plan = { slides: [{ index: 1, kind: 'step', headline: 'خطوة', shots: [{ warnings: [] }] }, { index: 2, kind: 'cta', headline: 'تابع', shots: [] }] };
+  const rendered = [{ index: 1, file: 'a.png', shotBoxes: [{ x: 0, y: 0, w: 1080, h: 400 }] }, { index: 2, file: 'b.png', shotBoxes: [] }];
   const ocr = file => (file === 'a.png' ? [{ text: 'small text', x: 200, y: 100, w: 200, h: 30 }] : [{ text: 'card ending 4242', x: 200, y: 200, w: 100, h: 20 }]);
   const privacy = texts => (texts.some(t => t.includes('card ending')) ? ['billing'] : []);
   const qa = qaPack(plan, rendered, { ocr, privacy });
@@ -222,7 +222,7 @@ test('privacy: home paths, shell prompts and the watcher denylist', () => {
 
 test('the pack page records take names, never local paths', () => {
   const plan = { slug: 'demo', title: 'Demo', caption: 'c', slides: [{ index: 1, kind: 'step', headline: 'h',
-    shot: { take: '/private/somewhere/take-1', takeName: 'take-1', video: '/private/somewhere/take-1/screen.mp4' } }] };
+    shots: [{ take: '/private/somewhere/take-1', takeName: 'take-1', video: '/private/somewhere/take-1/screen.mp4' }] }] };
   const html = indexHtml(plan, ['/x/exports/instagram-3x4/slide-01.png']);
   assert.match(html, /exports\/instagram-3x4\/slide-01\.png/);
   assert.doesNotMatch(html, /\/private\/somewhere/);
@@ -310,15 +310,27 @@ test('stagePack reuses an active job, refuses a failing pack, and dry-runs witho
 });
 
 test('rules and theme come from the spec, over the defaults', () => {
-  const rules = resolveRules({ canvas: '4x5', rules: { minTextPx: 40, safe: { y: 60 } } });
+  const rules = resolveRules({ canvas: '4x5', rules: { minTextPx: 40, minPx: { headline: 80 } } });
   assert.equal(rules.canvas, '4x5');
   assert.equal(rules.minTextPx, 40);
-  assert.deepEqual(rules.safe, { x: 88, y: 60 });
-  assert.equal(rules.minShotFill, 0.55);
+  assert.deepEqual([rules.minPx.headline, rules.minPx.sub], [80, 44], 'a rule block merges over the skill floors');
+  assert.equal(rules.inset, 100);
   assert.throws(() => resolveRules({ canvas: '16x9' }), /canvas must be one of/);
-  const theme = resolveTheme({ theme: { h1: 72, cardMargin: 40 } });
-  assert.equal(theme.h1, 72);
-  assert.equal(shotWidth(theme, CANVASES['3x4']), 1080 - 2 * (40 + theme.cardBorder));
+  const plain = resolveTheme({});
+  assert.equal(plain.name, 'plain');
+  assert.ok(fs.existsSync(plain.template));
+  assert.ok(plain.fonts.every(f => f.url.startsWith('file:')), 'theme fonts resolve to files');
+  const theme = resolveTheme({ theme: { name: 'plain', h1: 80, cardMargin: 40 } });
+  assert.equal(theme.vars.h1, 80);
+  assert.equal(shotWidth(theme.vars, CANVASES['3x4']), 1080 - 2 * (40 + theme.vars.cardBorder));
+  assert.throws(() => resolveTheme({ theme: 'nope' }), /no carousel theme/);
+  // A theme folder next to the spec, the way a design session hands one over.
+  const own = fs.mkdtempSync(path.join(os.tmpdir(), 'carousel-theme-'));
+  fs.mkdirSync(path.join(own, 'lab'));
+  fs.writeFileSync(path.join(own, 'lab', 'theme.json'), JSON.stringify({ name: 'lab', template: 'slide.html', vars: { h1: 90 } }));
+  const lab = resolveTheme({ theme: './lab' }, { specDir: own });
+  assert.deepEqual([lab.name, path.basename(lab.template), lab.vars.h1], ['lab', 'slide.html', 90]);
+  fs.rmSync(own, { recursive: true, force: true });
   // A scout's carousel need not be a twin: structure rules switch off, the cover need not list needs.
   const loose = spec('t');
   loose.rules = { requirePrompt: false, requireKeyword: false, slideCount: [3, 10] };
@@ -330,14 +342,14 @@ test('a still image is a shot source too, and step slides carry their move count
   const still = { ...spec('t'), slides: spec('t').slides.map(s => (s.shot ? { ...s, shot: { image: 'shot.png', crop: [0, 0, 400, 300] } } : s)) };
   const plan = planPack(still, { readStillFn: file => ({ name: path.basename(file), video: file, still: true, width: 800, height: 600, steps: [] }) });
   const step = plan.slides[1];
-  assert.equal(step.shot.still, true);
-  assert.equal(step.shot.t, 0);
+  assert.equal(step.shots[0].still, true);
+  assert.equal(step.shots[0].t, 0);
   assert.equal(step.moves, 3);
   assert.equal(slideData(step, { total: 6 }).kicker, 'الحركة ١ من ٣');
   assert.equal(slideData({ ...step, kicker: '' }, { total: 6 }).kicker, '', 'a spec can drop the kicker');
 });
 
-test('edgeCut and outsideSafe find text at the shot edge and outside the margins', () => {
+test('edgeCut finds UI text at the shot edge; layoutProblems measures sizes, inset, bottom band and words', () => {
   const box = { x: 60, y: 400, w: 960, h: 600 };
   const lines = [
     { text: 'Auto-compact window', x: 62, y: 500, w: 400, h: 30 },
@@ -346,9 +358,48 @@ test('edgeCut and outsideSafe find text at the shot edge and outside the margins
     { text: 'headline', x: 20, y: 100, w: 400, h: 60 },
   ];
   assert.deepEqual(edgeCut(lines, box, 20), ['Auto-compact window']);
-  assert.deepEqual(outsideSafe(lines, CANVASES['3x4'], { x: 100, y: 45 }, box), ['headline']);
-  const qa = qaPack({ rules: resolveRules({}), canvas: CANVASES['3x4'], slides: [{ index: 1, kind: 'step', headline: 'h', shot: { warnings: [] } }] },
-    [{ index: 1, file: 'a.png', shotBox: box, cardBox: { ...box, h: 500 } }], { ocr: () => lines.slice(0, 2), privacy: () => [] });
+  const rules = resolveRules({});
+  const canvas = CANVASES['3x4'];
+  const texts = [
+    { role: 'headline', px: 60, rect: { x: 120, y: 120, w: 800, h: 80 }, text: 'اكتب الأمر بكلود كود' },
+    { role: 'sub', px: 44, rect: { x: 60, y: 220, w: 800, h: 60 }, text: 'سطر واحد بيشرح ليش' },
+    { role: 'after', px: 44, rect: { x: 120, y: 1300, w: 800, h: 60 }, text: 'احفظه' },
+    { role: 'footer', px: 30, rect: { x: 120, y: 1310, w: 200, h: 30 }, text: 'handle' },
+  ];
+  const layout = layoutProblems({ kind: 'step' }, { texts, cards: [] }, rules, canvas).problems.join('\n');
+  assert.match(layout, /headline text at 60 px \(min 72\)/);
+  assert.match(layout, /inside the 100 px inset: sub/);
+  assert.match(layout, /in the bottom 10%: after/);
+  assert.doesNotMatch(layout, /footer/, 'the footer may sit in the bottom band');
+  const many = [{ role: 'body', px: 44, rect: { x: 120, y: 300, w: 800, h: 400 }, text: Array(31).fill('كلمة').join(' ') }];
+  assert.match(layoutProblems({ kind: 'note' }, { texts: many }, rules, canvas).problems.join(), /31 words/);
+  assert.deepEqual(layoutProblems({ kind: 'prompt' }, { texts: many }, rules, canvas).problems, [], 'a prompt slide is dense by default');
+  const qa = qaPack({ rules, canvas, slides: [{ index: 1, kind: 'step', headline: 'h', shots: [{ warnings: [] }] }] },
+    [{ index: 1, file: 'a.png', shotBoxes: [box], cardBoxes: [{ ...box, h: 500 }], texts: [] }], { ocr: () => lines.slice(0, 2), privacy: () => [] });
   assert.match(qa.slides[0].problems.join('\n'), /fills 35% of the slide \(min 55%\)/);
   assert.match(qa.slides[0].problems.join('\n'), /text cut at the shot's edge/);
+});
+
+test('compare, proof and note slides; alt text; the TikTok canvas keeps its bottom tenth clear', () => {
+  const base = spec('t');
+  const shot = { image: 'a.png', crop: [0, 0, 400, 300] };
+  base.slides.splice(4, 0,
+    { kind: 'compare', headline: 'قبل وبعد', shots: [{ ...shot, label: 'قبل' }, { ...shot, label: 'بعد', alt: 'the result' }] },
+    { kind: 'proof', headline: 'الإيصال', figure: '$150', shot: { ...shot, alt: 'a receipt' } },
+    { kind: 'note', headline: 'انتبه', items: ['واحد', 'اثنين'] });
+  assert.deepEqual(validateSpec(base), []);
+  const bad = spec('t');
+  bad.slides.splice(4, 0, { kind: 'compare', headline: 'قبل وبعد', shots: [shot] }, { kind: 'proof', headline: 'الإيصال' });
+  const problems = validateSpec(bad).join('\n');
+  assert.match(problems, /compare slide has shots: \[two shots, each with a label\]/);
+  assert.match(problems, /proof slide needs a real shot/);
+  const take = { name: 't', video: 'v.mp4', width: 1200, height: 800, steps: [{ id: 7, type: 'click', vt: 1.5, x: 400, y: 300 }, { id: 12, type: 'typing', vt: 3.25 }] };
+  const plan = planPack(base, { readTakeFn: () => take, readStillFn: file => ({ name: path.basename(file), video: file, still: true, width: 800, height: 600, steps: [] }) });
+  const compare = plan.slides.find(s => s.kind === 'compare');
+  assert.equal(compare.shots.length, 2);
+  assert.equal(slideData(compare, { total: 9, shotUrls: ['u1', 'u2'] }).shots[1].label, 'بعد');
+  assert.equal(altText(plan.slides.find(s => s.kind === 'proof')), 'الإيصال — a receipt');
+  assert.equal(altText({ headline: 'اكتب `/advisor`', shots: [] }), 'اكتب /advisor');
+  const top = Math.floor((TIKTOK_CANVAS.height * 0.9 - 1440) / 2);
+  assert.ok(top + 1440 <= TIKTOK_CANVAS.height * 0.9, 'a 3:4 slide ends above the bottom tenth');
 });

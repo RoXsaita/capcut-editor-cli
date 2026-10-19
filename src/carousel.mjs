@@ -14,7 +14,7 @@
  *             frame per real click or typing burst, with the click in video pixels and a
  *             crop sized so the UI text lands at ≥36 px on a 1080-wide slide;
  *  - `build`: a pack spec (docs/carousel-spec.md) → static PNG slides, 1080×1440 by default,
- *             rendered by headless Chrome (mograph/carousel/guide.html), a contact sheet,
+ *             rendered by headless Chrome through a theme folder (mograph/carousel/themes/), a contact sheet,
  *             index.html and metadata.json, then measured: OCR line height inside every step's
  *             UI shot, how much of the slide the shot fills, text cut at the shot's edge, text
  *             outside the safe zone, privacy rules, headline length and slide count. The
@@ -32,8 +32,9 @@ import { CapcutError, requireBinary } from './core.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const PACKAGE_ROOT = path.join(HERE, '..');
-export const TEMPLATE = path.join(PACKAGE_ROOT, 'mograph', 'carousel', 'guide.html');
-export const FONT_DIR = path.join(PACKAGE_ROOT, 'mograph', 'fonts');
+/** Theme folders: each holds theme.json (fonts, type scale, grid vars) and the template it names. */
+export const THEMES_DIR = path.join(PACKAGE_ROOT, 'mograph', 'carousel', 'themes');
+export const DEFAULT_THEME_NAME = 'plain';
 
 /** Canvases a pack renders at. 3:4 is the feed's own ratio; 4:5 stays for ads and old packs. */
 export const CANVASES = Object.freeze({
@@ -43,22 +44,26 @@ export const CANVASES = Object.freeze({
 export const SLIDE = CANVASES['3x4'];
 /** Step shots must read at this OCR line-box height (px, on the 1080-wide slide) or the build fails. */
 export const MIN_TEXT_PX = 36;
-export const MAX_HEADLINE_WORDS = 12;
-export const SLIDE_COUNT = Object.freeze([6, 8]);
+export const SLIDE_COUNT = Object.freeze([6, 10]);
 
 /**
- * What QA enforces, overridable per spec (`rules`). `safe` is the margin every text line keeps
- * (x from the sides, y from top and bottom; OCR boxes run ~10 px past the glyphs, so x sits
- * under theme.padX, the design inset; y 45 keeps text inside a centred 1080×1350, so a
- * 4:5 crop loses nothing). `minShotFill` is the step shot's share of the slide height;
- * `edgePadPx` is how close OCR text may come to the shot's left or right edge.
+ * What QA enforces, overridable per spec (`rules`). Defaults are the carousel skill's floors.
+ * Type sizes, insets and word counts are measured on the rendered page (the theme reports every
+ * text's role, size and box), so they hold whichever theme draws the slides; UI text inside a
+ * shot is measured by OCR. `inset` is the margin every text and card keeps on all four edges;
+ * `bottomClear` is the share of the canvas bottom kept free of anything but the footer (TikTok
+ * draws its caption and buttons there).
  */
 export const DEFAULT_RULES = Object.freeze({
   canvas: '3x4',
-  safe: Object.freeze({ x: 88, y: 45 }),
+  inset: 100,
+  bottomClear: 0.10,
   minTextPx: MIN_TEXT_PX,
-  maxHeadlineWords: MAX_HEADLINE_WORDS,
-  slideCount: Object.freeze([6, 10]),
+  minPx: Object.freeze({ coverHeadline: 96, headline: 72, sub: 44, body: 44, code: 40, any: 28 }),
+  maxWords: Object.freeze({ coverHeadline: 8, headline: 7 }),
+  slideWords: Object.freeze([8, 22]),
+  maxSlideWords: 30,
+  slideCount: SLIDE_COUNT,
   minShotFill: 0.55,
   edgePadPx: 20,
   maxUpscale: 2.8,
@@ -67,33 +72,41 @@ export const DEFAULT_RULES = Object.freeze({
   requireKeyword: false,
 });
 
-/**
- * The template's look, overridable per spec (`theme`). Numbers are CSS pixels, strings are CSS
- * values; each key becomes a `--kebab-case` custom property in guide.html. Colours come from the
- * profile's brand tokens unless the theme names them.
- */
-export const DEFAULT_THEME = Object.freeze({
-  bg: '#F5F5F9', card: '#FFFFFF', muted: '#4A4A5C',
-  padX: 100, padTop: 48, padBottom: 40,
-  badge: 104, kicker: 30, h1: 60, h1Cover: 80, sub: 34, body: 38, footer: 30,
-  gap: 40, cardMargin: 60, cardBorder: 4, cardRadius: 36, shadow: '0 18px 48px rgba(11, 11, 20, 0.12)',
-});
-
 export function resolveRules(spec = {}) {
-  const rules = { ...DEFAULT_RULES, ...(spec.rules || {}) };
+  const own = spec.rules || {};
+  const rules = { ...DEFAULT_RULES, ...own };
   rules.canvas = spec.canvas || rules.canvas;
   if (!CANVASES[rules.canvas]) fail('CAROUSEL_SPEC', `canvas must be one of ${Object.keys(CANVASES).join(', ')}`);
-  rules.safe = { ...DEFAULT_RULES.safe, ...(spec.rules?.safe || {}) };
+  rules.minPx = { ...DEFAULT_RULES.minPx, ...(own.minPx || {}) };
+  rules.maxWords = { ...DEFAULT_RULES.maxWords, ...(own.maxWords || {}) };
   return rules;
 }
 
-export function resolveTheme(spec = {}) {
-  return { ...DEFAULT_THEME, ...(spec.theme || {}) };
+/**
+ * The theme a spec names: `"plain"`, a path to a theme folder (relative to the spec), or
+ * `{ name, ...vars }` to override the folder's vars. → { name, dir, template, fonts, vars }.
+ */
+export function resolveTheme(spec = {}, { specDir = process.cwd() } = {}) {
+  const ref = typeof spec.theme === 'string' ? spec.theme : (spec.theme?.name || DEFAULT_THEME_NAME);
+  const dir = /[\\/]/.test(ref) ? path.resolve(specDir, ref) : path.join(THEMES_DIR, ref);
+  const file = path.join(dir, 'theme.json');
+  if (!fs.existsSync(file)) {
+    const known = fs.existsSync(THEMES_DIR) ? fs.readdirSync(THEMES_DIR).join(', ') : 'none';
+    fail('CAROUSEL_THEME', `no carousel theme at ${dir} (theme.json missing). Bundled: ${known}`);
+  }
+  const meta = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const overrides = spec.theme && typeof spec.theme === 'object' ? Object.fromEntries(Object.entries(spec.theme).filter(([k]) => k !== 'name')) : {};
+  return {
+    name: meta.name || path.basename(dir), dir,
+    template: path.join(dir, meta.template || 'template.html'),
+    fonts: (meta.fonts || []).map(f => ({ ...f, url: pathToFileURL(path.resolve(dir, f.file)).href })),
+    vars: { ...(meta.vars || {}), ...overrides },
+  };
 }
 
 /** The pixel width a shot image is cut at: the card's inner width on the canvas. */
-export function shotWidth(theme, canvas) {
-  return canvas.width - 2 * (theme.cardMargin + theme.cardBorder);
+export function shotWidth(vars, canvas) {
+  return canvas.width - 2 * ((vars.cardMargin ?? 100) + (vars.cardBorder ?? 0));
 }
 /** A reel is judged on its first ~day: older than this and its reach is lifetime, not momentum. */
 export const WINDOW_HOURS = 36;
@@ -297,8 +310,9 @@ export function readableCrop({ x, y }, frame, { textPx = 18, slideWidth = SLIDE.
 
 // ─── Pack spec ──────────────────────────────────────────────────────────────────────────────
 
-const KINDS = new Set(['cover', 'step', 'text', 'prompt', 'cta']);
-export const countWords = text => String(text || '').trim().split(/\s+/).filter(Boolean).length;
+const KINDS = new Set(['cover', 'step', 'proof', 'compare', 'note', 'text', 'prompt', 'cta']);
+const SHOT_KINDS = new Set(['step', 'proof']);
+export const countWords = text => String(text || '').replace(/`/g, '').trim().split(/\s+/).filter(Boolean).length;
 
 /** Problems with a spec, as strings; empty when it can be built. */
 export function validateSpec(spec) {
@@ -313,19 +327,24 @@ export function validateSpec(spec) {
   if (slides.at(-1)?.kind !== 'cta') problems.push('the last slide must be the CTA');
   if (rules.requirePrompt && !slides.some(s => s.kind === 'prompt')) problems.push('this carousel needs a "copy this" prompt slide (rules.requirePrompt)');
   if (rules.requireKeyword && !slides.some(s => s.kind === 'cta' && s.keyword)) problems.push('the CTA needs a comment keyword (rules.requireKeyword)');
+  const checkShot = (shot, at) => {
+    if (!shot.take && !shot.image) problems.push(`${at}: shot needs take (an rl2 folder) or image (a still)`);
+    if (shot.take && shot.t == null && shot.click == null && shot.typing == null) problems.push(`${at}: a take shot needs t (seconds), click or typing (trace event ids)`);
+    if (!Array.isArray(shot.crop) || shot.crop.length !== 4) problems.push(`${at}: shot.crop is [x, y, w, h] in source pixels`);
+  };
   slides.forEach((slide, i) => {
     const at = `slide ${i + 1}`;
     if (!KINDS.has(slide.kind)) problems.push(`${at}: kind must be one of ${[...KINDS].join(', ')}`);
     if (!slide.headline) problems.push(`${at}: headline is required`);
-    if (countWords(slide.headline) > rules.maxHeadlineWords) problems.push(`${at}: headline is ${countWords(slide.headline)} words (max ${rules.maxHeadlineWords})`);
-    if (slide.kind === 'step' && !slide.shot) problems.push(`${at}: a step needs a real UI shot`);
-    if (slide.kind === 'prompt' && !(slide.blocks || []).length) problems.push(`${at}: the prompt slide needs at least one block to copy`);
-    if (slide.shot) {
-      const shot = slide.shot;
-      if (!shot.take && !shot.image) problems.push(`${at}: shot needs take (an rl2 folder) or image (a still)`);
-      if (shot.take && shot.t == null && shot.click == null && shot.typing == null) problems.push(`${at}: a take shot needs t (seconds), click or typing (trace event ids)`);
-      if (!Array.isArray(shot.crop) || shot.crop.length !== 4) problems.push(`${at}: shot.crop is [x, y, w, h] in source pixels`);
+    const role = slide.kind === 'cover' ? 'coverHeadline' : 'headline';
+    const max = rules.maxWords[role];
+    if (max && countWords(slide.headline) > max) problems.push(`${at}: headline is ${countWords(slide.headline)} words (max ${max})`);
+    if (SHOT_KINDS.has(slide.kind) && !slide.shot) problems.push(`${at}: a ${slide.kind} slide needs a real shot`);
+    if (slide.kind === 'compare' && (!Array.isArray(slide.shots) || slide.shots.length !== 2 || slide.shots.some(sh => !sh.label))) {
+      problems.push(`${at}: a compare slide has shots: [two shots, each with a label]`);
     }
+    if (slide.kind === 'prompt' && !(slide.blocks || []).length) problems.push(`${at}: the prompt slide needs at least one block to copy`);
+    for (const [n, shot] of (slide.shots || (slide.shot ? [slide.shot] : [])).entries()) checkShot(shot, slide.shots ? `${at} shot ${n + 1}` : at);
   });
   return problems;
 }
@@ -342,7 +361,7 @@ export function planPack(spec, { specDir = process.cwd(), takes = {}, readTakeFn
   const problems = validateSpec(spec);
   if (problems.length) fail('CAROUSEL_SPEC', `the pack spec is not buildable:\n  - ${problems.join('\n  - ')}`);
   const rules = resolveRules(spec);
-  const theme = resolveTheme(spec);
+  const theme = resolveTheme(spec, { specDir });
   const canvas = CANVASES[rules.canvas];
   const cache = new Map(Object.entries(takes));
   const source = shot => {
@@ -354,10 +373,16 @@ export function planPack(spec, { specDir = process.cwd(), takes = {}, readTakeFn
   const numbered = spec.slides.map(slide => (slide.kind === 'step' ? (slide.number ?? ++step) : null));
   const moves = Math.max(0, ...numbered.filter(n => n != null));
   const slides = spec.slides.map((slide, i) => {
-    const out = { ...slide, index: i + 1 };
+    const out = { ...slide, kind: slide.kind === 'text' ? 'note' : slide.kind, index: i + 1 };
     if (slide.kind === 'step') { out.number = numbered[i]; out.moves = moves; }
-    if (!slide.shot) return out;
-    const shot = slide.shot;
+    const given = slide.shots || (slide.shot ? [slide.shot] : []);
+    out.shots = given.map(shot => planShot(shot, i));
+    delete out.shot;
+    return out;
+  });
+  return { ...spec, rules, theme, canvas: { name: rules.canvas, ...canvas }, slides };
+
+  function planShot(shot, i) {
     const src = source(shot);
     let t = src.still ? 0 : shot.t;
     let marker = null;
@@ -377,10 +402,10 @@ export function planPack(spec, { specDir = process.cwd(), takes = {}, readTakeFn
     if (cx < 0 || cy < 0 || cx + cw > src.width || cy + ch > src.height) {
       fail('CAROUSEL_SPEC', `slide ${i + 1}: crop ${shot.crop.join(',')} leaves the ${src.width}×${src.height} frame`);
     }
-    const width = shot.width || shotWidth(theme, canvas);
+    const width = shot.width || shotWidth(theme.vars, canvas);
     const scale = width / cw;
     const toSlide = ([x, y, w, h]) => [(x - cx) * scale, (y - cy) * scale, w * scale, h * scale].map(Math.round);
-    out.shot = {
+    return {
       ...shot, takeName: src.name, video: src.video, still: Boolean(src.still), t: r3(t), crop: [cx, cy, cw, ch],
       width, height: Math.round(ch * scale), scale: r3(scale),
       marker: marker && marker.x >= cx && marker.x <= cx + cw && marker.y >= cy && marker.y <= cy + ch
@@ -389,9 +414,7 @@ export function planPack(spec, { specDir = process.cwd(), takes = {}, readTakeFn
       masks: (shot.masks || []).map(m => ({ rect: toSlide(m.rect || m), color: m.color || null })),
       warnings: scale > rules.maxUpscale ? [`upscaled ${r1(scale)}× from the capture: it will read soft`] : [],
     };
-    return out;
-  });
-  return { ...spec, rules, theme, canvas: { name: rules.canvas, ...canvas }, slides };
+  }
 }
 
 // ─── Render ─────────────────────────────────────────────────────────────────────────────────
@@ -411,25 +434,25 @@ export function extractShot(shot, file) {
 /** The template's fixed words; a spec's `labels` overrides any of them. */
 export const DEFAULT_LABELS = Object.freeze({
   eyebrow: 'دليل خطوة بخطوة', needs: 'شو بتحتاج:', cta: 'اكتب بالتعليقات', stepOf: 'الحركة {n} من {total}',
-  save: 'احفظه، وارجعله وقت ما تحتاجه',
+  save: 'احفظه، وارجعله وقت ما تحتاجه', swipe: 'اسحب',
 });
 
 const kicker = (template, n, total) => (n == null || !template ? '' : template.replace('{n}', arabicNumeral(n)).replace('{total}', arabicNumeral(total)));
 
-export function slideData(slide, { total, handle, tokens, shotUrl, labels, theme = DEFAULT_THEME, canvas = SLIDE, safe = DEFAULT_RULES.safe }) {
+/** Everything a theme template needs for one slide (its contract is in docs/carousel-spec.md). */
+export function slideData(slide, { total, handle, tokens, shotUrls = [], labels, theme = null, canvas = SLIDE, inset = DEFAULT_RULES.inset }) {
   const words = { ...DEFAULT_LABELS, ...(labels || {}) };
   return {
     kind: slide.kind, index: slide.index, total, number: slide.number != null ? arabicNumeral(slide.number) : null,
     kicker: slide.kind === 'step' ? (slide.kicker ?? kicker(words.stepOf, slide.number, slide.moves || slide.number)) : (slide.kicker || ''),
-    headline: slide.headline, sub: slide.sub || '', body: slide.body || '', needs: slide.needs || [], blocks: slide.blocks || [],
-    keyword: slide.keyword || '', after: slide.after || '', handle: handle || '',
-    canvas: { width: canvas.width, height: canvas.height }, safe, theme,
-    shot: slide.shot ? { url: shotUrl, width: slide.shot.width, height: slide.shot.height, marker: slide.shot.marker,
-      highlight: slide.shot.highlight, masks: slide.shot.masks, dark: Boolean(slide.shot.dark) } : null,
+    headline: slide.headline, sub: slide.sub || '', body: slide.body || '', items: slide.items || [], figure: slide.figure || '',
+    needs: slide.needs || [], blocks: slide.blocks || [], keyword: slide.keyword || '', after: slide.after || '', handle: handle || '',
+    canvas: { width: canvas.width, height: canvas.height }, inset, vars: theme?.vars || {}, fonts: theme?.fonts || [],
+    shots: (slide.shots || []).map((shot, i) => ({ url: shotUrls[i], label: shot.label || '', width: shot.width, height: shot.height,
+      marker: shot.marker, highlight: shot.highlight, masks: shot.masks, dark: Boolean(shot.dark) })),
     // The bundled profile's neutrals; a creator's own brand comes from their profile layer.
     colors: { brand: tokens?.color?.brand || '#3D3D3D', accent: tokens?.color?.accent || '#FFB020', ink: tokens?.color?.ink || '#0B0B14' },
     labels: words,
-    fontsBase: `${pathToFileURL(FONT_DIR).href}/`,
   };
 }
 
@@ -456,18 +479,17 @@ export async function renderSlides(plan, { out, profile, browserFactory } = {}) 
     const page = await context.newPage();
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
-    await page.goto(pathToFileURL(TEMPLATE).href);
+    await page.goto(pathToFileURL(plan.theme.template).href);
     for (const slide of plan.slides) {
       const name = `slide-${String(slide.index).padStart(2, '0')}`;
-      let shotUrl = null;
-      if (slide.shot) shotUrl = pathToFileURL(extractShot(slide.shot, path.join(shotsDir, `${name}.png`))).href;
-      const data = slideData(slide, { total, handle: plan.handle, tokens: profile?.tokens, shotUrl, labels: plan.labels,
-        theme: plan.theme || DEFAULT_THEME, canvas, safe: (plan.rules || DEFAULT_RULES).safe });
+      const shotUrls = slide.shots.map((shot, i) => pathToFileURL(extractShot(shot, path.join(shotsDir, `${name}${slide.shots.length > 1 ? `-${i + 1}` : ''}.png`))).href);
+      const data = slideData(slide, { total, handle: plan.handle, tokens: profile?.tokens, shotUrls, labels: plan.labels,
+        theme: plan.theme, canvas, inset: (plan.rules || DEFAULT_RULES).inset });
       const box = await page.evaluate(async value => window.renderSlide(value), data);
       if (errors.length) fail('CAROUSEL_RENDER', `${name}: ${errors.join('; ')}`);
       const file = path.join(exportsDir, `${name}.png`);
       await page.screenshot({ path: file, clip: { x: 0, y: 0, width: canvas.width, height: canvas.height } });
-      results.push({ index: slide.index, kind: slide.kind, file, shotBox: box?.shot || null, cardBox: box?.card || null, displayScale: box?.shotScale ?? null });
+      results.push({ index: slide.index, kind: slide.kind, file, shotBoxes: box?.shots || [], cardBoxes: box?.cards || [], texts: box?.texts || [] });
     }
   } finally {
     await browser.close();
@@ -532,12 +554,30 @@ export function edgeCut(lines, box, pad) {
     .map(l => l.text);
 }
 
-/** Text lines outside the safe margins (the shot's own UI text is the shot's business, not this check's). */
-export function outsideSafe(lines, canvas, safe, box) {
-  const inBox = l => box && l.x + l.w / 2 >= box.x && l.x + l.w / 2 <= box.x + box.w && l.y + l.h / 2 >= box.y && l.y + l.h / 2 <= box.y + box.h;
-  return lines.filter(l => !inBox(l))
-    .filter(l => l.x < safe.x - 2 || l.x + l.w > canvas.width - safe.x + 2 || l.y < safe.y - 2 || l.y + l.h > canvas.height - safe.y + 2)
-    .map(l => l.text);
+/**
+ * The theme-measured checks (sizes, insets, the bottom band, words) for one rendered slide.
+ * `texts` and `cards` are what the theme reported, in canvas px.
+ */
+export function layoutProblems(slide, { texts = [], cards = [] }, rules, canvas) {
+  const problems = [];
+  const warnings = [];
+  for (const t of texts) {
+    const floor = rules.minPx[t.role] ?? rules.minPx.any;
+    if (t.px + 0.5 < floor || t.px + 0.5 < rules.minPx.any) problems.push(`${t.role} text at ${r1(t.px)} px (min ${Math.max(floor, rules.minPx.any)})`);
+  }
+  const inset = rules.inset;
+  const outside = [...texts.map(t => ({ what: `${t.role} "${String(t.text).slice(0, 24)}"`, r: t.rect })), ...cards.map((r, i) => ({ what: `card ${i + 1}`, r }))]
+    .filter(({ r }) => r.w > 0 && (r.x < inset - 1 || r.y < inset - 1 || r.x + r.w > canvas.width - inset + 1 || r.y + r.h > canvas.height - inset + 1));
+  if (outside.length) problems.push(`inside the ${inset} px inset: ${outside.map(o => o.what).join(', ')}`);
+  const band = canvas.height * (1 - rules.bottomClear);
+  const low = [...texts.filter(t => !['footer', 'swipe'].includes(t.role)).map(t => ({ what: t.role, r: t.rect })), ...cards.map((r, i) => ({ what: `card ${i + 1}`, r }))]
+    .filter(({ r }) => r.y + r.h > band + 1);
+  if (low.length) problems.push(`in the bottom ${Math.round(rules.bottomClear * 100)}%: ${[...new Set(low.map(o => o.what))].join(', ')}`);
+  const words = texts.filter(t => !['footer', 'swipe'].includes(t.role)).reduce((n, t) => n + countWords(t.text), 0);
+  const dense = slide.dense ?? slide.kind === 'prompt';
+  if (words > rules.maxSlideWords && !dense) problems.push(`${words} words on the slide (review anything over ${rules.maxSlideWords}; mark a reference slide dense)`);
+  else if (words < rules.slideWords[0] || words > rules.slideWords[1]) warnings.push(`${words} words (aim ${rules.slideWords[0]}–${rules.slideWords[1]})`);
+  return { problems, warnings, words };
 }
 
 export function qaPack(plan, rendered, { ocr = ocrImage, privacy = checkPrivacy } = {}) {
@@ -546,19 +586,22 @@ export function qaPack(plan, rendered, { ocr = ocrImage, privacy = checkPrivacy 
   const slides = rendered.map(result => {
     const slide = plan.slides.find(s => s.index === result.index);
     const lines = ocr(result.file);
-    const textPx = slide.kind === 'step' ? shotTextPx(lines, result.shotBox) : null;
-    const fill = result.cardBox ? r3(result.cardBox.h / canvas.height) : null;
-    const cut = edgeCut(lines, result.shotBox, rules.edgePadPx);
-    const unsafe = outsideSafe(lines, canvas, rules.safe, result.cardBox);
+    const shotBoxes = result.shotBoxes || [];
+    const perShot = shotBoxes.map(box => shotTextPx(lines, box));
+    const measured = perShot.filter(v => v != null);
+    const textPx = shotBoxes.length ? (measured.length ? Math.min(...measured) : null) : null;
+    const fill = (result.cardBoxes || []).length ? r3(result.cardBoxes.reduce((h, b) => h + b.h, 0) / canvas.height) : null;
+    const cut = shotBoxes.flatMap(box => edgeCut(lines, box, rules.edgePadPx));
     const names = privacy(lines.map(l => l.text));
+    const layout = layoutProblems(slide, { texts: result.texts || [], cards: result.cardBoxes || [] }, rules, canvas);
     const problems = [];
-    if (slide.kind === 'step' && (textPx == null || textPx < rules.minTextPx)) problems.push(`UI text reads at ${textPx ?? 'no'} px (min ${rules.minTextPx})`);
+    if (shotBoxes.length && slide.kind !== 'cover' && (textPx == null || textPx < rules.minTextPx)) problems.push(`UI text reads at ${textPx ?? 'no'} px (min ${rules.minTextPx})`);
     if (slide.kind === 'step' && fill != null && fill < rules.minShotFill) problems.push(`the shot fills ${Math.round(fill * 100)}% of the slide (min ${Math.round(rules.minShotFill * 100)}%)`);
     if (cut.length) problems.push(`text cut at the shot's edge: ${cut.map(t => `"${String(t).slice(0, 32)}"`).join(', ')}`);
-    if (unsafe.length) problems.push(`text outside the safe zone: ${unsafe.map(t => `"${String(t).slice(0, 32)}"`).join(', ')}`);
+    problems.push(...layout.problems);
     if (names.length) problems.push(`privacy: ${names.join(', ')}`);
-    if (countWords(slide.headline) > rules.maxHeadlineWords) problems.push(`headline over ${rules.maxHeadlineWords} words`);
-    return { index: result.index, kind: slide.kind, textPx, fill, privacy: names, warnings: slide.shot?.warnings || [], verdict: problems.length ? 'FAIL' : 'PASS', problems };
+    const warnings = [...slide.shots.flatMap(s => s.warnings || []), ...layout.warnings];
+    return { index: result.index, kind: slide.kind, textPx, fill, words: layout.words, privacy: names, warnings, verdict: problems.length ? 'FAIL' : 'PASS', problems };
   });
   return { verdict: slides.some(s => s.verdict === 'FAIL') ? 'FAIL' : 'PASS', minTextPx: rules.minTextPx, minShotFill: rules.minShotFill, slides };
 }
@@ -604,8 +647,16 @@ export function indexHtml(plan, files) {
 function stripLocal(plan) {
   return {
     ...plan,
-    slides: plan.slides.map(s => (s.shot ? { ...s, shot: { ...s.shot, video: undefined, take: s.shot.still ? undefined : s.shot.takeName, image: s.shot.still ? s.shot.takeName : undefined } } : s)),
+    theme: { name: plan.theme?.name, vars: plan.theme?.vars },
+    slides: plan.slides.map(s => ({ ...s, shots: s.shots.map(shot => ({ ...shot, video: undefined, take: shot.still ? undefined : shot.takeName, image: shot.still ? shot.takeName : undefined })) })),
   };
+}
+
+/** Alt text per slide: the spec's `alt`, else the headline plus what each shot shows (`shot.alt`). */
+export function altText(slide) {
+  if (slide.alt) return slide.alt;
+  const plain = s => String(s || '').replace(/`/g, '');
+  return [plain(slide.headline), ...(slide.shots || []).map(shot => plain(shot.alt)).filter(Boolean)].join(' — ');
 }
 
 export function packMetadata(plan, { qa, sheet, now = new Date().toISOString() }) {
@@ -628,8 +679,11 @@ export function packMetadata(plan, { qa, sheet, now = new Date().toISOString() }
     captions: { instagram: plan.caption || '', tiktok: plan.tiktokCaption || plan.caption || '' },
     qa_notes: `capcutctl carousel QA ${qa.verdict}: ${qa.slides.map(s => `${s.index}:${s.kind}${s.textPx ? ` ${s.textPx}px` : ''}${s.fill != null ? ` fill ${Math.round(s.fill * 100)}%` : ''}${s.problems.length ? ` (${s.problems.join('; ')})` : ''}`).join(', ')}`,
     qa,
+    theme: plan.theme?.name || DEFAULT_THEME_NAME,
     slide_boxes: plan.slides.map(s => ({ slide: s.index, kind: s.kind, headline: s.headline,
-      ...(s.shot ? { take: s.shot.takeName, t: s.shot.t, crop: s.shot.crop, scale: s.shot.scale, marker: Boolean(s.shot.marker) } : {}) })),
+      shots: s.shots.map(shot => ({ source: shot.takeName, t: shot.t, crop: shot.crop, scale: shot.scale, marker: Boolean(shot.marker) })) })),
+    alt_text: plan.slides.map(s => ({ slide: s.index, text: altText(s) })),
+    exports: { slides: `exports/${exportDirName(plan.canvas?.name || '3x4')}`, tiktok: `exports/${TIKTOK_DIR}` },
     contact_sheet: sheet ? path.relative(path.dirname(path.dirname(sheet.file)), sheet.file) : '',
     created_at: now,
     updated_at: now,
@@ -644,10 +698,33 @@ export async function buildPack(spec, { out, specDir, profile, browserFactory, o
   const files = rendered.map(r => r.file);
   const sheet = contactSheet(files, path.join(dir, 'exports', `contact-sheet-${exportDirName(plan.canvas.name)}.jpg`), { canvas: plan.canvas });
   mirrorForDashboard(dir, plan.canvas.name, files, sheet.file);
+  tiktokExport(dir, files, plan.canvas, plan.theme?.vars?.bg);
   const qa = qaPack(plan, rendered, { ...(ocr ? { ocr } : {}), ...(privacy ? { privacy } : {}) });
   fs.writeFileSync(path.join(dir, 'index.html'), indexHtml(plan, files));
   fs.writeFileSync(path.join(dir, 'metadata.json'), JSON.stringify(packMetadata(plan, { qa, sheet }), null, 2) + '\n');
   return { pack: dir, slides: files, contactSheet: sheet.file, qa };
+}
+
+export const TIKTOK_DIR = 'tiktok-9x16';
+export const TIKTOK_CANVAS = Object.freeze({ width: 1080, height: 1920 });
+
+/**
+ * The same slides on TikTok's 9:16 canvas: the slide sits centred in the top 90 %, so the bottom
+ * tenth (where TikTok draws the caption and buttons) holds only background.
+ */
+export function tiktokExport(dir, files, canvas, bg = '#FFFFFF') {
+  requireBinary('ffmpeg', 'carousel');
+  const out = path.join(dir, 'exports', TIKTOK_DIR);
+  fs.rmSync(out, { recursive: true, force: true });
+  fs.mkdirSync(out, { recursive: true });
+  const top = Math.floor((TIKTOK_CANVAS.height * 0.9 - canvas.height) / 2);
+  const color = /^#[0-9a-f]{6}$/i.test(bg) ? `0x${bg.slice(1)}` : 'white';
+  for (const file of files) {
+    const target = path.join(out, path.basename(file));
+    const run = spawnSync('ffmpeg', ['-v', 'error', '-y', '-i', file, '-vf', `pad=${TIKTOK_CANVAS.width}:${TIKTOK_CANVAS.height}:${Math.floor((TIKTOK_CANVAS.width - canvas.width) / 2)}:${top}:color=${color}`, target], { encoding: 'utf8' });
+    if (run.status !== 0) fail('CAROUSEL_TIKTOK', `9:16 export of ${path.basename(file)} failed: ${String(run.stderr).trim()}`);
+  }
+  return { dir: out, top };
 }
 
 /**

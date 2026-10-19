@@ -118,9 +118,11 @@ Usage:
                         and pixels, with a crop sized so the UI text reads at ≥36 px on a 1080-wide slide.
   capcutctl carousel build --spec PACK.json [--out DIR] [--json]
                       — render a static carousel from a slide spec (docs/carousel-spec.md; 1080×1440 by
-                        default: cover, steps on real UI crops with the click drawn, copy-this, keyword CTA)
-                        with headless Chrome, then QA it against the spec's rules: UI text ≥36 px, shot fill,
-                        no text cut at the shot edge or outside the safe zone, privacy. Exit 1 on FAIL.
+                        default: cover, step/proof/compare/note on real UI crops, copy-this, keyword or save CTA)
+                        through a theme folder (mograph/carousel/themes/), plus a 1080×1920 TikTok copy. QA
+                        measures the rendered page against the spec's rules: font size per role, 100 px inset,
+                        bottom 10% clear, words per slide, UI text ≥36 px, shot fill, edge cuts, privacy.
+                        Exit 1 on FAIL.
   capcutctl carousel stage --pack DIR --dashboard URL --remote HOST:DIR [--item ID] [--platforms instagram,tiktok]
                       [--dry-run] [--json]
                       — copy a passing pack to a carousel dashboard as a DRAFT linked to the reel's item and
