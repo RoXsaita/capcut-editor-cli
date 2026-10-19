@@ -1,0 +1,140 @@
+<!doctype html>
+<!--
+  guide — one slide of a guide carousel, 1080×1350, light background.
+  Driven by src/carousel.mjs: window.renderSlide(data) lays the slide out and returns the
+  on-slide box of the UI shot ({ shot: {x, y, w, h}, shotScale }) so QA can measure the text
+  inside it. Kinds: cover | step | prompt | cta. Text in `backticks` renders as a code chip
+  (the slide's one accent); everything else is IBM Plex Sans Arabic, right to left.
+-->
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<style>
+  :root { --brand: #4040FE; --accent: #FFD84D; --ink: #0B0B14; --muted: #4A4A5C; --bg: #F5F5F9; --card: #FFFFFF; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1080px; height: 1350px; overflow: hidden; background: var(--bg); }
+  body { font-family: 'Plex Arabic', sans-serif; color: var(--ink); -webkit-font-smoothing: antialiased; }
+  #slide { position: relative; width: 1080px; height: 1350px; display: flex; flex-direction: column; }
+  .pad { padding: 0 72px; }
+  header.pad { padding-top: 64px; display: flex; gap: 28px; align-items: flex-start; }
+  .badge { flex: none; width: 112px; height: 112px; border-radius: 56px; background: var(--brand); color: #fff;
+           font: 700 72px/112px 'Plex Arabic'; text-align: center; }
+  .titles { flex: 1; min-width: 0; }
+  h1 { font: 700 70px/1.22 'Plex Arabic'; letter-spacing: 0; }
+  .cover h1 { font-size: 88px; line-height: 1.18; }
+  .sub { margin-top: 18px; font: 600 38px/1.4 'Plex Arabic'; color: var(--muted); }
+  code { font-family: 'Mono', monospace; font-weight: 700; direction: ltr; unicode-bidi: isolate; font-size: 0.82em;
+         background: var(--accent); color: var(--ink); padding: 0 14px; border-radius: 12px; white-space: nowrap; }
+  .eyebrow { display: inline-block; margin-bottom: 26px; font: 700 34px/1 'Plex Arabic'; color: var(--brand);
+             border: 4px solid var(--brand); border-radius: 40px; padding: 14px 26px; }
+  .shot { position: relative; margin-top: 44px; width: 1080px; flex: none; border-top: 8px solid var(--brand);
+          border-bottom: 8px solid var(--brand); background: #fff; overflow: hidden; }
+  .shot img { display: block; width: 100%; height: 100%; }
+  .marker { position: absolute; width: 84px; height: 84px; margin: -42px 0 0 -42px; border-radius: 50%;
+            border: 8px solid var(--brand); box-shadow: 0 0 0 4px #fff, inset 0 0 0 4px #fff; }
+  .marker::after { content: ''; position: absolute; left: 50%; top: 50%; width: 16px; height: 16px; margin: -8px 0 0 -8px;
+                   border-radius: 50%; background: var(--brand); box-shadow: 0 0 0 3px #fff; }
+  .highlight { position: absolute; border: 7px solid var(--brand); border-radius: 14px; box-shadow: 0 0 0 3px #fff; }
+  .mask { position: absolute; border-radius: 10px; }
+  .spacer { flex: 1; }
+  .needs { padding-bottom: 28px; }
+  .needs h2 { font: 700 40px/1.3 'Plex Arabic'; margin-bottom: 18px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 16px; }
+  .chip { font: 600 36px/1.25 'Plex Arabic'; background: var(--card); border: 4px solid var(--brand); border-radius: 22px; padding: 14px 26px; }
+  .blocks { margin-top: 40px; display: flex; flex-direction: column; gap: 30px; }
+  .block .label { font: 600 34px/1.3 'Plex Arabic'; color: var(--muted); margin-bottom: 12px; }
+  .block pre { direction: ltr; text-align: left; white-space: pre-wrap; word-break: break-word; font: 700 40px/1.35 'Mono', monospace;
+               background: var(--card); border: 4px solid var(--brand); border-radius: 22px; padding: 24px 30px; }
+  .cta-card { margin-top: 56px; background: var(--brand); color: #fff; border-radius: 36px; padding: 56px 48px; text-align: center; }
+  .cta-card .hint { font: 600 38px/1.3 'Plex Arabic'; opacity: 0.92; }
+  .cta-card .kw { margin-top: 18px; font: 700 150px/1.1 'Plex Arabic'; }
+  .after { margin-top: 40px; font: 600 40px/1.4 'Plex Arabic'; color: var(--muted); }
+  footer { display: flex; justify-content: space-between; align-items: center; padding: 0 72px 56px; font: 700 34px/1 'Plex Arabic'; }
+  footer .handle { direction: ltr; }
+  footer .count { direction: ltr; color: var(--muted); }
+</style>
+</head>
+<body>
+<div id="slide"></div>
+<script>
+  const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+  // `code` → a chip; the rest stays plain text.
+  const rich = s => esc(s).replace(/`([^`]+)`/g, (_, code) => `<code>${code}</code>`);
+
+  async function loadFonts(base) {
+    if (window.__fontsLoaded) return;
+    const faces = [
+      ['Plex Arabic', 'ibm-plex-sans-arabic-arabic-600-normal.woff2', 600, 'U+0600-06FF, U+0750-077F, U+FB50-FDFF, U+FE70-FEFF, U+200C-200E'],
+      ['Plex Arabic', 'ibm-plex-sans-arabic-arabic-700-normal.woff2', 700, 'U+0600-06FF, U+0750-077F, U+FB50-FDFF, U+FE70-FEFF, U+200C-200E'],
+      ['Plex Arabic', 'ibm-plex-sans-arabic-latin-600-normal.woff2', 600, 'U+0000-00FF, U+2000-206F'],
+      ['Plex Arabic', 'ibm-plex-sans-arabic-latin-700-normal.woff2', 700, 'U+0000-00FF, U+2000-206F'],
+      ['Mono', 'jetbrains-mono-latin-400-normal.woff2', 400, 'U+0000-00FF, U+2000-206F'],
+      ['Mono', 'jetbrains-mono-latin-700-normal.woff2', 700, 'U+0000-00FF, U+2000-206F'],
+    ];
+    for (const [family, file, weight, range] of faces) {
+      const face = new FontFace(family, `url(${base}${file})`, { weight: String(weight), unicodeRange: range });
+      document.fonts.add(await face.load());
+    }
+    window.__fontsLoaded = true;
+  }
+
+  function shotHtml(shot) {
+    if (!shot) return '';
+    const masks = (shot.masks || []).map(m => `<div class="mask" style="left:${m.rect[0]}px;top:${m.rect[1]}px;width:${m.rect[2]}px;height:${m.rect[3]}px;background:${m.color || (shot.dark ? '#1E1E22' : '#ECECF2')}"></div>`).join('');
+    const hl = shot.highlight ? `<div class="highlight" style="left:${shot.highlight[0]}px;top:${shot.highlight[1]}px;width:${shot.highlight[2]}px;height:${shot.highlight[3]}px"></div>` : '';
+    const mk = shot.marker ? `<div class="marker" style="left:${shot.marker.x}px;top:${shot.marker.y}px"></div>` : '';
+    return `<div class="shot" id="shot"><div id="shot-inner" style="position:relative;width:${shot.width}px;height:${shot.height}px;transform-origin:top center">
+      <img src="${shot.url}" width="${shot.width}" height="${shot.height}" alt="">${masks}${hl}${mk}</div></div>`;
+  }
+
+  function body(d) {
+    const footer = `<div class="spacer"></div><footer><span class="handle">${esc(d.handle)}</span><span class="count">${d.index}/${d.total}</span></footer>`;
+    if (d.kind === 'cover') {
+      return `<header class="pad cover"><div class="titles"><div class="eyebrow">دليل خطوة بخطوة</div><h1>${rich(d.headline)}</h1>${d.sub ? `<div class="sub">${rich(d.sub)}</div>` : ''}</div></header>
+        ${shotHtml(d.shot)}<div class="spacer"></div>
+        <div class="pad needs"><h2>شو بتحتاج:</h2><div class="chips">${d.needs.map(n => `<span class="chip">${rich(n)}</span>`).join('')}</div></div>
+        <footer><span class="handle">${esc(d.handle)}</span><span class="count">${d.index}/${d.total}</span></footer>`;
+    }
+    if (d.kind === 'step') {
+      return `<div class="spacer"></div><header class="pad"><div class="badge">${esc(d.number)}</div><div class="titles"><h1>${rich(d.headline)}</h1>${d.sub ? `<div class="sub">${rich(d.sub)}</div>` : ''}</div></header>
+        ${shotHtml(d.shot)}${footer}`;
+    }
+    if (d.kind === 'prompt') {
+      return `<header class="pad"><div class="titles"><h1>${rich(d.headline)}</h1>${d.sub ? `<div class="sub">${rich(d.sub)}</div>` : ''}</div></header>
+        <div class="pad blocks">${d.blocks.map(b => `<div class="block">${b.label ? `<div class="label">${rich(b.label)}</div>` : ''}<pre>${esc(b.text)}</pre></div>`).join('')}</div>${footer}`;
+    }
+    return `<header class="pad"><div class="titles"><h1>${rich(d.headline)}</h1>${d.sub ? `<div class="sub">${rich(d.sub)}</div>` : ''}</div></header>
+      <div class="pad"><div class="cta-card"><div class="hint">اكتب بالتعليقات</div><div class="kw">${esc(d.keyword)}</div></div>
+      ${d.after ? `<div class="after">${rich(d.after)}</div>` : ''}</div>${footer}`;
+  }
+
+  window.renderSlide = async function renderSlide(d) {
+    const root = document.documentElement.style;
+    root.setProperty('--brand', d.colors.brand);
+    root.setProperty('--accent', d.colors.accent);
+    root.setProperty('--ink', d.colors.ink);
+    await loadFonts(d.fontsBase);
+    const slide = document.getElementById('slide');
+    slide.innerHTML = body(d);
+    await Promise.all([...slide.querySelectorAll('img')].map(img => img.complete ? null : new Promise((ok, no) => { img.onload = ok; img.onerror = () => no(new Error(`image failed: ${img.src}`)); })));
+    await document.fonts.ready;
+    const shot = document.getElementById('shot');
+    let shotScale = null;
+    if (shot) {
+      // Fit the shot into what the header and footer leave; QA measures the result, so a
+      // shot that had to shrink fails on its text size rather than passing on paper.
+      const inner = document.getElementById('shot-inner');
+      const used = [...slide.children].filter(el => el !== shot && !el.classList.contains('spacer'))
+        .reduce((sum, el) => sum + el.getBoundingClientRect().height, 0);
+      const room = 1350 - used - 44 - 16 - 24;
+      shotScale = Math.min(1, room / d.shot.height);
+      inner.style.transform = `scale(${shotScale})`;
+      shot.style.height = `${Math.round(d.shot.height * shotScale) + 16}px`;
+      const r = inner.getBoundingClientRect();
+      return { shot: { x: r.left, y: r.top, w: r.width, h: r.height }, shotScale };
+    }
+    return { shot: null, shotScale };
+  };
+</script>
+</body>
+</html>
