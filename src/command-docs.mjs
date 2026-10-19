@@ -21,6 +21,7 @@ export const GROUPS = Object.freeze([
   ['check', 'Check and review'],
   ['safety', 'Snapshots and repair'],
   ['export', 'Export (explicit request only)'],
+  ['social', 'After posting'],
   ['dev', 'Development'],
 ]);
 
@@ -112,6 +113,8 @@ export const COMMAND_DOCS = Object.freeze({
   'check-export': doc('check', 'QA the rendered file: black, flash frames, freezes, dead air, loudness, true peak, canvas and length.', 'capcutctl check-export --media final.mp4 --project NAME'),
   reference: doc('check', 'Measure a reference reel\'s pacing in the gate\'s terms; --profile-out writes the density override.', 'capcutctl reference --media reel.mp4 --project NAME --sheet shots.png'),
   'export-grid': doc('export', 'Labelled frame grid from an existing video.', 'capcutctl export-grid --media final.mp4 --out grid.png --times 0,8,15'),
+
+  carousel: doc('social', 'Static carousels from a slide spec (reel twins first): trigger scan, rl2 click frames, 3:4 pack + QA, stage as a draft.', 'capcutctl carousel build --spec pack.json'),
 
   harvest: doc('dev', 'Catalogue transitions/SFX/masks/keyframes from real drafts.', 'capcutctl harvest --plan'),
   oracle: doc('dev', 'Dev-only round-trip capture/diff of a disposable project.', 'capcutctl oracle diff --before A --after B'),
