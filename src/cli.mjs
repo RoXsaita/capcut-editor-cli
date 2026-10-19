@@ -108,27 +108,6 @@ Usage:
                         edit (--project), then hand off. Exit 1 on blockers or a discarded review.
   capcutctl review-video --decide REVIEW.json --issue ID --verdict accept|reject --reason "one line"
                       — log the verdict on one Gemini issue after checking its evidence.
-  capcutctl carousel scan --dashboard URL | --analytics FILE [--content FILE] [--platform instagram]
-                      [--window-hours 36] [--log FILE|none] [--json]
-                      — which recent reels earn a guide-carousel twin: reach in the first ~day above the
-                        median of the other reels AND a setup the viewer repeats. Stories are logged
-                        "story, no twin"; unclear topics are logged "unsure" for a human.
-  capcutctl carousel steps --take DIR [--text-px 18] [--json]
-                      — one candidate frame per real click / typing burst in an rl2 take, in video time
-                        and pixels, with a crop sized so the UI text reads at ≥36 px on a 1080-wide slide.
-  capcutctl carousel build --spec PACK.json [--out DIR] [--json]
-                      — render a static carousel from a slide spec (docs/carousel-spec.md; 1080×1440 by
-                        default: cover, step/proof/compare/note on real UI crops, terminal output retyped verbatim
-                        and OCR-checked against the frame, copy-this, keyword or save CTA)
-                        through a theme folder (mograph/carousel/themes/), plus a 1080×1920 TikTok copy. QA
-                        measures the rendered page against the spec's rules: font size per role, 100 px inset,
-                        bottom 10% clear, words per slide, UI text ≥36 px, shot fill, edge cuts, privacy.
-                        Exit 1 on FAIL.
-  capcutctl carousel stage --pack DIR --dashboard URL --remote HOST:DIR [--item ID] [--platforms instagram,tiktok]
-                      [--dry-run] [--json]
-                      — copy a passing pack to a carousel dashboard as a DRAFT linked to the reel's item and
-                        create one draft publish job (a restage updates that job's captions in place).
-                        Never publishes or sends to any platform.
   capcutctl review --project NAME [--out DIR] [--id NAME] [--fps 6] [--width 240]
                       — write outputs/<id>/proxy.mp4, edl.json, and contact-sheet.png (never CapCut export)
   capcutctl new --project NAME [--media FILE] [--scenes 0:6,6:12,12:18]
@@ -892,73 +871,6 @@ function mographParams(args) {
   catch (error) { throw new CapcutError(`--params is not JSON: ${error.message}`, { code: 'MOGRAPH_PARAM', exitCode: 2 }); }
 }
 
-async function runCarousel(args) {
-  const carousel = await import('./carousel.mjs');
-  const sub = args._[1];
-  if (sub === 'scan') {
-    let analytics;
-    let content = null;
-    if (args.dashboard) {
-      const base = args.dashboard.replace(/\/+$/, '');
-      const get = async route => {
-        const res = await fetch(`${base}${route}`);
-        if (!res.ok) throw new CapcutError(`GET ${route} → ${res.status}`, { code: 'CAROUSEL_SCAN', exitCode: 2 });
-        return res.json();
-      };
-      analytics = await get('/api/analytics');
-      content = await get('/api/analytics/content');
-    } else if (args.analytics) {
-      analytics = readJson(path.resolve(args.analytics));
-      if (args.content) content = readJson(path.resolve(args.content));
-    } else {
-      throw new CapcutError('carousel scan needs --dashboard URL or --analytics FILE.', { code: 'CAROUSEL_SCAN', exitCode: 2 });
-    }
-    const platform = args.platform || 'instagram';
-    const block = analytics?.platforms?.[platform] || analytics;
-    const posts = block?.data?.posts || block?.posts || [];
-    const snapshots = (content?.snapshots || []).filter(s => s.platform === platform);
-    const verdicts = carousel.scanReels({ posts, snapshots, fetchedAt: block?.fetched_at || new Date().toISOString(),
-      windowHours: args.windowHours != null ? Number(args.windowHours) : carousel.WINDOW_HOURS });
-    const logFile = args.log === 'none' ? null : path.resolve(args.log || carousel.defaultLogFile());
-    const logged = logFile ? carousel.logVerdicts(logFile, verdicts) : [];
-    const report = { platform, windowHours: Number(args.windowHours || carousel.WINDOW_HOURS), log: logFile, logged: logged.length,
-      twins: verdicts.filter(v => v.verdict === 'twin').map(v => v.postId), verdicts };
-    if (args.json) return print(report, true);
-    const recent = verdicts.filter(v => v.verdict !== 'too-old');
-    return print([`${platform}: ${verdicts.length} reels, ${recent.length} within ${report.windowHours} h`,
-      ...recent.map(v => `${v.verdict.padEnd(14)} ${v.postId}  reach ${v.reach} at ${v.ageHours} h vs median ${v.median}  [${v.kind}]  ${v.title}`),
-      logFile ? `log: ${logFile} (+${logged.length})` : ''].join('\n') + '\n');
-  }
-  if (sub === 'steps') {
-    if (!args.take) throw new CapcutError('carousel steps needs --take DIR.', { code: 'CAROUSEL_TAKE', exitCode: 2 });
-    const take = carousel.readTake(args.take);
-    const textPx = args.textPx != null ? Number(args.textPx) : 18;
-    const steps = take.steps.map(step => step.type === 'click'
-      ? { ...step, crop: carousel.readableCrop(step, take, { textPx }) } : step);
-    return print({ take: take.name, video: path.basename(take.video), width: take.width, height: take.height, steps }, true);
-  }
-  if (sub === 'build') {
-    if (!args.spec) throw new CapcutError('carousel build needs --spec PACK.json.', { code: 'CAROUSEL_SPEC', exitCode: 2 });
-    const { loadProfile } = await import('./profile.mjs');
-    const specFile = path.resolve(args.spec);
-    const spec = readJson(specFile);
-    const result = await carousel.buildPack(spec, { out: args.out ? path.resolve(args.out) : path.join(path.dirname(specFile), spec.slug),
-      specDir: path.dirname(specFile), profile: loadProfile() });
-    if (result.qa.verdict !== 'PASS') process.exitCode = 1;
-    if (args.json) return print(result, true);
-    return print([`carousel ${result.qa.verdict}: ${result.pack}`, `contact sheet: ${result.contactSheet}`,
-      ...result.qa.slides.map(s => `  ${String(s.index).padStart(2)} ${s.kind.padEnd(6)} ${s.verdict}${s.textPx ? `  text ${s.textPx}px` : ''}`
-        + `${s.problems.length ? `  ${s.problems.join('; ')}` : ''}${s.warnings.length ? `  WARN ${s.warnings.join('; ')}` : ''}`)].join('\n') + '\n');
-  }
-  if (sub === 'stage') {
-    if (!args.pack) throw new CapcutError('carousel stage needs --pack DIR.', { code: 'CAROUSEL_STAGE', exitCode: 2 });
-    return print(await carousel.stagePack({ pack: args.pack, dashboard: args.dashboard || process.env.CAPCUTCTL_DASHBOARD,
-      remote: args.remote || process.env.CAPCUTCTL_CAROUSELS_REMOTE, item: args.item != null ? Number(args.item) : undefined,
-      platforms: args.platforms || 'instagram,tiktok', dryRun: Boolean(args.dryRun) }), true);
-  }
-  throw new CapcutError('carousel takes scan | steps | build | stage.', { code: 'CAROUSEL_SUBCOMMAND', exitCode: 2 });
-}
-
 export async function main(argv, dependencies = {}) {
   loadEnv();
   const command = argv[0];
@@ -1257,7 +1169,6 @@ export async function main(argv, dependencies = {}) {
     if (record.status === 'discarded' || record.issues.some(i => i.blocker)) process.exitCode = 1;
     return args.json ? print(record, true) : print(reviewText(record));
   }
-  if (command === 'carousel') return runCarousel(args);
   if (command === 'review') {
     if (!args.project) throw new CapcutError('review requires --project NAME.', { exitCode: 2 });
     const projectDir = resolveProject(args.project, root);
