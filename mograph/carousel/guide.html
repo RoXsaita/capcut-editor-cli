@@ -10,7 +10,7 @@
 <head>
 <meta charset="utf-8">
 <style>
-  :root { --brand: #4040FE; --accent: #FFD84D; --ink: #0B0B14; --muted: #4A4A5C; --bg: #F5F5F9; --card: #FFFFFF; }
+  :root { --brand: #3D3D3D; --accent: #FFB020; --ink: #0B0B14; --muted: #4A4A5C; --bg: #F5F5F9; --card: #FFFFFF; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { width: 1080px; height: 1350px; overflow: hidden; background: var(--bg); }
   body { font-family: 'Plex Arabic', sans-serif; color: var(--ink); -webkit-font-smoothing: antialiased; }
@@ -90,9 +90,9 @@
   function body(d) {
     const footer = `<div class="spacer"></div><footer><span class="handle">${esc(d.handle)}</span><span class="count">${d.index}/${d.total}</span></footer>`;
     if (d.kind === 'cover') {
-      return `<header class="pad cover"><div class="titles"><div class="eyebrow">دليل خطوة بخطوة</div><h1>${rich(d.headline)}</h1>${d.sub ? `<div class="sub">${rich(d.sub)}</div>` : ''}</div></header>
+      return `<header class="pad cover"><div class="titles"><div class="eyebrow">${esc(d.labels.eyebrow)}</div><h1>${rich(d.headline)}</h1>${d.sub ? `<div class="sub">${rich(d.sub)}</div>` : ''}</div></header>
         ${shotHtml(d.shot)}<div class="spacer"></div>
-        <div class="pad needs"><h2>شو بتحتاج:</h2><div class="chips">${d.needs.map(n => `<span class="chip">${rich(n)}</span>`).join('')}</div></div>
+        <div class="pad needs"><h2>${esc(d.labels.needs)}</h2><div class="chips">${d.needs.map(n => `<span class="chip">${rich(n)}</span>`).join('')}</div></div>
         <footer><span class="handle">${esc(d.handle)}</span><span class="count">${d.index}/${d.total}</span></footer>`;
     }
     if (d.kind === 'step') {
@@ -104,7 +104,7 @@
         <div class="pad blocks">${d.blocks.map(b => `<div class="block">${b.label ? `<div class="label">${rich(b.label)}</div>` : ''}<pre>${esc(b.text)}</pre></div>`).join('')}</div>${footer}`;
     }
     return `<header class="pad"><div class="titles"><h1>${rich(d.headline)}</h1>${d.sub ? `<div class="sub">${rich(d.sub)}</div>` : ''}</div></header>
-      <div class="pad"><div class="cta-card"><div class="hint">اكتب بالتعليقات</div><div class="kw">${esc(d.keyword)}</div></div>
+      <div class="pad"><div class="cta-card"><div class="hint">${esc(d.labels.cta)}</div><div class="kw">${esc(d.keyword)}</div></div>
       ${d.after ? `<div class="after">${rich(d.after)}</div>` : ''}</div>${footer}`;
   }
 

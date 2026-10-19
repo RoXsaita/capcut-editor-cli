@@ -335,14 +335,19 @@ export function extractShot(shot, file) {
   return file;
 }
 
-export function slideData(slide, { total, handle, tokens, shotUrl }) {
+/** The template's fixed words; a spec's `labels` overrides any of them. */
+export const DEFAULT_LABELS = Object.freeze({ eyebrow: 'دليل خطوة بخطوة', needs: 'شو بتحتاج:', cta: 'اكتب بالتعليقات' });
+
+export function slideData(slide, { total, handle, tokens, shotUrl, labels }) {
   return {
     kind: slide.kind, index: slide.index, total, number: slide.number != null ? arabicNumeral(slide.number) : null,
     headline: slide.headline, sub: slide.sub || '', needs: slide.needs || [], blocks: slide.blocks || [],
     keyword: slide.keyword || '', after: slide.after || '', handle: handle || '',
     shot: slide.shot ? { url: shotUrl, width: slide.shot.width, height: slide.shot.height, marker: slide.shot.marker,
       highlight: slide.shot.highlight, masks: slide.shot.masks, dark: Boolean(slide.shot.dark) } : null,
-    colors: { brand: tokens?.color?.brand || '#4040FE', accent: tokens?.color?.accent || '#FFD84D', ink: tokens?.color?.ink || '#0B0B14' },
+    // The bundled profile's neutrals; a creator's own brand comes from their profile layer.
+    colors: { brand: tokens?.color?.brand || '#3D3D3D', accent: tokens?.color?.accent || '#FFB020', ink: tokens?.color?.ink || '#0B0B14' },
+    labels: { ...DEFAULT_LABELS, ...(labels || {}) },
     fontsBase: `${pathToFileURL(FONT_DIR).href}/`,
   };
 }
@@ -370,7 +375,7 @@ export async function renderSlides(plan, { out, profile, browserFactory } = {}) 
       const name = `slide-${String(slide.index).padStart(2, '0')}`;
       let shotUrl = null;
       if (slide.shot) shotUrl = pathToFileURL(extractShot(slide.shot, path.join(shotsDir, `${name}.png`))).href;
-      const data = slideData(slide, { total, handle: plan.handle, tokens: profile?.tokens, shotUrl });
+      const data = slideData(slide, { total, handle: plan.handle, tokens: profile?.tokens, shotUrl, labels: plan.labels });
       const box = await page.evaluate(async value => window.renderSlide(value), data);
       if (errors.length) fail('CAROUSEL_RENDER', `${name}: ${errors.join('; ')}`);
       const file = path.join(exportsDir, `${name}.png`);

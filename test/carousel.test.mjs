@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   classifyTopic, scanReels, logVerdicts, median, hostToVt, readTake, readableCrop, validateSpec, planPack,
-  shotTextPx, qaPack, checkPrivacy, EXTRA_PRIVACY_RULES, stagePack, indexHtml, arabicNumeral, MIN_TEXT_PX,
+  shotTextPx, qaPack, checkPrivacy, EXTRA_PRIVACY_RULES, stagePack, indexHtml, arabicNumeral, MIN_TEXT_PX, slideData, DEFAULT_LABELS,
 } from '../src/carousel.mjs';
 
 // Synthetic captions in the style the trigger has to read (Levantine Arabic + English names).
@@ -221,6 +221,16 @@ test('the pack page records take names, never local paths', () => {
   const html = indexHtml(plan, ['/x/exports/instagram-4x5/slide-01.png']);
   assert.match(html, /exports\/instagram-4x5\/slide-01\.png/);
   assert.doesNotMatch(html, /\/private\/somewhere/);
+});
+
+test('slideData uses the profile brand, neutral defaults, and spec labels over the defaults', () => {
+  const slide = { kind: 'cta', index: 8, headline: 'h', keyword: 'k' };
+  const neutral = slideData(slide, { total: 8 });
+  assert.deepEqual([neutral.colors.brand, neutral.colors.accent], ['#3D3D3D', '#FFB020']);
+  const own = slideData(slide, { total: 8, tokens: { color: { brand: '#112233', accent: '#445566' } }, labels: { cta: 'comment' } });
+  assert.deepEqual([own.colors.brand, own.colors.accent], ['#112233', '#445566']);
+  assert.equal(own.labels.cta, 'comment');
+  assert.equal(own.labels.eyebrow, DEFAULT_LABELS.eyebrow);
 });
 
 test('arabicNumeral', () => {
