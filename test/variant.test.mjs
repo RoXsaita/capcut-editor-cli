@@ -174,6 +174,23 @@ test('variant --dry-run plans on the original and writes nothing; a shorter hook
   assert.equal(doctor(made.project).errors, 0);
 });
 
+test('a music bed that starts a beat in still runs from where it was when a shorter hook pulls the body in', async () => {
+  const fx = signedOff();
+  const music = fx.doc.tracks.find(t => t.name === 'music').segments[0];
+  music.target_timerange = { start: 133_333, duration: 9_866_667 };
+  music.source_timerange = { start: 0, duration: 9_866_667 };
+  for (const dir of [fx.project, path.join(fx.project, 'Timelines', 'TL')]) {
+    for (const name of MIRRORS) fs.writeFileSync(path.join(dir, name), stableJson(fx.doc));
+  }
+  const made = await runVariant(fx.project, { hook: { id: 'short', in: 40, out: 42 }, processProbe: CLOSED, gate: false });
+  const doc = timeline(made.project);
+  const s = byId(doc);
+  // Moving it by the −2 s delta would start it at −1.87 s; it keeps its start and ends with the timeline.
+  assert.equal(s.MUSIC.target_timerange.start, 133_333);
+  assert.equal(s.MUSIC.target_timerange.start + s.MUSIC.target_timerange.duration, doc.duration);
+  assert.equal(doctor(made.project).errors, 0);
+});
+
 test('variant refuses an --opening that is not a cut, and a hook past the end of the take', async () => {
   const fx = signedOff();
   await assert.rejects(runVariant(fx.project, { hook: { id: 'x', in: 1, out: 3 }, opening: 2.5, dryRun: true }),
