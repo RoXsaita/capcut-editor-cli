@@ -7,6 +7,7 @@ import {
   classifyTopic, scanReels, logVerdicts, median, hostToVt, readTake, readableCrop, validateSpec, planPack,
   shotTextPx, qaPack, checkPrivacy, EXTRA_PRIVACY_RULES, stagePack, indexHtml, arabicNumeral, MIN_TEXT_PX, slideData, DEFAULT_LABELS,
   resolveRules, resolveTheme, shotWidth, edgeCut, layoutProblems, altText, CANVASES, DEFAULT_RULES, TIKTOK_CANVAS,
+  ocrRows, sameTerminalLine, checkTerminal, terminalData,
 } from '../src/carousel.mjs';
 
 // Synthetic captions in the style the trigger has to read (Levantine Arabic + English names).
@@ -402,4 +403,64 @@ test('compare, proof and note slides; alt text; the TikTok canvas keeps its bott
   assert.equal(altText({ headline: 'اكتب `/advisor`', shots: [] }), 'اكتب /advisor');
   const top = Math.floor((TIKTOK_CANVAS.height * 0.9 - 1440) / 2);
   assert.ok(top + 1440 <= TIKTOK_CANVAS.height * 0.9, 'a 3:4 slide ends above the bottom tenth');
+});
+
+test('terminal slides: OCR rows, the verbatim check, numbering, data and what the pack records', () => {
+  // Vision splits a status bar into fragments; one row joins them in x order.
+  assert.deepEqual(ocrRows([
+    { text: 'tokens', x: 300, y: 40, w: 60, h: 20 }, { text: '❯ /autocompact 400k', x: 0, y: 10, w: 200, h: 20 },
+    { text: 'Auto-compact window for Opus 5.5 set to 400k', x: 10, y: 42, w: 280, h: 20 }, { text: ' ', x: 0, y: 90, w: 5, h: 5 },
+  ]), ['❯ /autocompact 400k', 'Auto-compact window for Opus 5.5 set to 400k tokens']);
+  // Decoration and dot-like glyphs fold; letters and digits never do; spaces are not compared.
+  assert.ok(sameTerminalLine('│ Using Opus 5.5 (from .claude/settings.json) · /model', 'I Using Opus 5.5 (from .claude/settings.json)• /model'));
+  assert.ok(sameTerminalLine('❯ /advisor', '2 /advisor'), 'the prompt chevron is read as anything');
+  assert.ok(sameTerminalLine('⎿ Advisor set to Opus 5.5', 'L Advisor set to Opus 5.5'));
+  assert.ok(!sameTerminalLine('⎿ Advisor set to Opus 4.5', 'L Advisor set to Opus 5.5'), 'a digit is content');
+  assert.ok(!sameTerminalLine('/advisor', '2 /advisor'), 'no lead glyph locked, none forgiven');
+  assert.ok(!sameTerminalLine('Advisor set to Opus 5.5', 'Advisor set to 0pus 5.5'), 'O and 0 never fold');
+  const frame = ['I Using Opus 5.5 • /model', '≥autocompact 400k', 'Auto-compact window for Opus 5.5 window set to 400k tokens'];
+  const second = ['I Using Opus 5.5 · /model', '› /autocompact 400k', 'Auto-compact window for Opus 5.5 set to 400k tokens'];
+  const locked = ['│ Using Opus 5.5 · /model', '❯ /autocompact 400k', '', '⎿ Auto-compact window for Opus 5.5 set to 400k tokens'];
+  const ok = checkTerminal([frame, second], { lines: locked });
+  assert.deepEqual(ok.problems, [], 'each locked line matches one of the two reads; blank lines are spacers');
+  assert.equal(ok.locked, true);
+  const wrong = checkTerminal([frame, second], { lines: ['│ Using Opus 5.5 · /model', '❯ /autocompact 400k', '⎿ Auto-compact window for Opus 5.5 set to 40k tokens'] });
+  assert.match(wrong.problems[0], /terminal line 3: .* \(character 36, spaces not counted\)/);
+  assert.match(checkTerminal([frame, second], { lines: ['❯ /autocompact 400k'] }).problems[0], /the frame reads 3 lines, terminal.lines has 1/);
+  const unlocked = checkTerminal([frame, second]);
+  assert.equal(unlocked.problems.length, 2, 'unlocked reads must agree line for line');
+  assert.match(unlocked.problems[1], /OCR reads disagree .* lock terminal.lines/);
+  assert.match(unlocked.warnings[0], /not locked/);
+  assert.deepEqual(checkTerminal([second, second]).problems, []);
+
+  const base = spec('t');
+  base.slides.splice(2, 0, { kind: 'terminal', headline: 'اكتب `/advisor`', terminal: { take: 't', t: 17.5, crop: [0, 220, 840, 200], header: 1, highlight: [1], lines: locked.filter(Boolean) } });
+  assert.deepEqual(validateSpec(base), []);
+  const bad = spec('t');
+  bad.slides.splice(2, 0, { kind: 'terminal', headline: 'x' }, { kind: 'terminal', headline: 'y', terminal: { take: 't', t: 1, crop: [0, 0, 10, 10], lines: 'one line', highlight: ['1'] } });
+  const problems = validateSpec(bad).join('\n');
+  assert.match(problems, /terminal slide needs terminal: \{take or image, t, crop\}/);
+  assert.match(problems, /terminal.lines is a list/);
+  assert.match(problems, /terminal.highlight is a list of line indexes/);
+  const take = { name: 't', video: '/abs/v.mp4', width: 1200, height: 800, steps: [{ id: 7, type: 'click', vt: 1.5, x: 400, y: 300 }, { id: 12, type: 'typing', vt: 3.25 }] };
+  const plan = planPack(base, { readTakeFn: () => take, readStillFn: file => ({ name: path.basename(file), video: file, still: true, width: 800, height: 600, steps: [] }) });
+  const term = plan.slides.find(s => s.kind === 'terminal');
+  assert.equal(term.number, 2, 'a terminal slide is a numbered move');
+  assert.deepEqual(plan.slides.filter(s => s.number != null).map(s => s.number), [1, 2, 3, 4]);
+  assert.equal(term.terminal.width, 2520, 'the frame is cut at 3× for OCR');
+  assert.deepEqual(term.shots, [], 'no screenshot is placed');
+  term.terminal.read = checkTerminal([frame, second], term.terminal);
+  const data = slideData(term, { total: 9 });
+  assert.equal(data.kicker, 'الحركة ٢ من ٤');
+  assert.deepEqual(data.terminal.header, ['│ Using Opus 5.5 · /model']);
+  assert.deepEqual(data.terminal.lines.map(l => l.highlight), [true, false]);
+  assert.equal(altText(term), 'اكتب /advisor — │ Using Opus 5.5 · /model / ❯ /autocompact 400k / ⎿ Auto-compact window for Opus 5.5 set to 400k tokens');
+  assert.ok(!indexHtml(plan, []).includes('/abs/v.mp4'), 'the terminal source path stays local');
+  // QA takes the verbatim problems and runs privacy on the retyped lines themselves.
+  const qa = qaPack({ ...plan, slides: [term] }, [{ index: term.index, file: 'a.png', shotBoxes: [], cardBoxes: [], texts: [],
+    terminal: { ...term.terminal.read, lines: ['cat /Users/someone/notes'], problems: ['terminal line 1: x'] } }], { ocr: () => [] });
+  assert.equal(qa.slides[0].verdict, 'FAIL');
+  assert.deepEqual(qa.slides[0].privacy, ['home-path']);
+  assert.ok(qa.slides[0].problems.includes('terminal line 1: x'));
+  assert.equal(terminalData({ lines: ['a'], header: 3 }).header.length, 1, 'header never runs past the lines');
 });

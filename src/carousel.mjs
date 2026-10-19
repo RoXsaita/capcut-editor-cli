@@ -59,7 +59,7 @@ export const DEFAULT_RULES = Object.freeze({
   inset: 100,
   bottomClear: 0.10,
   minTextPx: MIN_TEXT_PX,
-  minPx: Object.freeze({ coverHeadline: 96, headline: 72, sub: 44, body: 44, code: 40, any: 28 }),
+  minPx: Object.freeze({ coverHeadline: 96, headline: 72, sub: 44, body: 44, code: 40, terminal: 40, any: 28 }),
   maxWords: Object.freeze({ coverHeadline: 8, headline: 7 }),
   slideWords: Object.freeze([8, 22]),
   maxSlideWords: 30,
@@ -310,8 +310,10 @@ export function readableCrop({ x, y }, frame, { textPx = 18, slideWidth = SLIDE.
 
 // ─── Pack spec ──────────────────────────────────────────────────────────────────────────────
 
-const KINDS = new Set(['cover', 'step', 'proof', 'compare', 'note', 'text', 'prompt', 'cta']);
+const KINDS = new Set(['cover', 'step', 'terminal', 'proof', 'compare', 'note', 'text', 'prompt', 'cta']);
 const SHOT_KINDS = new Set(['step', 'proof']);
+/** Kinds that count as a numbered move. */
+const STEP_KINDS = new Set(['step', 'terminal']);
 export const countWords = text => String(text || '').replace(/`/g, '').trim().split(/\s+/).filter(Boolean).length;
 
 /** Problems with a spec, as strings; empty when it can be built. */
@@ -343,6 +345,16 @@ export function validateSpec(spec) {
     if (slide.kind === 'compare' && (!Array.isArray(slide.shots) || slide.shots.length !== 2 || slide.shots.some(sh => !sh.label))) {
       problems.push(`${at}: a compare slide has shots: [two shots, each with a label]`);
     }
+    if (slide.kind === 'terminal') {
+      const term = slide.terminal;
+      if (!term || typeof term !== 'object') problems.push(`${at}: a terminal slide needs terminal: {take or image, t, crop}`);
+      else {
+        checkShot(term, `${at} terminal`);
+        if (term.lines != null && (!Array.isArray(term.lines) || !term.lines.length || term.lines.some(l => typeof l !== 'string'))) problems.push(`${at}: terminal.lines is a list of the frame's lines, verbatim`);
+        if (term.header != null && !(Number.isInteger(term.header) && term.header >= 0)) problems.push(`${at}: terminal.header is how many top lines are the small header`);
+        if (term.highlight != null && (!Array.isArray(term.highlight) || term.highlight.some(n => !Number.isInteger(n) || n < 0))) problems.push(`${at}: terminal.highlight is a list of line indexes (0 = the first line)`);
+      }
+    }
     if (slide.kind === 'prompt' && !(slide.blocks || []).length) problems.push(`${at}: the prompt slide needs at least one block to copy`);
     for (const [n, shot] of (slide.shots || (slide.shot ? [slide.shot] : [])).entries()) checkShot(shot, slide.shots ? `${at} shot ${n + 1}` : at);
   });
@@ -370,14 +382,20 @@ export function planPack(spec, { specDir = process.cwd(), takes = {}, readTakeFn
     return cache.get(file);
   };
   let step = 0;
-  const numbered = spec.slides.map(slide => (slide.kind === 'step' ? (slide.number ?? ++step) : null));
+  const numbered = spec.slides.map(slide => (STEP_KINDS.has(slide.kind) ? (slide.number ?? ++step) : null));
   const moves = Math.max(0, ...numbered.filter(n => n != null));
   const slides = spec.slides.map((slide, i) => {
     const out = { ...slide, kind: slide.kind === 'text' ? 'note' : slide.kind, index: i + 1 };
-    if (slide.kind === 'step') { out.number = numbered[i]; out.moves = moves; }
+    if (STEP_KINDS.has(slide.kind)) { out.number = numbered[i]; out.moves = moves; }
     const given = slide.shots || (slide.shot ? [slide.shot] : []);
     out.shots = given.map(shot => planShot(shot, i));
     delete out.shot;
+    if (slide.kind === 'terminal') {
+      // The frame is cut large for OCR only; the slide retypes its lines (see readTerminal).
+      const term = slide.terminal;
+      const read = planShot({ ...term, highlight: null, masks: [], marker: false, width: Math.round(term.crop[2] * TERMINAL_OCR_SCALES[0]) }, i);
+      out.terminal = { ...read, warnings: [], highlight: term.highlight || [], header: term.header ?? 0, lines: term.lines || null };
+    }
     return out;
   });
   return { ...spec, rules, theme, canvas: { name: rules.canvas, ...canvas }, slides };
@@ -431,6 +449,116 @@ export function extractShot(shot, file) {
   return file;
 }
 
+// ─── Terminal slides ────────────────────────────────────────────────────────────────────────
+//
+// A terminal at a normal font size never reaches the 36 px floor as a screenshot (an 80-column
+// line is ~800 source px wide on an ~870 px card). A `terminal` slide retypes the frame's lines
+// instead, verbatim: the frame is read twice by OCR (at two upscales) and every line is checked
+// character by character, against the spec's locked `lines` when it has them.
+
+/** The upscales the frame is read at; the first is the one compared against locked lines. */
+export const TERMINAL_OCR_SCALES = Object.freeze([3, 2]);
+
+/** Vision observations → the terminal's rows, top to bottom (fragments on one row joined in x order). */
+export function ocrRows(observations) {
+  const rows = [];
+  for (const o of [...observations].filter(o => String(o.text).trim()).sort((p, q) => (p.y + p.h / 2) - (q.y + q.h / 2))) {
+    const cy = o.y + o.h / 2;
+    const row = rows.find(r => Math.abs(r.cy - cy) < Math.max(r.h, o.h) * 0.5);
+    if (row) row.parts.push(o);
+    else rows.push({ cy, h: o.h, parts: [o] });
+  }
+  return rows.map(r => r.parts.sort((p, q) => p.x - q.x).map(p => String(p.text).trim()).join(' '));
+}
+
+// Only what OCR confuses and a reader would not: dot-like glyphs, prompt chevrons, typographic
+// quotes and dashes, odd spaces. Never l/I/1 or O/0: that is where real misreads hide.
+const foldTerminal = text => String(text).normalize('NFKC')
+  .replace(/[•·∙‧⋅]/g, '.').replace(/[›❯»]/g, '>').replace(/[‘’´`]/g, "'").replace(/[“”]/g, '"')
+  .replace(/[–—]/g, '-').replace(/\s+/g, ' ').trim();
+// A TUI's border, tree branch or prompt chevron (│ ⎿ ❯ …) leads a line as decoration, and OCR
+// reads it as anything: I, l, L, 2, ), ≥. When the locked line starts with one, any single
+// character there is accepted. Whitespace is not compared (OCR drops and adds spaces in a
+// monospace grid); every visible character after the lead glyph is.
+const LEAD_GLYPH = /^[│|┃▌▎⎿└├╰>›❯»]\s*/;
+const stripBorder = text => text.replace(LEAD_GLYPH, '');
+const squash = text => text.replace(/\s+/g, '');
+const readCores = read => {
+  const b = foldTerminal(read);
+  return [b, stripBorder(b), ...(/^\S /.test(b) ? [b.slice(2)] : [])].map(squash);
+};
+
+/** Whether a locked line and an OCR read of it are the same text. */
+export function sameTerminalLine(locked, read) {
+  const a = foldTerminal(locked);
+  const cores = readCores(read);
+  if (cores[0] === squash(a)) return true;
+  return LEAD_GLYPH.test(a) && cores.includes(squash(stripBorder(a)));
+}
+
+const firstDiff = (locked, read) => {
+  const x = squash(stripBorder(foldTerminal(locked)));
+  return Math.max(...readCores(read).map(y => {
+    let i = 0;
+    while (i < x.length && x[i] === y[i]) i++;
+    return i + 1;
+  }));
+};
+const clip = text => `"${String(text).slice(0, 60)}"`;
+
+/**
+ * The verbatim check. With locked `lines` (blank strings are spacer rows, not compared) each
+ * line must match the frame's read; without them the two reads must agree line for line, and
+ * the slide carries a warning until someone locks them.
+ */
+export function checkTerminal([read, second], { lines = null } = {}) {
+  const problems = [];
+  const warnings = [];
+  if (lines) {
+    const text = lines.filter(l => l.trim());
+    const rows = [read, second].find(r => r.length === text.length);
+    if (!rows) {
+      problems.push(`terminal: the frame reads ${read.length} lines, terminal.lines has ${text.length} (frame: ${read.map(clip).join(', ')})`);
+    } else {
+      text.forEach((line, i) => {
+        if (sameTerminalLine(line, read[i] ?? '') || sameTerminalLine(line, second[i] ?? '')) return;
+        const [at, seen] = [read[i], second[i]].filter(r => r != null).map(r => [firstDiff(line, r), r]).sort((p, q) => q[0] - p[0])[0];
+        problems.push(`terminal line ${i + 1}: ${clip(line)} is not the frame's ${clip(seen)} (character ${at}, spaces not counted)`);
+      });
+    }
+    return { lines, locked: true, problems, warnings };
+  }
+  if (read.length !== second.length) problems.push(`terminal: the two OCR reads find ${read.length} and ${second.length} lines; lock terminal.lines`);
+  else read.forEach((row, i) => {
+    if (!sameTerminalLine(row, second[i])) problems.push(`terminal line ${i + 1}: the OCR reads disagree (${clip(row)} / ${clip(second[i])}); lock terminal.lines`);
+  });
+  warnings.push('terminal lines are read by OCR, not locked: check them against the frame and copy them into terminal.lines');
+  return { lines: read, locked: false, problems, warnings };
+}
+
+/** Cut the frame at each OCR scale, read it, and check the lines. */
+export function readTerminalFrame(term, base, { ocr = ocrImage } = {}) {
+  const [, , cw, ch] = term.crop;
+  const reads = TERMINAL_OCR_SCALES.map(k => {
+    const shot = { ...term, width: Math.round(cw * k), height: Math.round(ch * k), scale: k };
+    const file = extractShot(shot, `${base}-terminal-${k}x.png`);
+    return ocrRows(ocr(file, { size: { width: shot.width, height: shot.height } }));
+  });
+  return checkTerminal(reads, term);
+}
+
+/** What the template gets for a terminal slide: the header cue lines, then the body lines. */
+export function terminalData(term) {
+  const lines = term.read?.lines || term.lines || [];
+  const header = Math.min(term.header || 0, lines.length);
+  const marked = new Set(term.highlight || []);
+  return {
+    header: lines.slice(0, header),
+    lines: lines.slice(header).map((text, i) => ({ text, highlight: marked.has(i + header) })),
+    dark: term.dark !== false,
+  };
+}
+
 /** The template's fixed words; a spec's `labels` overrides any of them. */
 export const DEFAULT_LABELS = Object.freeze({
   eyebrow: 'دليل خطوة بخطوة', needs: 'شو بتحتاج:', cta: 'اكتب بالتعليقات', stepOf: 'الحركة {n} من {total}',
@@ -444,12 +572,13 @@ export function slideData(slide, { total, handle, tokens, shotUrls = [], labels,
   const words = { ...DEFAULT_LABELS, ...(labels || {}) };
   return {
     kind: slide.kind, index: slide.index, total, number: slide.number != null ? arabicNumeral(slide.number) : null,
-    kicker: slide.kind === 'step' ? (slide.kicker ?? kicker(words.stepOf, slide.number, slide.moves || slide.number)) : (slide.kicker || ''),
+    kicker: STEP_KINDS.has(slide.kind) ? (slide.kicker ?? kicker(words.stepOf, slide.number, slide.moves || slide.number)) : (slide.kicker || ''),
     headline: slide.headline, sub: slide.sub || '', body: slide.body || '', items: slide.items || [], figure: slide.figure || '',
     needs: slide.needs || [], blocks: slide.blocks || [], keyword: slide.keyword || '', after: slide.after || '', handle: handle || '',
     canvas: { width: canvas.width, height: canvas.height }, inset, vars: theme?.vars || {}, fonts: theme?.fonts || [],
     shots: (slide.shots || []).map((shot, i) => ({ url: shotUrls[i], label: shot.label || '', width: shot.width, height: shot.height,
       marker: shot.marker, highlight: shot.highlight, masks: shot.masks, dark: Boolean(shot.dark) })),
+    terminal: slide.terminal?.read ? terminalData(slide.terminal) : null,
     // The bundled profile's neutrals; a creator's own brand comes from their profile layer.
     colors: { brand: tokens?.color?.brand || '#3D3D3D', accent: tokens?.color?.accent || '#FFB020', ink: tokens?.color?.ink || '#0B0B14' },
     labels: words,
@@ -460,7 +589,7 @@ export function slideData(slide, { total, handle, tokens, shotUrls = [], labels,
 export const exportDirName = canvasName => `instagram-${canvasName}`;
 
 /** Render every slide to exports/instagram-<canvas>/slide-NN.png. Returns the slide files and the boxes QA measures. */
-export async function renderSlides(plan, { out, profile, browserFactory } = {}) {
+export async function renderSlides(plan, { out, profile, browserFactory, ocr = ocrImage } = {}) {
   const canvas = plan.canvas || { name: '3x4', ...SLIDE };
   const exportsDir = path.join(out, 'exports', exportDirName(canvas.name));
   const shotsDir = path.join(out, 'shots');
@@ -482,6 +611,7 @@ export async function renderSlides(plan, { out, profile, browserFactory } = {}) 
     await page.goto(pathToFileURL(plan.theme.template).href);
     for (const slide of plan.slides) {
       const name = `slide-${String(slide.index).padStart(2, '0')}`;
+      if (slide.terminal) slide.terminal.read = readTerminalFrame(slide.terminal, path.join(shotsDir, name), { ocr });
       const shotUrls = slide.shots.map((shot, i) => pathToFileURL(extractShot(shot, path.join(shotsDir, `${name}${slide.shots.length > 1 ? `-${i + 1}` : ''}.png`))).href);
       const data = slideData(slide, { total, handle: plan.handle, tokens: profile?.tokens, shotUrls, labels: plan.labels,
         theme: plan.theme, canvas, inset: (plan.rules || DEFAULT_RULES).inset });
@@ -489,7 +619,8 @@ export async function renderSlides(plan, { out, profile, browserFactory } = {}) 
       if (errors.length) fail('CAROUSEL_RENDER', `${name}: ${errors.join('; ')}`);
       const file = path.join(exportsDir, `${name}.png`);
       await page.screenshot({ path: file, clip: { x: 0, y: 0, width: canvas.width, height: canvas.height } });
-      results.push({ index: slide.index, kind: slide.kind, file, shotBoxes: box?.shots || [], cardBoxes: box?.cards || [], texts: box?.texts || [] });
+      results.push({ index: slide.index, kind: slide.kind, file, shotBoxes: box?.shots || [], cardBoxes: box?.cards || [], texts: box?.texts || [],
+        ...(slide.terminal ? { terminal: slide.terminal.read } : {}) });
     }
   } finally {
     await browser.close();
@@ -500,12 +631,12 @@ export async function renderSlides(plan, { out, profile, browserFactory } = {}) 
 // ─── QA ─────────────────────────────────────────────────────────────────────────────────────
 
 /** Vision OCR on one image → [{text, x, y, w, h}] in pixels. */
-export function ocrImage(file, { languages = 'en-US' } = {}) {
+export function ocrImage(file, { languages = 'en-US', size = SLIDE } = {}) {
   const bin = path.join(PACKAGE_ROOT, 'tools', 'vision', 'ocr');
   if (!fs.existsSync(bin)) fail('CAROUSEL_OCR', 'the Vision OCR helper is not built: swiftc -O -o tools/vision/ocr tools/vision/ocr.swift');
   const run = spawnSync(bin, [file, '--languages', languages], { encoding: 'utf8' });
   if (run.status !== 0) fail('CAROUSEL_OCR', `OCR failed on ${file}: ${String(run.stderr).trim()}`);
-  return JSON.parse(run.stdout).map(r => ({ text: r.text, x: r.x * SLIDE.width, y: r.y * SLIDE.height, w: r.w * SLIDE.width, h: r.h * SLIDE.height }));
+  return JSON.parse(run.stdout).map(r => ({ text: r.text, x: r.x * size.width, y: r.y * size.height, w: r.w * size.width, h: r.h * size.height }));
 }
 
 /**
@@ -558,6 +689,8 @@ export function edgeCut(lines, box, pad) {
  * The theme-measured checks (sizes, insets, the bottom band, words) for one rendered slide.
  * `texts` and `cards` are what the theme reported, in canvas px.
  */
+const NOT_COPY = new Set(['footer', 'swipe', 'terminal', 'termHeader']);
+
 export function layoutProblems(slide, { texts = [], cards = [] }, rules, canvas) {
   const problems = [];
   const warnings = [];
@@ -573,7 +706,8 @@ export function layoutProblems(slide, { texts = [], cards = [] }, rules, canvas)
   const low = [...texts.filter(t => !['footer', 'swipe'].includes(t.role)).map(t => ({ what: t.role, r: t.rect })), ...cards.map((r, i) => ({ what: `card ${i + 1}`, r }))]
     .filter(({ r }) => r.y + r.h > band + 1);
   if (low.length) problems.push(`in the bottom ${Math.round(rules.bottomClear * 100)}%: ${[...new Set(low.map(o => o.what))].join(', ')}`);
-  const words = texts.filter(t => !['footer', 'swipe'].includes(t.role)).reduce((n, t) => n + countWords(t.text), 0);
+  // Retyped terminal output is evidence, like a screenshot: its words are not the slide's copy.
+  const words = texts.filter(t => !NOT_COPY.has(t.role)).reduce((n, t) => n + countWords(t.text), 0);
   const dense = slide.dense ?? slide.kind === 'prompt';
   if (words > rules.maxSlideWords && !dense) problems.push(`${words} words on the slide (review anything over ${rules.maxSlideWords}; mark a reference slide dense)`);
   else if (words < rules.slideWords[0] || words > rules.slideWords[1]) warnings.push(`${words} words (aim ${rules.slideWords[0]}–${rules.slideWords[1]})`);
@@ -585,22 +719,22 @@ export function qaPack(plan, rendered, { ocr = ocrImage, privacy = checkPrivacy 
   const canvas = plan.canvas || SLIDE;
   const slides = rendered.map(result => {
     const slide = plan.slides.find(s => s.index === result.index);
-    const lines = ocr(result.file);
+    const lines = ocr(result.file, { size: canvas });
     const shotBoxes = result.shotBoxes || [];
     const perShot = shotBoxes.map(box => shotTextPx(lines, box));
     const measured = perShot.filter(v => v != null);
     const textPx = shotBoxes.length ? (measured.length ? Math.min(...measured) : null) : null;
     const fill = (result.cardBoxes || []).length ? r3(result.cardBoxes.reduce((h, b) => h + b.h, 0) / canvas.height) : null;
     const cut = shotBoxes.flatMap(box => edgeCut(lines, box, rules.edgePadPx));
-    const names = privacy(lines.map(l => l.text));
+    const names = [...new Set(privacy([...lines.map(l => l.text), ...(result.terminal?.lines || [])]))];
     const layout = layoutProblems(slide, { texts: result.texts || [], cards: result.cardBoxes || [] }, rules, canvas);
     const problems = [];
     if (shotBoxes.length && slide.kind !== 'cover' && (textPx == null || textPx < rules.minTextPx)) problems.push(`UI text reads at ${textPx ?? 'no'} px (min ${rules.minTextPx})`);
     if (slide.kind === 'step' && fill != null && fill < rules.minShotFill) problems.push(`the shot fills ${Math.round(fill * 100)}% of the slide (min ${Math.round(rules.minShotFill * 100)}%)`);
     if (cut.length) problems.push(`text cut at the shot's edge: ${cut.map(t => `"${String(t).slice(0, 32)}"`).join(', ')}`);
-    problems.push(...layout.problems);
+    problems.push(...layout.problems, ...(result.terminal?.problems || []));
     if (names.length) problems.push(`privacy: ${names.join(', ')}`);
-    const warnings = [...slide.shots.flatMap(s => s.warnings || []), ...layout.warnings];
+    const warnings = [...slide.shots.flatMap(s => s.warnings || []), ...(result.terminal?.warnings || []), ...layout.warnings];
     return { index: result.index, kind: slide.kind, textPx, fill, words: layout.words, privacy: names, warnings, verdict: problems.length ? 'FAIL' : 'PASS', problems };
   });
   return { verdict: slides.some(s => s.verdict === 'FAIL') ? 'FAIL' : 'PASS', minTextPx: rules.minTextPx, minShotFill: rules.minShotFill, slides };
@@ -643,12 +777,15 @@ export function indexHtml(plan, files) {
 `;
 }
 
+const localFree = shot => ({ ...shot, video: undefined, take: shot.still ? undefined : shot.takeName, image: shot.still ? shot.takeName : undefined });
+
 /** The spec as recorded in the pack: take folder names only, never local absolute paths. */
 function stripLocal(plan) {
   return {
     ...plan,
     theme: { name: plan.theme?.name, vars: plan.theme?.vars },
-    slides: plan.slides.map(s => ({ ...s, shots: s.shots.map(shot => ({ ...shot, video: undefined, take: shot.still ? undefined : shot.takeName, image: shot.still ? shot.takeName : undefined })) })),
+    slides: plan.slides.map(s => ({ ...s, shots: s.shots.map(localFree),
+      ...(s.terminal ? { terminal: { ...localFree(s.terminal), read: s.terminal.read ? { lines: s.terminal.read.lines, locked: s.terminal.read.locked } : undefined } } : {}) })),
   };
 }
 
@@ -656,7 +793,8 @@ function stripLocal(plan) {
 export function altText(slide) {
   if (slide.alt) return slide.alt;
   const plain = s => String(s || '').replace(/`/g, '');
-  return [plain(slide.headline), ...(slide.shots || []).map(shot => plain(shot.alt)).filter(Boolean)].join(' — ');
+  const term = slide.terminal ? [slide.terminal.alt || (slide.terminal.read?.lines || slide.terminal.lines || []).join(' / ')] : [];
+  return [plain(slide.headline), ...(slide.shots || []).map(shot => plain(shot.alt)), ...term.map(plain)].filter(Boolean).join(' — ');
 }
 
 export function packMetadata(plan, { qa, sheet, now = new Date().toISOString() }) {
@@ -681,7 +819,8 @@ export function packMetadata(plan, { qa, sheet, now = new Date().toISOString() }
     qa,
     theme: plan.theme?.name || DEFAULT_THEME_NAME,
     slide_boxes: plan.slides.map(s => ({ slide: s.index, kind: s.kind, headline: s.headline,
-      shots: s.shots.map(shot => ({ source: shot.takeName, t: shot.t, crop: shot.crop, scale: shot.scale, marker: Boolean(shot.marker) })) })),
+      shots: s.shots.map(shot => ({ source: shot.takeName, t: shot.t, crop: shot.crop, scale: shot.scale, marker: Boolean(shot.marker) })),
+      ...(s.terminal ? { terminal: { source: s.terminal.takeName, t: s.terminal.t, crop: s.terminal.crop, lines: s.terminal.read?.lines || s.terminal.lines, locked: Boolean(s.terminal.read?.locked) } } : {}) })),
     alt_text: plan.slides.map(s => ({ slide: s.index, text: altText(s) })),
     exports: { slides: `exports/${exportDirName(plan.canvas?.name || '3x4')}`, tiktok: `exports/${TIKTOK_DIR}` },
     contact_sheet: sheet ? path.relative(path.dirname(path.dirname(sheet.file)), sheet.file) : '',
@@ -694,7 +833,7 @@ export async function buildPack(spec, { out, specDir, profile, browserFactory, o
   const plan = planPack(spec, { specDir });
   const dir = path.resolve(out || plan.slug);
   fs.mkdirSync(dir, { recursive: true });
-  const rendered = await renderSlides(plan, { out: dir, profile, browserFactory });
+  const rendered = await renderSlides(plan, { out: dir, profile, browserFactory, ...(ocr ? { ocr } : {}) });
   const files = rendered.map(r => r.file);
   const sheet = contactSheet(files, path.join(dir, 'exports', `contact-sheet-${exportDirName(plan.canvas.name)}.jpg`), { canvas: plan.canvas });
   mirrorForDashboard(dir, plan.canvas.name, files, sheet.file);

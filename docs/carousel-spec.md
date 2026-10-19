@@ -59,6 +59,7 @@ as a mono chip. `alt` sets the slide's alt text (default: the headline plus each
 |---|---|---|
 | `cover` | `headline`, `sub`, `shot`, `needs` (list) | eyebrow label, the promise, the payoff shot, optional "what you need" chips, the swipe cue |
 | `step` | `headline`, `sub`, `shot` (required), `number`, `kicker` | badge + kicker + headline + one-line sub, then the shot in a framed card |
+| `terminal` | `headline`, `sub`, `terminal` (required), `number`, `kicker` | a step whose proof is terminal output, retyped verbatim in a mono card (see below) |
 | `proof` | `headline`, `sub`, `shot` (required), `figure` | a receipt: headline, the one number large (`figure`), the shot as evidence |
 | `compare` | `headline`, `sub`, `shots: [a, b]` (each with `label`) | two results, equal treatment, each labelled |
 | `note` | `headline`, `body` or `items`, `shot` | an honest step, takeaway or timeline: paragraphs (blank line = new one) or a numbered list, optional shot |
@@ -67,7 +68,7 @@ as a mono chip. `alt` sets the slide's alt text (default: the headline plus each
 
 `text` is accepted as an older name for `note`. A slide takes `shot` (one) or `shots` (a list).
 
-Steps number themselves 1, 2, 3 … unless `number` is set; give two slides the same `number`
+Steps and terminal slides number themselves 1, 2, 3 … unless `number` is set; give two slides the same `number`
 when one move takes two slides. The kicker reads `labels.stepOf` with `{n}` and `{total}`
 (total = the highest step number), or the slide's own `kicker` (`""` drops it).
 
@@ -97,6 +98,35 @@ The crop is scaled to the card width, so its width sets how large the UI text re
 lines allow ~580 px, which is too narrow for a full terminal line: record terminal moments at a
 larger font. Keep whole lines inside the crop: QA fails text that touches the card's edge.
 
+### Terminal slides
+
+A terminal at a normal font size never reaches 36 px as a screenshot: an 80-column line is ~800
+source pixels wide on an ~870 px card. A `terminal` slide retypes the frame's lines instead, in a
+mono card at ≥40 px, keeping the real header line (the model and settings path) as the cue that
+this is his output. GUI screens stay screenshots.
+
+| key | |
+|---|---|
+| `take` / `image`, `t` / `click` / `typing`, `crop` | the frame and the region holding the lines, as for a shot |
+| `lines` | the frame's lines, verbatim, top to bottom (`""` is a spacer row, not checked). Lock them |
+| `header` | how many top lines are the small header cue (default 0) |
+| `highlight` | line indexes to mark (0 = the first line, header included) |
+| `alt` | what the output says, for alt text (default: the lines) |
+
+The frame is cut at 3× and at 2× and read by OCR both times; the reads are grouped into rows.
+With `lines`, every line must match one of the two reads; without them the two reads must agree
+line for line, and the slide warns until the lines are locked. Matching folds only what OCR
+confuses and a reader would not: dot-like glyphs (`• · ∙`) to `.`, prompt chevrons (`› ❯ »`) to
+`>`, typographic quotes and dashes, and whitespace (not compared). A leading border, tree branch
+or prompt glyph (`│ ⎿ └ ❯ >`) is decoration that OCR reads as anything (`I`, `L`, `2`, `)`), so
+when the locked line starts with one, any single character there is accepted. Letters and digits
+never fold: `l`/`I`/`1` and `O`/`0` are where real misreads hide. A mismatch fails the slide with
+the line and the character where it differs. Privacy runs on the retyped lines too.
+
+Retyped output is evidence, like a screenshot: its words do not count toward the slide's words,
+and the card's fill is reported, not gated. Recording tip: a larger Terminal font at capture time
+makes a plain screenshot pass, which is still the stronger proof.
+
 ## labels
 
 | key | default |
@@ -118,9 +148,9 @@ and OCR only inside the shots.
 | `canvas` | `"3x4"` | same as the top-level `canvas` |
 | `inset` | 100 | every text and card stays this far inside all four edges |
 | `bottomClear` | 0.10 | nothing but the footer in the bottom 10% of the canvas |
-| `minPx` | `{coverHeadline: 96, headline: 72, sub: 44, body: 44, code: 40, any: 28}` | the rendered font size per text role |
+| `minPx` | `{coverHeadline: 96, headline: 72, sub: 44, body: 44, code: 40, terminal: 40, any: 28}` | the rendered font size per text role |
 | `maxWords` | `{coverHeadline: 8, headline: 7}` | headline length, checked before rendering |
-| `slideWords` | `[8, 22]` | words per slide; outside is a warning |
+| `slideWords` | `[8, 22]` | words per slide (not counting the footer or retyped terminal output); outside is a warning |
 | `maxSlideWords` | 30 | over this fails, except on a dense slide (`dense: true`; `prompt` is dense) |
 | `minTextPx` | 36 | the smallest shot's median OCR line height, on every slide with a shot except the cover |
 | `minShotFill` | 0.55 | a step's card heights ÷ the canvas height |
@@ -153,7 +183,9 @@ A theme is a folder: `theme.json` plus the template it names. The bundled one is
 }
 ```
 
-Font `file`s resolve against the theme folder. Each `vars` key reaches the template as data and
+Font `file`s resolve against the theme folder. The plain theme's terminal card reads `terminal`
+(44, shrinking to `code` before a line wraps), `termHeader`, `terminalBg`, `terminalInk` and
+`terminalMuted`. Each `vars` key reaches the template as data and
 is meant to become a `--kebab-case` CSS custom property; numbers are pixels. `cardMargin` and
 `cardBorder` also set the width shots are cut at (canvas width − 2 × (cardMargin + cardBorder)).
 The brand, accent and ink colours come from the user profile's `tokens.color`.
@@ -164,15 +196,18 @@ The engine opens the template once, then for every slide calls `window.renderSli
 screenshots the canvas. `data` holds `kind`, `index`, `total`, `number` (Arabic digits),
 `kicker`, `headline`, `sub`, `body`, `items`, `figure`, `needs`, `blocks`, `keyword`, `after`,
 `handle`, `canvas {width, height}`, `inset`, `vars`, `fonts`, `colors {brand, accent, ink}`,
-`labels`, and `shots: [{url, label, width, height, marker, highlight, masks, dark}]`, with
-`marker`, `highlight` and `masks` already in the shot image's pixels. The template must
+`labels`, `shots: [{url, label, width, height, marker, highlight, masks, dark}]`, with
+`marker`, `highlight` and `masks` already in the shot image's pixels, and on a terminal slide
+`terminal: {header: [line], lines: [{text, highlight}], dark}`. The template must
 
 - size the page to `data.canvas` and keep every text and card inside `data.inset`;
 - load `data.fonts` and apply `data.vars`;
 - tag every piece of text with `data-role`: `coverHeadline`, `headline`, `kicker`, `sub`, `body`,
-  `figure`, `label`, `code`, `eyebrow`, `hint`, `keyword`, `after`, `swipe`, `footer`;
+  `figure`, `label`, `code`, `terminal` (a retyped line), `termHeader`, `eyebrow`, `hint`,
+  `keyword`, `after`, `swipe`, `footer`;
 - return `{ shots: [rect], cards: [rect], texts: [{role, px, rect, text}] }`, rects
-  `{x, y, width, height}` in canvas pixels, one shot and one card per entry of `data.shots`.
+  `{x, y, w, h}` in canvas pixels, one shot and one card per entry of `data.shots`, then the
+  terminal card if there is one.
 
 QA reads only that return value and the screenshot, so any layout that keeps the contract passes
 or fails on the same rules.

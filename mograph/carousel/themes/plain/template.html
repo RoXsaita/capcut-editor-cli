@@ -7,10 +7,11 @@
     - size itself to data.canvas, keep every text and card inside data.inset;
     - load data.fonts; set data.vars as --kebab-case custom properties;
     - tag every piece of text with data-role (coverHeadline, headline, kicker, sub, body, figure,
-      label, code, eyebrow, hint, keyword, after, swipe, footer) so QA can measure it;
+      label, code, terminal, termHeader, eyebrow, hint, keyword, after, swipe, footer) so QA can measure it;
     - return { shots: [rect], cards: [rect], texts: [{ role, px, rect, text }] }, rects in canvas px,
-      one shot/card per entry of data.shots, in order.
-  Kinds: cover | step | proof | compare | note | prompt | cta. `code` in backticks is a mono chip.
+      one shot/card per entry of data.shots, in order, then the terminal card if there is one.
+  Kinds: cover | step | terminal | proof | compare | note | prompt | cta. `code` in backticks is a mono chip.
+  A terminal slide retypes the frame's lines (data.terminal: header lines, then lines), verbatim.
 -->
 <html lang="ar" dir="rtl">
 <head>
@@ -22,6 +23,7 @@
     --pad-top: 0px; --pad-bottom: 0px; --badge: 108px; --kicker: 30px; --h1: 72px; --h1-cover: 96px; --sub: 44px;
     --body: 44px; --code: 40px; --label: 32px; --figure: 120px; --footer: 30px; --gap: 36px;
     --card-margin: 100px; --card-border: 4px; --card-radius: 32px; --shadow: 0 18px 48px rgba(11, 11, 20, 0.12);
+    --terminal: 44px; --term-header: 30px; --terminal-bg: #1E1E22; --terminal-ink: #ECECF2; --terminal-muted: #9A9AA8;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { width: var(--w); height: var(--h); overflow: hidden; background: var(--bg); }
@@ -57,6 +59,16 @@
                    border-radius: 50%; background: var(--brand); box-shadow: 0 0 0 3px #fff; }
   .highlight { position: absolute; border: 7px solid var(--brand); border-radius: 14px; box-shadow: 0 0 0 3px #fff; }
   .mask { position: absolute; border-radius: 6px; }
+  .term { flex: none; align-self: stretch; margin: 0 calc(var(--card-margin) - var(--inset)); direction: ltr; text-align: left;
+          background: var(--terminal-bg); color: var(--terminal-ink); border: var(--card-border) solid var(--brand);
+          border-radius: var(--card-radius); box-shadow: var(--shadow); padding: 34px 36px; }
+  .term .th { font: 400 var(--term-header)/1.35 'Mono', monospace; color: var(--terminal-muted); white-space: pre-wrap; word-break: break-word;
+              padding-bottom: 18px; margin-bottom: 22px; border-bottom: 2px solid rgba(255, 255, 255, 0.14); }
+  .term pre { font: 700 var(--terminal)/1.32 'Mono', monospace; white-space: pre-wrap; word-break: break-word; }
+  .term pre + pre { margin-top: 14px; }
+  .term pre.hl { outline: 6px solid var(--accent); outline-offset: 8px; border-radius: 6px; }
+  .term .glyph { color: var(--accent); }
+  .term .hang { padding-left: 2ch; text-indent: -2ch; }  /* a wrapped line continues under the text, not the glyph */
   .needs h2 { font: 700 var(--sub)/1.3 'Plex Arabic'; margin-bottom: 16px; }
   .chips { display: flex; flex-wrap: wrap; gap: 14px; }
   .chip { font: 600 var(--sub)/1.25 'Plex Arabic'; background: var(--card); border: 4px solid var(--brand); border-radius: 22px; padding: 10px 22px; }
@@ -102,6 +114,12 @@
       <img src="${shot.url}" width="${shot.width}" height="${shot.height}" alt="">${masks}${hl}${mk}</div></div>`;
   }
   const cards = d => (d.shots || []).map(card).join('');
+  // The prompt or bullet a line starts with keeps its glyph, in the accent, as the real output did.
+  const LEAD = /^([>›❯$#⏺●⎿└│]\s?)(.*)$/s;
+  const termLine = text => { const m = String(text).match(LEAD); return m ? `<span class="glyph">${esc(m[1])}</span>${esc(m[2])}` : esc(text); };
+  const hang = text => (LEAD.test(String(text)) ? ' hang' : '');
+  const terminal = d => `<div class="term" data-term>${d.terminal.header.map(h => `<div class="th${hang(h)}" data-role="termHeader">${esc(h)}</div>`).join('')}${
+    d.terminal.lines.map(l => `<pre data-role="terminal" class="${l.highlight ? 'hl' : ''}${hang(l.text)}">${termLine(l.text)}</pre>`).join('')}</div>`;
   const titles = (d, cover) => `<div class="titles">${d.kicker ? `<div class="kicker" data-role="kicker">${esc(d.kicker)}</div>` : ''}<h1 class="${cover ? 'cover' : ''}" data-role="${cover ? 'coverHeadline' : 'headline'}">${rich(d.headline)}</h1>${d.sub ? `<div class="sub" data-role="sub">${rich(d.sub)}</div>` : ''}</div>`;
   const body = d => (d.body || d.items.length) ? `<div class="body">${String(d.body || '').split(/\n{2,}/).filter(Boolean).map(p => `<p data-role="body">${rich(p)}</p>`).join('')}${d.items.length ? `<ol>${d.items.map(it => `<li data-role="body">${rich(it)}</li>`).join('')}</ol>` : ''}</div>` : '';
 
@@ -116,6 +134,9 @@
         break;
       case 'step':
         group = `<div class="head"><div class="badge">${esc(d.number)}</div>${titles(d)}</div>${cards(d)}${body(d)}`;
+        break;
+      case 'terminal':
+        group = `<div class="head"><div class="badge">${esc(d.number)}</div>${titles(d)}</div>${terminal(d)}${body(d)}`;
         break;
       case 'proof':
         group = `${titles(d)}${cards(d)}${d.figure ? `<div class="figure" data-role="figure">${rich(d.figure)}</div>` : ''}${body(d)}`;
@@ -171,9 +192,21 @@
         el.style.height = `${Math.round(d.shots[i].height * scale) + 2 * border}px`;
       });
     }
+    const term = slide.querySelector('[data-term]');
+    if (term) {
+      // Largest size that keeps the longest line whole, down to the theme's code size; below that it wraps.
+      const floor = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--code')) || 40;  // the code floor
+      const pres = [...term.querySelectorAll('pre')];
+      pres.forEach(p => { p.style.whiteSpace = 'pre'; });
+      let px = parseFloat(getComputedStyle(pres[0] || term).fontSize);
+      const room = term.clientWidth - parseFloat(getComputedStyle(term).paddingLeft) - parseFloat(getComputedStyle(term).paddingRight);
+      const widest = Math.max(0, ...pres.map(p => p.scrollWidth));
+      if (widest > room) px = Math.max(floor, Math.floor(px * room / widest));
+      pres.forEach(p => { p.style.fontSize = `${px}px`; p.style.whiteSpace = ''; });
+    }
     return {
       shots: cardEls.map(el => rect(el.querySelector('.inner'))),
-      cards: cardEls.map(rect),
+      cards: [...cardEls, ...(term ? [term] : [])].map(rect),
       texts: [...slide.querySelectorAll('[data-role]')].map(el => ({ role: el.dataset.role, px: parseFloat(getComputedStyle(el).fontSize), rect: rect(el), text: el.innerText })),
     };
   };
