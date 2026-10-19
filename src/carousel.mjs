@@ -48,21 +48,23 @@ export const SLIDE_COUNT = Object.freeze([6, 8]);
 
 /**
  * What QA enforces, overridable per spec (`rules`). `safe` is the margin every text line keeps
- * (x from the sides, y from top and bottom: y 45 keeps text inside a centred 1080×1350, so a
+ * (x from the sides, y from top and bottom; OCR boxes run ~10 px past the glyphs, so x sits
+ * under theme.padX, the design inset; y 45 keeps text inside a centred 1080×1350, so a
  * 4:5 crop loses nothing). `minShotFill` is the step shot's share of the slide height;
  * `edgePadPx` is how close OCR text may come to the shot's left or right edge.
  */
 export const DEFAULT_RULES = Object.freeze({
   canvas: '3x4',
-  safe: Object.freeze({ x: 72, y: 45 }),
+  safe: Object.freeze({ x: 88, y: 45 }),
   minTextPx: MIN_TEXT_PX,
   maxHeadlineWords: MAX_HEADLINE_WORDS,
-  slideCount: SLIDE_COUNT,
+  slideCount: Object.freeze([6, 10]),
   minShotFill: 0.55,
   edgePadPx: 20,
   maxUpscale: 2.8,
   requirePrompt: true,
-  requireKeyword: true,
+  // A comment keyword only where something real answers it; a save CTA otherwise.
+  requireKeyword: false,
 });
 
 /**
@@ -72,7 +74,7 @@ export const DEFAULT_RULES = Object.freeze({
  */
 export const DEFAULT_THEME = Object.freeze({
   bg: '#F5F5F9', card: '#FFFFFF', muted: '#4A4A5C',
-  padX: 90, padTop: 48, padBottom: 40,
+  padX: 100, padTop: 48, padBottom: 40,
   badge: 104, kicker: 30, h1: 60, h1Cover: 80, sub: 34, body: 38, footer: 30,
   gap: 40, cardMargin: 60, cardBorder: 4, cardRadius: 36, shadow: '0 18px 48px rgba(11, 11, 20, 0.12)',
 });
@@ -409,6 +411,7 @@ export function extractShot(shot, file) {
 /** The template's fixed words; a spec's `labels` overrides any of them. */
 export const DEFAULT_LABELS = Object.freeze({
   eyebrow: 'دليل خطوة بخطوة', needs: 'شو بتحتاج:', cta: 'اكتب بالتعليقات', stepOf: 'الحركة {n} من {total}',
+  save: 'احفظه، وارجعله وقت ما تحتاجه',
 });
 
 const kicker = (template, n, total) => (n == null || !template ? '' : template.replace('{n}', arabicNumeral(n)).replace('{total}', arabicNumeral(total)));

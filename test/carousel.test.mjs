@@ -152,11 +152,12 @@ test('validateSpec enforces the winning structure', () => {
   bad.slides = bad.slides.slice(1, 4);
   bad.slides[0].headline = 'واحد اثنين ثلاثة أربعة خمسة ستة سبعة ثمانية تسعة عشرة أحد عشر اثنا عشر';
   const problems = validateSpec(bad).join('\n');
-  assert.match(problems, /6–8 slides/);
+  assert.match(problems, /6–10 slides/);
   assert.match(problems, /slide 1 must be the cover/);
   assert.match(problems, /last slide must be the CTA/);
   assert.match(problems, /prompt slide/);
-  assert.match(problems, /comment keyword/);
+  assert.doesNotMatch(problems, /comment keyword/, 'a save CTA is fine by default');
+  assert.match(validateSpec({ ...bad, rules: { requireKeyword: true } }).join('\n'), /comment keyword/);
   assert.match(problems, /words \(max 12\)/);
 });
 
@@ -312,7 +313,7 @@ test('rules and theme come from the spec, over the defaults', () => {
   const rules = resolveRules({ canvas: '4x5', rules: { minTextPx: 40, safe: { y: 60 } } });
   assert.equal(rules.canvas, '4x5');
   assert.equal(rules.minTextPx, 40);
-  assert.deepEqual(rules.safe, { x: 72, y: 60 });
+  assert.deepEqual(rules.safe, { x: 88, y: 60 });
   assert.equal(rules.minShotFill, 0.55);
   assert.throws(() => resolveRules({ canvas: '16x9' }), /canvas must be one of/);
   const theme = resolveTheme({ theme: { h1: 72, cardMargin: 40 } });
@@ -345,7 +346,7 @@ test('edgeCut and outsideSafe find text at the shot edge and outside the margins
     { text: 'headline', x: 20, y: 100, w: 400, h: 60 },
   ];
   assert.deepEqual(edgeCut(lines, box, 20), ['Auto-compact window']);
-  assert.deepEqual(outsideSafe(lines, CANVASES['3x4'], { x: 72, y: 45 }, box), ['headline']);
+  assert.deepEqual(outsideSafe(lines, CANVASES['3x4'], { x: 100, y: 45 }, box), ['headline']);
   const qa = qaPack({ rules: resolveRules({}), canvas: CANVASES['3x4'], slides: [{ index: 1, kind: 'step', headline: 'h', shot: { warnings: [] } }] },
     [{ index: 1, file: 'a.png', shotBox: box, cardBox: { ...box, h: 500 } }], { ocr: () => lines.slice(0, 2), privacy: () => [] });
   assert.match(qa.slides[0].problems.join('\n'), /fills 35% of the slide \(min 55%\)/);

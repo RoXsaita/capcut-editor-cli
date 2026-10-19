@@ -54,7 +54,7 @@ as a mono chip in the accent colour.
 | `step` | `headline`, `sub`, `shot` (required), `number`, `kicker`, `body` | badge + kicker + headline + one-line sub, then the shot in a framed card |
 | `text` | `headline`, `sub`, `body`, `shot` | headline and paragraphs (blank line = new paragraph), optional shot |
 | `prompt` | `headline`, `sub`, `blocks: [{label, text}]` | copy-this blocks in mono |
-| `cta` | `headline`, `keyword`, `after` | the comment keyword in a large card |
+| `cta` | `headline`, `keyword`, `after` | the comment keyword in a large card, or the save line without one |
 
 Steps number themselves 1, 2, 3 … unless `number` is set; give two slides the same `number`
 when one move takes two slides. The kicker reads `labels.stepOf` with `{n}` and `{total}`
@@ -91,21 +91,22 @@ allow ~630 px. Keep whole lines inside the crop: QA fails text that touches the 
 | `needs` | `شو بتحتاج:` |
 | `cta` | `اكتب بالتعليقات` |
 | `stepOf` | `الحركة {n} من {total}` |
+| `save` | `احفظه، وارجعله وقت ما تحتاجه` (the CTA when there is no keyword) |
 
 ## rules
 
 | key | default | QA |
 |---|---|---|
 | `canvas` | `"3x4"` | same as the top-level `canvas` |
-| `safe` | `{x: 72, y: 45}` | every text line outside the shot stays this far from the sides and from top and bottom; y 45 keeps a centred 1080×1350 crop intact |
+| `safe` | `{x: 88, y: 45}` | every text line outside the shot stays this far from the sides and from top and bottom (OCR boxes run ~10 px past the glyphs, so x sits under the 100 px design inset `theme.padX`); y 45 keeps a centred 1080×1350 crop intact |
 | `minTextPx` | 36 | the median OCR line height inside a step's shot |
 | `minShotFill` | 0.55 | a step's card height ÷ the canvas height |
 | `edgePadPx` | 20 | no OCR text (3+ characters) closer than this to the shot's left or right edge |
 | `maxHeadlineWords` | 12 | |
-| `slideCount` | `[6, 8]` | |
+| `slideCount` | `[6, 10]` | |
 | `maxUpscale` | 2.8 | warns when a crop is scaled past this (reads soft) |
 | `requirePrompt` | true | the carousel has a `prompt` slide |
-| `requireKeyword` | true | the CTA has a `keyword` |
+| `requireKeyword` | false | the CTA has a `keyword` (a reel twin sets it: the reel promised one). Without a keyword the CTA is `labels.save` |
 
 Privacy runs on every slide's OCR text and always fails the build: the screen watcher's rules,
 home paths, shell prompts and emails. QA records rule names, never the matched text.
@@ -121,7 +122,7 @@ user profile's `tokens.color` (the bundled defaults are neutral).
 | `bg` | `#F5F5F9` | | `h1` | 60 |
 | `card` | `#FFFFFF` | | `h1Cover` | 80 |
 | `muted` | `#4A4A5C` | | `sub` | 34 |
-| `padX` | 90 | | `body` | 38 |
+| `padX` | 100 | | `body` | 38 |
 | `padTop` | 48 | | `kicker` | 30 |
 | `padBottom` | 40 | | `badge` | 104 |
 | `gap` | 40 | | `footer` | 30 |
