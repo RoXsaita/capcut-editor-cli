@@ -159,7 +159,8 @@ export function opVariantHook(doc, op, context = {}) {
       }
       const material = materials.get(seg.material_id);
       if (end > seam + FRAME_US) {
-        if (start <= FRAME_US) {
+        // a bed that starts a beat in (music at 0.133) runs from the top too: moving it would go negative
+        if (start <= FRAME_US || start + delta < 0) {
           if (setDuration(seg, tt.duration + delta, material)) rows.short.push(label);
           rows.stretched.push(label);
         } else {
