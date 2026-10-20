@@ -1,4 +1,4 @@
-import { CapcutError, allSegments, seededId } from './core.mjs';
+import { CapcutError, allSegments, seededId, privateMaterial } from './core.mjs';
 import { principalTrack } from './polish.mjs';
 
 const US = s => Math.round(s * 1e6);
@@ -95,6 +95,7 @@ export function setSpeed(doc, seg, speed, { sourceStart = null } = {}) {
   st.duration = newDur;
   seg.speed = speed;
   let sm = speedMaterial(doc, seg);
+  let records;
   if (!sm) {
     // CapCut 9.4.0 resets a segment-only speed to 1x when saving the draft.
     const id = seededId(seg.id, 'speed');
@@ -104,8 +105,13 @@ export function setSpeed(doc, seg, speed, { sourceStart = null } = {}) {
     if (!(seg.extra_material_refs || []).includes(id)) {
       seg.extra_material_refs = [...(seg.extra_material_refs || []), id];
     }
+    records = [sm];
+  } else {
+    // A speed shared with another clip is cloned for this one (seeded by the segment id, so
+    // both mirrors mint the same clone); identical CapCut copies are all written.
+    records = privateMaterial(doc, seg, sm.id, { seed: seg.id, seedKey: `speed:private:${sm.id}` });
   }
-  sm.speed = speed; sm.mode = 0; sm.curve_speed = null;
+  for (const m of records) { m.speed = speed; m.mode = 0; m.curve_speed = null; }
   return { speed, clamped, source: [S(newStart), S(newStart + newDur)] };
 }
 

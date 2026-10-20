@@ -5,6 +5,7 @@ import path from 'node:path';
 import {
   CapcutError, clone, seededId, loadPreset, allSegments, selectSegments, localizeMedia,
   isLocalMedia, isCapCutCachePath, PRESET_PARK_GAP_US, contentEndUs, maxSegmentEndUs,
+  segmentsReferencing, privateMaterial,
 } from './core.mjs';
 import { insertOverlayTrack, renumberTracks, recordMediaProvenance, sourceTakeId } from './layouts.mjs';
 import { assertOrigin, stampOrigin } from './origin.mjs';
@@ -76,12 +77,14 @@ function cloneExtras(doc, template, segmentId) {
  * what its timeranges say. Same shape setSpeed writes.
  */
 function setSpeedMaterial(doc, segment, speed) {
-  for (const ref of segment.extra_material_refs || []) {
-    for (const values of Object.values(doc.materials || {})) {
-      if (!Array.isArray(values)) continue;
-      const m = values.find(x => x?.id === ref && x.type === 'speed');
-      if (m) { m.speed = speed; m.mode = 0; m.curve_speed = null; return m; }
-    }
+  for (const ref of [...(segment.extra_material_refs || [])]) {
+    const isSpeed = Object.values(doc.materials || {})
+      .some(values => Array.isArray(values) && values.some(x => x?.id === ref && x.type === 'speed'));
+    if (!isSpeed) continue;
+    // A speed shared with another clip is cloned for this one; identical copies are all written.
+    const records = privateMaterial(doc, segment, ref, { seed: SEED, seedKey: `speed:${segment.id}:${ref}` });
+    for (const m of records) { m.speed = speed; m.mode = 0; m.curve_speed = null; }
+    return records[0] || null;
   }
   return null;
 }
@@ -442,7 +445,17 @@ export function opReplaceMedia(doc, op, context = {}) {
     derivedOffset: op.derivedOffset, allowEphemeral: op.allowEphemeral === true,
   });
 
-  const shared = (doc.tracks || []).flatMap(t => t.segments || []).filter(s => s.material_id === old.id).length > 1;
+  // CapCut repeats a material under one id. Byte-identical twins are one material and all of
+  // them get the new media (below); writing only the first turned the copies into a
+  // CONFLICTING_MATERIAL_ID. Twins that already differ are a collision to settle first.
+  const twins = doc.materials.videos.filter(m => m.id === old.id);
+  if (twins.some(m => JSON.stringify(m) !== JSON.stringify(old))) {
+    throw new CapcutError(
+      `replace.media: material ${old.id} has ${twins.length} copies that differ; run \`capcutctl sync\` `
+      + '(or settle the copies) before replacing its media.',
+      { code: 'CONFLICTING_MATERIAL_ID', exitCode: 2, details: { id: old.id } });
+  }
+  const shared = segmentsReferencing(doc, old.id).length > 1;
   let material = old;
   if (shared) {
     material = clone(old);
@@ -486,6 +499,13 @@ export function opReplaceMedia(doc, op, context = {}) {
   }
   stampOrigin(material, origin);
   annotateMediaSource(material, seg, originalPath, dest, context, origin);
+  if (!shared) {
+    for (const twin of twins) {
+      if (twin === material) continue;
+      for (const key of Object.keys(twin)) delete twin[key];
+      Object.assign(twin, clone(material));
+    }
+  }
   return { changed: 1, id: seg.id, materialId: material.id, path: dest, origin: origin.kind, shared: shared && true };
 }
 

@@ -753,3 +753,101 @@ test('polish leaves no overlapping segments on any lane, end to end', () => {
   assert.ok(clicks && clicks.segments.length === 2, 'both callouts got a click');
   assert.ok(doc.tracks.find(t => t.name === 'polish-sfx').segments.length > 0, 'and the seams got wooshes');
 });
+
+// ---- speed and media writes reach every copy, and only this clip's copy --------------------
+
+const speedDoc = speeds => ({
+  duration: 20_000_000, fps: 30, canvas_config: { width: 1080, height: 1920 },
+  materials: {
+    videos: [{ id: 'V', type: 'video', path: '/media/v.mp4', duration: 60_000_000, width: 1080, height: 1920 }],
+    speeds,
+  },
+  tracks: [{ id: 'T', type: 'video', flag: 2, name: 'broll', segments: ['a', 'b'].map((id, i) => ({
+    id, material_id: 'V', extra_material_refs: id === 'a' || speeds.some(s => s.__shared) ? ['S1'] : [], speed: 1,
+    source_timerange: { start: i * 10_000_000, duration: 4_000_000 },
+    target_timerange: { start: i * 4_000_000, duration: 4_000_000 },
+  })) }],
+});
+const trim = seed => ({ op: 'clip.trim', selector: { id: 'a' }, src: [0, 8], __seed: seed });
+
+test('trim writes every identical copy of a speed material, so no conflict is left behind', async () => {
+  const { applyOperations, validateDocument } = await import('../src/core.mjs');
+  const doc = speedDoc([{ id: 'S1', type: 'speed', speed: 1, mode: 0, curve_speed: null },
+    { id: 'S1', type: 'speed', speed: 1, mode: 0, curve_speed: null }]);
+  applyOperations(doc, [trim('SEED')], { group: 'root' });
+  assert.deepEqual(doc.materials.speeds.map(s => [s.id, s.speed]), [['S1', 2], ['S1', 2]]);
+  assert.ok(!validateDocument(doc, { checkFiles: false }).some(i => i.code === 'CONFLICTING_MATERIAL_ID'));
+});
+
+test('trim clones a speed shared with another clip; the sibling keeps its own speed', async () => {
+  const { applyOperations, validateDocument } = await import('../src/core.mjs');
+  const shared = () => speedDoc([{ id: 'S1', type: 'speed', speed: 1, mode: 0, curve_speed: null, __shared: true }]);
+  const doc = shared();
+  applyOperations(doc, [trim('SEED')], { group: 'root' });
+  const [a, b] = doc.tracks[0].segments;
+  assert.equal(b.extra_material_refs[0], 'S1');
+  assert.notEqual(a.extra_material_refs[0], 'S1');
+  const speedOf = id => doc.materials.speeds.find(s => s.id === id).speed;
+  assert.equal(speedOf(a.extra_material_refs[0]), 2);
+  assert.equal(speedOf('S1'), 1);
+  assert.ok(!validateDocument(doc, { checkFiles: false }).some(i => i.code === 'SHARED_SEGMENT_EXTRA'));
+  const again = shared();
+  applyOperations(again, [trim('SEED')], { group: 'timeline:x' });
+  assert.equal(again.tracks[0].segments[0].extra_material_refs[0], a.extra_material_refs[0], 'same seed, same clone id');
+});
+
+test('material.patch refuses a speed several clips share unless shared: true', async () => {
+  const { applyOperations, CapcutError } = await import('../src/core.mjs');
+  const doc = speedDoc([{ id: 'S1', type: 'speed', speed: 1, mode: 0, curve_speed: null, __shared: true }]);
+  assert.throws(() => applyOperations(doc, [{ op: 'material.patch', selector: { id: 'S1' }, set: { speed: 3 } }], { group: 'root' }),
+    error => error instanceof CapcutError && error.code === 'SHARED_MATERIAL');
+  assert.equal(doc.materials.speeds[0].speed, 1);
+  applyOperations(doc, [{ op: 'material.patch', selector: { id: 'S1' }, set: { speed: 3 }, shared: true }], { group: 'root' });
+  assert.equal(doc.materials.speeds[0].speed, 3);
+  // A video material shared by both clips is patched on purpose (stage, repair) and not refused.
+  applyOperations(doc, [{ op: 'material.patch', selector: { id: 'V' }, set: { material_name: 'v' } }], { group: 'root' });
+});
+
+test('replace.media writes every identical copy of the video material; differing copies refuse', () => {
+  const f = fixture();
+  applySpec(f.project, { version: 1, operations: [addOp(f)] }, { forceRunning: true });
+  const duplicate = mutate => {
+    for (const dir of [f.project, f.timelineDir]) {
+      const d = readJson(path.join(dir, 'draft_info.json'));
+      const id = d.tracks.find(t => t.name === 'broll').segments[0].material_id;
+      const copy = structuredClone(d.materials.videos.find(m => m.id === id));
+      mutate(copy);
+      d.materials.videos.push(copy);
+      for (const name of ['draft_info.json', 'draft_info.json.bak', 'template-2.tmp']) fs.writeFileSync(path.join(dir, name), stableJson(d));
+    }
+  };
+  duplicate(() => {});
+  const seg = readJson(path.join(f.project, 'draft_info.json')).tracks.find(t => t.name === 'broll').segments[0];
+  const other = path.join(f.temp, 'other.mp4');
+  fs.writeFileSync(other, 'other');
+  applySpec(f.project, { version: 1, operations: [{
+    op: 'replace.media', selector: { id: seg.id }, path: other, width: 1080, height: 1920, mediaDuration: 20_000_000,
+  }] }, { forceRunning: true });
+  const copies = readJson(path.join(f.project, 'draft_info.json')).materials.videos.filter(m => m.id === seg.material_id);
+  assert.equal(copies.length, 2);
+  assert.deepEqual(copies.map(m => m.path), [other, other]);
+  assert.equal(doctor(f.project).errors, 0);
+
+  duplicate(copy => { copy.duration = 1_000_000; });
+  assert.throws(() => applySpec(f.project, { version: 1, operations: [{
+    op: 'replace.media', selector: { id: seg.id }, path: other, width: 1080, height: 1920, mediaDuration: 20_000_000,
+  }] }, { forceRunning: true }), error => error.code === 'CONFLICTING_MATERIAL_ID' && /capcutctl sync/.test(error.message));
+});
+
+test('pace setSpeed on a shared speed material leaves the sibling clip at 1x', async () => {
+  const { setSpeed } = await import('../src/pace.mjs');
+  const doc = speedDoc([{ id: 'S1', type: 'speed', speed: 1, mode: 0, curve_speed: null, __shared: true }]);
+  const [a, b] = doc.tracks[0].segments;
+  setSpeed(doc, a, 2);
+  assert.equal(b.extra_material_refs[0], 'S1');
+  assert.equal(doc.materials.speeds.find(s => s.id === 'S1').speed, 1);
+  assert.equal(doc.materials.speeds.find(s => s.id === a.extra_material_refs[0]).speed, 2);
+  const twin = speedDoc([{ id: 'S1', type: 'speed', speed: 1, mode: 0, curve_speed: null, __shared: true }]);
+  setSpeed(twin, twin.tracks[0].segments[0], 2);
+  assert.equal(twin.tracks[0].segments[0].extra_material_refs[0], a.extra_material_refs[0], 'both mirrors mint the same clone');
+});

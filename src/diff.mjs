@@ -50,9 +50,12 @@ export function summarizeProject(dir) {
 }
 
 /**
- * The tolerated set from dedupeMaterials in core.mjs. CapCut legitimately re-saves the
- * same logical material under an id it already used, differing only in noise, so a diff
- * that compared whole objects reported a document as different from itself.
+ * The fields a diff compares for a material. CapCut legitimately re-saves the same logical
+ * material under an id it already used, differing only in noise, so a diff that compared
+ * whole objects reported a document as different from itself. Broader than what
+ * dedupeMaterials in core.mjs tolerates: dedupe merges loosely only MEDIA copies (same
+ * non-empty path, frame size, type and material_name, duration within a frame); every other
+ * kind merges only when byte-identical.
  */
 const MATERIAL_FIELDS = ['path', 'width', 'height', 'duration', 'type', 'name'];
 

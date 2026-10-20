@@ -1232,6 +1232,8 @@ export function validateDocument(doc, {
     parkedRange: parkedWindow,
   };
   const seenSegmentIds = new Set();
+  const frameUs = Math.floor(1_000_000 / (Number.isFinite(doc.fps) && doc.fps > 0 ? doc.fps : 30));
+  const extraUsers = new Map();
   const seenMaterialIds = new Map();
   const seenTrackIds = new Set();
   const videoBasenames = new Map();
@@ -1300,7 +1302,25 @@ export function validateDocument(doc, {
       issues.push(issue('error', 'MISSING_MATERIAL_REF', `Segment ${segment.id} references missing material ${segment.material_id}.`, { file, id: segment.id }));
     }
     for (const ref of segment.extra_material_refs || []) {
-      if (!materials.has(ref)) issues.push(issue('error', 'MISSING_EXTRA_REF', `Segment ${segment.id} references missing extra material ${ref}.`, { file, id: segment.id, ref }));
+      const extra = materials.get(ref);
+      if (!extra) {
+        issues.push(issue('error', 'MISSING_EXTRA_REF', `Segment ${segment.id} references missing extra material ${ref}.`, { file, id: segment.id, ref }));
+        continue;
+      }
+      if (isPerSegmentExtra(extra.kind, extra.value)) {
+        if (!extraUsers.has(ref)) extraUsers.set(ref, { kind: extra.kind, type: extra.value.type, segments: [] });
+        extraUsers.get(ref).segments.push(segment.id);
+      }
+      // pace reads the speed MATERIAL first; a material that disagrees with the segment makes
+      // the clip read as some other speed than the one it plays at.
+      const speedValue = extra.value;
+      if (speedValue.type === 'speed' && speedValue.curve_speed == null
+          && Number.isFinite(speedValue.speed) && Number.isFinite(segment.speed)
+          && Math.abs(speedValue.speed - segment.speed) > 1e-3) {
+        issues.push(issue('warning', 'SPEED_MATERIAL_MISMATCH',
+          `${segment.id}: speed material ${ref} says ${speedValue.speed}x but the segment plays at ${segment.speed}x.`,
+          { file, id: segment.id, ref }));
+      }
     }
     for (const key of ['target_timerange', 'source_timerange']) {
       const range = segment[key];
@@ -1309,6 +1329,15 @@ export function validateDocument(doc, {
         issues.push(issue('error', 'BAD_TIMERANGE', `${segment.id}.${key} is invalid.`, { file, id: segment.id, key }));
       } else if (range.start < 0 || range.duration < 0) {
         issues.push(issue('error', 'NEGATIVE_TIMERANGE', `${segment.id}.${key} is negative.`, { file, id: segment.id, key }));
+      } else if (!Number.isInteger(range.start) || !Number.isInteger(range.duration)) {
+        // CapCut's timeline unit is the integer microsecond; 1.167 is seconds written raw.
+        issues.push(issue('error', 'NON_INTEGER_TIMERANGE',
+          `${segment.id}.${key} is not whole microseconds (start ${range.start}, duration ${range.duration}); seconds written raw?`,
+          { file, id: segment.id, key }));
+      } else if (key === 'target_timerange' && range.duration < frameUs) {
+        issues.push(issue('warning', range.duration === 0 ? 'ZERO_DURATION_SEGMENT' : 'SUBFRAME_SEGMENT',
+          `${segment.id} lasts ${range.duration}µs, under one frame; CapCut cannot show it.`,
+          { file, id: segment.id, key, durationUs: range.duration }));
       }
     }
     const target = segment.target_timerange;
@@ -1348,6 +1377,12 @@ export function validateDocument(doc, {
       issues.push(issue('error', 'NONFINITE_CLIP', `${segment.id}.${keyPath} is non-finite.`, { file, id: segment.id }));
     }
   }
+  for (const [ref, use] of extraUsers) {
+    if (use.segments.length < 2) continue;
+    issues.push(issue('warning', 'SHARED_SEGMENT_EXTRA',
+      `${use.type || use.kind} ${ref} is shared by ${use.segments.length} segments (${use.segments.slice(0, 4).join(', ')}); `
+      + 'an edit to one clip\'s copy changes them all.', { file, ref, kind: use.kind, segments: use.segments }));
+  }
   for (const [trackIndex, track] of (doc.tracks || []).entries()) {
     if (track.id) {
       if (seenTrackIds.has(track.id)) issues.push(issue('error', 'DUPLICATE_TRACK_ID', `Duplicate track id ${track.id}.`, { file, id: track.id, trackIndex }));
@@ -1370,10 +1405,16 @@ export function documentFingerprint(doc) {
     fps: doc.fps,
     canvas: doc.canvas_config,
     tracks: (doc.tracks || []).map(track => ({
+      // Identity and extras are structure too: a track renamed, or one clip's speed/mask
+      // re-pointed, in only one document is the drift this fingerprint exists to see.
+      id: track.id,
+      name: track.name,
+      flag: track.flag,
       type: track.type,
       segments: (track.segments || []).map(segment => ({
         id: segment.id,
         material_id: segment.material_id,
+        extra_material_refs: segment.extra_material_refs,
         target_timerange: segment.target_timerange,
         source_timerange: segment.source_timerange,
         clip: segment.clip,
@@ -1642,50 +1683,21 @@ export function preflight({
   };
 }
 
-export function doctor(projectDir, { checkFiles = true, duplicateBaseline = null } = {}) {
-  const state = loadProject(projectDir);
+/**
+ * Document-level checks that need the whole group set (or the timeline graph), not one draft
+ * alone. doctor reports them; executeTransaction runs them on the before and after sets so a
+ * dry run that passes cannot be rolled back at commit by the same check.
+ */
+export function documentSetIssues(groups, activeTimelineId) {
   const issues = [];
-  const requestedBaseline = duplicateBaseline === null
-    ? knownPreset3DuplicateBaseline(projectDir)
-    : duplicateBaseline === false ? [] : duplicateBaseline;
-  const baseline = Array.isArray(requestedBaseline) ? requestedBaseline : [];
-  const baselineDuplicates = [];
-  for (const group of state.groups) {
-    issues.push(...validateDocument(group.doc, {
-      file: group.canonical,
-      checkFiles,
-      projectDir,
-      duplicateBaseline: baseline,
-    }));
-    for (const match of baselineDuplicateMatches(group.doc, baseline)) {
-      baselineDuplicates.push({ ...match, group: group.name, file: group.canonical });
-    }
-    const canonicalHash = sha256(fs.readFileSync(group.canonical));
-    for (const mirror of group.mirrors) {
-      if (!fs.existsSync(mirror)) {
-        issues.push(issue('warning', 'MISSING_MIRROR', `Missing live mirror ${mirror}.`, { file: mirror, group: group.name }));
-        continue;
-      }
-      let mirrorHash;
-      try { mirrorHash = sha256(fs.readFileSync(mirror)); readJson(mirror); }
-      catch (error) { issues.push(issue('error', 'INVALID_MIRROR', error.message, { file: mirror, group: group.name })); continue; }
-      if (mirrorHash !== canonicalHash) issues.push(issue('warning', 'MIRROR_DRIFT', `Mirror differs from canonical: ${mirror}`, { file: mirror, group: group.name }));
-    }
-  }
-  if (state.groups.length > 1) {
-    const fingerprints = state.groups.map(group => ({ name: group.name, value: documentFingerprint(group.doc) }));
-    if (new Set(fingerprints.map(item => item.value)).size > 1) {
-      issues.push(issue('warning', 'DOCUMENT_DRIFT', 'Root draft and active timeline differ structurally. Semantic edits will be applied to both documents independently.', { fingerprints }));
-    }
-  }
   // CapCut resolves a draft's timeline by draft_info.json's top-level `id`. When it
   // does not match the active timeline, every structural check still passes and the
   // project simply will not open.
-  if (state.activeTimelineId) {
-    for (const group of state.groups) {
-      if (group.doc?.id && group.doc.id !== state.activeTimelineId) {
+  if (activeTimelineId) {
+    for (const group of groups) {
+      if (group.doc?.id && group.doc.id !== activeTimelineId) {
         issues.push(issue('error', 'TIMELINE_ID_MISMATCH',
-          `${group.name}: draft_info.json id "${group.doc.id}" does not match the active timeline "${state.activeTimelineId}". CapCut will not open this project.`,
+          `${group.name}: draft_info.json id "${group.doc.id}" does not match the active timeline "${activeTimelineId}". CapCut will not open this project.`,
           { file: group.canonical, group: group.name }));
       }
     }
@@ -1694,7 +1706,7 @@ export function doctor(projectDir, { checkFiles = true, duplicateBaseline = null
   // segment with nothing after it on its own track, so the edit looks applied on disk and
   // is gone the moment the project is opened. And a transition below the talking head
   // wipes the B-roll while the face hard-cuts — the layer, not just the timing, is wrong.
-  for (const group of state.groups) {
+  for (const group of groups) {
     const doc = group.doc;
     if (!doc || !Array.isArray(doc.tracks)) continue;
     const transitionIds = new Set((doc.materials?.transitions || []).map(m => m.id));
@@ -1712,7 +1724,7 @@ export function doctor(projectDir, { checkFiles = true, duplicateBaseline = null
         const next = segs[n + 1];
         if (!next || next.target_timerange.start - end > 20000) {
           issues.push(issue('error', 'TRANSITION_ORPHANED',
-            `${group.name}: a transition at ${(end / 1e6).toFixed(2)}s sits on track ${i} with no clip after it. CapCut will drop it on load.`,
+            `${group.name}: a transition at ${(end / 1e6).toFixed(2)}s sits on track ${i} with no clip after it. CapCut will drop it on load; \`capcutctl polish\` rebuilds transitions.`,
             { file: group.canonical, track: i, at: end / 1e6 }));
         }
       }
@@ -1755,6 +1767,52 @@ export function doctor(projectDir, { checkFiles = true, duplicateBaseline = null
       }
     }
   }
+  return issues;
+}
+
+/** Identity of a document-set issue, so an error the project already had is not blamed on an edit. */
+function setIssueKey(item) {
+  return [item.code, item.group ?? item.file ?? '', item.track ?? '',
+    Number.isFinite(item.at) ? Math.round(item.at * 100) : ''].join('|');
+}
+
+export function doctor(projectDir, { checkFiles = true, duplicateBaseline = null } = {}) {
+  const state = loadProject(projectDir);
+  const issues = [];
+  const requestedBaseline = duplicateBaseline === null
+    ? knownPreset3DuplicateBaseline(projectDir)
+    : duplicateBaseline === false ? [] : duplicateBaseline;
+  const baseline = Array.isArray(requestedBaseline) ? requestedBaseline : [];
+  const baselineDuplicates = [];
+  for (const group of state.groups) {
+    issues.push(...validateDocument(group.doc, {
+      file: group.canonical,
+      checkFiles,
+      projectDir,
+      duplicateBaseline: baseline,
+    }));
+    for (const match of baselineDuplicateMatches(group.doc, baseline)) {
+      baselineDuplicates.push({ ...match, group: group.name, file: group.canonical });
+    }
+    const canonicalHash = sha256(fs.readFileSync(group.canonical));
+    for (const mirror of group.mirrors) {
+      if (!fs.existsSync(mirror)) {
+        issues.push(issue('warning', 'MISSING_MIRROR', `Missing live mirror ${mirror}.`, { file: mirror, group: group.name }));
+        continue;
+      }
+      let mirrorHash;
+      try { mirrorHash = sha256(fs.readFileSync(mirror)); readJson(mirror); }
+      catch (error) { issues.push(issue('error', 'INVALID_MIRROR', error.message, { file: mirror, group: group.name })); continue; }
+      if (mirrorHash !== canonicalHash) issues.push(issue('warning', 'MIRROR_DRIFT', `Mirror differs from canonical: ${mirror}`, { file: mirror, group: group.name }));
+    }
+  }
+  if (state.groups.length > 1) {
+    const fingerprints = state.groups.map(group => ({ name: group.name, value: documentFingerprint(group.doc) }));
+    if (new Set(fingerprints.map(item => item.value)).size > 1) {
+      issues.push(issue('warning', 'DOCUMENT_DRIFT', 'Root draft and active timeline differ structurally. Semantic edits will be applied to both documents independently.', { fingerprints }));
+    }
+  }
+  issues.push(...documentSetIssues(state.groups, state.activeTimelineId));
 
   issues.push(...auditMediaOrigins(projectDir, state));
 
@@ -1900,18 +1958,93 @@ export function removeUnreferencedMaterials(doc, ids) {
   }
 }
 
-function normalizeUs(value, field) {
+/** Every segment that points at a material id, as its main material or as an extra. */
+export function segmentsReferencing(doc, id) {
+  return allSegments(doc).filter(({ segment }) =>
+    segment.material_id === id || (segment.extra_material_refs || []).includes(id));
+}
+
+/**
+ * The material records this segment may write through `ref` without touching another clip.
+ * Shared by more than one segment: the first record is cloned under seededId(seed, seedKey),
+ * only THIS segment is repointed, and [clone] is returned. Otherwise every record carrying the
+ * id is returned — CapCut repeats identical copies, and writing only the first turned them
+ * into a CONFLICTING_MATERIAL_ID the next save could not open.
+ */
+export function privateMaterial(doc, seg, ref, { seed = null, seedKey = `private:${seg.id}:${ref}` } = {}) {
+  const records = [];
+  let kind = null;
+  for (const [name, values] of Object.entries(doc.materials || {})) {
+    if (!Array.isArray(values)) continue;
+    for (const value of values) if (value?.id === ref) { records.push(value); kind ||= name; }
+  }
+  if (!records.length) return [];
+  if (segmentsReferencing(doc, ref).length <= 1) return records;
+  const id = seededId(seed, seedKey);
+  const list = ensureMaterialArray(doc, kind);
+  let copy = list.find(value => value?.id === id);
+  if (!copy) {
+    copy = clone(records[0]);
+    copy.id = id;
+    list.push(copy);
+  }
+  if (seg.material_id === ref) seg.material_id = id;
+  seg.extra_material_refs = (seg.extra_material_refs || []).map(item => (item === ref ? id : item));
+  return [copy];
+}
+
+/**
+ * Spec times: an integer above 100000 is microseconds, anything else is seconds. A number
+ * between an hour and 100000 fits neither reading safely (33333 meant as µs became 9 hours of
+ * seconds), so it refuses and names both readings. `explicitUs` is the unambiguous escape:
+ * a `startUs` / `durationUs` field, which must be an integer.
+ */
+function normalizeUs(value, field, explicitUs = undefined) {
+  if (explicitUs != null) {
+    if (!Number.isSafeInteger(explicitUs)) throw new CapcutError(`${field}Us must be an integer number of microseconds, got ${explicitUs}.`, { code: 'BAD_TIME', exitCode: 2 });
+    return explicitUs;
+  }
   if (value == null) return null;
   if (Number.isInteger(value) && Math.abs(value) > 100000) return value;
-  if (!Number.isFinite(value)) throw new CapcutError(`${field} must be finite.`, { code: 'BAD_TIME' });
+  if (!Number.isFinite(value)) throw new CapcutError(`${field} must be finite.`, { code: 'BAD_TIME', exitCode: 2 });
+  if (Math.abs(value) > 3600) {
+    throw new CapcutError(`${field} ${value} is read as seconds (${value}s is over an hour); `
+      + `for ${value} µs pass ${value / 1_000_000} (seconds) or ${field.split('.').pop()}Us: ${value}.`, { code: 'BAD_TIME', exitCode: 2 });
+  }
   return Math.round(value * 1_000_000);
+}
+
+/** A {start, duration} spec range in µs; `startUs` / `durationUs` win when given. */
+function normalizeRange(range, field) {
+  return {
+    start: normalizeUs(range.start, `${field}.start`, range.startUs),
+    duration: normalizeUs(range.duration, `${field}.duration`, range.durationUs),
+  };
+}
+
+/**
+ * segment.patch writes raw CapCut JSON, where timeranges are integer µs. A fractional value is
+ * seconds written by mistake (1.167 for 1167000); convert just that. Integers are left alone:
+ * they are already µs.
+ */
+function microsecondTimeranges(set) {
+  for (const key of ['target_timerange', 'source_timerange']) {
+    const range = set?.[key];
+    if (!range || typeof range !== 'object') continue;
+    for (const part of ['start', 'duration']) {
+      const value = range[part];
+      if (typeof value === 'number' && Number.isFinite(value) && !Number.isInteger(value)) range[part] = Math.round(value * 1_000_000);
+    }
+  }
+  return set;
 }
 
 function opSegmentPatch(doc, op) {
   const found = selectSegments(doc, op.selector);
   if (!requireMatches(found, op, 'segments')) return { changed: 0, skipped: true };
+  const set = microsecondTimeranges(clone(op.set || {}));
   for (const entry of op.all ? found : found.slice(0, 1)) {
-    deepMerge(entry.segment, op.set || {});
+    deepMerge(entry.segment, set);
     for (const key of op.unset || []) unsetPath(entry.segment, key);
   }
   return { changed: op.all ? found.length : 1 };
@@ -1956,9 +2089,9 @@ function opSegmentClone(doc, op) {
     if (materials.length !== 1 && !equivalentMaterialMatches(materials)) throw new CapcutError(`Material selector matched ${materials.length} distinct materials: ${JSON.stringify(op.material)}`, { code: 'MATERIAL_SELECTOR' });
     copied.material_id = materials[0].value.id;
   }
-  if (op.target) copied.target_timerange = { start: normalizeUs(op.target.start, 'target.start'), duration: normalizeUs(op.target.duration, 'target.duration') };
+  if (op.target) copied.target_timerange = normalizeRange(op.target, 'target');
   if (op.source === null) copied.source_timerange = null;
-  else if (op.source) copied.source_timerange = { start: normalizeUs(op.source.start, 'source.start'), duration: normalizeUs(op.source.duration, 'source.duration') };
+  else if (op.source) copied.source_timerange = normalizeRange(op.source, 'source');
   if (op.set) deepMerge(copied, op.set);
   destination.track.segments.push(copied);
   destination.track.segments.sort((a, b) => (a.target_timerange?.start || 0) - (b.target_timerange?.start || 0));
@@ -2072,12 +2205,29 @@ function opMaterialRelink(doc, op, context) {
   return { changed: selected.length, logicalMaterials: equivalentMaterialMatches(found) ? 1 : selected.length, path: destination };
 }
 
+const PER_SEGMENT_EXTRA_TYPES = new Set(['speed', 'audio_fade', 'mask']);
+const PER_SEGMENT_EXTRA_KINDS = new Set(['speeds', 'audio_fades', 'common_mask']);
+function isPerSegmentExtra(kind, value) {
+  return PER_SEGMENT_EXTRA_TYPES.has(value?.type) || PER_SEGMENT_EXTRA_KINDS.has(kind);
+}
+
 function opMaterialPatch(doc, op) {
   let found = selectMaterials(doc, op.selector || {});
   if (op.selector?.speed != null) found = found.filter(entry => entry.value.speed === op.selector.speed);
   if (!found.length) throw new CapcutError(`${op.op}: no materials matched ${JSON.stringify(op.selector || {})}.`, { code: 'SELECTOR_EMPTY' });
   if (found.length > 1) throw new CapcutError(`${op.op}: selector matched ${found.length} materials.`, { code: 'SELECTOR_AMBIGUOUS' });
   const { value } = found[0];
+  // A speed, a fade or a mask belongs to one clip. Patching one that several segments point
+  // at changes all of them; say so, unless the caller means it. Shared VIDEO materials are
+  // patched on purpose (stage, repair) and are not refused.
+  if (op.shared !== true && isPerSegmentExtra(found[0].kind, value)) {
+    const users = segmentsReferencing(doc, value.id);
+    if (users.length > 1) {
+      throw new CapcutError(`${op.op}: ${value.type || found[0].kind} ${value.id} is shared by ${users.length} segments `
+        + `(${users.slice(0, 4).map(entry => entry.segment.id).join(', ')}); patching it changes every one of them. `
+        + 'Clone it private for one clip, or pass "shared": true.', { code: 'SHARED_MATERIAL', exitCode: 2 });
+    }
+  }
   if (op.set) deepMerge(value, op.set);
   for (const key of op.unset || []) unsetPath(value, key);
   return { changed: 1, id: value.id, kind: found[0].kind };
@@ -2133,13 +2283,26 @@ function opTrackRemove(doc, op) {
   return { changed: 1, removed: track.name, index, segments: (track.segments || []).length };
 }
 
-function opTimelineSet(doc, op) {
+/** Past the last clip (or the parked leftover) by more than this, a duration is a unit slip. */
+const DURATION_HEADROOM_US = 60_000_000;
+
+function opTimelineSet(doc, op, context = {}) {
   if (Object.hasOwn(op, 'exportRange')) {
     if (op.exportRange !== null) throw new CapcutError('timeline.set exportRange only supports null (clear selection).', { code: 'BAD_EXPORT_RANGE' });
     doc.config ||= {};
     doc.config.export_range = null;
   }
-  if (op.duration != null) doc.duration = normalizeUs(op.duration, 'duration');
+  if (op.duration != null || op.durationUs != null) {
+    const duration = normalizeUs(op.duration, 'duration', op.durationUs);
+    const parkedEnd = (context.shared?.preserved?.next || preservedRange(context.projectDir))?.end || 0;
+    const limit = Math.max(maxSegmentEndUs(doc), parkedEnd) + DURATION_HEADROOM_US;
+    if (duration > limit && op.force !== true) {
+      throw new CapcutError(`timeline.set: duration ${duration / 1e6}s is more than 60s past the last clip `
+        + `(${(limit - DURATION_HEADROOM_US) / 1e6}s). Durations are seconds (integers above 100000 are µs); `
+        + 'pass "force": true if the long tail is meant.', { code: 'DURATION_OUT_OF_RANGE', exitCode: 2 });
+    }
+    doc.duration = duration;
+  }
   if (op.fps != null) doc.fps = op.fps;
   if (op.canvas) doc.canvas_config = clone(op.canvas);
   if (op.name) doc.name = op.name;
@@ -2941,8 +3104,8 @@ export function applyOperations(doc, operations, context) {
     else if (op.op === 'material.clone') result = opMaterialClone(doc, op, context);
     else if (op.op === 'track.clone') result = opTrackClone(doc, op);
     else if (op.op === 'track.remove') result = opTrackRemove(doc, op);
-    else if (op.op === 'materials.dedupe') { const merged = dedupeMaterials(doc); result = { changed: merged.length, merged }; }
-    else if (op.op === 'timeline.set') result = opTimelineSet(doc, op);
+    else if (op.op === 'materials.dedupe') { const merged = dedupeMaterials(doc); result = { changed: merged.length, merged: [...merged], unmerged: merged.unmerged }; }
+    else if (op.op === 'timeline.set') result = opTimelineSet(doc, op, context);
     else if (op.op === 'layout.apply') result = opLayoutApply(doc, op, context);
     else if (op.op === 'layout.background') result = opLayoutBackground(doc, op, context);
     else if (op.op === 'layout.broll') result = opLayoutBroll(doc, op, context);
@@ -2990,11 +3153,17 @@ export function applyOperations(doc, operations, context) {
 }
 
 const SIDECAR_RELATIVE = path.join('.capcutctl', 'created.json');
+/**
+ * `build`'s record of the plan it last applied. It travels with every snapshot: restoring a
+ * pre-build snapshot used to keep it, so the next build said "up to date" over a draft the
+ * restore had just emptied.
+ */
+export const BUILD_STATE_RELATIVE = '.capcutctl/build.json';
 
 function snapshotFiles(projectDir) {
   const files = new Set();
   for (const group of documentGroups(projectDir)) for (const file of group.mirrors) if (fs.existsSync(file)) files.add(file);
-  for (const relative of ['draft_meta_info.json', 'draft_virtual_store.json', 'Timelines/project.json', SIDECAR_RELATIVE]) {
+  for (const relative of ['draft_meta_info.json', 'draft_virtual_store.json', 'Timelines/project.json', SIDECAR_RELATIVE, BUILD_STATE_RELATIVE]) {
     const file = managedFile(projectDir, relative);
     if (fs.existsSync(file)) files.add(file);
   }
@@ -3006,6 +3175,7 @@ export function createSnapshot(projectDir, label = 'snapshot') {
   fs.mkdirSync(root, { recursive: true });
   const managed = documentGroups(projectDir).flatMap(group => group.mirrors);
   const sidecar = path.join(projectDir, SIDECAR_RELATIVE);
+  const buildState = path.join(projectDir, BUILD_STATE_RELATIVE);
   const manifest = {
     version: 1,
     createdAt: new Date().toISOString(),
@@ -3013,7 +3183,8 @@ export function createSnapshot(projectDir, label = 'snapshot') {
     files: [],
     absent: [
       ...managed.filter(file => !fs.existsSync(file)).map(file => path.relative(projectDir, file)),
-      ...(!fs.existsSync(sidecar) ? [SIDECAR_RELATIVE] : [])
+      ...(!fs.existsSync(sidecar) ? [SIDECAR_RELATIVE] : []),
+      ...(!fs.existsSync(buildState) ? [BUILD_STATE_RELATIVE] : [])
     ]
   };
   for (const file of snapshotFiles(projectDir)) {
@@ -3039,7 +3210,7 @@ function snapshotRestoreFiles(snapshotDir, projectDir) {
   const destinationFor = relative => {
     const pieces = typeof relative === 'string' ? relative.split('/') : [];
     const allowed = LIVE_FILE_NAMES.includes(relative)
-      || ['draft_meta_info.json', 'draft_virtual_store.json', 'Timelines/project.json', '.capcutctl/created.json'].includes(relative)
+      || ['draft_meta_info.json', 'draft_virtual_store.json', 'Timelines/project.json', '.capcutctl/created.json', BUILD_STATE_RELATIVE].includes(relative)
       || (pieces.length === 3 && pieces[0] === 'Timelines' && pieces[1] && pieces[1] !== '.'
         && pieces[1] !== '..' && !/[\\\0]/.test(pieces[1]) && LIVE_FILE_NAMES.includes(pieces[2]));
     if (!allowed || seen.has(relative)) {
@@ -3058,17 +3229,48 @@ function snapshotRestoreFiles(snapshotDir, projectDir) {
     }
     return { destination, data };
   });
-  return { files, absent };
+  // A snapshot from before build.json was captured says nothing about it. Deleting the live
+  // one would let `shots` apply twice; keeping it whole would keep the stale "up to date".
+  const legacyBuildState = !manifest.files.some(item => item?.relative === BUILD_STATE_RELATIVE)
+    && !(manifest.absent || []).includes(BUILD_STATE_RELATIVE);
+  return { files, absent, legacyBuildState };
 }
 
 function restoreSnapshot(snapshotDir, projectDir, prepared = null) {
-  const { files, absent } = prepared || snapshotRestoreFiles(snapshotDir, projectDir);
+  const { files, absent, legacyBuildState } = prepared || snapshotRestoreFiles(snapshotDir, projectDir);
   for (const destination of absent) {
     if (fs.existsSync(destination)) fs.unlinkSync(destination);
   }
   for (const { destination, data } of files) {
     fs.mkdirSync(path.dirname(destination), { recursive: true });
-    fs.writeFileSync(destination, data);
+    writeFileAtomicSync(destination, data);
+  }
+  if (legacyBuildState) {
+    const file = managedFile(projectDir, BUILD_STATE_RELATIVE);
+    let state = null;
+    try { state = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : null; } catch { state = null; }
+    if (state && typeof state === 'object' && 'hash' in state) {
+      delete state.hash;
+      writeFileAtomicSync(file, stableJson(state));
+    }
+  }
+}
+
+/**
+ * Replace a file in one rename, so a crash or a CapCut read mid-restore sees the old bytes or
+ * the new ones, never a truncated draft.
+ */
+export function writeFileAtomicSync(file, data) {
+  const temp = `${file}.capcutctl-${uuid()}.tmp`;
+  try {
+    const fd = fs.openSync(temp, 'wx');
+    try {
+      fs.writeFileSync(fd, data);
+      fs.fsyncSync(fd);
+    } finally { fs.closeSync(fd); }
+    fs.renameSync(temp, file);
+  } finally {
+    try { if (fs.existsSync(temp)) fs.unlinkSync(temp); } catch {}
   }
 }
 
@@ -3344,10 +3546,12 @@ function stageWrites(writes, transactionId) {
   }
 }
 
-function commitStaged(staged) {
+/** `renamed` collects every destination actually replaced, so a rollback touches only those. */
+function commitStaged(staged, renamed = []) {
   let writes = 0;
   for (const item of staged) {
     fs.renameSync(item.temp, item.file);
+    renamed.push(path.resolve(item.file));
     writes++;
     if (process.env.CAPCUTCTL_FAIL_AFTER_WRITES && writes >= Number(process.env.CAPCUTCTL_FAIL_AFTER_WRITES)) {
       throw new Error('Injected transaction failure.');
@@ -3378,15 +3582,40 @@ function captureRollbackJournal(files) {
   });
 }
 
-function restoreRollbackJournal(journal) {
+/** `only` (resolved paths) limits the restore to destinations the commit actually replaced. */
+function restoreRollbackJournal(journal, only = null) {
+  const wanted = only ? new Set(only) : null;
   for (const item of journal || []) {
+    if (wanted && !wanted.has(item.file)) continue;
     if (item.existed) {
       fs.mkdirSync(path.dirname(item.file), { recursive: true });
-      fs.writeFileSync(item.file, item.data);
+      writeFileAtomicSync(item.file, item.data);
     } else if (fs.existsSync(item.file)) {
       fs.unlinkSync(item.file);
     }
   }
+}
+
+/**
+ * Undo a transaction. Before the first rename nothing live was touched, so nothing live is
+ * rewritten: the snapshot taken for it is dropped instead (it describes a commit that never
+ * happened). After it, the snapshot and the journal put back every replaced destination.
+ */
+function rollBackCommit({ commitAttempted, snapshot, journal, renamed, projectDir }) {
+  let rollbackError = null;
+  if (!commitAttempted) {
+    if (snapshot) try { fs.rmSync(snapshot, { recursive: true, force: true }); } catch (caught) { rollbackError = caught; }
+    return { rollbackError };
+  }
+  if (snapshot) {
+    try { restoreSnapshot(snapshot, projectDir); }
+    catch (caught) { rollbackError = caught; }
+  }
+  if (journal) {
+    try { restoreRollbackJournal(journal, renamed); }
+    catch (caught) { rollbackError = rollbackError || caught; }
+  }
+  return { rollbackError };
 }
 
 function pendingSidecarRange(sidecarWrite, projectDir) {
@@ -3423,7 +3652,9 @@ export function executeTransaction(projectDir, mutator, {
   let snapshot = null;
   let journal = null;
   let staged = [];
+  const renamed = [];
   let commitAttempted = false;
+  let preexisting = new Set();
   try {
     const state = loadProject(projectDir);
     const working = state.groups.map(group => ({ ...group, doc: clone(group.doc) }));
@@ -3440,7 +3671,21 @@ export function executeTransaction(projectDir, mutator, {
       parked,
       duplicateBaseline: knownPreset3DuplicateBaseline(projectDir),
     }));
-    const errors = validation.filter(item => item.level === 'error');
+    let errors = validation.filter(item => item.level === 'error');
+    if (errors.length) throw new CapcutError(`Transaction failed validation with ${errors.length} error(s).`, { code: 'VALIDATION_FAILED', details: errors });
+    // The checks doctor runs on the whole set used to run only AFTER the write, so a dry run
+    // passed and the real apply rolled back. Run them here, against what the project already
+    // had: an error the edit introduced refuses now; one the project already carried (an
+    // orphaned transition from an older polish) is passed through as a warning, so a volume
+    // tweak is not blocked by it. A timeline id mismatch is never waved through.
+    preexisting = new Set(documentSetIssues(state.groups, state.activeTimelineId)
+      .filter(item => item.level === 'error' && item.code !== 'TIMELINE_ID_MISMATCH')
+      .map(setIssueKey));
+    for (const item of documentSetIssues(working, state.activeTimelineId)) {
+      if (item.level !== 'error') continue;
+      validation.push(preexisting.has(setIssueKey(item)) ? { ...item, level: 'warning', preexisting: true } : item);
+    }
+    errors = validation.filter(item => item.level === 'error');
     if (errors.length) throw new CapcutError(`Transaction failed validation with ${errors.length} error(s).`, { code: 'VALIDATION_FAILED', details: errors });
     const changedGroups = working.filter((group, index) => forceWriteAll || stableJson(group.doc) !== stableJson(state.groups[index].doc));
     const writes = [];
@@ -3478,29 +3723,21 @@ export function executeTransaction(projectDir, mutator, {
     const transactionId = uuid();
     staged = stageWrites(writes, transactionId);
     commitAttempted = true;
-    commitStaged(staged);
+    commitStaged(staged, renamed);
     const post = doctor(projectDir, { checkFiles: true });
-    if (post.errors) throw new CapcutError(`Post-write validation found ${post.errors} errors.`, { code: 'POST_WRITE_VALIDATION', details: post.issues });
+    const newErrors = post.issues.filter(item => item.level === 'error' && !preexisting.has(setIssueKey(item)));
+    if (newErrors.length) throw new CapcutError(`Post-write validation found ${newErrors.length} errors.`, { code: 'POST_WRITE_VALIDATION', details: post.issues });
     return { ...preview, committed: true, snapshot, postDoctor: post };
   } catch (error) {
-    let rollbackError = null;
-    if (commitAttempted || snapshot) {
-      if (snapshot) {
-        try { restoreSnapshot(snapshot, projectDir); }
-        catch (caught) { rollbackError = caught; }
-      }
-      if (journal) {
-        try { restoreRollbackJournal(journal); }
-        catch (caught) { rollbackError = rollbackError || caught; }
-      }
-    }
     if (!commitAttempted && !snapshot) throw error;
+    const { rollbackError } = rollBackCommit({ commitAttempted, snapshot, journal, renamed, projectDir });
     const cause = error instanceof CapcutError
       ? { code: error.code, message: error.message, details: error.details }
       : { message: error?.message || String(error) };
     throw new CapcutError(`Transaction rolled back: ${error.message}`, {
       code: 'ROLLED_BACK',
-      details: { snapshot, cause, ...(rollbackError ? { rollbackError: rollbackError.message } : {}) }
+      details: { snapshot: commitAttempted ? snapshot : null, restored: commitAttempted, cause,
+        ...(rollbackError ? { rollbackError: rollbackError.message } : {}) }
     });
   } finally {
     cleanStaged(staged);
@@ -3524,6 +3761,7 @@ export function commitProjectFiles(projectDir, { writes = [], removes = [] } = {
   let snapshot = null;
   let journal = null;
   const staged = [];
+  const renamed = [];
   let commitAttempted = false;
   try {
     if (check) check();
@@ -3542,22 +3780,25 @@ export function commitProjectFiles(projectDir, { writes = [], removes = [] } = {
       if (write.json) readJson(temp);
     }
     commitAttempted = true;
-    commitStaged(staged);
-    for (const file of removes) if (fs.existsSync(file)) fs.unlinkSync(file);
+    commitStaged(staged, renamed);
+    for (const file of removes) {
+      if (!fs.existsSync(file)) continue;
+      renamed.push(path.resolve(file));
+      fs.unlinkSync(file);
+    }
     const post = doctor(projectDir, { checkFiles: true });
     if (post.errors) throw new CapcutError(`Post-write validation found ${post.errors} errors.`, { code: 'POST_WRITE_VALIDATION', details: post.issues });
     return { committed: true, snapshot, postDoctor: post };
   } catch (error) {
     if (!commitAttempted && !snapshot) throw error;
-    let rollbackError = null;
-    if (snapshot) try { restoreSnapshot(snapshot, projectDir); } catch (caught) { rollbackError = caught; }
-    if (journal) try { restoreRollbackJournal(journal); } catch (caught) { rollbackError = rollbackError || caught; }
+    const { rollbackError } = rollBackCommit({ commitAttempted, snapshot, journal, renamed, projectDir });
     const cause = error instanceof CapcutError
       ? { code: error.code, message: error.message, details: error.details }
       : { message: error?.message || String(error) };
     throw new CapcutError(`Commit rolled back: ${error.message}`, {
       code: 'ROLLED_BACK',
-      details: { snapshot, cause, ...(rollbackError ? { rollbackError: rollbackError.message } : {}) }
+      details: { snapshot: commitAttempted ? snapshot : null, restored: commitAttempted, cause,
+        ...(rollbackError ? { rollbackError: rollbackError.message } : {}) }
     });
   } finally {
     cleanStaged(staged);
@@ -3621,16 +3862,50 @@ export function applySpec(projectDir, spec, options = {}) {
   return tx;
 }
 
-export function restoreProjectSnapshot(projectDir, snapshotNameOrPath, options = {}) {
-  assertCapcutClosed({ forceRunning: options.forceRunning || options.dryRun, probe: options.processProbe || capcutProcess });
+/**
+ * A snapshot by path, by exact name, or by the label it was created with: `pre-build` picks
+ * the newest `<timestamp>-pre-build`. Shared by `restore --snapshot` and `diff --snapshot`.
+ * Always inside this project's history, or SNAPSHOT_SCOPE.
+ */
+export function resolveSnapshotDir(projectDir, nameOrPath) {
   const history = path.resolve(projectDir, '.capcutctl', 'history');
-  const snapshotDir = path.resolve(snapshotNameOrPath.includes(path.sep) ? snapshotNameOrPath : path.join(history, snapshotNameOrPath));
+  const raw = String(nameOrPath ?? '');
+  let snapshotDir;
+  let resolvedFrom;
+  if (!raw) throw new CapcutError('A snapshot name or label is required.', { code: 'SNAPSHOT_NOT_FOUND', exitCode: 2 });
+  if (raw.includes(path.sep) || raw.includes('/')) {
+    snapshotDir = path.resolve(raw);
+    resolvedFrom = 'path';
+  } else if (fs.existsSync(path.join(history, raw))) {
+    snapshotDir = path.resolve(history, raw);
+    resolvedFrom = 'name';
+  } else {
+    const label = raw.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const snapshots = listSnapshots(projectDir);
+    const hit = snapshots.find(entry => entry.name.endsWith(`-${label}`));
+    if (!hit) {
+      const newest = snapshots.slice(0, 5).map(entry => entry.name);
+      throw new CapcutError(`Snapshot not found: ${raw}.${newest.length ? ` Newest: ${newest.join(', ')}` : ' This project has no snapshots.'}`,
+        { code: 'SNAPSHOT_NOT_FOUND', exitCode: 2, details: { candidates: newest } });
+    }
+    snapshotDir = path.resolve(hit.path);
+    resolvedFrom = 'label';
+  }
   const relative = path.relative(history, snapshotDir);
   if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
     throw new CapcutError('Snapshot must be a named entry inside this project\'s .capcutctl/history directory.', { code: 'SNAPSHOT_SCOPE', exitCode: 2 });
   }
+  return { snapshotDir, name: path.basename(snapshotDir), resolvedFrom };
+}
+
+export function restoreProjectSnapshot(projectDir, snapshotNameOrPath, options = {}) {
+  assertCapcutClosed({ forceRunning: options.forceRunning || options.dryRun, probe: options.processProbe || capcutProcess });
+  const { snapshotDir, name: snapshotName, resolvedFrom } = resolveSnapshotDir(projectDir, snapshotNameOrPath);
   const manifestFile = path.join(snapshotDir, 'manifest.json');
   if (options.dryRun) {
+    if (!fs.existsSync(manifestFile)) {
+      throw new CapcutError(`Snapshot not found: ${snapshotNameOrPath}`, { code: 'SNAPSHOT_NOT_FOUND', exitCode: 2 });
+    }
     managedFile(projectDir, path.relative(projectDir, manifestFile));
     const prepared = snapshotRestoreFiles(snapshotDir, projectDir);
     const sidecar = prepared.files.find(item => item.destination === path.resolve(projectDir, SIDECAR_RELATIVE));
@@ -3639,7 +3914,7 @@ export function restoreProjectSnapshot(projectDir, snapshotNameOrPath, options =
       .flatMap(item => validateDocument(JSON.parse(item.data), { file: item.destination, checkFiles: false, projectDir, parked }));
     const errors = validation.filter(item => item.level === 'error');
     if (errors.length) throw new CapcutError(`Snapshot failed validation with ${errors.length} error(s).`, { code: 'RESTORE_VALIDATION', details: errors });
-    return { dryRun: true, restored: false, snapshot: snapshotDir,
+    return { dryRun: true, restored: false, snapshot: snapshotDir, snapshotName, resolvedFrom,
       files: prepared.files.map(item => item.destination), absent: prepared.absent, validation };
   }
   const lock = acquireLock(projectDir);
@@ -3657,6 +3932,7 @@ export function restoreProjectSnapshot(projectDir, snapshotNameOrPath, options =
     journal = captureRollbackJournal([
       ...prepared.files.map(item => item.destination),
       ...prepared.absent,
+      ...(prepared.legacyBuildState ? [managedFile(projectDir, BUILD_STATE_RELATIVE)] : []),
     ]);
     if (options.backup !== false) rescue = createSnapshot(projectDir, options.label || 'before-restore');
     // Restore into THIS projectDir, not the absolute path baked into the manifest.
@@ -3666,14 +3942,23 @@ export function restoreProjectSnapshot(projectDir, snapshotNameOrPath, options =
     restoreSnapshot(snapshotDir, projectDir, prepared);
     const post = doctor(projectDir, { checkFiles: true });
     if (post.errors) throw new CapcutError(`Restored snapshot has ${post.errors} validation error(s).`, { code: 'RESTORE_VALIDATION', details: post.issues });
-    return { restored: snapshotDir, rescue, postDoctor: post };
+    return { restored: snapshotDir, snapshotName, resolvedFrom, rescue, postDoctor: post };
   } catch (error) {
-    if (rescue) restoreSnapshot(rescue, projectDir);
-    if (journal) restoreRollbackJournal(journal);
+    // The journal must run even when the rescue restore throws: it is the exact bytes from
+    // before this restore began, and a half-applied rescue is the state it exists to undo.
+    let rollbackError = null;
+    if (rescue) {
+      try {
+        if (process.env.CAPCUTCTL_FAIL_RESCUE_RESTORE) throw new Error('Injected rescue restore failure.');
+        restoreSnapshot(rescue, projectDir);
+      } catch (caught) { rollbackError = caught; }
+    }
+    if (journal) try { restoreRollbackJournal(journal); } catch (caught) { rollbackError = rollbackError || caught; }
     const cause = error instanceof CapcutError
       ? { code: error.code, message: error.message, details: error.details }
       : { message: error?.message || String(error) };
-    throw new CapcutError(`Restore rolled back: ${error.message}`, { code: 'RESTORE_ROLLED_BACK', details: { rescue, cause } });
+    throw new CapcutError(`Restore rolled back: ${error.message}`, { code: 'RESTORE_ROLLED_BACK',
+      details: { rescue, cause, ...(rollbackError ? { rollbackError: rollbackError.message } : {}) } });
   } finally {
     releaseLock(lock);
   }
@@ -3685,9 +3970,17 @@ export function restoreProjectSnapshot(projectDir, snapshotNameOrPath, options =
  * CONFLICTING_MATERIAL_ID error even though every copy points at the same file. Collapse
  * them — but only when they are the same LOGICAL material, so a genuine id collision
  * between two different clips is still reported rather than silently merged.
+ *
+ * The loose test (same file, same frame size and type, duration within a frame) is only for
+ * MEDIA copies: both carry the same non-empty `path`. A speed, a text, a fade has no file to
+ * vouch for it, and two speeds 1.0 and 2.5 under one id agree on every loose key — merging
+ * them silently picked one clip's speed for both. Those merge only when byte-identical, the
+ * test validateDocument uses, so doctor still reports the rest. The returned array lists
+ * what merged; `.unmerged` lists the conflicting ids left for the human.
  */
 export function dedupeMaterials(doc) {
   const merged = [];
+  const unmerged = [];
   for (const [kind, values] of Object.entries(doc.materials || {})) {
     if (!Array.isArray(values)) continue;
     const seen = new Map();
@@ -3696,29 +3989,59 @@ export function dedupeMaterials(doc) {
       if (!value?.id) { keep.push(value); continue; }
       const prev = seen.get(value.id);
       if (!prev) { seen.set(value.id, value); keep.push(value); continue; }
+      const identical = JSON.stringify(prev) === JSON.stringify(value);
+      const media = typeof prev.path === 'string' && prev.path !== '' && prev.path === value.path;
       // CapCut's re-probe can also move a duration by a frame (135000000 vs 135033333 on one
       // stream-copied mp4); within a frame it is the same file, and the first copy is kept.
-      const same = ['path', 'width', 'height', 'type', 'name']
-        .every(k => JSON.stringify(prev[k]) === JSON.stringify(value[k]))
+      const sameMedia = media
+        && ['width', 'height', 'type', 'material_name']
+          .every(k => JSON.stringify(prev[k]) === JSON.stringify(value[k]))
         && (prev.duration === value.duration || Math.abs((prev.duration || 0) - (value.duration || 0)) <= 34_000);
-      if (same) merged.push({ kind, id: value.id });
-      else keep.push(value);                       // a real collision: leave it for doctor
+      if (identical || sameMedia) merged.push({ kind, id: value.id });
+      else {
+        keep.push(value);                          // a real collision: leave it for doctor
+        if (!unmerged.some(row => row.kind === kind && row.id === value.id)) unmerged.push({ kind, id: value.id });
+      }
     }
     doc.materials[kind] = keep;
   }
-  return merged;
+  return Object.assign(merged, { unmerged });
+}
+
+/**
+ * Dedupe leaves a genuine id collision for the human, so the transaction then refuses on it.
+ * Say how many are left and what to do, instead of only a validation dump.
+ */
+function withConflictHint(run) {
+  try { return run(); }
+  catch (error) {
+    const ids = new Set((Array.isArray(error?.details) ? error.details : [])
+      .filter(item => item?.code === 'CONFLICTING_MATERIAL_ID').map(item => item.id));
+    if (error instanceof CapcutError && error.code === 'VALIDATION_FAILED' && ids.size) {
+      error.message += ` ${ids.size} conflicting id(s) left for you (${[...ids].slice(0, 5).join(', ')}): `
+        + 'they differ beyond CapCut noise, so pick the right copy (material.patch with a speed/value selector) or clone one private.';
+    }
+    throw error;
+  }
 }
 
 export function syncMirrors(projectDir, options = {}) {
   const merged = [];
-  const result = executeTransaction(projectDir, groups => {
+  const unmerged = [];
+  const result = withConflictHint(() => executeTransaction(projectDir, groups => {
+    merged.length = 0; unmerged.length = 0;
     for (const group of groups) {
       group.doc = clone(group.doc);
-      if (options.dedupe !== false) merged.push(...dedupeMaterials(group.doc).map(m => ({ ...m, group: group.name })));
+      if (options.dedupe !== false) {
+        const rows = dedupeMaterials(group.doc);
+        merged.push(...rows.map(m => ({ ...m, group: group.name })));
+        unmerged.push(...rows.unmerged.map(m => ({ ...m, group: group.name })));
+      }
     }
     return groups.map(group => ({ group: group.name, mirrors: group.mirrors }));
-  }, { ...options, forceWriteAll: true, label: options.label || 'sync' });
-  return { ...result, mergedDuplicateMaterials: merged.length, merged };
+  }, { ...options, forceWriteAll: true, label: options.label || 'sync' }));
+  return { ...result, mergedDuplicateMaterials: merged.length, merged,
+    conflictingMaterialIds: unmerged.length, unmerged };
 }
 
 /**
@@ -3728,11 +4051,13 @@ export function syncMirrors(projectDir, options = {}) {
  */
 export function repairProject(projectDir, options = {}) {
   const record = readMetaRecord(projectDir);
-  const rows = { merged: [], restored: [], clamped: [], unclamped: [] };
-  const result = executeTransaction(projectDir, groups => {
+  const rows = { merged: [], unmerged: [], restored: [], clamped: [], unclamped: [] };
+  const result = withConflictHint(() => executeTransaction(projectDir, groups => {
     for (const group of groups) {
       const tag = row => ({ ...row, group: group.name });
-      rows.merged.push(...dedupeMaterials(group.doc).map(tag));
+      const deduped = dedupeMaterials(group.doc);
+      rows.merged.push(...deduped.map(tag));
+      rows.unmerged.push(...deduped.unmerged.map(tag));
       rows.restored.push(...restoreMeta(group.doc, record).map(tag));
       let principalIndex = null;
       try { principalIndex = principalTrack(group.doc).index; } catch { /* no principal: clamp nothing on it */ }
@@ -3741,7 +4066,7 @@ export function repairProject(projectDir, options = {}) {
       rows.unclamped.push(...left.map(tag));
     }
     return rows;
-  }, { ...options, forceWriteAll: true, label: options.label || 'repair' });
+  }, { ...options, forceWriteAll: true, label: options.label || 'repair' }));
   return { ...result, repaired: { merged: rows.merged.length, restored: rows.restored.length,
     clamped: rows.clamped.length, unclamped: rows.unclamped.length }, ...rows };
 }

@@ -132,7 +132,8 @@ Usage:
                       — the project's creative log: rejected looks and why, the accepted look, decisions,
                         outstanding notes. Kept in <project>/.capcutctl/notes.json, outside snapshots,
                         so it survives restore, compaction and new sessions. Read --brief first each round.
-  capcutctl restore --project NAME_OR_PATH --snapshot NAME [--force-running] [--no-backup]
+  capcutctl restore --project NAME_OR_PATH --snapshot NAME|LABEL [--force-running] [--no-backup]
+                      — LABEL picks the newest snapshot named <timestamp>-LABEL (e.g. --snapshot pre-build).
   capcutctl sync --project NAME_OR_PATH [--dry-run] [--force-running] [--no-backup]
   capcutctl stage start   --project NAME [--dry-run]
   capcutctl stage status  --project NAME
@@ -216,7 +217,7 @@ Usage:
                     [--resolution 360x640|--native] [--no-cache] [--no-grade]
                       — lightweight streamed proxy; defaults to 360x640 and never writes
                         one PNG per frame. Use qa for bounded seam/pixel evidence.
-  capcutctl diff --project NAME --against NAME|--snapshot NAME [--allow ID|track:NAME[,…]]
+  capcutctl diff --project NAME --against NAME|--snapshot NAME|LABEL [--allow ID|track:NAME[,…]]
                       — what changed. --allow proves a scoped revision stayed in scope: every
                         change outside those segment ids / tracks is listed with both values
                         under scope.outOfScope, and the command exits 1.
@@ -537,7 +538,8 @@ function printDoctor(report, asJson) {
   if (fix?.error) emit(`Repair failed [${fix.error.code}]: ${fix.error.message}\n`);
   else if (fix) {
     emit(`Repair${fix.dryRun ? ' (dry run)' : ''}: merged ${fix.merged} duplicate id(s), restored ${fix.restored} key(s), `
-      + `clamped ${fix.clamped} clip(s)${fix.unclamped ? `, ${fix.unclamped} overrun(s) left for you (principal track)` : ''}.\n`);
+      + `clamped ${fix.clamped} clip(s)${fix.unclamped ? `, ${fix.unclamped} overrun(s) left for you (principal track)` : ''}`
+      + `${fix.details?.unmerged?.length ? `, ${fix.details.unmerged.length} conflicting id(s) left for you` : ''}.\n`);
   }
   emit(`Project: ${report.project}\nActive timeline: ${report.activeTimelineId || 'root only'}\nErrors: ${report.errors}  Warnings: ${report.warnings}\n`);
   for (const item of report.issues) emit(`${item.level === 'error' ? 'ERROR' : 'WARN '} ${item.code}: ${item.message}\n`);
@@ -1304,7 +1306,7 @@ export async function main(argv, dependencies = {}) {
         const fixed = repairProject(projectDir, { dryRun: Boolean(args.dryRun), forceRunning: Boolean(args.forceRunning),
           backup: !args.noBackup, label: 'doctor-fix' });
         repair = { dryRun: fixed.dryRun, committed: fixed.committed, snapshot: fixed.snapshot, ...fixed.repaired,
-          details: { merged: fixed.merged, restored: fixed.restored, clamped: fixed.clamped, unclamped: fixed.unclamped } };
+          details: { merged: fixed.merged, unmerged: fixed.unmerged, restored: fixed.restored, clamped: fixed.clamped, unclamped: fixed.unclamped } };
       } catch (error) {
         if (error.code === 'CAPCUT_RUNNING' || error.code === 'CAPCUT_PROCESS_UNKNOWN') throw error;
         repair = { error: { code: error.code, message: error.message, details: error.details } };
@@ -1348,7 +1350,7 @@ export async function main(argv, dependencies = {}) {
   };
   if (command === 'sync') return print(syncMirrors(projectDir, options), true);
   if (command === 'restore') {
-    if (!args.snapshot) throw new CapcutError('restore requires --snapshot NAME.', { exitCode: 2 });
+    if (!args.snapshot) throw new CapcutError('restore requires --snapshot NAME|LABEL.', { exitCode: 2 });
     return print(restoreProjectSnapshot(projectDir, args.snapshot, options), true);
   }
   if (command === 'scenes') {
@@ -2310,15 +2312,10 @@ export async function main(argv, dependencies = {}) {
     return;
   }
   if (command === 'diff') {
-    const { listSnapshots } = await import('./core.mjs');
+    const { resolveSnapshotDir } = await import('./core.mjs');
     const { summarizeProject, diffSummaries } = await import('./diff.mjs');
     let otherDir = args.against ? resolveProject(args.against, root) : null;
-    if (args.snapshot && !otherDir) {
-      const snaps = listSnapshots(projectDir);
-      const hit = snaps.find(s => (s.name || s).includes(String(args.snapshot)));
-      if (!hit) throw new CapcutError(`no snapshot matching ${args.snapshot}`, { exitCode: 2 });
-      otherDir = hit.path || hit;
-    }
+    if (args.snapshot && !otherDir) otherDir = resolveSnapshotDir(projectDir, String(args.snapshot)).snapshotDir;
     if (!otherDir) throw new CapcutError('diff requires --against NAME or --snapshot NAME', { exitCode: 2 });
     const before = summarizeProject(otherDir);
     const after = summarizeProject(projectDir);

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { readJson, stableJson } from '../src/core.mjs';
+import { listSnapshots, readJson, restoreProjectSnapshot, stableJson } from '../src/core.mjs';
 import { resolveAnchor, resolveAnchors } from '../src/anchors.mjs';
 import { sourceToTimeline } from '../src/signature.mjs';
 import { gateReport } from '../src/gate.mjs';
@@ -141,4 +141,83 @@ test('harvest --profile measures the drafts it is given and writes only what the
   assert.equal(profile.seams.hardCutsByDefault, true, 'no transitions in the drafts');
   assert.deepEqual(profile.provenance.drafts, [path.basename(dir)]);
   assert.equal(profile.tokens, undefined, 'tokens are not guessed from drafts');
+});
+
+// ---- build state travels with snapshots ----------------------------------------------------
+
+const quiet = extra => normalizePlan({ version: 1, logos: false, layout: false, camera: { stress: false },
+  sound: { seams: false, loudness: false }, ...extra });
+const descs = dir => docOf(dir).tracks.flatMap(tr => tr.segments || []).map(s => s.desc);
+const earliest = dir => listSnapshots(dir).at(-1).name;
+
+test('build is not "up to date" after a restore took its outputs away', async () => {
+  const dir = buildProject();
+  const plan = quiet({ endcard: {} });
+  await runBuild(dir, plan, { forceRunning: true });
+  assert.ok(descs(dir).includes('sig:endcard'));
+  assert.equal((await runBuild(dir, plan, { forceRunning: true })).upToDate, true, 'two builds in a row stay a no-op');
+  restoreProjectSnapshot(dir, earliest(dir), { forceRunning: true });
+  assert.ok(!descs(dir).includes('sig:endcard'));
+  assert.equal(fs.existsSync(path.join(dir, '.capcutctl', 'build.json')), false, 'the pre-build snapshot had no build state');
+  const again = await runBuild(dir, plan, { forceRunning: true });
+  assert.notEqual(again.upToDate, true);
+  assert.ok(descs(dir).includes('sig:endcard'), 'the endcard is back');
+});
+
+test('build rebuilds when its recorded outputs are gone even if the hash still matches', async () => {
+  const dir = buildProject();
+  const plan = quiet({ endcard: {} });
+  await runBuild(dir, plan, { forceRunning: true });
+  // A legacy snapshot (taken before build.json was captured) says nothing about build state:
+  // restore strips only the hash and keeps `shots`.
+  const snapshot = path.join(dir, '.capcutctl', 'history', earliest(dir));
+  const manifest = readJson(path.join(snapshot, 'manifest.json'));
+  manifest.absent = manifest.absent.filter(item => item !== '.capcutctl/build.json');
+  fs.writeFileSync(path.join(snapshot, 'manifest.json'), stableJson(manifest));
+  const stateFile = path.join(dir, '.capcutctl', 'build.json');
+  fs.writeFileSync(stateFile, stableJson({ ...readJson(stateFile), shots: 'kept-shots-key' }));
+  restoreProjectSnapshot(dir, path.basename(snapshot), { forceRunning: true });
+  const state = readJson(stateFile);
+  assert.equal(state.hash, undefined);
+  assert.equal(state.shots, 'kept-shots-key');
+
+  // A hash that matches but outputs that are gone (deleted by hand) also rebuilds.
+  const rebuilt = await runBuild(dir, plan, { forceRunning: true });
+  assert.notEqual(rebuilt.upToDate, true);
+  const outputs = readJson(stateFile).outputs;
+  assert.ok(outputs.length >= 1);
+  rewrite(dir, doc => { for (const tr of doc.tracks) tr.segments = (tr.segments || []).filter(s => !outputs.includes(s.id)); });
+  const missing = await runBuild(dir, plan, { forceRunning: true });
+  assert.notEqual(missing.upToDate, true);
+  assert.equal(missing.stages.reason, 'build outputs missing (restore?)');
+  assert.ok(descs(dir).includes('sig:endcard'));
+});
+
+test('shots re-apply after a restore to before them, without stacking', async () => {
+  const dir = buildProject();
+  const broll = path.join(path.dirname(dir), 'screen.mp4');
+  fs.writeFileSync(broll, 'screen');
+  const shots = path.join(path.dirname(dir), 'shots.json');
+  fs.writeFileSync(shots, JSON.stringify([{ decision: 'place', ops: [{ op: 'clip.add', media: broll, at: 1, duration: 2, src: 0,
+    track: 'broll', volume: 0, width: 1080, height: 1920, mediaDuration: 20_000_000 }] }]));
+  const plan = quiet({ shots });
+  const first = await runBuild(dir, plan, { forceRunning: true });
+  assert.equal(first.stages.shots.applied, 1);
+  const brolls = () => docOf(dir).tracks.filter(tr => tr.name === 'broll').flatMap(tr => tr.segments || []).length;
+  assert.equal(brolls(), 1);
+  restoreProjectSnapshot(dir, earliest(dir), { forceRunning: true });
+  assert.equal(brolls(), 0);
+  const again = await runBuild(dir, plan, { forceRunning: true });
+  assert.ok(again.stages.shots.applied > 0);
+  assert.equal(brolls(), 1, 'applied once, not stacked');
+
+  // A legacy restore keeps the shots key: a plain build trusts it, --force sees the clips are gone.
+  const stateFile = path.join(dir, '.capcutctl', 'build.json');
+  const kept = readJson(stateFile);
+  restoreProjectSnapshot(dir, earliest(dir), { forceRunning: true });
+  fs.writeFileSync(stateFile, stableJson({ ...kept, hash: undefined }));
+  assert.equal((await runBuild(dir, plan, { forceRunning: true })).stages.shots.applied, 0);
+  assert.equal(brolls(), 0);
+  assert.equal((await runBuild(dir, plan, { forceRunning: true, force: true })).stages.shots.applied, 1);
+  assert.equal(brolls(), 1);
 });

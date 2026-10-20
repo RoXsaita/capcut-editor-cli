@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { CapcutError, resolveMediaPath } from './core.mjs';
+import { CapcutError, resolveMediaPath, segmentsReferencing } from './core.mjs';
 import { isEphemeralPath } from './origin.mjs';
 import { brollWindows } from './polish.mjs';
 import { resolveClip, opReplaceMedia } from './add.mjs';
@@ -54,7 +54,7 @@ export function opBlurBroll(doc,op,context={}) {
   if(op.plan)return {changed:0,...plan};
   const {segment:s}=resolveClip(doc,{id:plan.id}),st={...s.source_timerange};
   for(const m of doc.materials.speeds||[]) if((s.extra_material_refs||[]).includes(m.id)
-    && doc.tracks.some(t=>t.segments.some(o=>o.id!==s.id&&(o.extra_material_refs||[]).includes(m.id)))) derivedFailure('The speed material is shared with another clip.');
+    && segmentsReferencing(doc,m.id).some(o=>o.segment.id!==s.id)) derivedFailure('The speed material is shared with another clip.');
   renderDerived(plan.output,['-ss',String(plan.start),'-t',String(plan.sourceDuration),'-i',plan.source,'-an','-vf',plan.filter,
     '-t',String(plan.duration),'-c:v','libx264','-crf','18','-pix_fmt','yuv420p','-movflags','+faststart'],context,plan);
   rescaleKeyframes(s,st.start,st.duration,0,s.target_timerange.duration);

@@ -16,6 +16,7 @@ import {
   closeCapcut,
   contentEndUs,
   createSnapshot,
+  dedupeMaterials,
   deepMerge,
   discoverOpenDraft,
   draftEndUs,
@@ -28,6 +29,7 @@ import {
   projectLockStatus,
   listSnapshots,
   readJson,
+  resolveSnapshotDir,
   restoreProjectSnapshot,
   sha256,
   stableJson,
@@ -1217,4 +1219,201 @@ test('a live lock is never reclaimed after a stale preflight check', () => {
   );
   assert.equal(fs.readFileSync(lock, 'utf8'), before);
   fs.unlinkSync(lock);
+});
+
+// ---- review 2026-10-19: transaction, materials, time units, snapshots -----------------------
+
+function rewriteMirrors(fx, mutate, dirs = [fx.project, fx.timelineDir]) {
+  for (const dir of dirs) {
+    const doc = readJson(path.join(dir, 'draft_info.json'));
+    mutate(doc);
+    for (const name of LIVE_FILE_NAMES) fs.writeFileSync(path.join(dir, name), stableJson(doc));
+  }
+}
+const withTransition = doc => { doc.materials.transitions = [{ id: 'TR1', type: 'transition', duration: 200_000 }]; };
+const withOrphan = doc => { withTransition(doc); doc.tracks[0].segments[0].extra_material_refs.push('TR1'); };
+const volumeSpec = value => ({ version: 1, operations: [{ op: 'segment.patch', selector: { id: 'SEGMENT-ONE' }, set: { volume: value } }] });
+const orphanSpec = { version: 1, operations: [{ op: 'segment.patch', selector: { id: 'SEGMENT-ONE' }, set: { extra_material_refs: ['MASK-ONE', 'TR1'] } }] };
+
+test('a transition orphaned before the edit is a preexisting warning, and the apply commits', () => {
+  const fx = fixture({ drift: false });
+  rewriteMirrors(fx, withOrphan);
+  assert.ok(doctor(fx.project).issues.some(item => item.code === 'TRANSITION_ORPHANED' && item.level === 'error'
+    && /capcutctl polish/.test(item.message)));
+  const dry = applySpec(fx.project, volumeSpec(0.5), { forceRunning: true, dryRun: true });
+  const orphan = dry.validation.filter(item => item.code === 'TRANSITION_ORPHANED');
+  assert.ok(orphan.length);
+  assert.ok(orphan.every(item => item.level === 'warning' && item.preexisting === true));
+  const real = applySpec(fx.project, volumeSpec(0.5), { forceRunning: true, backup: false });
+  assert.equal(real.committed, true);
+  assert.equal(readJson(path.join(fx.project, 'draft_info.json')).tracks[0].segments[0].volume, 0.5);
+  assert.deepEqual(listSnapshots(fx.project), [], 'no rollback snapshot left behind');
+});
+
+test('an edit that orphans a transition refuses at the dry run, not after the write', () => {
+  const fx = fixture({ drift: false });
+  rewriteMirrors(fx, withTransition);
+  for (const dryRun of [true, false]) {
+    assert.throws(() => applySpec(fx.project, orphanSpec, { forceRunning: true, dryRun }),
+      error => error.code === 'VALIDATION_FAILED' && error.details.some(item => item.code === 'TRANSITION_ORPHANED'));
+  }
+  assert.deepEqual(readJson(path.join(fx.project, 'draft_info.json')).tracks[0].segments[0].extra_material_refs, ['MASK-ONE']);
+});
+
+test('a dry run that passes never rolls back at commit (doctor-only checks run before the write)', () => {
+  const variants = {
+    plain: () => {},
+    orphaned: fx => rewriteMirrors(fx, withOrphan),
+    transitionMaterial: fx => rewriteMirrors(fx, withTransition),
+    timelineIdMismatch: fx => rewriteMirrors(fx, doc => { doc.id = 'SOME-OTHER-TIMELINE'; }, [fx.project]),
+  };
+  for (const [name, setup] of Object.entries(variants)) {
+    for (const spec of [volumeSpec(0.3), orphanSpec]) {
+      const fx = fixture({ drift: false });
+      setup(fx);
+      let dryError = null;
+      try { applySpec(fx.project, spec, { forceRunning: true, dryRun: true }); } catch (error) { dryError = error; }
+      if (dryError) {
+        assert.equal(dryError.code, 'VALIDATION_FAILED', `${name}: ${dryError.message}`);
+        assert.throws(() => applySpec(fx.project, spec, { forceRunning: true }), error => error.code === 'VALIDATION_FAILED');
+      } else {
+        const result = applySpec(fx.project, spec, { forceRunning: true });
+        assert.ok(result.committed || result.changedFiles.length === 0, `${name} committed (or had nothing to write)`);
+      }
+      if (name === 'timelineIdMismatch' && spec !== orphanSpec) {
+        assert.ok(dryError?.details.some(item => item.code === 'TIMELINE_ID_MISMATCH'), 'reported at the dry run, still blocking');
+      }
+    }
+  }
+});
+
+test('dedupe merges loosely only media copies; speeds and texts must be byte-identical', () => {
+  const doc = {
+    materials: {
+      speeds: [
+        { id: 'S1', type: 'speed', speed: 1, mode: 0 }, { id: 'S1', type: 'speed', speed: 2.5, mode: 0 },
+        { id: 'S2', type: 'speed', speed: 1, mode: 0 }, { id: 'S2', type: 'speed', speed: 1, mode: 0 },
+      ],
+      texts: [{ id: 'T1', type: 'text', content: 'one' }, { id: 'T1', type: 'text', content: 'two' }],
+    },
+    tracks: [],
+  };
+  const merged = dedupeMaterials(doc);
+  assert.deepEqual([...merged], [{ kind: 'speeds', id: 'S2' }]);
+  assert.deepEqual(merged.unmerged, [{ kind: 'speeds', id: 'S1' }, { kind: 'texts', id: 'T1' }]);
+  assert.equal(validateDocument(doc, { checkFiles: false }).filter(item => item.code === 'CONFLICTING_MATERIAL_ID').length, 2);
+});
+
+test('sync leaves a conflicting speed for the human and says so; doctor still reports it', () => {
+  const fx = fixture({ drift: false });
+  rewriteMirrors(fx, doc => {
+    doc.materials.speeds = [{ id: 'SP', type: 'speed', speed: 1, mode: 0 }, { id: 'SP', type: 'speed', speed: 2.5, mode: 0 }];
+  });
+  assert.throws(() => syncMirrors(fx.project, { forceRunning: true }),
+    error => error.code === 'VALIDATION_FAILED' && /1 conflicting id\(s\) left for you \(SP\)/.test(error.message));
+  assert.ok(doctor(fx.project).issues.some(item => item.code === 'CONFLICTING_MATERIAL_ID' && item.id === 'SP'));
+});
+
+test('spec times refuse the ambiguous range; explicit µs and raw timeranges are integers', () => {
+  const doc = () => ({ duration: 10_000_000, fps: 30, materials: { videos: [{ id: 'V', type: 'video', duration: 60_000_000 }] },
+    tracks: [{ id: 'T', type: 'video', flag: 2, segments: [{ id: 'S', material_id: 'V', extra_material_refs: [],
+      target_timerange: { start: 0, duration: 2_000_000 }, source_timerange: { start: 0, duration: 2_000_000 } }] }] });
+  const run = op => { const d = doc(); applyOperations(d, [op], { group: 'root' }); return d; };
+  assert.throws(() => run({ op: 'segment.clone', from: { id: 'S' }, id: 'N', target: { start: 3, duration: 50000 } }),
+    error => error.code === 'BAD_TIME' && /50000 is read as seconds/.test(error.message));
+  const clone = run({ op: 'segment.clone', from: { id: 'S' }, id: 'N', target: { start: 3, durationUs: 33333 } });
+  assert.deepEqual(clone.tracks[0].segments.find(s => s.id === 'N').target_timerange, { start: 3_000_000, duration: 33333 });
+  assert.throws(() => run({ op: 'segment.clone', from: { id: 'S' }, id: 'N', target: { start: 3, durationUs: 1.5 } }),
+    error => error.code === 'BAD_TIME');
+  const patched = run({ op: 'segment.patch', selector: { id: 'S' }, set: { target_timerange: { start: 33333, duration: 1.167 } } });
+  assert.deepEqual(patched.tracks[0].segments[0].target_timerange, { start: 33333, duration: 1_167_000 });
+
+  const codes = duration => {
+    const d = doc();
+    d.tracks[0].segments[0].target_timerange.duration = duration;
+    d.tracks[0].segments[0].source_timerange.duration = duration;
+    return validateDocument(d, { checkFiles: false }).map(item => `${item.level}:${item.code}`);
+  };
+  assert.ok(codes(1.167).includes('error:NON_INTEGER_TIMERANGE'));
+  assert.ok(codes(2).includes('warning:SUBFRAME_SEGMENT'));
+  assert.ok(codes(0).includes('warning:ZERO_DURATION_SEGMENT'));
+  assert.deepEqual(codes(2_840_000).filter(code => /TIMERANGE|SEGMENT$/.test(code)), []);
+  assert.deepEqual(codes(33_333).filter(code => /SUBFRAME/.test(code)), [], 'one 30fps frame is not sub-frame');
+});
+
+test('a failure before the first rename leaves live drafts untouched and drops its snapshot', () => {
+  const fx = fixture({ drift: false });
+  const file = path.join(fx.project, 'draft_info.json');
+  const bytes = fs.readFileSync(file);
+  const inode = fs.statSync(file).ino;
+  assert.throws(() => executeTransaction(fx.project, groups => {
+    for (const group of groups) group.doc.name = 'changed';
+  }, { forceRunning: true,
+    extraWrites: () => [{ file: path.join(fx.project, '.capcutctl', 'invalid.json'), data: 'invalid JSON' }] }),
+  error => error.code === 'ROLLED_BACK' && error.details.restored === false
+    && error.details.snapshot === null && error.details.cause.code === 'INVALID_JSON');
+  assert.deepEqual(fs.readFileSync(file), bytes);
+  assert.equal(fs.statSync(file).ino, inode, 'the live draft was not rewritten');
+  assert.deepEqual(listSnapshots(fx.project), []);
+});
+
+test('a failing rescue restore still runs the journal and reports both errors', () => {
+  const fx = fixture({ drift: false });
+  const snapshot = createSnapshot(fx.project, 'broken');
+  const snapFile = path.join(snapshot, 'draft_info.json');
+  const broken = readJson(snapFile);
+  broken.tracks[0].segments[0].material_id = 'MISSING';
+  fs.writeFileSync(snapFile, stableJson(broken));
+  const manifest = readJson(path.join(snapshot, 'manifest.json'));
+  manifest.files.find(item => item.relative === 'draft_info.json').sha256 = sha256(fs.readFileSync(snapFile));
+  fs.writeFileSync(path.join(snapshot, 'manifest.json'), stableJson(manifest));
+  rewriteMirrors(fx, doc => { doc.tracks[0].segments[0].volume = 0.2; });
+  const before = fs.readFileSync(path.join(fx.project, 'draft_info.json'));
+  process.env.CAPCUTCTL_FAIL_RESCUE_RESTORE = '1';
+  try {
+    assert.throws(() => restoreProjectSnapshot(fx.project, snapshot, { forceRunning: true }),
+      error => error.code === 'RESTORE_ROLLED_BACK' && error.details.cause.code === 'RESTORE_VALIDATION'
+        && /Injected rescue restore/.test(error.details.rollbackError));
+  } finally {
+    delete process.env.CAPCUTCTL_FAIL_RESCUE_RESTORE;
+  }
+  assert.deepEqual(fs.readFileSync(path.join(fx.project, 'draft_info.json')), before);
+});
+
+test('the fingerprint sees re-pointed extras and renamed tracks in one document only', () => {
+  const drift = fx => doctor(fx.project).issues.some(item => item.code === 'DOCUMENT_DRIFT');
+  for (const mutate of [doc => { doc.tracks[0].segments[0].extra_material_refs = []; }, doc => { doc.tracks[0].name = 'renamed'; }]) {
+    const fx = fixture({ drift: false });
+    assert.equal(drift(fx), false);
+    rewriteMirrors(fx, mutate, [fx.timelineDir]);
+    assert.equal(drift(fx), true);
+  }
+  const fx = fixture({ drift: false });
+  const broll = path.join(fx.temp, 'screen.mp4');
+  fs.writeFileSync(broll, 'screen');
+  applySpec(fx.project, { version: 1, operations: [
+    { op: 'segment.clone', from: { id: 'SEGMENT-ONE' }, target: { start: 5, duration: 2 } },
+    { op: 'clip.add', media: broll, at: 1, duration: 2, src: 0, track: 'broll', volume: 0, width: 1080, height: 1920, mediaDuration: 20_000_000 },
+  ] }, { forceRunning: true });
+  assert.equal(drift(fx), false, 'applySpec keeps both documents structurally equal');
+});
+
+test('restore --snapshot LABEL resolves the newest <timestamp>-LABEL', async () => {
+  const fx = fixture({ drift: false });
+  const first = createSnapshot(fx.project, 'pre-x');
+  await new Promise(resolve => setTimeout(resolve, 5));
+  const second = createSnapshot(fx.project, 'pre-x');
+  const options = { dryRun: true, forceRunning: true };
+  const dry = restoreProjectSnapshot(fx.project, 'pre-x', options);
+  assert.equal(dry.snapshotName, path.basename(second));
+  assert.equal(dry.resolvedFrom, 'label');
+  assert.equal(path.basename(resolveSnapshotDir(fx.project, 'pre-x').snapshotDir), path.basename(second));
+  const exact = restoreProjectSnapshot(fx.project, path.basename(first), options);
+  assert.equal(exact.snapshotName, path.basename(first));
+  assert.equal(exact.resolvedFrom, 'name');
+  assert.throws(() => restoreProjectSnapshot(fx.project, 'never-made', options),
+    error => error.code === 'SNAPSHOT_NOT_FOUND' && error.details.candidates.length === 2);
+  assert.throws(() => restoreProjectSnapshot(fx.project, '../x', options), error => error.code === 'SNAPSHOT_SCOPE');
+  const real = restoreProjectSnapshot(fx.project, 'pre-x', { forceRunning: true, backup: false });
+  assert.equal(path.basename(real.restored), path.basename(second));
 });

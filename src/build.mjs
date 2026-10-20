@@ -18,12 +18,13 @@
  * Every stage owns its output (mograph:*, sig:*, polish:*, finish:music), so running `build`
  * again replaces rather than stacks. Graphics are anchored to SOURCE WORDS: after a recut the
  * same plan lands every graphic on its word again, or refuses by name when a word was cut.
- * An unchanged plan on an unchanged cut is a no-op (`.capcutctl/build.json` holds its hash).
+ * An unchanged plan on an unchanged cut is a no-op (`.capcutctl/build.json` holds its hash and
+ * the ids of the segments build placed; when a restore took those away, it rebuilds).
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { CapcutError, stableJson, applySpec, loadProject, readJson, resolveMediaPath } from './core.mjs';
+import { CapcutError, stableJson, applySpec, loadProject, readJson, resolveMediaPath, allSegments, BUILD_STATE_RELATIVE } from './core.mjs';
 import { findWordsFile, resolveAnchors } from './anchors.mjs';
 import { layoutAt } from './mograph-place.mjs';
 import { safeZoneViolations } from './mograph-geometry.mjs';
@@ -37,6 +38,8 @@ const ENDING_KEYS = new Set(['frame', 'noSfx', 'pill', 'headline', 'sub', 'badge
 const r3 = n => Math.round(n * 1000) / 1000;
 
 const fail = (code, message, details) => { throw new CapcutError(message, { code, exitCode: 2, details }); };
+
+const segmentIds = doc => new Set(allSegments(doc).map(entry => entry.segment.id));
 
 function workingDoc(projectDir) {
   const state = loadProject(projectDir);
@@ -250,19 +253,30 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
     for (const id of new Set(plan.scenes.map(x => x.scene))) templateHashes[`scene:${id}`] = sceneFingerprint(id, {}, profile);
   }
   const hash = planHash(plan, profile, doc, wordsFile, templateHashes, projectDir);
-  const stateFile = path.join(projectDir, '.capcutctl', 'build.json');
+  const stateFile = path.join(projectDir, BUILD_STATE_RELATIVE);
   const state = fs.existsSync(stateFile) ? readJson(stateFile) : {};
-  if (!force && !dryRun && state.hash === hash) {
-    const gate = gateReport(doc, { projectDir, profile });
-    return { upToDate: true, hash, gate };
-  }
+  const startIds = segmentIds(doc);
+  const previousOutputs = Array.isArray(state.outputs) ? state.outputs : [];
+  // The hash covers the plan and the principal cut, not the overlays build placed. A restore
+  // that removed them left the hash matching, and "up to date" sat on an empty draft.
+  const outputsPresent = previousOutputs.every(id => startIds.has(id));
   const stages = {};
+  if (!force && !dryRun && state.hash === hash) {
+    if (outputsPresent) {
+      const gate = gateReport(doc, { projectDir, profile });
+      return { upToDate: true, hash, gate };
+    }
+    stages.reason = 'build outputs missing (restore?)';
+  }
 
   // ---- picture: shots (once), layout, camera ------------------------------------------------
   const pictureOps = [];
   if (plan.shots) {
     const shotsKey = crypto.createHash('sha256').update(fs.readFileSync(plan.shots)).digest('hex').slice(0, 16);
-    if (state.shots !== shotsKey) {
+    // --force also re-applies shots whose placed clips are all gone (a restore from before them).
+    const shotOutputs = Array.isArray(state.shotOutputs) ? state.shotOutputs : [];
+    const shotsGone = force && shotOutputs.length > 0 && !shotOutputs.some(id => startIds.has(id));
+    if (state.shots !== shotsKey || shotsGone) {
       const matcher = await import('./match.mjs');
       const spec = matcher.shotsToSpec(matcher.readShotsFile(plan.shots), {});
       const check = matcher.writersAccept(spec.operations);
@@ -271,9 +285,14 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
       stages.shots = { applied: spec.operations.length, key: shotsKey };
     } else stages.shots = { applied: 0, reason: 'already applied (change shots with match/replace-media, or restore a snapshot)' };
   }
+  let shotOutputs = Array.isArray(state.shotOutputs) ? state.shotOutputs : [];
   if (pictureOps.length) {
+    const beforeShots = segmentIds(doc);
     stages.shotsResult = applySpec(projectDir, { version: 1, name: 'build-shots', operations: pictureOps }, txn('build-shots'));
-    if (!dryRun) doc = workingDoc(projectDir);
+    if (!dryRun) {
+      doc = workingDoc(projectDir);
+      shotOutputs = [...segmentIds(doc)].filter(id => !beforeShots.has(id));
+    }
   }
   const cameraOps = [];
   if (plan.layout === 'auto') {
@@ -414,8 +433,13 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
   if (!dryRun) {
     if (record) writeGateRecord(projectDir, gate);
     fs.mkdirSync(path.dirname(stateFile), { recursive: true });
-    const next = { version: 1, hash: planHash(plan, profile, workingDoc(projectDir), wordsFile, templateHashes, projectDir), builtFrom: hash,
-      shots: stages.shots?.key || state.shots || null, at: new Date().toISOString(), verdict: gate.verdict };
+    const finalDoc = workingDoc(projectDir);
+    // What build placed: segments that are new since the start, plus earlier outputs it kept
+    // (a rebuild re-places graphics under their stable ids).
+    const kept = new Set(previousOutputs);
+    const outputs = [...segmentIds(finalDoc)].filter(id => !startIds.has(id) || kept.has(id));
+    const next = { version: 1, hash: planHash(plan, profile, finalDoc, wordsFile, templateHashes, projectDir), builtFrom: hash,
+      shots: stages.shots?.key || state.shots || null, shotOutputs, outputs, at: new Date().toISOString(), verdict: gate.verdict };
     fs.writeFileSync(stateFile, stableJson(next));
   }
   return { dryRun, hash, stages, gate };
