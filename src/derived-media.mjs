@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { CapcutError, resolveMediaPath, segmentsReferencing } from './core.mjs';
+import { CapcutError, hasBinary, resolveMediaPath, segmentsReferencing } from './core.mjs';
 import { isEphemeralPath } from './origin.mjs';
 import { brollWindows } from './polish.mjs';
 import { resolveClip, opReplaceMedia } from './add.mjs';
@@ -16,6 +16,20 @@ export function derivedPath(projectDir, source, recipe) {
   const hash=crypto.createHash('sha256').update(JSON.stringify([source,stat.size,stat.mtimeMs,recipe])).digest('hex').slice(0,20);
   return path.join(projectDir,'Resources','CapcutctlDerived',`${recipe.kind}-${hash}.mp4`);
 }
+/** ffmpeg argv, under `lockf -k $CAPCUTCTL_HEAVY_LOCK` when that lock is set and lockf exists. */
+export function heavyCommand(args,env=process.env) {
+  const lock=env.CAPCUTCTL_HEAVY_LOCK;
+  return lock&&hasBinary('lockf')?['lockf',['-k',lock,'ffmpeg',...args]]:['ffmpeg',args];
+}
+/** Source frame rate from ffprobe's avg_frame_rate; 30 when it cannot be read. */
+export function sourceFps(file) {
+  const result=spawnSync('ffprobe',['-v','error','-select_streams','v:0','-show_entries','stream=avg_frame_rate','-of','json',file],{encoding:'utf8',timeout:30000});
+  try {
+    const [n,d=1]=String(JSON.parse(result.stdout).streams?.[0]?.avg_frame_rate||'').split('/').map(Number);
+    const fps=n/d;
+    return Number.isFinite(fps)&&fps>0&&fps<=1000?fps:30;
+  } catch { return 30; }
+}
 export function renderDerived(file,args,{dryRun=false}={},expected) {
   if(dryRun) return;
   const validate=file=>{
@@ -27,7 +41,8 @@ export function renderDerived(file,args,{dryRun=false}={},expected) {
   fs.mkdirSync(path.dirname(file),{recursive:true});
   const temp=path.join(path.dirname(file),`${crypto.randomUUID()}.pending.mp4`);
   try {
-    const result=spawnSync('ffmpeg',['-v','error','-nostdin','-y',...args,temp],{encoding:'utf8',timeout:900000,maxBuffer:4*1024*1024});
+    const [command,argv]=heavyCommand(['-v','error','-nostdin','-y',...args,temp]);
+    const result=spawnSync(command,argv,{encoding:'utf8',timeout:900000,maxBuffer:4*1024*1024});
     if(result.error||result.status!==0) derivedFailure(`ffmpeg failed: ${result.error?.message||result.stderr}`);
     validate(temp);
     fs.renameSync(temp,file);
@@ -44,9 +59,12 @@ export function planBlurBroll(doc,op={},context={}) {
   if(s.volume!==0)derivedFailure('Mute recording audio first; this picture-only derivative does not retain sped-up sound.');
   const m=doc.materials.videos.find(m=>m.id===s.material_id);
   const source=resolveMediaPath(m.path,context.projectDir)||m.path;
-  const recipe={kind:'blur-broll',version:1,start:st.start/1e6,sourceDuration:st.duration/1e6,duration:tt.duration/1e6,speed};
+  // Motion blur by averaging the source frames each output frame covers. minterpolate at 60 fps
+  // over the whole source window ran at about 4 fps and could hit the 15 minute timeout.
+  const srcFps=sourceFps(source),frames=Math.max(2,Math.round(speed*srcFps/30));
+  const recipe={kind:'blur-broll',version:2,start:st.start/1e6,sourceDuration:st.duration/1e6,duration:tt.duration/1e6,speed,srcFps};
   const output=derivedPath(context.projectDir,source,recipe);
-  const filter=`minterpolate=fps=60:mi_mode=mci:mc_mode=aobmc:me_mode=bidir,tmix=frames=${Math.ceil(speed*2)},setpts=(PTS-STARTPTS)/${speed},fps=30,tpad=stop_mode=clone:stop_duration=${recipe.duration}`;
+  const filter=`tmix=frames=${frames},setpts=(PTS-STARTPTS)/${speed},fps=30,tpad=stop_mode=clone:stop_duration=${recipe.duration}`;
   return {...recipe,id:s.id,source,output,width:m.width,height:m.height,filter};
 }
 export function opBlurBroll(doc,op,context={}) {

@@ -361,11 +361,14 @@ Usage:
                         Also clicks every rectangle/arrow/circle callout (Enter / click / select).
                         rl2 click/typing events on the chopped B-roll (Mouse click / Typing).
                         --no-interactions skips that pass.
-  capcutctl loudness            --project NAME [--target -14] [--segments ID[,ID...]] [--allow-boost] [--plan] [--measure] [--peak -1]
-                                — measure edited ranges and mix; match speech/SFX to −14 LUFS with peak headroom.
-                                  --measure is read-only. --peak is the true-peak ceiling (dBTP): a mix still
+  capcutctl loudness            --project NAME [--target -14] [--segments ID[,ID...]] [--allow-boost] [--plan] [--measure] [--peak -1] [--peak-only]
+                                — measure edited ranges and mix; match speech to −14 LUFS with peak headroom.
+                                  SFX keep their placed level (never raised; --segments matches a named one).
+                                  Parked parts-bin clips past the edit are skipped; volume keys (the duck) scale
+                                  with their clip. --measure is read-only. --peak is the true-peak ceiling (dBTP): a mix still
                                   over it after the clip pass is limited by lowering the SFX/music around the
                                   voice, then the whole mix; the result's peakLimit lists every change.
+                                  --peak-only skips the clip pass and only limits the current mix to --peak.
                                   Attenuation < 1.0 is round-tripped. A needed boost is
                                   VOLUME_BOOST_UNVERIFIED unless --allow-boost (UNVERIFIED).
                                   Music beds are never raised. Does not touch loudnesses.enable.
@@ -466,7 +469,7 @@ export const BOOLEAN_FLAGS = Object.freeze(new Set([
   'noLocalize', 'motivated', 'regen', 'music', 'polish', 'noInteractions', 'duck',
   'waitForClose', 'force', 'reindex', 'noRepair', 'inPlace',
   'generated', 'allowEphemeral', 'measure', 'apply', 'native', 'noCache', 'noGrade',
-  'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'noEase', 'easePosition', 'stress', 'allowBoost', 'values',
+  'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'noEase', 'easePosition', 'stress', 'allowBoost', 'peakOnly', 'values',
   'faceDetail', 'replaceExisting', 'replace', 'record', 'allowUnsafe', 'markdown', 'brief', 'check', 'restyle',
   'resetRounds', 'noReview', 'noGate', 'fix', 'all',
 ]));
@@ -1329,7 +1332,7 @@ export async function main(argv, dependencies = {}) {
       const scan = check.scanMedia(media, { sheet: args.sheet || null });
       const report = check.checkExportReport(scan, {
         profile, expected: await check.expectedDelivery(projectDir, profile),
-        target: number('target', '--target'), peak: number('peak', '--peak'),
+        target: number('target', '--target'), peak: number('peak', '--peak'), project: args.project || null,
       });
       if (!report.ok) process.exitCode = 1;
       return args.json ? print(report, true) : print(check.checkExportText(report));
@@ -1590,6 +1593,7 @@ export async function main(argv, dependencies = {}) {
       target: num(args, 'target', { def: -14 }),
       peak: num(args, 'peak', { def: -1 }),
       ...(args.allowBoost ? { allowBoost: true } : {}),
+      ...(args.peakOnly ? { match: false } : {}),
       ...(args.segments ? { segments: segmentIds(args) } : {}),
     };
     return print(applySpec(projectDir, { version: 1, name: 'loudness', operations: [op] },

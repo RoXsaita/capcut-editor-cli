@@ -596,6 +596,7 @@
         "--dry-run",
         "--measure",
         "--peak",
+        "--peak-only",
         "--plan",
         "--project",
         "--segments",

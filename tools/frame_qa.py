@@ -2253,11 +2253,58 @@ def _run_progress_encoder(command, total_frames, fps, started, callback):
     _emit_preview_progress(callback, total_frames, total_frames, started)
 
 
-def _audio_filters(segment, materials, speed, offset=0.0):
-    """Shared gain/fades in clip time, after speed and before preview-range placement."""
-    filters = [value for value in (atempo_chain(speed),) if value]
+def _volume_keys(segment, strict=True):
+    """[(source_us, gain)] of a segment's KFTypeVolume keys, or None when it has none.
+
+    CapCut's volume keys are absolute gain that REPLACE the static volume (preset
+    volume-keyframes.json), in absolute source microseconds. Only straight 'Line'
+    segments are rendered exactly; a strict caller refuses any other curve, a preview
+    draws it as straight lines.
+    """
+    keys = []
+    for block in segment.get("common_keyframes") or []:
+        if block.get("property_type") != "KFTypeVolume":
+            continue
+        for key in block.get("keyframe_list") or []:
+            curve = key.get("curveType", "Line")
+            if curve not in ("Line", 0, None) and strict:
+                raise FrameExtractionError(
+                    f"volume keyframe curve {curve!r} on {segment.get('id')} needs native playback measurement")
+            keys.append((float(key["time_offset"]), float((key.get("values") or [0])[0])))
+    # By time only: two keys on one instant are a step, in the order they were written.
+    return sorted(keys, key=lambda k: k[0]) or None
+
+
+def _volume_expr(keys, source_start):
+    """ffmpeg `volume` for piecewise-linear keys, with t in seconds from `source_start`.
+
+    A flat sum of clipped ramps rather than nested ifs, so a long duck stays one level deep.
+    """
+    if len({value for _, value in keys}) == 1:
+        return f"volume={keys[0][1]:.9g}"
+    points = [(us / 1e6 - source_start, value) for us, value in keys]
+    terms = [f"{points[0][1]:.9g}"]
+    for (ta, va), (tb, vb) in pairwise(points):
+        if vb == va:
+            continue
+        ramp = f"gte(t,{ta:.9f})" if tb <= ta else f"clip((t{-ta:+.9f})/{tb - ta:.9f},0,1)"
+        terms.append(f"{vb - va:+.9g}*{ramp}")
+    return f"volume='{''.join(terms)}':eval=frame"
+
+
+def _audio_filters(segment, materials, speed, offset=0.0, strict=True):
+    """Shared gain/fades in clip time, after speed and before preview-range placement.
+
+    `offset` is clip time (seconds after the segment's target start) where the slice
+    begins; volume keys are evaluated before atempo, while t is still source time.
+    """
+    keys = _volume_keys(segment, strict)
+    filters = []
+    if keys:
+        filters.append(_volume_expr(keys, source_span(segment)[0] + offset * speed))
+    filters += [value for value in (atempo_chain(speed),) if value]
     volume = segment.get("volume")
-    if volume is not None:
+    if volume is not None and not keys:
         filters.append(f"volume={float(volume):.6f}")
     fade = next((materials[ref] for ref in segment.get("extra_material_refs") or []
                  if materials.get(ref, {}).get("type") == "audio_fade"), None)
@@ -2525,7 +2572,7 @@ def _timeline_audio(proj, tl, tmp, duration_s, range_start=0.0, *, sources=None,
         cmd = ["ffmpeg", "-y", "-loglevel", "error", "-ss", str(max(0, source_start)),
                "-t", str(max(0.01, source_duration)),
                "-i", p]
-        af = _audio_filters(s, idx, speed, overlap_start - target_start)
+        af = _audio_filters(s, idx, speed, overlap_start - target_start, strict)
         if af:
             cmd += ["-af", ",".join(af)]
         cmd += ["-ac", "2", "-ar", "44100", "-c:a", "pcm_f32le", wav]
@@ -2583,6 +2630,24 @@ def _selftest():
     # not 1798+3.667 = 1801.7 (the no-speed formula that showed the sidebar).
     got = source_time(seg, 63.0)
     check("speed-aware source time", abs(got - 1799.614) < 0.01)
+    duck = {"id": "bed", "source_timerange": {"start": 2_000_000, "duration": 4_000_000},
+            "target_timerange": {"start": 0, "duration": 4_000_000},
+            "common_keyframes": [{"property_type": "KFTypeVolume", "keyframe_list": [
+                {"time_offset": 2_000_000, "values": [0.5], "curveType": "Line"},
+                {"time_offset": 3_000_000, "values": [0.125], "curveType": "Line"}]}]}
+    check("volume keys become a ramp in slice time, before atempo",
+          _audio_filters(duck, {}, 1.0, 0.5) == [
+              "volume='0.5-0.375*clip((t+0.500000000)/1.000000000,0,1)':eval=frame"])
+    flat = copy.deepcopy(duck)
+    flat["common_keyframes"][0]["keyframe_list"][1]["values"] = [0.5]
+    check("equal volume keys are a constant gain", _audio_filters(flat, {}, 1.0) == ["volume=0.5"])
+    curved = copy.deepcopy(duck)
+    curved["common_keyframes"][0]["keyframe_list"][0]["curveType"] = "FreeCurveInOut"
+    try:
+        _audio_filters(curved, {}, 1.0)
+        check("a curved volume key refuses a strict measurement", False)
+    except FrameExtractionError:
+        check("a curved volume key refuses a strict measurement", True)
     check("1x is just an offset", abs(source_time(
         {"target_timerange": {"start": 0, "duration": 5_000_000},
          "source_timerange": {"start": 90_000_000, "duration": 5_000_000}}, 2.0) - 92.0) < 1e-9)
