@@ -451,11 +451,18 @@ export async function reviewVideo({ media, projectDir = null, script = null, spe
   const counted = ledger.rounds.filter(r => !r.discarded);
   const round = counted.length + 1;
   const retries = ledger.rounds.length - (ledger.rounds.findLastIndex(r => !r.discarded) + 1);
+  // Both skips carry the last counted review.json, so export can name it and its blockers.
+  const lastFile = counted.at(-1)?.file || null;
+  const skip = (code, message) => {
+    const error = new CapcutError(message, { code, exitCode: 3, details: { lastFile } });
+    error.lastFile = lastFile;
+    throw error;
+  };
   if (projectDir && round > MAX_ROUNDS) {
-    fail('REVIEW_ROUNDS_EXHAUSTED', `${MAX_ROUNDS} Gemini review rounds are done for this edit: hand off to the creator with the remaining notes and the accepted/rejected log (${counted.at(-1)?.file}). --reset-rounds only for a new edit.`, 3);
+    skip('REVIEW_ROUNDS_EXHAUSTED', `${MAX_ROUNDS} Gemini review rounds are done for this edit: hand off to the creator with the remaining notes and the accepted/rejected log (${lastFile}). --reset-rounds only for a new edit.`);
   }
   if (projectDir && retries >= MAX_DISCARDS) {
-    fail('REVIEW_DISCARDED_AGAIN', `Gemini failed the sound check ${retries} times in round ${round}: hand off without a Gemini review and say so.`, 3);
+    skip('REVIEW_DISCARDED_AGAIN', `Gemini failed the sound check ${retries} times in round ${round}: hand off without a Gemini review and say so.`);
   }
   const dir = path.join(`${media.replace(/\.[^.]+$/, '')}.review`, retries ? `round-${round}-retry${retries}` : `round-${round}`);
   fs.mkdirSync(dir, { recursive: true });

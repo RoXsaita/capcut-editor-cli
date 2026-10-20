@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { CapcutError, clone, seededId, loadPreset, localizeMedia, resolveMediaPath, principalEndUs } from './core.mjs';
+import { CapcutError, clone, seededId, loadPreset, localizeMedia, resolveMediaPath, principalEndUs, removeUnreferencedMaterials } from './core.mjs';
 import { principalTrack, sfxPresets } from './polish.mjs';
 import { parkPresetLeftover, opScaleKeyframe } from './add.mjs';
 import { freeCurveControls } from './easing.mjs';
@@ -389,6 +389,34 @@ function ensureSfx(doc, which, atSeconds, key, unavailable, projectDir) {
   return { materialId: mat.id, at: atSeconds, key, duration: Math.min(S(tpl.duration || US(0.5)), 1.2) };
 }
 
+/**
+ * Remove every segment tagged with one of `tags`, the `sig-` tracks that leaves empty, and the
+ * materials only those segments used. Dropping the segments alone is not enough: a stale logo
+ * VIDEO material still carries a path, and CapCut scans materials — not tracks — when it decides
+ * whether media is missing ("Link media" on the next open); video_effects, effects, the cue's
+ * audio and its extras bind to a segment that is gone.
+ */
+export function clearSignatureTags(doc, tags) {
+  if (!tags.length) return { removed: 0 };
+  const owned = new Set();
+  let removed = 0;
+  for (const t of doc.tracks) {
+    for (const s of t.segments || []) {
+      if (!tags.includes(s.desc || '')) continue;
+      if (s.material_id) owned.add(s.material_id);
+      for (const r of s.extra_material_refs || []) owned.add(r);
+    }
+  }
+  for (const t of doc.tracks) {
+    const before = (t.segments || []).length;
+    t.segments = (t.segments || []).filter(s => !tags.includes(s.desc || ''));
+    removed += before - t.segments.length;
+  }
+  doc.tracks = doc.tracks.filter(t => !(t.name || '').startsWith('sig-') || (t.segments || []).length);
+  if (owned.size) removeUnreferencedMaterials(doc, owned);
+  return { removed };
+}
+
 export function opSignature(doc, op, context = {}) {
   SEED = op.__seed || null;
   const p = sigPresets();
@@ -405,41 +433,21 @@ export function opSignature(doc, op, context = {}) {
   // cannot take the endcard's cue with it.
   const writesLogos = Array.isArray(op.logos) && op.logos.length > 0;
   const writesEndcard = !!op.endcard;
+  // clearLogos / clearEndcard: take the earlier pop or card (and its sound) away without
+  // writing a new one — `build` with logos:false, or a recut that no longer names a brand.
+  const sweepLogos = writesLogos || Boolean(op.clearLogos);
+  const sweepEndcard = writesEndcard || Boolean(op.clearEndcard);
   const TAGS = [];
-  if (writesLogos) TAGS.push('sig:logo', 'sig:sfx:logo');
-  if (writesEndcard) TAGS.push('sig:endcard', 'sig:sfx:endcard');
+  if (sweepLogos) TAGS.push('sig:logo', 'sig:sfx:logo');
+  if (sweepEndcard) TAGS.push('sig:endcard', 'sig:sfx:endcard');
   // untagged legacy cues predate the attribution; only a pass that rewrites BOTH owners
   // (i.e. `wrap`) can safely claim them.
   if (writesLogos && writesEndcard) TAGS.push('sig:sfx');
-  if (TAGS.length) {
-    // Everything the outgoing segments own, so the sweep can take the materials with them.
-    const orphaned = new Set();
-    for (const t of doc.tracks) {
-      for (const s of t.segments || []) {
-        if (!TAGS.includes(s.desc || '')) continue;
-        if (s.material_id) orphaned.add(s.material_id);
-        for (const r of s.extra_material_refs || []) orphaned.add(r);
-      }
-    }
-    for (const t of doc.tracks) t.segments = (t.segments || []).filter(s => !TAGS.includes(s.desc || ''));
-    doc.tracks = doc.tracks.filter(t => !(t.name || '').startsWith('sig-') || (t.segments || []).length);
-
-    // Dropping the segments alone is not enough. A stale logo VIDEO material left behind
-    // still carries a path, and CapCut scans materials — not tracks — when it decides
-    // whether media is missing, so a re-run that relocated the artwork greeted the next
-    // open with the "Link media" dialog even though every surviving segment was fine.
-    // video_effects have the matching problem: they bind to a segment id that is gone.
-    const live = new Set();
-    for (const t of doc.tracks) {
-      for (const s of t.segments || []) {
-        if (s.material_id) live.add(s.material_id);
-        for (const r of s.extra_material_refs || []) live.add(r);
-      }
-    }
-    for (const kind of ['videos', 'video_effects', 'effects']) {
-      if (!doc.materials?.[kind]) continue;
-      doc.materials[kind] = doc.materials[kind].filter(m => !orphaned.has(m.id) || live.has(m.id));
-    }
+  const cleared = clearSignatureTags(doc, TAGS);
+  // A clear-only pass writes nothing else: no parking, no renumbering of an untouched draft.
+  if ((op.clearLogos || op.clearEndcard) && !writesLogos && !writesEndcard && !(op.zooms || []).length) {
+    if (cleared.removed) doc.tracks.forEach((t, i) => (t.segments || []).forEach(s => { s.track_render_index = i; }));
+    return { ...result, cleared: cleared.removed };
   }
 
   // Preset 3 leftover is a parts bin. Park it after a gap, then place Follow on the talking head.

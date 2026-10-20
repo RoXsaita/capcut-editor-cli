@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  CapcutError, clone, seededId, allSegments, loadPreset, resolveMediaPath, contentEndUs
+  CapcutError, clone, seededId, allSegments, loadPreset, resolveMediaPath, contentEndUs, removeUnreferencedMaterials
 } from './core.mjs';
 import { carryLevels, snapshotLevels } from './levels.mjs';
 
@@ -942,7 +942,40 @@ export function seamVariety(plan) {
   };
 }
 
+/**
+ * Take back what an earlier polish pass placed, without planning a new one: its SFX cues
+ * (polish:sfx/callout/click/type) and only the transitions named in `only` (build records the
+ * ids it placed, so a transition the user added by hand survives). The slices it cut into the
+ * principal track stay: they are invisible without a transition. For `seams: false`.
+ */
+function prunePolish(doc, op) {
+  const only = new Set(op.only || []);
+  let removedSfx = 0;
+  const owned = new Set();
+  for (const track of doc.tracks) {
+    const before = (track.segments || []).length;
+    track.segments = (track.segments || []).filter(s => {
+      if (!/^polish:(sfx|callout|click|type)$/.test(s.desc || '')) return true;
+      if (s.material_id) owned.add(s.material_id);
+      for (const r of s.extra_material_refs || []) owned.add(r);
+      return false;
+    });
+    removedSfx += before - track.segments.length;
+  }
+  const present = new Set((doc.materials.transitions || []).map(m => m.id));
+  const removedTransitions = [...only].filter(id => present.has(id));
+  for (const { segment } of allSegments(doc)) {
+    segment.extra_material_refs = (segment.extra_material_refs || []).filter(r => !only.has(r));
+  }
+  doc.materials.transitions = (doc.materials.transitions || []).filter(m => !only.has(m.id));
+  doc.tracks = doc.tracks.filter(t => t.name !== 'polish-sfx' || (t.segments || []).length);
+  removeUnreferencedMaterials(doc, owned);
+  return { changed: removedSfx + removedTransitions.length, pruned: true, removedTransitions: removedTransitions.length,
+    removedSfx, transitionsUnknown: [...only].filter(id => !present.has(id)).length };
+}
+
 export function opPolish(doc, op, context = {}) {
+  if (op.prune) return prunePolish(doc, op);
   SEED = op.__seed || null;
   const p = sfxPresets();
   const lead = op.lead ?? p.rules.sfxLeadSeconds;

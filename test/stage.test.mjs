@@ -4,10 +4,12 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { applySpec, doctor, listSnapshots, readJson, repairProject, resolveProject, stableJson } from '../src/core.mjs';
+import { applySpec, doctor, listSnapshots, loadWorkingDoc, readJson, repairProject, resolveProject, stableJson } from '../src/core.mjs';
+import { graphicEvents } from '../src/gate.mjs';
 import { commitStage, discardStage, stageStatus, startStage } from '../src/stage.mjs';
 import { main, setOutput } from '../src/cli.mjs';
 import { LEDGER_RELATIVE } from '../src/repair.mjs';
+import { capcutResave as resave } from './helpers/capcut-resave.mjs';
 
 const CLOSED = () => ({ running: false, verified: true, pids: [] });
 const RUNNING = () => ({ running: true, verified: true, pids: [4242] });
@@ -153,15 +155,7 @@ test('stage: a second start is refused while one is active', () => {
 
 /** What a CapCut save does to a capcutctl draft, plus two deliberate user edits. */
 function capcutResave(doc) {
-  const out = structuredClone(doc);
-  for (const values of Object.values(out.materials)) {
-    if (!Array.isArray(values)) continue;
-    for (const m of values) for (const key of Object.keys(m)) if (key.startsWith('capcutctl_')) delete m[key];
-  }
-  for (const s of out.tracks.flatMap(t => t.segments)) delete s.desc;
-  const dup = structuredClone(out.materials.videos[0]);
-  dup.duration += 33_333;                                   // CapCut's one-frame re-probe
-  out.materials.videos.push(dup);
+  const out = resave(doc);
   segment(out, 'SHOT').source_timerange.duration = 4_500_000; // now reads 0.5 s past the 5 s source
   segment(out, 'SHOT').target_timerange.duration = 4_500_000;
   out.duration = 10_000_000;
@@ -274,4 +268,27 @@ test('cli: stage start → edits by project name → stage commit; doctor --fix 
   } finally {
     if (previous == null) delete process.env.CAPCUTCTL_STAGE_DIR; else process.env.CAPCUTCTL_STAGE_DIR = previous;
   }
+});
+
+test('loadWorkingDoc reads the draft as capcutctl wrote it; the live file is left as CapCut saved it', () => {
+  const fx = fixture();
+  applySpec(fx.project, { version: 1, name: 'meta', operations: [
+    { op: 'material.patch', selector: { id: 'SCREEN' }, set: { capcutctl_mograph: { template: 'scene:seam-wipe', scene: true } } },
+    { op: 'segment.patch', selector: { id: 'SHOT' }, set: { desc: 'mograph:seam-wipe' } },
+    { op: 'segment.patch', selector: { id: 'POP-1' }, set: { desc: 'mograph:sfx:seam-wipe' } },
+  ] }, { processProbe: CLOSED });
+  writeDraft(fx.project, resave(live(fx.project)));
+  const bytes = fs.readFileSync(path.join(fx.project, 'Timelines', 'TL', 'draft_info.json'), 'utf8');
+
+  const { doc, restored } = loadWorkingDoc(fx.project);
+  assert.equal(segment(doc, 'SHOT').desc, 'mograph:seam-wipe');
+  assert.equal(segment(doc, 'POP-1').desc, 'mograph:sfx:seam-wipe');
+  assert.equal(doc.materials.videos.find(m => m.id === 'SCREEN').capcutctl_mograph.template, 'scene:seam-wipe');
+  assert.ok(restored.length >= 3, JSON.stringify(restored));
+  assert.equal(fs.readFileSync(path.join(fx.project, 'Timelines', 'TL', 'draft_info.json'), 'utf8'), bytes, 'reading never writes');
+  assert.equal(segment(live(fx.project), 'SHOT').desc, undefined);
+
+  // Stripped, the wipe is an anonymous overlay; restored, the gate sees the seam-wipe scene.
+  assert.deepEqual(graphicEvents(live(fx.project)).map(g => [g.kind, g.template]), [['overlay', null]]);
+  assert.deepEqual(graphicEvents(doc).map(g => [g.kind, g.template, g.scene]), [['mograph', 'scene:seam-wipe', true]]);
 });

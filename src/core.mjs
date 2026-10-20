@@ -934,10 +934,13 @@ function editEndUs(doc, projectDir, withEnding) {
     // still a useful read result, and validation will report the structural problem.
   }
   if (end > 0) {
+    // A CapCut save re-quantises the ender's start to its frame grid (10000µs off on a 30 fps
+    // draft): within half a frame it still opens on the last frame. Parked checks stay strict.
+    const halfFrame = Math.round(1e6 / (Number(doc?.fps) > 0 ? Number(doc.fps) : 30) / 2);
     if (withEnding) for (const { track, segment } of allSegments(doc)) {
       const target = segment.target_timerange;
       if (track.type === 'video' && isFollowEnding(doc, segment) && target?.duration > 0
-          && Math.abs(target.start - end) <= DURATION_TOLERANCE_US) end = target.start + target.duration;
+          && Math.abs(target.start - end) <= halfFrame) end = target.start + target.duration;
     }
     return parked ? Math.min(end, parked.start) : end;
   }
@@ -1106,6 +1109,20 @@ export function loadProject(projectDir) {
     return { ...group, doc, durations: durationInfo(doc, projectDir) };
   });
   return { projectDir, groups, activeTimelineId: activeTimelineId(projectDir) };
+}
+
+/**
+ * The active timeline as capcutctl last wrote it: a copy of the live doc with the metadata a
+ * CapCut save strips (capcutctl_*, desc, provenance) put back from the meta ledger / history.
+ * The live file is untouched; `restored` lists the keys that were missing (doctor --fix writes
+ * them). Readers that judge ownership (gate, export, planners) read this, not the raw file.
+ */
+export function loadWorkingDoc(projectDir) {
+  const state = loadProject(projectDir);
+  const group = state.groups.find(g => g.name.startsWith('timeline:')) || state.groups[0];
+  const doc = clone(group.doc);
+  const restored = restoreMeta(doc, readMetaRecord(projectDir));
+  return { doc, restored };
 }
 
 export function materialIndex(doc) {

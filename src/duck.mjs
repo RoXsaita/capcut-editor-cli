@@ -131,6 +131,14 @@ function gainAt(points, time) {
   return points.at(-1)[1];
 }
 
+/**
+ * The speech the duck keys from, resolved the way the duck will (energy index, else transcript),
+ * or DUCK_NO_SPEECH_INDEX. `build` calls it before its first write.
+ */
+export function speechSpans(doc, op = {}, context = {}) {
+  return speechRegions(doc, op, context, settings(op));
+}
+
 export function planDuckMusic(doc, op = {}, context = {}) {
   const opts = settings(op);
   const materials = new Map((doc.materials?.audios || []).map(m => [m.id, m]));

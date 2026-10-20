@@ -507,6 +507,21 @@ function buildMusicState(projectDir, doc, {
   };
 }
 
+/**
+ * What `prepareMusic` would refuse, found before anything is written: no brief and no file
+ * (MUSIC_BRIEF_REQUIRED), or a bed to generate with no Gemini key (NO_API_KEY). `build` runs it
+ * before its first stage, so a missing brief or key does not strand committed graphics.
+ */
+export function musicPreflight(projectDir, doc, options = {}) {
+  const state = buildMusicState(projectDir, doc, options);
+  let keyMissing = false;
+  if (state.wouldGenerate) { loadEnv(); keyMissing = !geminiApiKey(); }
+  const code = state.needsBrief ? 'MUSIC_BRIEF_REQUIRED' : keyMissing ? 'NO_API_KEY' : null;
+  const error = state.needsBrief ? MUSIC_BRIEF_REQUIRED
+    : keyMissing ? 'no GEMINI_API_KEY to generate the music bed: pass sound.music.file (a local track), or set the key in cli/.env.' : null;
+  return { needsBrief: state.needsBrief, wouldGenerate: state.wouldGenerate, keyMissing, code, error, file: state.file };
+}
+
 export async function prepareMusic(projectDir, doc, {
   regen = false,
   volume = DEFAULT_MUSIC_VOLUME,

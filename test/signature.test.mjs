@@ -426,3 +426,34 @@ test('layoutAudit counts a footage photo as B-roll but never a frame plate', () 
     assert.equal(layoutAudit(d)[0].want, want, String(origin));
   }
 });
+
+test('clearLogos takes the pops, their cue, their materials and the empty sig- tracks; the endcard and its cue stay', () => {
+  const f = path.join(os.tmpdir(), 'capcutctl-clear-logo.png');
+  fs.writeFileSync(f, PNG_1x1);
+  const d = doc();
+  d.canvas_config = { width: 1080, height: 1920 };
+  opSignature(d, { logos: [{ brand: 'grok', at: 1, logo: f }], endcard: { text: 'Follow' }, glow: true });
+  const tagged = tag => d.tracks.flatMap(t => t.segments || []).filter(s => s.desc === tag);
+  assert.ok(tagged('sig:logo').length >= 1);
+  assert.equal(tagged('sig:sfx:logo').length, 1);
+  const owned = new Set(tagged('sig:logo').flatMap(s => [s.material_id, ...(s.extra_material_refs || [])]));
+  const ids = () => new Set(Object.values(d.materials).filter(Array.isArray).flat().map(m => m.id));
+  const tracks = d.tracks.length;
+
+  const r = opSignature(d, { clearLogos: true });
+  assert.ok(r.cleared >= 2, 'a clear-only pass is not NOTHING_TO_SIGN');
+  assert.equal(tagged('sig:logo').length, 0);
+  assert.equal(tagged('sig:sfx:logo').length, 0);
+  assert.ok(!d.tracks.some(t => /^sig-logo/.test(t.name || '')), 'empty sig-logo tracks removed');
+  assert.ok(d.tracks.length < tracks);
+  assert.ok([...owned].every(id => !ids().has(id)), 'logo material, effects and extras swept');
+  assert.equal(tagged('sig:endcard').length, 1);
+  assert.equal(tagged('sig:sfx:endcard').length, 1);
+  assert.ok(ids().has(tagged('sig:sfx:endcard')[0].material_id), 'the endcard cue keeps its sound');
+
+  const e = opSignature(d, { clearEndcard: true });
+  assert.ok(e.cleared >= 2);
+  assert.equal(tagged('sig:endcard').length, 0);
+  assert.equal(tagged('sig:sfx:endcard').length, 0);
+  assert.throws(() => opSignature(doc(), {}), /NOTHING_TO_SIGN|wrote nothing/, 'an empty op still refuses');
+});

@@ -324,9 +324,11 @@
         "--out",
         "--overwrite",
         "--pause",
+        "--profile",
         "--project",
         "--review-model",
         "--script",
+        "--style",
         "--times",
         "--xray"
       ],

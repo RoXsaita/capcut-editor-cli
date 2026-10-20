@@ -13,7 +13,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { allSegments, contentEndUs, resolveMediaPath } from './core.mjs';
+import { allSegments, contentEndUs, maxSegmentEndUs, resolveMediaPath } from './core.mjs';
 import { projectAlphaLeaks } from './alpha.mjs';
 import { blurredBackgrounds, captionStyleDrift } from './house-rules.mjs';
 import { coldOpen, cutPoints, pictureChanges, principalTrack } from './polish.mjs';
@@ -210,6 +210,14 @@ function longestClear(graphics, from, to) {
   return r2(Math.max(best, to - cursor));
 }
 
+/** Seconds of slack between the draft's end and the edit's before a tail counts as parked. */
+export const TAIL_TOLERANCE_S = 0.15;
+
+/** How far CapCut would export: the declared duration or the last segment end, whichever is later. */
+export function draftTailSeconds(doc) {
+  return S(Math.max(maxSegmentEndUs(doc), Number.isFinite(doc?.duration) ? doc.duration : 0));
+}
+
 export function gateReport(doc, { projectDir = null, profile = loadProfile() } = {}) {
   const d = profile.density;
   const fps = profile.canvas.fps;
@@ -317,6 +325,12 @@ export function gateReport(doc, { projectDir = null, profile = loadProfile() } =
   if (fin.lengthWarnAbove) {
     add('length', 'WARN', end <= fin.lengthWarnAbove, `${r2(end)}s (45–60s ideal, 75s fine, warn above ${fin.lengthWarnAbove}s)`, r2(end), fin.lengthWarnAbove);
   }
+  // CapCut exports to the end of the draft, not of the edit: a parked parts bin or a clip
+  // overhanging the edit ships as dead tail (export then refuses with EXPORT_TAIL_PAST_CONTENT).
+  const tail = draftTailSeconds(doc);
+  add('parked-tail', 'WARN', tail <= end + TAIL_TOLERANCE_S, tail > end + TAIL_TOLERANCE_S
+    ? `the draft runs to ${r2(tail)}s, past the edit's end at ${r2(end)}s: CapCut would export the tail — remove the parked/overhanging clips (spec op track.remove or segment.remove), then timeline.set duration ${r2(end)}`
+    : 'the draft ends with the edit', r2(tail), r2(end));
   add('chip-and-logo', 'FAIL', !chipClash.length, chipClash.length ? `brand-chip and logo pop on one mention at ${chipClash.map(g => g.t).join(', ')}s` : 'no doubled brand mentions');
 
   // Seams.
@@ -555,6 +569,34 @@ export function foldXray(report, xrayDir, projectDir, { profile = null, draft = 
   return finaliseReport(report);
 }
 
+/**
+ * A CapCut save stripped capcutctl metadata the reader put back from the ledger (loadWorkingDoc):
+ * the gate judged the restored copy, and `doctor --fix` writes the keys back to the draft.
+ */
+export function noteRestoredMeta(report, restored) {
+  const n = Array.isArray(restored) ? restored.length : Number(restored) || 0;
+  if (!n) return report;
+  report.checks.push({ id: 'meta-restored', level: 'NOTE', ok: false,
+    message: `meta restored from ledger: ${n} keys; run doctor --fix`, value: n, target: null });
+  return finaliseReport(report);
+}
+
+/**
+ * The stages `build` could not run. A skipped loudness pass leaves an unmeasured, possibly
+ * clipping mix (FAIL); a skipped layout, stress pass or logo art is a weaker edit (WARN).
+ */
+export function foldBuildStages(report, skipped) {
+  if (!Array.isArray(skipped)) return report;
+  const loud = skipped.some(s => s.stage === 'loudness');
+  report.checks = report.checks.filter(c => c.id !== 'build-stages');
+  report.checks.push({ id: 'build-stages', level: loud ? 'FAIL' : 'WARN', ok: !skipped.length,
+    message: skipped.length
+      ? `build skipped ${skipped.map(s => `${s.stage}${s.code ? ` (${s.code})` : ''}: ${s.reason}`).join('; ')}`
+      : 'every build stage ran',
+    value: skipped.length, target: null });
+  return finaliseReport(report);
+}
+
 export function finaliseReport(report) {
   const failed = report.checks.filter(c => !c.ok && c.level === 'FAIL');
   const warned = report.checks.filter(c => !c.ok && c.level === 'WARN');
@@ -567,7 +609,9 @@ export function finaliseReport(report) {
 
 export function gateText(report) {
   const mark = c => (c.ok ? 'ok  ' : c.level === 'FAIL' ? 'FAIL' : c.level === 'NOTE' ? 'note' : 'warn');
-  const lines = [`gate: ${report.verdict}  (profile ${report.profile}, ${report.duration}s)`];
+  const profile = report.profile && typeof report.profile === 'object'
+    ? `${report.profile.name}${report.profile.style ? `, style ${report.profile.style}` : ''}` : report.profile;
+  const lines = [`gate: ${report.verdict}  (profile ${profile}, ${report.duration}s)`];
   for (const c of report.checks) lines.push(`  ${mark(c)} ${c.id.padEnd(24)} ${c.message}`);
   const m = report.metrics;
   lines.push(`  events ${m.visualEvents} (${m.eventsPer10s}/10s) · cuts ${m.cuts} · moves ${m.cameraMoves} · graphics ${m.graphics} · sfx ${m.sfx} · transitions ${m.transitions}`);

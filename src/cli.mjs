@@ -16,6 +16,7 @@ import {
   inspectProject,
   listSnapshots,
   loadProject,
+  loadWorkingDoc,
   preflight,
   listProjects,
   capcutStatus,
@@ -82,11 +83,14 @@ Usage:
                                 report CapCut state; optionally request quit and return a branchable close result
   capcutctl export --project NAME --out FILE.mp4 [--overwrite] [--grid FILE.png] [--times 3,9,15] [--xray DIR]
                    [--pause SECONDS] [--script FILE] [--review-model sonnet] [--no-review] [--no-gate]
+                   [--profile FILE] [--style NAME]
                       — explicitly requested native macOS export, verified before replacing output, then the
                         final gates: X-ray with the export's transcript (into --xray DIR, default FILE.xray),
                         gate + X-ray, and — only if that passes — the Gemini watch-review (review-video).
                         Exit 1 when the gates fail; the export stays. --pause allows a deliberate pause;
-                        --no-gate is for a render that is not a final (no X-ray unless --xray).
+                        --no-gate is for a render that is not a final (no X-ray unless --xray). The gate uses
+                        the profile/style build recorded; --profile/--style override it. Refuses
+                        (EXPORT_TAIL_PAST_CONTENT) a draft that runs past the edit's end.
   capcutctl export-grid --media FILE --out GRID.png [--times 3,9,15]
                       — fast labelled grid from an existing exported video; no CapCut UI.
   capcutctl check-export --media FILE.mp4 [--project NAME] [--target -14] [--peak -1] [--sheet FILE.png] [--json]
@@ -682,10 +686,11 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
  * `layout broll --track broll` line that `add` prints as the next step resolved to NaN and
  * matched nothing — and `add`'s primary form is the named one.
  */
-async function loadWorking(projectDir) {
-  const state = loadProject(projectDir);
-  const group = state.groups.find(g => g.name.startsWith('timeline:')) || state.groups[0];
-  return group.doc;
+async function loadWorking(projectDir, { withRestored = false } = {}) {
+  // The ledger-restored copy: a CapCut save strips desc / capcutctl_* and every reader that
+  // judges ownership (gate, the planners) would otherwise misread the draft.
+  const working = loadWorkingDoc(projectDir);
+  return withRestored ? working : working.doc;
 }
 
 const r3 = n => Math.round(n * 1000) / 1000;
@@ -2046,10 +2051,10 @@ export async function main(argv, dependencies = {}) {
     return print(applySpec(projectDir, { version: 1, name: command, operations: [op] }, options), true);
   }
   if (command === 'gate') {
-    const { gateReport, gateText, writeGateRecord, finaliseReport } = await import('./gate.mjs');
+    const { gateReport, gateText, writeGateRecord, finaliseReport, noteRestoredMeta } = await import('./gate.mjs');
     const { loadProfile, applyStyle } = await import('./profile.mjs');
     const profile = applyStyle(loadProfile({ file: args.profile || null }), args.style || null);
-    const doc = await loadWorking(projectDir);
+    const { doc, restored } = await loadWorking(projectDir, { withRestored: true });
     const report = gateReport(doc, { projectDir, profile });
     if (args.xray) {
       const { foldXray } = await import('./gate.mjs');
@@ -2060,6 +2065,7 @@ export async function main(argv, dependencies = {}) {
       foldReview(report, path.resolve(args.review));
       finaliseReport(report);
     }
+    noteRestoredMeta(report, restored);
     if (args.record) report.recorded = writeGateRecord(projectDir, report);
     if (report.verdict === 'FAIL') process.exitCode = 1;
     return args.json ? print(report, true) : print(gateText(report));
@@ -2075,8 +2081,10 @@ export async function main(argv, dependencies = {}) {
     if (args.json) return print(result, true);
     const { gateText } = await import('./gate.mjs');
     const head = result.upToDate ? `build: up to date (${result.hash})` : `build: ${result.dryRun ? 'dry run' : 'applied'} (${result.hash})`;
+    // A skipped stage is named before the dump, where it cannot scroll past unread.
+    const skips = (result.skipped || []).map(s => `\nSKIPPED ${s.stage}${s.code ? ` (${s.code})` : ''}: ${s.reason}`).join('');
     const stages = result.stages ? `\n${JSON.stringify(result.stages, null, 2)}` : '';
-    return print(`${head}${stages}\n${gateText(result.gate)}`);
+    return print(`${head}${skips}${stages}\n${gateText(result.gate)}`);
   }
   if (command === 'mograph') {
     const sub = args._[1];
