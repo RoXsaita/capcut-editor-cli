@@ -65,21 +65,69 @@ if let close = find("automationcloseBtn") {
 }
 // Opening the exact, verified Home card establishes project identity without
 // Screen Recording access to CGWindow titles. Never infer identity from filename.
-if find("HomePageDraftTitle:" + project) == nil {
-    if find("ExportDialog") != nil { keyboard("tell application \"System Events\" to key code 53") }
-    guard let back = find("Back to home page") else { fail("EXPORT_HOME_UNAVAILABLE") }
-    guard AXUIElementPerformAction(back, kAXPressAction as CFString) == .success else { fail("EXPORT_HOME_FAILED") }
+let target = "HomePageDraftTitle:" + project
+func homeCards(_ nodes: [AXUIElement]? = nil) -> [AXUIElement] { (nodes ?? all(root)).filter { text($0, kAXDescriptionAttribute) == "HomePageDraft" } }
+func rect(_ e: AXUIElement) -> CGRect? {
+    guard let pv = attr(e, kAXPositionAttribute), let sv = attr(e, kAXSizeAttribute) else { return nil }
+    var p = CGPoint.zero; var s = CGSize.zero
+    AXValueGetValue(pv as! AXValue, .cgPoint, &p); AXValueGetValue(sv as! AXValue, .cgSize, &s)
+    return CGRect(origin: p, size: s)
 }
-let home = waitFor("HomePageDraftTitle:" + project)
-guard let hp = attr(home, kAXPositionAttribute) else { fail("EXPORT_HOME_GEOMETRY") }
-var homePoint = CGPoint.zero; AXValueGetValue(hp as! AXValue, .cgPoint, &homePoint)
-let cards = all(root).filter { text($0,kAXDescriptionAttribute) == "HomePageDraft" }
-guard let card = cards.first(where: { e in
-    guard let pv=attr(e,kAXPositionAttribute), let sv=attr(e,kAXSizeAttribute) else {return false}
-    var p=CGPoint.zero;var s=CGSize.zero
-    AXValueGetValue(pv as! AXValue,.cgPoint,&p);AXValueGetValue(sv as! AXValue,.cgSize,&s)
-    return CGRect(origin:p,size:s).contains(homePoint)
-}) else { fail("EXPORT_HOME_CARD_MISSING") }
+func homeWindow() -> CGRect? {
+    let window = attr(root, kAXMainWindowAttribute) ?? (attr(root, kAXWindowsAttribute) as? [AXUIElement])?.first
+    guard let w = window else { return nil }
+    return rect(w as! AXUIElement)
+}
+// One walk of the tree: the card that holds the exact title, only when it lies fully
+// inside the window, and where every card sits (unchanged after a scroll = page end).
+func homeState() -> (card: AXUIElement?, layout: [CGRect]) {
+    let nodes = all(root), cards = homeCards(nodes), layout = cards.compactMap(rect)
+    guard let title = nodes.first(where: { text($0, kAXTitleAttribute) == target || text($0, kAXDescriptionAttribute) == target }),
+          let tr = rect(title), let window = homeWindow() else { return (nil, layout) }
+    let point = CGPoint(x: tr.midX, y: tr.midY)
+    let card = cards.first { rect($0).map { $0.contains(point) && window.contains($0) } == true }
+    return (card, layout)
+}
+// Home is one long Qt page and only the cards on screen are in the accessibility tree.
+// A wheel over a card does not move it; a wheel over the page body does. Qt routes the
+// wheel by hover, so move the pointer there first.
+func scrollHome(_ pixels: Int32) {
+    guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.lemon.lvoverseas" else { fail("EXPORT_FOCUS_LOST: retry when CapCut can keep focus briefly") }
+    guard let w = homeWindow() else { fail("EXPORT_HOME_GEOMETRY") }
+    let p = CGPoint(x: w.minX + w.width * 0.55, y: w.minY + w.height * 0.85)
+    CGWarpMouseCursorPosition(p)
+    CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left)!.post(tap: .cghidEventTap)
+    Thread.sleep(forTimeInterval: 0.15)
+    let wheel = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: pixels, wheel2: 0, wheel3: 0)!
+    wheel.location = p; wheel.post(tap: .cghidEventTap)
+    Thread.sleep(forTimeInterval: 0.6)
+}
+if find(target) == nil {
+    if find("ExportDialog") != nil { keyboard("tell application \"System Events\" to key code 53") }
+    if let back = find("Back to home page") {
+        guard AXUIElementPerformAction(back, kAXPressAction as CFString) == .success else { fail("EXPORT_HOME_FAILED") }
+    } else if homeCards().isEmpty { fail("EXPORT_HOME_UNAVAILABLE") }
+}
+// Cards take a few seconds to appear after Back.
+let cardsBy = Date().addingTimeInterval(10)
+while homeCards().isEmpty && Date() < cardsBy { Thread.sleep(forTimeInterval: 0.25) }
+if homeCards().isEmpty { fail("EXPORT_HOME_UNAVAILABLE: no project cards on CapCut Home") }
+var state = homeState()
+if state.card == nil { Thread.sleep(forTimeInterval: 1); state = homeState() }
+// Older projects sit below the first row: page down, then back up, checking each step.
+for pixels: Int32 in [-240, 240] where state.card == nil {
+    var still = 0
+    for _ in 0..<60 {
+        let before = state.layout
+        scrollHome(pixels)
+        state = homeState()
+        if state.card != nil { break }
+        still = state.layout == before ? still + 1 : 0
+        if still >= 2 { break }
+    }
+}
+let found = state.card
+guard let card = found else { fail("EXPORT_PROJECT_NOT_ON_HOME: " + project + " has no card on CapCut Home after scrolling") }
 click(card)
 _ = waitFor("MainWindowTitleBarExportBtn")
 if find("ExportDialog") == nil {
