@@ -106,15 +106,16 @@ if find(target) == nil {
     if find("ExportDialog") != nil { keyboard("tell application \"System Events\" to key code 53") }
     if let back = find("Back to home page") {
         guard AXUIElementPerformAction(back, kAXPressAction as CFString) == .success else { fail("EXPORT_HOME_FAILED") }
-    } else if homeCards().isEmpty { fail("EXPORT_HOME_UNAVAILABLE") }
+    }
 }
-// Cards take a few seconds to appear after Back.
+// Cards take a few seconds to appear, after Back or on a freshly opened Home.
 let cardsBy = Date().addingTimeInterval(10)
 while homeCards().isEmpty && Date() < cardsBy { Thread.sleep(forTimeInterval: 0.25) }
 if homeCards().isEmpty { fail("EXPORT_HOME_UNAVAILABLE: no project cards on CapCut Home") }
 var state = homeState()
 if state.card == nil { Thread.sleep(forTimeInterval: 1); state = homeState() }
 // Older projects sit below the first row: page down, then back up, checking each step.
+var moved = false
 for pixels: Int32 in [-240, 240] where state.card == nil {
     var still = 0
     for _ in 0..<60 {
@@ -122,11 +123,13 @@ for pixels: Int32 in [-240, 240] where state.card == nil {
         scrollHome(pixels)
         state = homeState()
         if state.card != nil { break }
+        if state.layout != before { moved = true }
         still = state.layout == before ? still + 1 : 0
         if still >= 2 { break }
     }
 }
 let found = state.card
+if found == nil && !moved { fail("EXPORT_HOME_SCROLL_STUCK: CapCut Home did not move under the scroll wheel while looking for " + project) }
 guard let card = found else { fail("EXPORT_PROJECT_NOT_ON_HOME: " + project + " has no card on CapCut Home after scrolling") }
 click(card)
 _ = waitFor("MainWindowTitleBarExportBtn")
