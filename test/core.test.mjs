@@ -1498,3 +1498,114 @@ test('cut.recut reports hand-placed sound it left at its old time, not build-own
     assert.deepEqual(keys.find(s => s.id === 'MOGRAPH-SFX').target_timerange, { start: 3_200_000, duration: 500_000 });
   }
 });
+
+/* ---- clip.split ------------------------------------------------------------ */
+
+function splitDoc({ speed = 1, keyframed = false, animations = [] } = {}) {
+  const US = s => Math.round(s * 1e6);
+  const seg = {
+    id: 'CLIP', material_id: 'V', desc: 'broll',
+    target_timerange: { start: US(2), duration: US(4) },
+    render_timerange: { start: US(2), duration: US(4) },
+    source_timerange: { start: US(10), duration: US(4 * speed) },
+    speed, extra_material_refs: ['SPEED', 'FADE', 'TRANS', 'ANIM'],
+    clip: { scale: { x: 1, y: 1 }, transform: { x: 0, y: 0 }, alpha: 1 },
+    common_keyframes: keyframed ? [{ id: 'K', property_type: 'KFTypeScaleX', keyframe_list: [{ id: 'k0', time_offset: 0, values: [1] }] }] : [],
+  };
+  return {
+    fps: 30, duration: US(10),
+    materials: {
+      videos: [{ id: 'V', type: 'video', path: '/tmp/split.mp4', duration: US(60) }],
+      speeds: [{ id: 'SPEED', type: 'speed', speed, mode: 0 }],
+      audio_fades: [{ id: 'FADE', type: 'audio_fade', fade_type: 0, fade_in_duration: US(0.2), fade_out_duration: US(0.3) }],
+      transitions: [{ id: 'TRANS', type: 'transition', duration: US(0.4) }],
+      material_animations: [{ id: 'ANIM', type: 'sticker_animation', animations }],
+    },
+    tracks: [{ id: 'T', type: 'video', flag: 2, name: 'broll', segments: [seg] }],
+  };
+}
+
+const splitOp = (extra = {}) => ({ op: 'clip.split', selector: { id: 'CLIP' }, at: 3.5, __seed: 'split-test', ...extra });
+const split = (doc, op) => applyOperations(doc, [op], { dryRun: false, projectDir: null, group: 'root' })[0];
+
+for (const speed of [1, 2]) {
+  test(`clip.split cuts a ${speed}x clip into contiguous halves with private extras`, () => {
+    const doc = splitDoc({ speed, animations: [
+      { id: 'in-fx', type: 'in', start: 0, duration: 500000 },
+      { id: 'out-fx', type: 'out', start: 3500000, duration: 500000 },
+    ] });
+    const result = split(doc, splitOp());
+    assert.equal(result.leftId, 'CLIP');
+    assert.ok(result.rightId && result.rightId !== 'CLIP');
+    const [left, right] = doc.tracks[0].segments;
+    assert.equal(left.id, 'CLIP');
+    assert.equal(right.id, result.rightId);
+    assert.equal(left.target_timerange.start + left.target_timerange.duration, right.target_timerange.start);
+    assert.equal(right.target_timerange.start + right.target_timerange.duration, 6_000_000);
+    assert.equal(left.source_timerange.start + left.source_timerange.duration, right.source_timerange.start);
+    assert.equal(left.source_timerange.duration + right.source_timerange.duration, 4_000_000 * speed);
+    assert.equal(right.source_timerange.duration / right.target_timerange.duration, speed);
+    assert.deepEqual(left.render_timerange, left.target_timerange);
+    assert.deepEqual(right.render_timerange, right.target_timerange);
+    // No extra is shared, except nothing: the transition moved right.
+    const shared = left.extra_material_refs.filter(ref => right.extra_material_refs.includes(ref));
+    assert.deepEqual(shared, []);
+    assert.ok(!left.extra_material_refs.includes('TRANS'));
+    assert.ok(right.extra_material_refs.includes('TRANS'));
+    const fades = new Map(doc.materials.audio_fades.map(f => [f.id, f]));
+    const leftFade = fades.get(left.extra_material_refs.find(r => fades.has(r)));
+    const rightFade = fades.get(right.extra_material_refs.find(r => fades.has(r)));
+    assert.deepEqual([leftFade.fade_in_duration, leftFade.fade_out_duration], [200000, 0]);
+    assert.deepEqual([rightFade.fade_in_duration, rightFade.fade_out_duration], [0, 300000]);
+    const anims = new Map(doc.materials.material_animations.map(a => [a.id, a]));
+    const leftAnim = anims.get(left.extra_material_refs.find(r => anims.has(r)));
+    const rightAnim = anims.get(right.extra_material_refs.find(r => anims.has(r)));
+    assert.deepEqual(leftAnim.animations.map(a => a.type), ['in']);
+    assert.deepEqual(rightAnim.animations.map(a => a.type), ['out']);
+    assert.equal(rightAnim.animations[0].start, right.target_timerange.duration - 500000);
+    const speeds = doc.materials.speeds.filter(m => [...left.extra_material_refs, ...right.extra_material_refs].includes(m.id));
+    assert.equal(speeds.length, 2);
+    assert.ok(validateDocument(doc, { checkFiles: false }).every(issue => issue.level !== 'error'),
+      validateDocument(doc, { checkFiles: false }));
+  });
+}
+
+test('clip.split snaps to the frame grid, is a no-op on a boundary and refuses an edge or keyframes', () => {
+  const doc = splitDoc();
+  const snapped = split(doc, splitOp({ at: 3.501 }));
+  assert.equal(snapped.at, Math.round(Math.round(3.501 * 30) * 1e6 / 30) / 1e6);
+  const same = splitDoc();
+  assert.equal(split(same, splitOp({ at: 2 })).changed, 0);
+  assert.equal(split(same, splitOp({ at: 6 })).changed, 0);
+  assert.equal(same.tracks[0].segments.length, 1);
+  assert.throws(() => split(splitDoc(), splitOp({ at: 2.03 })), { code: 'SPLIT_EDGE' });
+  assert.throws(() => split(splitDoc({ keyframed: true }), splitOp()), { code: 'SPLIT_KEYFRAMED' });
+  assert.throws(() => split(splitDoc({ animations: [{ id: 'g', type: 'group', start: 0, duration: 4000000 }] }), splitOp()),
+    { code: 'SPLIT_ANIMATED' });
+  // The right id is a function of (id, T): both mirrors, and a second run, agree.
+  const a = splitDoc(), b = splitDoc();
+  assert.equal(split(a, splitOp({ __seed: 'one' })).rightId, split(b, splitOp({ __seed: 'two' })).rightId);
+  // Select by time and track instead of id.
+  const byTime = splitDoc();
+  assert.equal(split(byTime, { op: 'clip.split', at: 4, track: 'broll', __seed: 's' }).leftId, 'CLIP');
+});
+
+test('capcutctl split --dry-run changes nothing', async t => {
+  const { buildProject } = await import('./helpers/polish-project.mjs');
+  const { main, setOutput } = await import('../src/cli.mjs');
+  const project = buildProject();
+  const file = path.join(project, 'draft_info.json');
+  const before = fs.readFileSync(file, 'utf8');
+  let stdout = '';
+  const restore = setOutput(chunk => { stdout += String(chunk); return true; });
+  t.after(restore);
+  await main(['split', '--project', project, '--segments', 'A', '--at', '2', '--dry-run', '--json']);
+  assert.equal(fs.readFileSync(file, 'utf8'), before);
+  assert.match(stdout, /rightId/);
+  stdout = '';
+  await main(['split', '--project', project, '--segments', 'A', '--at', '2', '--json']);
+  const after = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const content = after.tracks.find(track => track.name === 'content');
+  assert.equal(content.segments.length, 3);
+  assert.deepEqual(content.segments.map(s => s.target_timerange.start), [0, 2_000_000, 4_000_000]);
+});

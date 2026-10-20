@@ -170,15 +170,24 @@ Usage:
   capcutctl localize --project NAME   — copy outside videos into the project (fixes Link media)
   capcutctl trim --project NAME --at S --track NAME|N | --segments ID  --src IN-OUT | --start S --dur S
   capcutctl shift --project NAME --at S --track NAME|N | --segments ID  --by SECONDS
+  capcutctl split --project NAME --at S --segments ID | --track NAME|N [--dry-run]
+                      — cut one clip in two at timeline second S (snapped to the frame grid). The
+                        left half keeps the id; the output names leftId and rightId. Speed, extras,
+                        transition (moves right), fades and intro/outro split cleanly; keyframed
+                        clips are refused; S on an existing boundary changes nothing.
   capcutctl ripple --project NAME --from S --to S [--dry-run]
                       — delete a timeline range on every track and pull everything after it up
                         (dead air between words); clips keep their speed, the face stays 1x.
   capcutctl remove --project NAME --at S --track NAME|N | --segments ID[,ID...]
   capcutctl volume --project NAME --at S --track NAME|N | --segments ID[,ID...]  --level 0
   capcutctl fade --project NAME --at S --track NAME|N | --segments ID[,ID...]  [--in 0.08] [--out 0.12] [--plan]
-  capcutctl sfx --project NAME --sound typing|click|enter|"PALETTE NAME" --cues AT[:DUR[:SRC]],… [--volume 0.6] [--track sfx-keys]
-                      — named palette sound at explicit timeline seconds (typing bed under a typed
-                        command, an Enter click on the real Enter); SRC starts inside a long bed.
+  capcutctl sfx --project NAME --sound typing|click|enter|"PALETTE NAME" | --file PATH.wav --cues AT[:DUR[:SRC]],…
+                [--volume 0.6] [--fade-in S] [--fade-out S] [--lead S] [--track sfx-keys] [--dry-run]
+                      — named palette sound, or your own audio file (a WAV whoosh, a click, a voice
+                        patch: copied into the draft, never an alpha-0 video), at explicit timeline
+                        seconds; SRC starts inside a long bed, --lead moves every cue earlier.
+                        Overlapping cues take the next free lane (sfx-keys, sfx-keys-2, …);
+                        an exact repeat of a placed cue is skipped. Output lists tracks[].
   capcutctl keyframe --project NAME --at S --track NAME|N | --segments ID
                     [--from SCALE] [--to SCALE] [--hold 1.6] [--ramp 0.2] [--clear] [--plan]
                     [--focus X,Y,W,H] [--viewport X,Y,W,H] [--no-ease] [--ease] [--ease-position]
@@ -210,14 +219,16 @@ Usage:
                       per shot is for a fresh agent in the session (no API billing) to
                       second-guess from the strip alone. CONTRADICTED exits non-zero and
                       blocks the build; INSUFFICIENT flags only. Never writes the draft.
-  capcutctl punch   --project NAME --on TEXT --segment ID|--at T [--word TEXT] [--track NAME|N] [--segments ID]
+  capcutctl punch   --project NAME --on TEXT --segment ID|--at T|--word TEXT [--words FILE] [--track NAME|N] [--segments ID]
                     [--kind click|result] [--zoom 1.6] [--hold auto|S] [--ramp 0.2]
                     [--no-ease] [--ease] [--ease-position] [--plan] [--dry-run]
                     — name an on-screen element; the CLI locates it via OCR boxes and writes
                       a native camera move through the existing focus-rectangle path. The
                       model never outputs a coordinate. Click arrives 250 ms early and holds
                       through the reaction; a result settles first. Refuses a zoom above 2.0×
-                      and a second punch-in before a return to wide.
+                      and a second punch-in before a return to wide. Time it with --at T
+                      (timeline seconds) or --word "PHRASE" (the first kept place the talking
+                      head says it, from its Whisper words or --words FILE), never both.
   capcutctl preview --project NAME --out preview.mp4 [--fps 6] [--from S] [--to S]
                     [--resolution 360x640|--native] [--no-cache] [--no-grade]
                       — lightweight streamed proxy; defaults to 360x640 and never writes
@@ -1510,7 +1521,7 @@ export async function main(argv, dependencies = {}) {
   const NEEDS_PROJECT = new Set([
     'inspect', 'doctor', 'snapshot', 'history', 'restore', 'sync', 'scenes',
     'denoise', 'blur-broll', 'reframe', 'cursor', 'screen-motion', 'pace', 'ramp', 'punch', 'match', 'verify-shots', 'captions', 'motion', 'logo', 'endcard', 'zoom', 'wrap', 'polish', 'layout', 'add',
-    'replace-media', 'localize', 'trim', 'shift', 'ripple', 'remove', 'volume', 'fade', 'sfx', 'keyframe', 'animate',
+    'replace-media', 'localize', 'trim', 'shift', 'split', 'ripple', 'remove', 'volume', 'fade', 'sfx', 'keyframe', 'animate',
     'preview', 'diff', 'apply', 'timeline', 'finish', 'music', 'grade', 'loudness', 'gate', 'build', 'mograph', 'notes'
   ]);
   if (!NEEDS_PROJECT.has(command)) throw await unknownCommandError(command);
@@ -1734,8 +1745,14 @@ export async function main(argv, dependencies = {}) {
   }
   if (command === 'punch') {
     if (!args.on) throw new CapcutError('punch requires --on TEXT naming the on-screen element.', { exitCode: 2 });
-    if (args.segment == null && args.segments == null && args.at == null) {
-      throw new CapcutError('punch requires --segment ID or --at T.', { exitCode: 2 });
+    if (args.at != null && args.word != null) {
+      throw new CapcutError('punch takes --at T or --word TEXT, not both.', { code: 'PUNCH_TIMING_CONFLICT', exitCode: 2 });
+    }
+    if (args.word === true || (args.word != null && !String(args.word).trim())) {
+      throw new CapcutError('punch --word needs the phrase he says, e.g. --word "save button".', { exitCode: 2 });
+    }
+    if (args.segment == null && args.segments == null && args.at == null && args.word == null) {
+      throw new CapcutError('punch requires --segment ID, --at T or --word TEXT.', { exitCode: 2 });
     }
     if (args.segment != null && args.segments != null) {
       throw new CapcutError('punch takes --segment ID or --segments ID, not both.', { code: 'MULTIPLE_SEGMENTS', exitCode: 2 });
@@ -1743,9 +1760,23 @@ export async function main(argv, dependencies = {}) {
     const punchSegment = args.segments != null ? singleSegment('punch', args) : args.segment;
     const zoom = num(args, 'zoom', { min: 0, def: 1.6 });
     const punchRamp = num(args, 'ramp', { min: 0, def: 0.2 });
-    const punchAt = num(args, 'at', { min: 0 });
+    let punchAt = num(args, 'at', { min: 0 });
     if (args.hold != null && args.hold !== 'auto') num(args, 'hold', { min: 0 });
     const punchTrack = await trackIndex(projectDir, args.track);
+    if (args.word != null) {
+      // --word is a timing source: find the phrase in the talking head's source-time words
+      // and map it through the cut to a timeline `at`. --track names the screen clip's lane,
+      // not the face, so the principal is found the usual way.
+      const doc = await loadWorking(projectDir);
+      const wordsFile = args.words ? path.resolve(String(args.words)) : await findWhisperCache(doc, null);
+      if (!wordsFile) {
+        throw new CapcutError('punch --word found no word-level transcript for this project; '
+          + 'pass --words FILE (<stem>.whisper-*.json) or --at T.', { code: 'PUNCH_NO_TRANSCRIPT', exitCode: 2 });
+      }
+      const { loadWords } = await import('./anchors.mjs');
+      const { wordTimelineAt } = await import('./punch.mjs');
+      punchAt = wordTimelineAt(doc, loadWords(wordsFile), String(args.word));
+    }
     const spec = { version: 1, name: 'punch', operations: [{
       op: 'punch',
       on: String(args.on),
@@ -1755,7 +1786,6 @@ export async function main(argv, dependencies = {}) {
       hold: args.hold == null ? 'auto' : args.hold,
       ...(punchSegment != null ? { segment: String(punchSegment) } : {}),
       ...(punchAt != null ? { at: punchAt } : {}),
-      ...(args.word != null ? { word: String(args.word) } : {}),
       ...(punchTrack != null ? { track: punchTrack } : {}),
       ease: !args.noEase,
       ...(args.easePosition ? { easePosition: true } : {}),
@@ -2363,6 +2393,14 @@ export async function main(argv, dependencies = {}) {
   }
   if (command === 'add') {
     if (!args.media) throw new CapcutError('add requires --media FILE.', { exitCode: 2 });
+    {
+      const { AUDIO_FILE_EXTENSIONS } = await import('./polish.mjs');
+      if (AUDIO_FILE_EXTENSIONS.includes(path.extname(String(args.media)).toLowerCase())) {
+        throw new CapcutError(`add places video and stills; ${path.basename(String(args.media))} is audio. `
+          + 'Use `capcutctl sfx --project NAME --file PATH --cues AT[:DUR]` (a whoosh, a click, a voice patch) '
+          + 'or `capcutctl music --file PATH` for a bed.', { code: 'ADD_AUDIO', exitCode: 2 });
+      }
+    }
     if (args.at == null || args.dur == null) throw new CapcutError('add requires --at SECONDS and --dur SECONDS.', { exitCode: 2 });
     if (args.track == null) throw new CapcutError('add requires --track NAME (creates) or --track N (existing).', { exitCode: 2 });
     // Numbers before the probe: `--at 3s` is the agent's mistake, not a media problem.
@@ -2480,7 +2518,12 @@ export async function main(argv, dependencies = {}) {
       { ...options, dryRun: Boolean(args.dryRun) }), true);
   }
   if (command === 'sfx') {
-    if (!args.sound) throw new CapcutError('sfx requires --sound typing|click|enter|"PALETTE NAME".', { exitCode: 2 });
+    const hasSound = args.sound != null && args.sound !== true && String(args.sound) !== '';
+    const hasFile = args.file != null && args.file !== true && String(args.file) !== '';
+    if (hasSound === hasFile) {
+      throw new CapcutError('sfx takes exactly one of --sound typing|click|enter|"PALETTE NAME" or --file PATH.',
+        { code: 'SFX_SOURCE', exitCode: 2 });
+    }
     const cues = String(args.cues || '').split(',').filter(Boolean).map(item => {
       const parts = item.split(':');
       if (parts.length > 3) throw new CapcutError(`--cues item "${item}" is AT[:DUR[:SRC]].`, { code: 'BAD_NUMBER', exitCode: 2 });
@@ -2488,15 +2531,22 @@ export async function main(argv, dependencies = {}) {
       return { at, ...(dur != null ? { dur } : {}), ...(src != null ? { src } : {}) };
     });
     const sfxVolume = num(args, 'volume', { min: 0 });
-    const op = { op: 'sfx.place', sound: String(args.sound), cues,
+    const fadeIn = num(args, 'fadeIn', { min: 0 });
+    const fadeOut = num(args, 'fadeOut', { min: 0 });
+    const lead = num(args, 'lead', { min: 0 });
+    const op = { op: 'sfx.place', cues,
+      ...(hasSound ? { sound: String(args.sound) } : { file: path.resolve(String(args.file)) }),
       ...(sfxVolume != null ? { volume: sfxVolume } : {}),
+      ...(fadeIn != null ? { fadeIn } : {}),
+      ...(fadeOut != null ? { fadeOut } : {}),
+      ...(lead != null ? { lead } : {}),
       ...(args.track != null ? { track: String(args.track) } : {}) };
     return print(applySpec(projectDir, { version: 1, name: 'sfx', operations: [op] }, { ...options, dryRun: Boolean(args.dryRun) }), true);
   }
   if (command === 'localize') {
     return print(applySpec(projectDir, { version: 1, name: 'localize', operations: [{ op: 'media.localize' }] }, options), true);
   }
-  if (command === 'trim' || command === 'shift' || command === 'remove' || command === 'volume' || command === 'keyframe' || command === 'fade' || command === 'animate') {
+  if (command === 'trim' || command === 'shift' || command === 'split' || command === 'remove' || command === 'volume' || command === 'keyframe' || command === 'fade' || command === 'animate') {
     const { resolveClip } = await import('./add.mjs');
     // Every number is checked before the draft is read, so a typo fails with BAD_NUMBER rather
     // than a selector error, and long before anything is written.
@@ -2536,6 +2586,9 @@ export async function main(argv, dependencies = {}) {
         throw new CapcutError('trim requires --src IN-OUT or --start S --dur S', { exitCode: 2 });
       }
       make = selector => ({ op: 'clip.trim', selector, src });
+    } else if (command === 'split') {
+      if (at == null) throw new CapcutError('split requires --at SECONDS (timeline) and --segments ID or --track NAME|N.', { exitCode: 2 });
+      make = selector => ({ op: 'clip.split', selector, at });
     } else if (command === 'shift') {
       if (args.by == null) throw new CapcutError('shift requires --by SECONDS', { exitCode: 2 });
       const by = num(args, 'by');
@@ -2556,7 +2609,7 @@ export async function main(argv, dependencies = {}) {
     }
     // remove, volume, fade and animate take a list: one op per id in ONE transaction, so it is
     // one snapshot, and one unknown id fails the whole list (SELECTOR_EMPTY) rather than half
-    // of it. trim, shift and keyframe act on one clip and refuse a list instead of quietly
+    // of it. trim, shift, split and keyframe act on one clip and refuse a list instead of quietly
     // acting on its first id.
     const ids = ['remove', 'volume', 'fade', 'animate'].includes(command)
       ? segmentIds(args)

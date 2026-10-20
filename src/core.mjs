@@ -8,7 +8,7 @@ import { createRequire } from 'node:module';
 import {
   opLayoutApply, opLayoutBackground, opLayoutBroll, opLayoutScreen, SCREEN_LAYOUT_OPERATION, renumberTracks
 } from './layouts.mjs';
-import { opPolish, opCalloutSfx, opInteractions, opSfxPlace, principalTrack } from './polish.mjs';
+import { opPolish, opCalloutSfx, opInteractions, opSfxPlace, opClipSplit, principalTrack } from './polish.mjs';
 import { opGradeApply, opGradeReset, opGradeLayer } from './grade.mjs';
 import { opPace } from './pace.mjs';
 import { opRipple } from './ripple.mjs';
@@ -3174,7 +3174,7 @@ export function applyOperations(doc, operations, context) {
     else if (op.op === 'polish') result = opPolish(doc, op, context);
     else if (op.op === 'polish.callouts') result = opCalloutSfx(doc, op);
     else if (op.op === 'polish.interactions') result = opInteractions(doc, op, context);
-    else if (op.op === 'sfx.place') result = opSfxPlace(doc, op);
+    else if (op.op === 'sfx.place') result = opSfxPlace(doc, op, context);
     else if (op.op === 'pace') result = opPace(doc, op, context);
     else if (op.op === 'ramp') result = opRamp(doc, op, context);
     else if (op.op === 'denoise') result = opDenoise(doc, op, context);
@@ -3195,6 +3195,7 @@ export function applyOperations(doc, operations, context) {
     else if (op.op === 'clip.shift') result = opClipShift(doc, op, context);
     else if (op.op === 'timeline.ripple') result = opRipple(doc, op, context);
     else if (op.op === 'clip.trim') result = opClipTrim(doc, op, context);
+    else if (op.op === 'clip.split') result = opClipSplit(doc, op, context);
     else if (op.op === 'clip.fade') result = opClipFade(doc, op, context);
     else if (op.op === 'music') result = opMusic(doc, op, context);
     else if (op.op === 'loudness') result = opLoudness(doc, op, context);

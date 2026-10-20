@@ -40,6 +40,7 @@
       "screen-motion",
       "sfx",
       "shift",
+      "split",
       "stage",
       "sync",
       "trim",
@@ -859,8 +860,8 @@
     },
     "punch": {
       "group": "camera",
-      "summary": "Eased push onto a named on-screen element (OCR locates it).",
-      "example": "capcutctl punch --project NAME --on Publish --segment ID --dry-run",
+      "summary": "Eased push onto a named on-screen element (OCR locates it), timed by --at or by the --word he says.",
+      "example": "capcutctl punch --project NAME --on Publish --word \"hit publish\" --dry-run",
       "options": [
         "--at",
         "--dry-run",
@@ -877,6 +878,7 @@
         "--segments",
         "--track",
         "--word",
+        "--words",
         "--zoom"
       ],
       "transactional": true
@@ -1100,11 +1102,15 @@
     },
     "sfx": {
       "group": "graphics",
-      "summary": "Place a named palette sound at explicit times: typing under a typed command, a click on the real Enter.",
+      "summary": "Place a palette sound or your own audio --file (whoosh, click, voice patch) at set times; overlaps take the next lane.",
       "example": "capcutctl sfx --project NAME --sound typing --cues 8.03:2.8:2,31.1:1.2:10 --volume 0.5 --dry-run",
       "options": [
         "--cues",
         "--dry-run",
+        "--fade-in",
+        "--fade-out",
+        "--file",
+        "--lead",
         "--project",
         "--sound",
         "--track",
@@ -1135,6 +1141,19 @@
         "--project"
       ],
       "transactional": false
+    },
+    "split": {
+      "group": "broll",
+      "summary": "Cut one clip in two at a timeline second; the left half keeps the id, the output names both.",
+      "example": "capcutctl split --project NAME --segments ID --at 5.2 --dry-run",
+      "options": [
+        "--at",
+        "--dry-run",
+        "--project",
+        "--segments",
+        "--track"
+      ],
+      "transactional": true
     },
     "stage": {
       "group": "safety",

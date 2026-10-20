@@ -6,7 +6,9 @@ import {
 } from './core.mjs';
 import { carryLevels, snapshotLevels } from './levels.mjs';
 import { hasClipAnimations } from './animations.mjs';
+import { resolveClip } from './add.mjs';
 import { readMetaRecord } from './repair.mjs';
+import { detachLibraryIdentity, localizeAudioFile, probeAudioDuration } from './local-audio.mjs';
 
 export function sfxPresets() {
   return loadPreset('sfx');
@@ -479,7 +481,7 @@ function optionalPrincipal(doc, explicit = null) {
  * to the segment's END, which the right half now owns, so it moves there.
  */
 function cloneRefs(doc, segment, rightId, key) {
-  const left = [], right = [];
+  const left = [], right = [], pairs = [];
   for (const [i, ref] of (segment.extra_material_refs || []).entries()) {
     let found = null, bucket = null;
     for (const [k, v] of Object.entries(doc.materials)) {
@@ -497,8 +499,66 @@ function cloneRefs(doc, segment, rightId, key) {
     doc.materials[bucket].push(copy);
     left.push(ref);
     right.push(copy.id);
+    pairs.push({ bucket, left: found, right: copy });
   }
-  return { left, right };
+  return { left, right, pairs };
+}
+
+/**
+ * Cut `entry.segment` (on `entry.track`) at absolute `us`, which must lie inside it. The left
+ * half keeps the original id; the right half gets `rightId` (or one minted from `key`).
+ * Shared by polish and ramp (through `sliceAt`) and by `clip.split`:
+ *
+ * - the source splits at the speed-scaled offset, so both halves keep the clip's speed;
+ * - every extra material is private to its half (`cloneRefs`), a transition moves right;
+ * - render_timerange follows target_timerange on each half;
+ * - a fade-in stays on the left and a fade-out moves right (each half's other side is zeroed);
+ * - an intro animation stays left, an outro moves right with its start measured on the right
+ *   half. Combo animations and keyframes are the caller's to refuse.
+ */
+export function splitSegmentAt(doc, entry, us, key, seed, { rightId = null } = {}) {
+  const prev = SEED;
+  if (seed !== undefined) SEED = seed;
+  try {
+    const seg = entry.segment;
+    const segs = entry.track.segments;
+    const tt = seg.target_timerange, st = seg.source_timerange;
+    const offset = us - tt.start;
+    const ratio = st && tt.duration ? st.duration / tt.duration : 1;
+    const srcOffset = Math.round(offset * ratio);
+
+    const right = clone(seg);
+    right.id = rightId || mint(`slice:${key}`);
+    const refs = cloneRefs(doc, seg, right.id, `slice:${key}`);
+    seg.extra_material_refs = refs.left;
+    right.extra_material_refs = refs.right;
+    right.target_timerange = { ...tt, start: us, duration: tt.duration - offset };
+    if (st) right.source_timerange = { ...st, start: st.start + srcOffset, duration: st.duration - srcOffset };
+
+    tt.duration = offset;
+    if (st) st.duration = srcOffset;
+    if (seg.render_timerange?.duration) {
+      right.render_timerange = { ...seg.render_timerange, start: right.target_timerange.start, duration: right.target_timerange.duration };
+      seg.render_timerange = { ...seg.render_timerange, start: tt.start, duration: tt.duration };
+    }
+
+    for (const { bucket, left, right: copy } of refs.pairs) {
+      if (bucket === 'audio_fades') {
+        if ('fade_out_duration' in left) left.fade_out_duration = 0;
+        if ('fade_in_duration' in copy) copy.fade_in_duration = 0;
+      } else if (bucket === 'material_animations' && Array.isArray(left.animations)) {
+        left.animations = left.animations.filter(a => a?.type !== 'out');
+        copy.animations = (copy.animations || []).filter(a => a?.type === 'out')
+          .map(a => ({ ...a, start: Math.max(0, right.target_timerange.duration - Number(a.duration || 0)) }));
+      }
+    }
+
+    segs.push(right);
+    segs.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
+    return right;
+  } finally {
+    if (seed !== undefined) SEED = prev;
+  }
 }
 
 /**
@@ -510,40 +570,76 @@ function cloneRefs(doc, segment, rightId, key) {
  * mid-shot and the outro keeps a start measured from the old, longer clip.
  */
 export function sliceAt(doc, track, t, key, seed) {
-  const prev = SEED;
-  if (seed !== undefined) SEED = seed;
-  try {
-    const us = US(t);
-    const segs = track.segments || [];
-    if (segs.some(s => Math.abs(s.target_timerange.start - us) < 20000)) return 'existing';
-    const seg = segs.find(s => s.target_timerange.start + 20000 < us
-                            && s.target_timerange.start + s.target_timerange.duration - 20000 > us);
-    if (!seg) return false;
-    if ((seg.common_keyframes || []).some(k => (k.keyframe_list || []).length)) return 'keyframed';
-    if (hasClipAnimations(doc, seg)) return 'animated';
+  const us = US(t);
+  const segs = track.segments || [];
+  if (segs.some(s => Math.abs(s.target_timerange.start - us) < 20000)) return 'existing';
+  const seg = segs.find(s => s.target_timerange.start + 20000 < us
+                          && s.target_timerange.start + s.target_timerange.duration - 20000 > us);
+  if (!seg) return false;
+  if ((seg.common_keyframes || []).some(k => (k.keyframe_list || []).length)) return 'keyframed';
+  if (hasClipAnimations(doc, seg)) return 'animated';
+  splitSegmentAt(doc, { segment: seg, track }, us, key, seed);
+  return 'split';
+}
 
-    const tt = seg.target_timerange, st = seg.source_timerange;
-    const offset = us - tt.start;
-    const ratio = st && tt.duration ? st.duration / tt.duration : 1;
-    const srcOffset = Math.round(offset * ratio);
+const SPLIT_ID_SEED = 'clip.split.v1';
 
-    const right = clone(seg);
-    right.id = mint(`slice:${key}`);
-    const refs = cloneRefs(doc, seg, right.id, `slice:${key}`);
-    seg.extra_material_refs = refs.left;
-    right.extra_material_refs = refs.right;
-    right.target_timerange = { ...tt, start: us, duration: tt.duration - offset };
-    if (st) right.source_timerange = { ...st, start: st.start + srcOffset, duration: st.duration - srcOffset };
-
-    tt.duration = offset;
-    if (st) st.duration = srcOffset;
-
-    segs.push(right);
-    segs.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
-    return 'split';
-  } finally {
-    if (seed !== undefined) SEED = prev;
+/**
+ * `clip.split`: cut one clip in two at timeline second `at`. Select it by `selector.id`
+ * (or `id`), or by `at` + `track`. T snaps to the project's frame grid. Splitting on an
+ * existing boundary is a no-op; within one frame of an edge is SPLIT_EDGE. Keyframed clips
+ * and combo animations are refused in v1. The left half keeps the id; the right id is a pure
+ * function of (id, T), so the root and timeline mirrors agree and a rerun names the same clip.
+ */
+export function opClipSplit(doc, op = {}) {
+  if (op.at == null || !Number.isFinite(Number(op.at)) || Number(op.at) < 0) {
+    throw new CapcutError('clip.split requires at SECONDS (timeline).', { code: 'BAD_TIME', exitCode: 2 });
   }
+  const id = op.selector?.id || op.id || null;
+  const entry = resolveClip(doc, id ? { id: String(id) } : { at: Number(op.at), track: op.track });
+  const seg = entry.segment;
+  const tt = seg.target_timerange;
+  const fps = Number.isFinite(doc.fps) && doc.fps > 0 ? doc.fps : 30;
+  const frameUs = 1e6 / fps;
+  const us = Math.round(Math.round(Number(op.at) * fps) * frameUs);
+  const start = tt.start, end = tt.start + tt.duration;
+  const base = { id: seg.id, at: us / 1e6 };
+  if (Math.abs(us - start) < frameUs / 2 || Math.abs(us - end) < frameUs / 2) {
+    return { changed: 0, ...base, leftId: seg.id, rightId: null, existing: true };
+  }
+  if (us < start || us > end) {
+    throw new CapcutError(`clip.split: ${base.at}s is outside clip ${seg.id} (${start / 1e6}–${end / 1e6}s).`,
+      { code: 'SPLIT_OUTSIDE', exitCode: 2 });
+  }
+  if (us - start < frameUs || end - us < frameUs) {
+    throw new CapcutError(`clip.split: ${base.at}s is within one frame of an edge of ${seg.id}; split elsewhere or trim instead.`,
+      { code: 'SPLIT_EDGE', exitCode: 2 });
+  }
+  if ((seg.common_keyframes || []).some(k => (k.keyframe_list || []).length)) {
+    throw new CapcutError(`clip.split refuses ${seg.id}: it has keyframes, and splitting would rescale the move. `
+      + 'Clear the camera move (keyframe --clear), split, then re-add it on the half that needs it.',
+    { code: 'SPLIT_KEYFRAMED', exitCode: 2 });
+  }
+  const refs = new Set(seg.extra_material_refs || []);
+  const animations = (doc.materials?.material_animations || []).filter(m => refs.has(m?.id))
+    .flatMap(m => m.animations || []);
+  if (animations.some(a => a?.type !== 'in' && a?.type !== 'out')) {
+    throw new CapcutError(`clip.split refuses ${seg.id}: it has a combo animation that spans the whole clip.`,
+      { code: 'SPLIT_ANIMATED', exitCode: 2 });
+  }
+  const leftDur = us - start, rightDur = end - us;
+  const tooLong = animations.find(a => Number(a.duration || 0) > (a.type === 'in' ? leftDur : rightDur));
+  if (tooLong) {
+    throw new CapcutError(`clip.split: the ${tooLong.type === 'in' ? 'intro' : 'outro'} animation on ${seg.id} `
+      + `is longer than its half after the split.`, { code: 'SPLIT_ANIMATED', exitCode: 2 });
+  }
+  const rightId = seededId(SPLIT_ID_SEED, `${seg.id}:${us}`);
+  if (allSegments(doc).some(e => e.segment.id === rightId)) {
+    throw new CapcutError(`clip.split: ${seg.id} was already split at ${base.at}s.`, { code: 'SPLIT_EXISTS', exitCode: 2 });
+  }
+  splitSegmentAt(doc, entry, us, `split:${seg.id}:${us}`, op.__seed || SPLIT_ID_SEED, { rightId });
+  return { changed: 1, ...base, leftId: seg.id, rightId,
+    left: { start: start / 1e6, duration: leftDur / 1e6 }, right: { start: us / 1e6, duration: rightDur / 1e6 } };
 }
 
 /**
@@ -986,36 +1082,143 @@ export function opInteractions(doc, op = {}, context = {}) {
 }
 
 /**
- * Place a named palette sound at explicit times (typing under a typed command, an Enter click on
- * the real Enter). Cues are {at, dur?, src?} in timeline seconds; `src` starts inside a long bed
- * such as the one-minute typing recording. The sound must be cached on this machine.
+ * The first audio lane of the `base` family (base, base-2, base-3, …) with nothing over the
+ * half-open range [startUs, startUs + durUs). The next lane is created only when every lane
+ * is busy. A typing bed and the clicks inside it used to stack on one lane, which CapCut
+ * plays as one and doctor reports as TRACK_OVERLAP.
  */
-export function opSfxPlace(doc, op = {}) {
+export function pickFreeAudioLane(doc, base, startUs, durUs, mintFn = mint) {
+  const endUs = startUs + durUs;
+  const busy = track => (track.segments || []).some(segment => {
+    const tt = segment.target_timerange;
+    return tt && tt.start < endUs && startUs < tt.start + tt.duration;
+  });
+  for (let n = 1; ; n++) {
+    const name = n === 1 ? base : `${base}-${n}`;
+    const track = doc.tracks.find(t => t.type === 'audio' && t.name === name);
+    if (!track) return ensureAudioTrack(doc, name, mintFn);
+    if (!busy(track)) return track;
+  }
+}
+
+/** An audio lane named `base` or `base-N`. */
+function laneFamily(base) {
+  const escaped = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`^${escaped}(?:-\\d+)?$`);
+}
+
+/** Audio file extensions `sfx --file` takes and `add` refuses. */
+export const AUDIO_FILE_EXTENSIONS = Object.freeze(['.wav', '.mp3', '.m4a', '.aac', '.aif', '.aiff', '.flac', '.ogg', '.opus', '.caf']);
+
+/**
+ * The material for a local audio file: localized under a content hash, cloned from a
+ * harvested sound template with the library identity removed, and typed 'sound' — never
+ * 'music', which loudness and duck treat as the bed. A rerun reuses it by path.
+ */
+function ensureFileAudio(doc, file, context = {}) {
+  const source = path.resolve(String(file));
+  if (!fs.existsSync(source)) {
+    throw new CapcutError(`sfx --file not found: ${file}`, { code: 'SFX_FILE_MISSING', exitCode: 2 });
+  }
+  const durationS = probeAudioDuration(source);
+  const placed = localizeAudioFile(context.projectDir, source, { dryRun: context.dryRun, prefix: 'sfx' });
+  const base = path.basename(source);
+  const found = (doc.materials.audios || []).find(m => m.path === placed && m.type === 'sound');
+  if (found) return { id: found.id, durationS, base, placed, reused: true };
+  const templates = Object.values(sfxPresets().audioTemplates);
+  const tpl = templates.find(m => m.type === 'sound') || templates.find(m => m.type !== 'music') || templates[0];
+  const material = detachLibraryIdentity(clone(tpl));
+  material.id = mint(`audio:file:${path.basename(placed)}`);
+  material.type = 'sound';
+  material.name = base;
+  material.path = placed;
+  material.duration = US(durationS);
+  if ('wave_points' in material) material.wave_points = [];
+  arr(doc, 'audios').push(material);
+  return { id: material.id, durationS, base, placed, reused: false };
+}
+
+function attachFade(doc, segment, fadeIn, fadeOut) {
+  if (!(fadeIn > 0) && !(fadeOut > 0)) return null;
+  const fade = { type: 'audio_fade', fade_type: 0, fade_in_duration: US(fadeIn || 0), fade_out_duration: US(fadeOut || 0) };
+  fade.id = mint(`fade:${segment.id}`);
+  arr(doc, 'audio_fades').push(fade);
+  segment.extra_material_refs = [...(segment.extra_material_refs || []), fade.id];
+  return fade.id;
+}
+
+/**
+ * Place a named palette sound (`sound`) or a local audio file (`file`) at explicit times:
+ * typing under a typed command, an Enter click on the real Enter, a WAV whoosh, a voice patch.
+ * Cues are {at, dur?, src?} in timeline seconds; `src` starts inside a long bed such as the
+ * one-minute typing recording. `lead` moves every cue earlier. Each cue takes the first free
+ * lane of the family (sfx-keys, sfx-keys-2, …; an explicit `track` spills to <track>-2), so
+ * overlapping cues never stack on one lane. A cue identical to one already placed (same
+ * sound, start, length and source offset) is skipped and reported, not duplicated.
+ */
+export function opSfxPlace(doc, op = {}, context = {}) {
   SEED = op.__seed || SEED || null;
   const p = sfxPresets();
-  const name = p.accents?.[op.sound] || (p.audioTemplates[op.sound] ? op.sound : null);
-  if (!name) {
-    throw new CapcutError(`sfx: unknown sound "${op.sound}". Use ${Object.keys(p.accents || {}).join(', ')} or a palette name from presets/sfx.json.`, { code: 'UNKNOWN_SFX', exitCode: 2 });
+  const hasSound = op.sound != null && op.sound !== '';
+  const hasFile = op.file != null && op.file !== '';
+  if (hasSound === hasFile) {
+    throw new CapcutError('sfx takes exactly one of --sound NAME or --file PATH.', { code: 'SFX_SOURCE', exitCode: 2 });
   }
   if (!Array.isArray(op.cues) || !op.cues.length) throw new CapcutError('sfx needs --cues AT[:DUR[:SRC]],…', { code: 'SFX_NO_CUES', exitCode: 2 });
-  const audioId = ensureAudio(doc, name);
-  if (!audioId) throw new CapcutError(`sfx: "${name}" is not cached on this machine; open it once in CapCut or pick another sound.`, { code: 'SFX_UNAVAILABLE', exitCode: 2 });
-  const fileDur = (p.audioTemplates[name].duration || US(0.5)) / 1e6;
-  const lane = ensureAudioTrack(doc, op.track || 'sfx-keys');
+  let audioId, fileDur, name, desc, file = null;
+  if (hasFile) {
+    const local = ensureFileAudio(doc, op.file, context);
+    audioId = local.id;
+    fileDur = local.durationS;
+    name = local.base;
+    desc = `sfx:file:${local.base}`;
+    file = { path: local.placed, reused: local.reused };
+  } else {
+    name = p.accents?.[op.sound] || (p.audioTemplates[op.sound] ? op.sound : null);
+    if (!name) {
+      throw new CapcutError(`sfx: unknown sound "${op.sound}". Use ${Object.keys(p.accents || {}).join(', ')} or a palette name from presets/sfx.json.`, { code: 'UNKNOWN_SFX', exitCode: 2 });
+    }
+    audioId = ensureAudio(doc, name);
+    if (!audioId) throw new CapcutError(`sfx: "${name}" is not cached on this machine; open it once in CapCut or pick another sound.`, { code: 'SFX_UNAVAILABLE', exitCode: 2 });
+    fileDur = (p.audioTemplates[name].duration || US(0.5)) / 1e6;
+    desc = `sfx:${op.sound}`;
+  }
+  const base = String(op.track || 'sfx-keys');
   const volume = op.volume ?? p.rules?.volume ?? 1;
+  const lead = Number(op.lead ?? 0);
+  if (!Number.isFinite(lead) || lead < 0) throw new CapcutError('sfx --lead must be a nonnegative number of seconds.', { code: 'BAD_NUMBER', exitCode: 2 });
+  const family = laneFamily(base);
+  const familySegments = () => doc.tracks.filter(t => t.type === 'audio' && family.test(t.name || ''))
+    .flatMap(t => t.segments || []);
+  const touched = new Set();
+  const lanes = [];
+  const duplicates = [];
   let placed = 0;
   for (const [i, cue] of op.cues.entries()) {
     const src = Math.max(0, Number(cue.src) || 0);
     const dur = Math.min(Number(cue.dur) || fileDur, fileDur - src);
     if (!(Number.isFinite(cue.at) && cue.at >= 0 && dur > 0)) throw new CapcutError(`sfx cue ${i} is out of range: ${JSON.stringify(cue)}`, { code: 'SFX_BAD_CUE', exitCode: 2 });
-    const seg = audioSegment(doc, audioId, cue.at, dur, `sfx-place:${name}:${i}:${cue.at}`, volume, `sfx:${op.sound}`);
-    seg.source_timerange = { start: US(src), duration: US(dur) };
+    const at = Math.max(0, cue.at - lead);
+    const startUs = US(at), durUs = US(dur), srcUs = US(src);
+    const twin = familySegments().find(s => s.material_id === audioId && s.target_timerange?.start === startUs
+      && s.target_timerange?.duration === durUs && (s.source_timerange?.start ?? 0) === srcUs);
+    if (twin) { duplicates.push({ at: Math.round(at * 1000) / 1000, id: twin.id, code: 'SFX_DUPLICATE' }); continue; }
+    const lane = pickFreeAudioLane(doc, base, startUs, durUs);
+    const seg = audioSegment(doc, audioId, at, dur, `sfx-place:${name}:${i}:${cue.at}`, volume, desc);
+    seg.source_timerange = { start: srcUs, duration: durUs };
+    attachFade(doc, seg, Number(op.fadeIn) || 0, Number(op.fadeOut) || 0);
     lane.segments.push(seg);
+    touched.add(lane);
+    if (!lanes.includes(lane.name)) lanes.push(lane.name);
     placed++;
   }
-  lane.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
+  for (const lane of touched) lane.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
   doc.tracks.forEach((t, i) => (t.segments || []).forEach(s => { s.track_render_index = i; }));
-  return { changed: placed, sfx: name, track: lane.name };
+  return {
+    changed: placed, sfx: name, track: lanes[0] || base, tracks: lanes,
+    ...(file ? { file } : {}),
+    ...(duplicates.length ? { skipped: duplicates } : {}),
+  };
 }
 
 /**

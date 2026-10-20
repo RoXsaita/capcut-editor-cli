@@ -2,10 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   matchOcrBoxes, pickBox, focusRectForZoom, planPunchTiming, assertNoDoublePunch,
-  opPunch, DEFAULT_ZOOM, CLICK_LEAD, CHANGE_HIGH,
+  opPunch, DEFAULT_ZOOM, CLICK_LEAD, CHANGE_HIGH, wordTime,
 } from '../src/punch.mjs';
 import { UPSCALE_REFUSE } from '../src/crispness.mjs';
 import { cameraValue } from '../src/add.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { main, setOutput } from '../src/cli.mjs';
 
 const US = s => Math.round(s * 1e6);
 const value = (segment, property, t, fallback = 0) => cameraValue(segment, property, US(t), fallback);
@@ -40,6 +44,8 @@ test('matchOcrBoxes is case-insensitive and fuzzy', () => {
   assert.equal(matchOcrBoxes(boxes, 'PUBLISH')[0].text, 'Publish');
   assert.equal(matchOcrBoxes(boxes, 'lish').length, 1);
   assert.equal(matchOcrBoxes(boxes, 'nope').length, 0);
+  const fragments = [{ text: 'Publish' }, { text: 'P' }, { text: 'is' }];
+  assert.deepEqual(matchOcrBoxes(fragments, 'Publish').map(box => box.text), ['Publish']);
 });
 
 test('pickBox refuses ambiguity unless a click is nearer one hit', () => {
@@ -160,4 +166,66 @@ test('assertNoDoublePunch allows a new move after a completed return', () => {
   };
   assert.doesNotThrow(() => assertNoDoublePunch(segment, US(5), US(7)));
   assert.throws(() => assertNoDoublePunch(segment, US(1.5), US(2.5)), { code: 'DOUBLE_PUNCH' });
+});
+
+test('wordTime matches whole tokens in order, never a fragment', () => {
+  const words = [
+    { word: ' Click', start: 1.0 }, { word: 'a', start: 1.3 }, { word: 'save', start: 1.5 },
+    { word: 'button.', start: 1.8 }, { word: 'Save', start: 4.0 },
+  ];
+  assert.equal(wordTime([{ word: 'a', start: 0.5 }], 'save button'), null);
+  assert.equal(wordTime(words, 'save button'), 1.5);
+  assert.equal(wordTime(words, 'SAVE'), 1.5);
+  assert.equal(wordTime(words, 'export png'), null);
+  assert.equal(wordTime({ segments: [{ words }] }, 'button'), 1.8);
+});
+
+function faceAndScreen() {
+  const face = {
+    id: 'f0', material_id: 'FACE', desc: '',
+    source_timerange: { start: US(2), duration: US(10) },
+    target_timerange: { start: 0, duration: US(10) },
+    extra_material_refs: [],
+    clip: { scale: { x: 1, y: 1 }, transform: { x: 0, y: 0 }, alpha: 1 },
+  };
+  const d = doc();
+  const screen = d.tracks[0].segments[0];
+  screen.target_timerange = { start: US(1), duration: US(8) };
+  screen.source_timerange = { start: 0, duration: US(8) };
+  d.materials.videos.push({ id: 'FACE', type: 'video', path: '/tmp/capcutctl-punch-face.mp4', width: 1080, height: 1920 });
+  d.tracks = [{ type: 'video', flag: 2, segments: [face] }, d.tracks[0]];
+  return d;
+}
+
+test('punch --word maps the phrase through the cut to the timeline', () => {
+  const d = faceAndScreen();
+  // Said at face source 6.0 → timeline 4.0 → screen source 3.0; the click arrives 250 ms early.
+  const out = opPunch(d, {
+    segment: 'b0', on: 'Publish', word: 'hit publish', kind: 'click', hold: 1, __seed: 'punch-word',
+    words: [{ word: 'Now', start: 5.6 }, { word: 'hit', start: 6.0 }, { word: 'Publish.', start: 6.2 }],
+    boxes: [publish], clicks: [], moments: [],
+  });
+  assert.equal(out.eventSource, 3);
+  assert.equal(out.arrive, 2.75);
+  const keys = d.tracks[1].segments[0].common_keyframes.find(k => k.property_type === 'KFTypeScaleX').keyframe_list;
+  assert.equal(keys[0].time_offset, US(2.75));
+  assert.throws(() => opPunch(faceAndScreen(), {
+    segment: 'b0', on: 'Publish', word: 'hit publish', boxes: [publish], clicks: [], moments: [],
+  }), error => error.code === 'PUNCH_NO_TRANSCRIPT' && /--words FILE or --at T/.test(error.message));
+  assert.throws(() => opPunch(faceAndScreen(), {
+    segment: 'b0', on: 'Publish', word: 'cancel', words: [{ word: 'hit', start: 6 }], boxes: [publish], clicks: [], moments: [],
+  }), { code: 'PUNCH_NO_TIME' });
+});
+
+test('punch --word with --at is refused before anything is read', async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'punch-cli-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, 'draft_info.json'), JSON.stringify(faceAndScreen()));
+  const restore = setOutput(() => true);
+  t.after(restore);
+  await assert.rejects(main(['punch', '--project', root, '--on', 'Publish', '--at', '4', '--word', 'publish']),
+    error => error.code === 'PUNCH_TIMING_CONFLICT' && error.exitCode === 2);
+  // No Whisper cache for this face: say so instead of "not in the transcript".
+  await assert.rejects(main(['punch', '--project', root, '--on', 'Publish', '--word', 'publish']),
+    error => error.code === 'PUNCH_NO_TRANSCRIPT' && /--words FILE/.test(error.message));
 });

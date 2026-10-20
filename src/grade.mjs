@@ -237,13 +237,6 @@ export function grabFrame(file, atSeconds, width = 320) {
   return { buf: raw.subarray(0, width * th * 3), width, height: th };
 }
 
-function mergeScopes(list) {
-  const keys = Object.keys(list[0]);
-  const out = {};
-  for (const k of keys) out[k] = +(list.reduce((a, s) => a + s[k], 0) / list.length).toFixed(1);
-  return out;
-}
-
 const SOURCE_ID_FIELDS = ['source_take_id', 'sourceTakeId', 'rl2_take_id', 'rl2TakeId'];
 const SOURCE_PATH_FIELDS = ['original_path', 'originalPath', 'source_path', 'sourcePath', 'path',
   'media_path', 'mediaPath'];
@@ -389,13 +382,13 @@ export function measureSources(doc, projectDir, { samples = 4 } = {}) {
         acc += c.srcDur;
       }
     }
-    const scopes = [];
+    const scopes = [], frames = [];
     for (const t of picks) {
       const f = grabFrame(e.file, t);
-      if (f) scopes.push(scope(f.buf));
+      if (f) { scopes.push(scope(f.buf)); frames.push(f.buf); }
     }
     if (!scopes.length) continue;
-    rows.push({
+    const row = {
       source: e.source,
       identity: e.identity,
       file: e.file,
@@ -403,14 +396,54 @@ export function measureSources(doc, projectDir, { samples = 4 } = {}) {
       clips: e.clips.length,
       screenSeconds: +e.clips.reduce((a, c) => a + c.dur, 0).toFixed(2),
       sampledAt: picks.map(t => +t.toFixed(1)),
-      scope: mergeScopes(scopes),
+      // The scope of every sampled pixel together, not a mean of per-frame percentiles: it is
+      // what the solver sees, so a self-reference lands on exactly what is measured here.
+      scope: scope(pooledFrames(frames)),
       spread: scopes.length > 1 ? {
         warmth: +(Math.max(...scopes.map(s => s.warmth)) - Math.min(...scopes.map(s => s.warmth))).toFixed(1),
         mid: +(Math.max(...scopes.map(s => s.mid)) - Math.min(...scopes.map(s => s.mid))).toFixed(1),
       } : null,
-    });
+    };
+    SAMPLED_FRAMES.set(row, frames);
+    rows.push(row);
   }
   return rows.sort((a, b) => b.screenSeconds - a.screenSeconds);
+}
+
+/**
+ * Decoded frames per measured row, kept off the JSON path: a plan is printed and written,
+ * and a few hundred KB of RGB per source has no business in it.
+ */
+const SAMPLED_FRAMES = new WeakMap();
+
+function pooledFrames(frames) {
+  return frames.length === 1 ? frames[0] : Buffer.concat(frames);
+}
+
+/** Every sampled frame of a row as one buffer, decoding again only when the row was not measured here. */
+function rowPixels(row) {
+  let frames = SAMPLED_FRAMES.get(row);
+  if (!frames?.length) {
+    frames = [];
+    for (const at of row.sampledAt || []) {
+      const f = grabFrame(row.file, at);
+      if (f) frames.push(f.buf);
+    }
+  }
+  return frames.length ? pooledFrames(frames) : null;
+}
+
+/** Above these the samples disagree enough that one grade cannot fit them all. */
+export const SPREAD_WARN = Object.freeze({ mid: 25, warmth: 12 });
+
+function spreadWarning(spread) {
+  if (!spread) return null;
+  const parts = [];
+  if (spread.mid > SPREAD_WARN.mid) parts.push(`mid luma varies by ${spread.mid}`);
+  if (spread.warmth > SPREAD_WARN.warmth) parts.push(`warmth varies by ${spread.warmth}`);
+  return parts.length
+    ? `${parts.join(' and ')} across the samples; one grade is a compromise for this source, check its darkest and brightest shots.`
+    : null;
 }
 
 /* ------------------------------------------------------------------ *
@@ -636,18 +669,16 @@ export function planGrade(doc, projectDir, options = {}) {
   }
   const out = [];
   for (const row of rows) {
-    let f = null;
-    for (const at of row.sampledAt) {
-      f = grabFrame(row.file, at);
-      if (f) break;
-    }
-    if (!f) continue;
+    // Solve against every sampled frame at once: the first frame alone graded a source that
+    // goes from a dark shot to a bright one for the dark shot, and blew out the bright one.
+    const pixels = rowPixels(row);
+    if (!pixels) continue;
     const target = {
       ...targetPart(reference, row.role, { strict: false }),
       ...targetPart(options.target, row.role),
     };
     const hasTarget = Object.values(target).some(value => value != null);
-    const solved = hasTarget ? solveGrade(f.buf, target, {
+    const solved = hasTarget ? solveGrade(pixels, target, {
       weights: ROLE_WEIGHTS[row.role],
       // A caller that names screen saturation has opted into matching that appearance.
       saturationIsCeiling: row.role === 'screen' && !Object.hasOwn(target, 'saturation'),
@@ -659,6 +690,8 @@ export function planGrade(doc, projectDir, options = {}) {
       .map(([k, v]) => [k, +(v * strength).toFixed(3)])
       .filter(([, v]) => Math.abs(v) >= 0.01));
     const reason = Object.keys(sliders).length ? null : 'No correction needed for the explicit target.';
+    const before = scope(pixels);
+    const warning = spreadWarning(row.spread);
     out.push({
       source: row.source,
       identity: row.identity,
@@ -668,9 +701,11 @@ export function planGrade(doc, projectDir, options = {}) {
       clips: row.clips,
       screenSeconds: row.screenSeconds,
       target,
-      before: row.scope,
+      before,
       sliders,
-      after: Object.keys(sliders).length ? scope(gradeBuffer(f.buf, sliders)) : row.scope,
+      after: Object.keys(sliders).length ? scope(gradeBuffer(pixels, sliders)) : before,
+      spread: row.spread ?? null,
+      ...(warning ? { warning } : {}),
       ...(reason ? { reason } : {}),
     });
   }
