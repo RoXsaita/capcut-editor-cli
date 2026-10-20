@@ -66,6 +66,7 @@
         "--dur",
         "--generated",
         "--height",
+        "--layer",
         "--media",
         "--media-duration",
         "--no-localize",
@@ -1209,13 +1210,14 @@
     },
     "trim": {
       "group": "broll",
-      "summary": "Change a clip's source window.",
+      "summary": "Change a clip's source window (source seconds); the talking head stays 1x unless --retime.",
       "example": "capcutctl trim --project NAME --at 5 --track broll --src 90-94 --dry-run",
       "options": [
         "--at",
         "--dry-run",
         "--dur",
         "--project",
+        "--retime",
         "--segments",
         "--src",
         "--start",

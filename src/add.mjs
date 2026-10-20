@@ -107,11 +107,39 @@ function assertNoOverlap(track, startUs, durUs, exceptId = null, label = 'clip.a
   }
 }
 
-/** Name creates/reuses a named overlay below the principal. A number uses that index and never creates. */
-export function resolveAddTrack(doc, trackSpec) {
+const ADD_PLACES = new Set(['top', 'under-face']);
+// Same lane names mograph-place.mjs and captions.mjs write (not imported: mograph-place imports this file).
+const isGraphicsLane = t => /^mograph-\d+$/.test(t?.name || '') || (t?.name || '').startsWith('captions:');
+
+function principalIndex(doc) {
+  try { return principalTrack(doc).index; }
+  catch (error) { if (error.code !== 'NO_PRINCIPAL_TRACK') throw error; return null; }
+}
+
+/**
+ * Name creates/reuses a named overlay below the principal. A number uses that index and never creates.
+ * `place: 'top'` creates the track ABOVE the principal instead, below the first mograph/caption
+ * lane over it (or at the top of the stack); `place: 'under-face'` is the default, made explicit.
+ * With a place given, an existing track on the other side of the face is refused, not reused.
+ */
+export function resolveAddTrack(doc, trackSpec, { place = null } = {}) {
   if (trackSpec == null || trackSpec === '') {
     throw new CapcutError('clip.add requires --track NAME (creates/reuses) or --track N (existing index).', { code: 'TRACK_REQUIRED', exitCode: 2 });
   }
+  if (place != null && !ADD_PLACES.has(place)) {
+    throw new CapcutError(`clip.add: --layer must be top or under-face, not "${place}".`, { code: 'BAD_LAYER', exitCode: 2 });
+  }
+  const principal = place != null ? principalIndex(doc) : null;
+  const checkPlacement = (index, label) => {
+    if (place == null || principal == null || index === principal) return;
+    const above = index > principal;
+    if ((place === 'top') !== above) {
+      throw new CapcutError(
+        `clip.add: track ${label} sits ${above ? 'above' : 'under'} the face, but --layer ${place} asks for `
+        + `${place === 'top' ? 'above' : 'under'} it. Name a new track, or drop --layer to reuse this one.`,
+        { code: 'TRACK_PLACEMENT', exitCode: 2 });
+    }
+  };
   if (/^\d+$/.test(String(trackSpec))) {
     const index = Number(trackSpec);
     const track = doc.tracks[index];
@@ -121,14 +149,25 @@ export function resolveAddTrack(doc, trackSpec) {
     if (track.flag === 0) {
       throw new CapcutError('clip.add: track 0 is the main/cover track and stays empty.', { code: 'MAIN_TRACK', exitCode: 2 });
     }
+    checkPlacement(index, String(index));
     return { track, index, created: false };
   }
   const name = String(trackSpec);
   const existing = doc.tracks.find(t => t.type === 'video' && t.name === name);
-  if (existing) return { track: existing, index: doc.tracks.indexOf(existing), created: false };
+  if (existing) {
+    const index = doc.tracks.indexOf(existing);
+    checkPlacement(index, `"${name}"`);
+    return { track: existing, index, created: false };
+  }
   let insertAt = 1;
-  try { insertAt = principalTrack(doc).index; }
-  catch { insertAt = Math.max(1, doc.tracks.findIndex(t => t.type === 'video' && t.flag === 2)); if (insertAt < 1) insertAt = 1; }
+  if (place === 'top') {
+    const above = principal == null ? -1 : principal;
+    const lane = doc.tracks.findIndex((t, i) => i > above && isGraphicsLane(t));
+    insertAt = Math.max(1, lane >= 0 ? lane : doc.tracks.length);
+  } else {
+    try { insertAt = principalTrack(doc).index; }
+    catch { insertAt = Math.max(1, doc.tracks.findIndex(t => t.type === 'video' && t.flag === 2)); if (insertAt < 1) insertAt = 1; }
+  }
   const track = insertOverlayTrack(doc, insertAt, mint(`track:${name}`));
   track.name = name;
   if (track.flag === 0) track.flag = 2;
@@ -343,7 +382,7 @@ export function opClipAdd(doc, op, context = {}) {
     : durUs;
   const speed = srcDur / durUs;
 
-  const dest = resolveAddTrack(doc, op.track);
+  const dest = resolveAddTrack(doc, op.track, { place: op.layer ?? null });
   if (dest.track.flag === 0) {
     throw new CapcutError('clip.add: will not place on the main/cover track.', { code: 'MAIN_TRACK', exitCode: 2 });
   }
@@ -391,6 +430,7 @@ export function opClipAdd(doc, op, context = {}) {
   dest.track.segments.push(segment);
   dest.track.segments.sort((a, b) => (a.target_timerange?.start || 0) - (b.target_timerange?.start || 0));
   renumberTracks(doc);                      // also sets track_render_index on every segment
+  const hidden = hiddenUnderPrincipal(doc, dest.track, atUs, durUs);
 
   return {
     changed: 1,
@@ -404,8 +444,34 @@ export function opClipAdd(doc, op, context = {}) {
     speed: r3(speed),
     origin: origin.kind,
     extended: slid.extended,
-    preserved: slid.preserved ? { start: r3(S(slid.preserved.start)), end: r3(S(slid.preserved.end)) } : null
+    preserved: slid.preserved ? { start: r3(S(slid.preserved.start)), end: r3(S(slid.preserved.end)) } : null,
+    ...(hidden ? { underPrincipal: true, hint: 'run capcutctl layout auto' } : {}),
   };
+}
+
+/**
+ * Does a full-frame, unmasked talking head cover this new clip? `add` puts new tracks under
+ * the face on purpose (the layout commands then open a window onto them), so until a layout
+ * runs the clip is on the timeline but invisible.
+ */
+function hiddenUnderPrincipal(doc, track, atUs, durUs) {
+  const principal = principalIndex(doc);
+  if (principal == null || doc.tracks.indexOf(track) >= principal) return false;
+  const W = doc.canvas_config?.width || 1080, H = doc.canvas_config?.height || 1920;
+  const masks = new Set((doc.materials?.common_mask || []).map(m => m.id));
+  return (doc.tracks[principal].segments || []).some(s => {
+    const t = s.target_timerange;
+    if (!t || !overlaps(atUs, atUs + durUs, t.start, t.start + t.duration)) return false;
+    if (s.enable_video_mask !== false && (s.extra_material_refs || []).some(id => masks.has(id))) return false;
+    const c = s.clip || {};
+    if ((c.alpha ?? 1) <= 0 || c.rotation) return false;
+    const sx = c.scale?.x ?? 1, sy = c.scale?.y ?? sx;
+    const m = (doc.materials?.videos || []).find(v => v.id === s.material_id);
+    const fit = m?.width > 0 && m?.height > 0 ? Math.min(W / m.width, H / m.height) : null;
+    const halfW = fit ? m.width * fit * sx / 2 : W * sx / 2, halfH = fit ? m.height * fit * sy / 2 : H * sy / 2;
+    const cx = W / 2 + (c.transform?.x ?? 0) * W / 2, cy = H / 2 - (c.transform?.y ?? 0) * H / 2;
+    return cx - halfW <= 1 && cx + halfW >= W - 1 && cy - halfH <= 1 && cy + halfH >= H - 1;
+  });
 }
 
 /** Relink this segment's material (or a clone of it if shared) without wiping keyframes. */
@@ -480,6 +546,22 @@ export function opReplaceMedia(doc, op, context = {}) {
   if (op.mediaDuration != null) material.duration = op.mediaDuration;
 
   const tt = seg.target_timerange;
+  // The derived file starts O seconds into the original, so the same moment sits O seconds
+  // earlier in it. `--derived-offset` used to be recorded and nothing else: the clip kept
+  // reading the ORIGINAL's window from the trimmed file, O seconds late (or past its end).
+  // Only the CLI asks for this; blur and denoise derive full-length files and keep the window.
+  const offsetUs = op.remapDerivedWindow && !op.retime && Number(op.derivedOffset) > 0 ? US(Number(op.derivedOffset)) : 0;
+  if (offsetUs && seg.source_timerange) {
+    const st = seg.source_timerange;
+    if (st.start < offsetUs) {
+      throw new CapcutError(
+        `replace.media: this clip reads source from ${r3(S(st.start))}s, before ${path.basename(dest)} begins `
+        + `(--derived-offset ${r3(S(offsetUs))}s into the original). Re-derive from an earlier point, or pass --retime.`,
+        { code: 'SOURCE_BEFORE_START', exitCode: 2 });
+    }
+    rescaleKeyframes(seg, st.start, st.duration, st.start - offsetUs, st.duration);
+    seg.source_timerange = { start: st.start - offsetUs, duration: st.duration };
+  }
   if (op.retime && seg.source_timerange && Number.isFinite(material.duration)) {
     const speed = material.duration / tt.duration;
     seg.source_timerange = { start: 0, duration: material.duration };
@@ -506,7 +588,9 @@ export function opReplaceMedia(doc, op, context = {}) {
       Object.assign(twin, clone(material));
     }
   }
-  return { changed: 1, id: seg.id, materialId: material.id, path: dest, origin: origin.kind, shared: shared && true };
+  return { changed: 1, id: seg.id, materialId: material.id, path: dest, origin: origin.kind, shared: shared && true,
+    ...(offsetUs ? { source: [r3(S(seg.source_timerange.start)), r3(S(seg.source_timerange.start + seg.source_timerange.duration))],
+      shiftedBy: r3(S(offsetUs)) } : {}) };
 }
 
 
@@ -667,6 +751,19 @@ export function cameraValue(segment, property, atUs, fallback) {
 const CAMERA_PROPERTIES = new Set(['KFTypeScaleX', 'KFTypeScaleY', 'KFTypePositionX', 'KFTypePositionY']);
 const linkedScale = s => s.uniform_scale?.on ?? ((s.clip?.scale?.x ?? 1) === (s.clip?.scale?.y ?? 1));
 
+/**
+ * The source row a split (line) mask cuts at, and which side of it shows: `lower` when the mask
+ * is turned 180 degrees (the lower half of the split). `band` is the visible source rows.
+ * One formula for keyframe --focus, punch and the polished cursor.
+ */
+export function maskVisibleRow(material, mask) {
+  const sh = Number(material?.height);
+  if (!mask || !(sh > 0)) return null;
+  const row = sh * (1 - (mask.config?.centerY || 0)) / 2;
+  const lower = Number(mask.config?.rotation || 0) === 180;
+  return { row, lower, band: lower ? [row, sh] : [0, row] };
+}
+
 function cameraRect(value, name, width, height) {
   const r = typeof value === 'string' ? value.split(',').map(Number) : value;
   if (!Array.isArray(r) || r.length !== 4 || !r.every(Number.isFinite)
@@ -756,6 +853,7 @@ export function opScaleKeyframe(doc, op) {
     throw new CapcutError('Camera motion on a circle or rotated mask moves its border. Use a full-face scene or select the screen recording.', { code: 'MOTION_MASK_UNSUPPORTED', exitCode: 2 });
   }
   if (op.viewport && !op.focus) throw new CapcutError('--viewport requires --focus.', { code: 'BAD_FOCUS', exitCode: 2 });
+  let focusRect = null, focusNote = null;
   if (op.focus || mask) {
     const sw = mat?.width, sh = mat?.height;
     if (!(sw > 0 && sh > 0) || Math.abs(base.x - base.y) > 1e-6 || segment.clip?.rotation
@@ -763,18 +861,42 @@ export function opScaleKeyframe(doc, op) {
       throw new CapcutError('Focus requires known source dimensions and an unrotated, uniformly scaled recording.', { code: 'BAD_FOCUS', exitCode: 2 });
     }
     const fit = Math.min(W / sw, H / sh);
-    const row = mask ? sh * (1 - (mask.config?.centerY || 0)) / 2 : null;
+    const split = mask ? maskVisibleRow(mat, mask) : null;
+    const row = split ? split.row : null;
     const seam = mask ? H / 2 - base.ty * H / 2 + (row - sh / 2) * fit * from : null;
     if (op.focus) {
       if (op.to != null || op.from != null) throw new CapcutError('--focus computes scale; omit --from/--to.', { code: 'BAD_FOCUS', exitCode: 2 });
-      const [x, y, w, h] = cameraRect(op.focus, '--focus', sw, sh);
-      const lower = mask && Number(mask.config?.rotation || 0) === 180;
+      let [x, y, w, h] = cameraRect(op.focus, '--focus', sw, sh);
+      const lower = Boolean(split?.lower);
+      if (split) {
+        // A rect computed from a rounded row (OCR boxes, punch) can overshoot the split by a
+        // pixel. Clamp that to the row rather than refusing; a real overshoot still refuses.
+        const over = lower ? row - y : y + h - row;
+        const tolerance = Math.max(2, 0.002 * sh);
+        if (over > 0 && over <= tolerance && h - over >= Math.max(1, h / 2)) {
+          if (lower) y = row;
+          h -= over;
+          focusNote = `focus ${lower ? 'top' : 'bottom'} clamped ${r3(over)}px to the split row ${r3(row)}`;
+        }
+      }
+      focusRect = [x, y, w, h];
       const defaults = mask ? [0, lower ? seam : 0, W, lower ? H - seam : seam] : [0, 0, W, H];
       const [vx, vy, vw, vh] = cameraRect(op.viewport || defaults, '--viewport', W, H);
       let pixels = Math.min(vw / w, vh / h) * 0.9;
       if (mask) {
-        if ((!lower && (y + h > row || vy + vh > seam + 1e-6)) || (lower && (y < row || vy < seam - 1e-6))) {
-          throw new CapcutError('Focus rectangle or viewport crosses the split mask. Select a visible source region.', { code: 'FOCUS_MASKED', exitCode: 2 });
+        const band = split.band.map(r3);
+        const details = { row: r3(row), lower, visibleSource: band, focus: [x, y, w, h].map(r3) };
+        if (lower ? y < row : y + h > row) {
+          throw new CapcutError(
+            `Focus rectangle crosses the split mask at split row ${Math.round(row)} of ${sh}: only source rows `
+            + `${band[0]}-${band[1]} are visible on this ${lower ? 'lower' : 'upper'} half. Select a region inside that band.`,
+            { code: 'FOCUS_MASKED', exitCode: 2, details });
+        }
+        if ((!lower && vy + vh > seam + 1e-6) || (lower && vy < seam - 1e-6)) {
+          throw new CapcutError(
+            `Viewport crosses the split seam (canvas y ${r3(seam)}, split row ${Math.round(row)} of the source). `
+            + 'Keep the viewport on this half of the split.',
+            { code: 'FOCUS_MASKED', exitCode: 2, details: { ...details, seam: r3(seam) } });
         }
         pixels = Math.min(pixels, lower ? (vy + vh - seam) / (y + h - row) : (seam - vy) / (row - y));
       }
@@ -847,7 +969,8 @@ export function opScaleKeyframe(doc, op) {
   }
   return { changed: plans.length, id: segment.id, offsets: offsets.map(k => r3(S(k))), from, to,
     shape: release ? 'push-hold-release' : 'push', hold, shortenedHold: op.hold == null && hold < 1.6,
-    focus: op.focus || null, transform: { x: tx, y: ty }, frameIds: frames.map(s => s.id),
+    focus: focusNote ? focusRect.map(r3) : (op.focus || null), ...(focusNote ? { note: focusNote } : {}),
+    transform: { x: tx, y: ty }, frameIds: frames.map(s => s.id),
     ease,
     easePosition,
     ...(ease || easePosition ? { verifiedIn: 'CapCut 9.4.0' } : {}),
@@ -879,7 +1002,11 @@ export function opClipShift(doc, op, context = {}) {
     preserved: slid.preserved ? { start: r3(S(slid.preserved.start)), end: r3(S(slid.preserved.end)) } : null };
 }
 
-/** Change the source window; speed follows source/target. Keyframes rescale with the window. */
+/**
+ * Change the source window; speed follows source/target. Keyframes rescale with the window.
+ * On the principal (talking-head) track only a same-length slip is allowed; `retime` keeps the
+ * current speed and resizes the clip on the timeline instead.
+ */
 export function opClipTrim(doc, op) {
   SEED = op.__seed || null;
   const entry = resolveOpClip(doc, op);
@@ -908,11 +1035,38 @@ export function opClipTrim(doc, op) {
       { code: 'SOURCE_AFTER_END', exitCode: 2 });
   }
   const oldStart = st.start, oldDur = st.duration;
+  const speedFrom = oldDur / tt.duration;
+  // --retime keeps the clip's current speed and resizes its slot on the timeline instead.
+  const targetDur = op.retime ? Math.round(srcDur / speedFrom) : tt.duration;
+  if (!(targetDur > 0)) throw new CapcutError('clip.trim: the retimed clip would have no duration.', { code: 'BAD_TIME', exitCode: 2 });
+  // The talking head plays at 1x. A longer or shorter window on the principal track used to
+  // speed the face up or down silently (pace refuses the same thing with PRINCIPAL_TRACK).
+  let principal = null;
+  try { principal = principalTrack(doc).track; }
+  catch (error) { if (error.code !== 'NO_PRINCIPAL_TRACK') throw error; }
+  const frameUs = 1e6 / (doc.fps || 30);
+  if (!op.retime && principal && principal === entry.track && Math.abs(srcDur - tt.duration) > frameUs) {
+    throw new CapcutError(
+      `clip.trim: ${entry.segment.id} is on the talking-head track; source ${r3(S(srcDur))}s into a `
+      + `${r3(S(tt.duration))}s slot would play the face at ${r3(srcDur / tt.duration)}x. `
+      + 'Faces stay 1x: recut with cut --keep, or --retime.',
+      { code: 'PRINCIPAL_TRACK', exitCode: 2 });
+  }
+  if (op.retime) assertNoOverlap(entry.track, tt.start, targetDur, entry.segment.id, 'clip.trim');
   entry.segment.source_timerange = { start: srcStart, duration: srcDur };
+  if (op.retime) {
+    tt.duration = targetDur;
+    if (entry.segment.render_timerange?.duration) entry.segment.render_timerange.duration = targetDur;
+    if (tt.start + targetDur > (doc.duration || 0)) doc.duration = tt.start + targetDur;
+  }
   entry.segment.speed = srcDur / tt.duration;
   setSpeedMaterial(doc, entry.segment, entry.segment.speed);
   rescaleKeyframes(entry.segment, oldStart, oldDur, srcStart, srcDur);
-  return { changed: 1, id: entry.segment.id, source: [r3(S(srcStart)), r3(S(srcStart + srcDur))], speed: r3(entry.segment.speed) };
+  return { changed: 1, id: entry.segment.id,
+    source: [r3(S(srcStart)), r3(S(srcStart + srcDur))], was: [r3(S(oldStart)), r3(S(oldStart + oldDur))],
+    target: [r3(S(tt.start)), r3(S(tt.start + tt.duration))],
+    speedFrom: r3(speedFrom), speed: r3(entry.segment.speed),
+    speedChanged: Math.abs(entry.segment.speed - speedFrom) > 1e-6 };
 }
 
 /** Attach or update a harvested audio_fade extra. Durations are seconds. */

@@ -229,3 +229,11 @@ test('punch --word with --at is refused before anything is read', async t => {
   await assert.rejects(main(['punch', '--project', root, '--on', 'Publish', '--word', 'publish']),
     error => error.code === 'PUNCH_NO_TRANSCRIPT' && /--words FILE/.test(error.message));
 });
+
+test('focusRectForZoom stays inside the visible band of a split-screen clip', () => {
+  const base = { box: { x: 0.4, y: 0.28, w: 0.1, h: 0.04 }, sourceW: 1920, sourceH: 1080, canvasW: 1080, canvasH: 1920, zoom: 1.6 };
+  const [, y, , h] = focusRectForZoom({ ...base, band: [0, 324] });
+  assert.ok(y >= 0 && y + h <= 324 + 1e-9, `rect ${y}-${y + h} leaves the upper band`);
+  const [, ly, , lh] = focusRectForZoom({ ...base, band: [324, 1080] });
+  assert.ok(ly >= 324 - 1e-9 && ly + lh <= 1080 + 1e-9, `rect ${ly}-${ly + lh} leaves the lower band`);
+});

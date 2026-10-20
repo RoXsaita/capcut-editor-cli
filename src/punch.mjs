@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CapcutError, allSegments, resolveMediaPath } from './core.mjs';
-import { opScaleKeyframe, resolveClip } from './add.mjs';
+import { maskVisibleRow, opScaleKeyframe, resolveClip } from './add.mjs';
 import { peakUpscale, UPSCALE_REFUSE } from './crispness.mjs';
 import { momentsFromSidecar } from './broll-lint.mjs';
 import { pythonForTool } from './python.mjs';
@@ -118,9 +118,10 @@ export function pickBox(hits, click = null, sourceDims = null) {
 
 /**
  * Source-pixel rectangle that, fed to `keyframe --focus`, yields ~`zoom` centred on the box.
- * Clamped so the framed region stays inside the source — the model never emits a coordinate.
+ * Clamped so the framed region stays inside the source — the model never emits a coordinate —
+ * and, on a split-screen clip, inside `band` ([top, bottom] source rows the split mask shows).
  */
-export function focusRectForZoom({ box, sourceW, sourceH, canvasW, canvasH, zoom }) {
+export function focusRectForZoom({ box, sourceW, sourceH, canvasW, canvasH, zoom, band = null }) {
   if (!(sourceW > 0 && sourceH > 0 && canvasW > 0 && canvasH > 0 && zoom > 0)) {
     throw new CapcutError('punch needs known source and canvas dimensions.', {
       code: 'BAD_FOCUS', exitCode: 2,
@@ -128,11 +129,13 @@ export function focusRectForZoom({ box, sourceW, sourceH, canvasW, canvasH, zoom
   }
   const fit = Math.min(canvasW / sourceW, canvasH / sourceH);
   const visW = Math.min(sourceW, (canvasW * 0.9) / (zoom * fit));
-  const visH = Math.min(sourceH, (canvasH * 0.9) / (zoom * fit));
+  const [top, bottom] = Array.isArray(band) && band[1] > band[0]
+    ? [Math.max(0, band[0]), Math.min(sourceH, band[1])] : [0, sourceH];
+  const visH = Math.min(bottom - top, (canvasH * 0.9) / (zoom * fit));
   const cx = (Number(box.x) + Number(box.w) / 2) * sourceW;
   const cy = (Number(box.y) + Number(box.h) / 2) * sourceH;
   const x = Math.min(Math.max(0, cx - visW / 2), sourceW - visW);
-  const y = Math.min(Math.max(0, cy - visH / 2), sourceH - visH);
+  const y = Math.min(Math.max(top, cy - visH / 2), bottom - visH);
   return [x, y, visW, visH];
 }
 
@@ -526,6 +529,10 @@ export function opPunch(doc, op = {}, context = {}) {
   const hits = matchOcrBoxes(boxes, on);
   const click = clickNear(clicks, eventSource);
   const box = pickBox(hits, click, { width: sourceW, height: sourceH });
+  // A split-screen half shows only part of the source: frame inside that band, or the rect
+  // crosses the seam and keyframe --focus refuses it (FOCUS_MASKED).
+  const mask = segment.enable_video_mask !== false
+    && (doc.materials?.common_mask || []).find(m => (segment.extra_material_refs || []).includes(m.id));
   const focus = focusRectForZoom({
     box,
     sourceW,
@@ -533,6 +540,7 @@ export function opPunch(doc, op = {}, context = {}) {
     canvasW: Number(canvas.width) || 1080,
     canvasH: Number(canvas.height) || 1920,
     zoom,
+    band: mask ? maskVisibleRow(material, mask)?.band ?? null : null,
   });
 
   const at = timelineOfSource(segment, timing.arrive);

@@ -49,7 +49,7 @@ export const COMMAND_DOCS = Object.freeze({
   'replace-media': doc('broll', 'Relink a clip to another file, keeping its keyframes.', 'capcutctl replace-media --project NAME --file new.mp4 --at 5 --track broll --dry-run', true),
   alpha: doc('check', 'Premultiply ProRes alpha overlays in place; CapCut paints a straight file\'s hidden colour as a haze.', 'capcutctl alpha --project NAME'),
   localize: doc('broll', 'Copy outside media into the draft (fixes "Link media").', 'capcutctl localize --project NAME', true),
-  trim: doc('broll', 'Change a clip\'s source window.', 'capcutctl trim --project NAME --at 5 --track broll --src 90-94 --dry-run', true),
+  trim: doc('broll', 'Change a clip\'s source window (source seconds); the talking head stays 1x unless --retime.', 'capcutctl trim --project NAME --at 5 --track broll --src 90-94 --dry-run', true),
   shift: doc('broll', 'Move a clip in time.', 'capcutctl shift --project NAME --at 5 --track broll --by 0.2 --dry-run', true),
   split: doc('broll', 'Cut one clip in two at a timeline second; the left half keeps the id, the output names both.', 'capcutctl split --project NAME --segments ID --at 5.2 --dry-run', true),
   ripple: doc('aroll', 'Delete a timeline range on every track and pull everything after it up, keeping each clip\'s speed.', 'capcutctl ripple --project NAME --from 9.64 --to 10.18 --dry-run', true),

@@ -160,15 +160,25 @@ Usage:
   capcutctl apply --project NAME_OR_PATH --spec FILE [--dry-run] [--force-running] [--no-backup]
   capcutctl add --project NAME --media FILE --at S --dur S --track NAME|N
                 [--src S] [--src-dur S | --cover IN-OUT] [--volume 0] [--desc TEXT] [--no-localize]
+                [--layer top|under-face]
                 [--generated] [--derived-from ORIGINAL [--derived-offset S]] [--allow-ephemeral]
                 [--width W --height H --media-duration S]   (probe override when ffprobe is missing)
+                      — a new --track NAME goes under the face (the default, under-face): invisible until
+                        a layout opens a window onto it, so the result says underPrincipal + the hint.
+                        --layer top puts a new track over the face, below the mograph/caption lanes.
+                        Reusing a track on the other side of the face with --layer refuses (TRACK_PLACEMENT).
   capcutctl replace-media --project NAME --file FILE --at S --track NAME|N | --segments ID[,ID...] [--all]
                 (--media FILE is an alias for --file FILE; --all relinks every clip that shares the
                 named clip's media, keeping each one's source window and keyframes)
                 [--retime] [--no-localize] [--generated] [--derived-from ORIGINAL] [--allow-ephemeral]
                 [--derived-offset S] [--width W --height H --media-duration S]
+                (--derived-offset S: FILE starts S seconds into ORIGINAL, so the clip's source window
+                and its keyframes move S earlier; a window starting before S refuses, SOURCE_BEFORE_START)
   capcutctl localize --project NAME   — copy outside videos into the project (fixes Link media)
-  capcutctl trim --project NAME --at S --track NAME|N | --segments ID  --src IN-OUT | --start S --dur S
+  capcutctl trim --project NAME --at S --track NAME|N | --segments ID  --src IN-OUT (source seconds) | --start S --dur S [--retime]
+                      — the new source window plays in the same slot, so speed follows. The talking-head
+                        track stays 1x: a window of another length refuses (PRINCIPAL_TRACK); recut with
+                        cut --keep, or --retime to keep the speed and resize the clip on the timeline.
   capcutctl shift --project NAME --at S --track NAME|N | --segments ID  --by SECONDS
   capcutctl split --project NAME --at S --segments ID | --track NAME|N [--dry-run]
                       — cut one clip in two at timeline second S (snapped to the frame grid). The
@@ -2435,6 +2445,7 @@ export async function main(argv, dependencies = {}) {
       height: probe.height,
       mediaDuration: probe.duration,
       localize: !args.noLocalize,
+      ...(args.layer != null ? { layer: String(args.layer) } : {}),
       ...originOptions(args)
     };
     const result = applySpec(projectDir, { version: 1, name: 'add', operations: [op] }, options);
@@ -2503,6 +2514,8 @@ export async function main(argv, dependencies = {}) {
       ...(all ? { all: true } : {}),
       path: path.resolve(file),
       retime: Boolean(args.retime),
+      // The derived file starts --derived-offset seconds into the original: shift the window.
+      ...(args.derivedOffset != null ? { remapDerivedWindow: true } : {}),
       localize: !args.noLocalize,
       width: probe.width,
       height: probe.height,
@@ -2585,7 +2598,8 @@ export async function main(argv, dependencies = {}) {
       } else {
         throw new CapcutError('trim requires --src IN-OUT or --start S --dur S', { exitCode: 2 });
       }
-      make = selector => ({ op: 'clip.trim', selector, src });
+      const retime = Boolean(args.retime);
+      make = selector => ({ op: 'clip.trim', selector, src, ...(retime ? { retime: true } : {}) });
     } else if (command === 'split') {
       if (at == null) throw new CapcutError('split requires --at SECONDS (timeline) and --segments ID or --track NAME|N.', { exitCode: 2 });
       make = selector => ({ op: 'clip.split', selector, at });
