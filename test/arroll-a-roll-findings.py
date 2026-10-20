@@ -14,9 +14,11 @@ from aroll import (
     AUDIO_RAMP_FRAMES,
     FRAME,
     add_audio_ramps,
+    apply_audio_ramps,
     apply_boundary_adjustments,
     apply_outward_recoveries,
     audio_ramp_operations,
+    capcutctl_cmd,
     cmd_cut,
     group_duplicates,
     load_review,
@@ -462,6 +464,28 @@ class ArollFindingsTest(unittest.TestCase):
                     patch("aroll.subprocess.run") as run:
                 self.assertEqual(cmd_cut(args), 1)
             run.assert_not_called()
+
+
+class CapcutctlCallbackTests(unittest.TestCase):
+    """aroll.py calls capcutctl back; it must be the checkout that launched it."""
+
+    def test_callback_uses_the_launching_node_and_bin_and_forwards_root(self):
+        env = {"CAPCUTCTL_NODE": "/opt/node", "CAPCUTCTL_BIN": "/checkout/bin/capcutctl.mjs"}
+        with patch.dict("os.environ", env), patch("aroll.subprocess.run") as run:
+            run.return_value.returncode = 0
+            run.return_value.stdout = ""
+            self.assertEqual(apply_audio_ramps("Project", [{"tl_in": 0.0}], root="/drafts", force_running=True), 0)
+        cmd = run.call_args.args[0]
+        self.assertEqual(cmd[:2], ["/opt/node", "/checkout/bin/capcutctl.mjs"])
+        self.assertEqual(cmd[2:4], ["apply", "--project"])
+        self.assertEqual(cmd[cmd.index("--root") + 1], "/drafts")
+        self.assertIn("--force-running", cmd)
+
+    def test_callback_falls_back_to_path_and_names_a_missing_capcutctl(self):
+        with patch.dict("os.environ", {"CAPCUTCTL_NODE": "", "CAPCUTCTL_BIN": ""}):
+            self.assertEqual(capcutctl_cmd("new", "--project", "P")[:2], ["capcutctl", "new"])
+            with patch("aroll.subprocess.run", side_effect=FileNotFoundError("capcutctl")):
+                self.assertEqual(apply_audio_ramps("Project", [{"tl_in": 0.0}]), 127)
 
 
 if __name__ == "__main__":

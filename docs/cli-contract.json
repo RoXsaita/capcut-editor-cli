@@ -180,8 +180,7 @@
         "--peak",
         "--project",
         "--sheet",
-        "--target",
-        "--times"
+        "--target"
       ],
       "transactional": false
     },
@@ -228,6 +227,7 @@
         "--drop",
         "--dry-run",
         "--force",
+        "--force-running",
         "--fps",
         "--in-place",
         "--into",
@@ -240,6 +240,7 @@
         "--recover-beat",
         "--reindex",
         "--review",
+        "--root",
         "--selftest",
         "--trim-beat"
       ],
@@ -870,6 +871,7 @@
         "--project",
         "--ramp",
         "--segment",
+        "--segments",
         "--track",
         "--word",
         "--zoom"
@@ -974,6 +976,7 @@
       "summary": "Relink a clip to another file, keeping its keyframes.",
       "example": "capcutctl replace-media --project NAME --file new.mp4 --at 5 --track broll --dry-run",
       "options": [
+        "--all",
         "--allow-ephemeral",
         "--at",
         "--derived-from",
@@ -1135,7 +1138,6 @@
       "example": "capcutctl stage start --project NAME",
       "options": [
         "--dry-run",
-        "--fix",
         "--force-running",
         "--no-backup",
         "--project"
@@ -1264,7 +1266,6 @@
         "--only",
         "--plan",
         "--project",
-        "--stress",
         "--text",
         "--track",
         "--words",

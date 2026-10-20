@@ -4,10 +4,11 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { HELP, main, setOutput } from '../src/cli.mjs';
+import { BOOLEAN_FLAGS, HELP, main, parseArgs, setOutput } from '../src/cli.mjs';
 import {
   CONTRACT_VERSION, TOOL_OPTIONS, TOOL_SCRIPTS, TRANSACTIONAL_COMMANDS, buildContract, parseHelp,
 } from '../src/contract.mjs';
+import { projectFingerprint, writeCliProject } from './helpers/cli-project.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = file => fs.readFileSync(path.join(ROOT, file), 'utf8');
@@ -271,4 +272,201 @@ test('every command documented with --project reaches project resolution, not "U
       } finally { restore(); process.exitCode = exitCode; }
     }
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+
+/** Run main() on a throwaway two-clip project; returns { out, error, changed }. */
+async function onFixture(t, segments = ['A', 'B']) {
+  const { default: os } = await import('node:os');
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-b2-'));
+  t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
+  const media = path.join(temp, 'face.mp4');
+  fs.writeFileSync(media, 'fixture media');
+  const project = writeCliProject(temp, media, { segments });
+  const draft = () => JSON.parse(fs.readFileSync(path.join(project, 'draft_info.json'), 'utf8'));
+  const history = () => {
+    const dir = path.join(project, '.capcutctl', 'history');
+    return fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+  };
+  const run = async (argv, { forceRunning = true } = {}) => {
+    const before = projectFingerprint(project);
+    let out = '';
+    let error = null;
+    const restore = setOutput(chunk => { out += String(chunk); return true; });
+    const exitCode = process.exitCode;
+    try {
+      // The fixture lives outside CapCut's registry, so --force-running is safe even when the
+      // user's editor is open; without it a refused write would hide a real one.
+      const mapped = argv.map(a => (a === 'P' ? project : a.replace(/^T\//, `${temp}/`)));
+      await main(forceRunning ? mapped.concat('--force-running') : mapped);
+    } catch (caught) { error = caught; } finally { restore(); process.exitCode = exitCode; }
+    return { out, error, changed: projectFingerprint(project) !== before };
+  };
+  return { temp, project, draft, history, run };
+}
+
+test('--plan never writes: zoom --at and layout circle/full-face are dry runs', async t => {
+  // --plan used to be ignored by every command that did not print its own plan, so these
+  // committed a real edit (and a snapshot) while the agent believed it was only looking.
+  const fx = await onFixture(t, ['SEGMENT']);
+  for (const argv of [
+    ['zoom', '--project', 'P', '--at', '1', '--plan'],
+    ['layout', 'circle', '--project', 'P', '--at', '1', '--plan'],
+    ['layout', 'full-face', '--project', 'P', '--at', '1', '--plan'],
+  ]) {
+    const { out, error, changed } = await fx.run(argv);
+    assert.equal(error, null, `${argv.join(' ')}: ${error?.message}`);
+    assert.equal(JSON.parse(out).dryRun, true, `${argv.join(' ')} must report a dry run`);
+    assert.equal(changed, false, `${argv.join(' ')} wrote to the project`);
+  }
+  assert.deepEqual(fx.history(), [], 'a --plan must not mint a snapshot');
+});
+
+test('prose in an entry does not lend its flags to the command', () => {
+  const contract = buildContract();
+  assert.ok(!contract.commands.stage.options.includes('--fix'), 'stage --fix is doctor --fix mentioned in prose');
+  assert.ok(!contract.commands.wrap.options.includes('--stress'), 'wrap --stress is zoom --stress mentioned in prose');
+  assert.ok(contract.commands.doctor.options.includes('--fix'));
+  assert.ok(contract.commands.zoom.options.includes('--stress'));
+  // Flags on continuation lines before any prose still count.
+  assert.ok(contract.commands.music.options.includes('--under-db'));
+  assert.ok(contract.commands.mograph.options.includes('--scene'));
+  assert.ok(contract.commands.pace.options.includes('--cover'));
+});
+
+test('a number that is not a number fails with BAD_NUMBER and writes nothing', async t => {
+  const fx = await onFixture(t);
+  for (const argv of [
+    ['volume', '--project', 'P', '--segments', 'A', '--level', '0,5'],
+    ['add', '--project', 'P', '--media', 'T/face.mp4', '--at', '3s', '--dur', '1', '--track', 'broll'],
+    ['fade', '--project', 'P', '--segments', 'A', '--in', '8ms'],
+    ['keyframe', '--project', 'P', '--segments', 'A', '--to', '1,3'],
+    ['loudness', '--project', 'P', '--target', '-14LUFS'],
+    ['zoom', '--project', 'P', '--at', '1,x'],
+  ]) {
+    const { error, changed } = await fx.run(argv);
+    assert.equal(error?.code, 'BAD_NUMBER', `${argv.join(' ')}: ${error?.message}`);
+    assert.equal(error.exitCode, 2);
+    assert.equal(changed, false, `${argv.join(' ')} wrote to the project`);
+  }
+  const { error } = await fx.run(['volume', '--project', 'P', '--segments', 'A', '--level', '0,5']);
+  assert.match(error.message, /use 0\.5/);
+});
+
+test('--segments A,B acts on every id in one transaction', async t => {
+  const fx = await onFixture(t);
+  const ids = () => fx.draft().tracks[1].segments.map(segment => segment.id);
+
+  let result = await fx.run(['volume', '--project', 'P', '--segments', 'A,B', '--level', '0']);
+  assert.equal(result.error, null, result.error?.message);
+  assert.deepEqual(fx.draft().tracks[1].segments.map(segment => segment.volume), [0, 0]);
+
+  result = await fx.run(['remove', '--project', 'P', '--segments', 'A,missing']);
+  assert.equal(result.error?.code, 'SELECTOR_EMPTY');
+  assert.equal(result.changed, false, 'one unknown id fails the whole list');
+  assert.deepEqual(ids(), ['A', 'B']);
+
+  const snapshots = fx.history().length;
+  result = await fx.run(['remove', '--project', 'P', '--segments', 'A, B']);
+  assert.equal(result.error, null, result.error?.message);
+  assert.deepEqual(ids(), []);
+  assert.equal(fx.history().length, snapshots + 1, 'one list is one snapshot');
+});
+
+test('single-clip commands refuse a list; a repeated --segments is refused', async t => {
+  const fx = await onFixture(t);
+  for (const argv of [
+    ['trim', '--project', 'P', '--segments', 'A,B', '--src', '0-1'],
+    ['shift', '--project', 'P', '--segments', 'A,B', '--by', '0.2'],
+    ['keyframe', '--project', 'P', '--segments', 'A,B', '--to', '1.2'],
+    ['punch', '--project', 'P', '--segments', 'A,B', '--on', 'Publish'],
+    ['punch', '--project', 'P', '--segment', 'A', '--segments', 'A', '--on', 'Publish'],
+  ]) {
+    const { error, changed } = await fx.run(argv);
+    assert.equal(error?.code, 'MULTIPLE_SEGMENTS', `${argv.join(' ')}: ${error?.message}`);
+    assert.equal(error.exitCode, 2);
+    assert.equal(changed, false);
+  }
+  assert.throws(() => parseArgs(['remove', '--segments', 'A', '--segments', 'B']),
+    error => error.code === 'DUPLICATE_FLAG' && error.exitCode === 2);
+  // A single id still behaves as before.
+  const { error } = await fx.run(['shift', '--project', 'P', '--segments', 'B', '--by', '0.5']);
+  assert.equal(error, null, error?.message);
+  assert.equal(fx.draft().tracks[1].segments.find(segment => segment.id === 'B').target_timerange.start, 2_000_000);
+});
+
+test('replace-media --segments ID --all relinks every clip on that media, keeping their windows', async t => {
+  const fx = await onFixture(t);
+  fs.writeFileSync(path.join(fx.temp, 'room.mp4'), 'room plate');
+  const before = fx.draft().tracks[1].segments.map(segment => segment.source_timerange);
+  const { error } = await fx.run(['replace-media', '--project', 'P', '--segments', 'A', '--all',
+    '--file', 'T/room.mp4', '--width', '1080', '--height', '1920', '--media-duration', '3', '--allow-ephemeral']);
+  assert.equal(error, null, error?.message);
+  const doc = fx.draft();
+  const videos = new Map(doc.materials.videos.map(material => [material.id, material]));
+  for (const segment of doc.tracks[1].segments) {
+    assert.match(videos.get(segment.material_id).path, /room\.mp4$/, `${segment.id} still plays the old media`);
+  }
+  assert.deepEqual(doc.tracks[1].segments.map(segment => segment.source_timerange), before);
+  const twice = await fx.run(['replace-media', '--project', 'P', '--segments', 'A,B', '--all', '--file', 'T/room.mp4']);
+  assert.equal(twice.error?.code, 'MULTIPLE_SEGMENTS');
+});
+
+test('an unknown command is a short pointed refusal, not the whole help', async t => {
+  const fx = await onFixture(t, ['SEGMENT']);
+  const { error } = await fx.run(['list']);
+  assert.match(error.message, /^Unknown command: list\./);
+  assert.match(error.message, /projects/);
+  assert.ok(error.message.length < 1024, `message is ${error.message.length} bytes`);
+  const typo = await fx.run(['timelin', '--project', 'P']);
+  assert.match(typo.error.message, /Did you mean: timeline/);
+});
+
+test('`<command> --help` prints that command only', async () => {
+  let out = '';
+  const restore = setOutput(chunk => { out += String(chunk); return true; });
+  try { await main(['notes', '--help']); } finally { restore(); }
+  assert.ok(out.length < 2048, `notes --help is ${out.length} bytes`);
+  assert.match(out, /--decide/);
+  assert.doesNotMatch(out, /capcutctl layout/);
+});
+
+test('an unknown option names the nearest flag or the options there are', async t => {
+  const fx = await onFixture(t, ['SEGMENT']);
+  const gate = await fx.run(['gate', '--project', 'P', '--bogus', '1']);
+  assert.equal(gate.error?.code, 'UNKNOWN_OPTION');
+  assert.match(gate.error.message, /Did you mean|takes:/);
+  const close = await fx.run(['gate', '--project', 'P', '--xrya', 'dir']);
+  assert.match(close.error.message, /Did you mean --xray/);
+  const preflight = await fx.run(['preflight', '--root', 'T/drafts', '--project', 'x', '--json'], { forceRunning: false });
+  assert.notEqual(preflight.error?.code, 'UNKNOWN_OPTION', preflight.error?.message);
+  const bogus = await fx.run(['preflight', '--root', 'T/drafts', '--bogus', '1'], { forceRunning: false });
+  assert.equal(bogus.error?.code, 'UNKNOWN_OPTION');
+});
+
+test('notes takes the flag names agents guess: --decision is --decide', async t => {
+  const fx = await onFixture(t, ['SEGMENT']);
+  const { error } = await fx.run(['notes', '--project', 'P', '--decision', 'keep the indigo frame'], { forceRunning: false });
+  assert.equal(error, null, error?.message);
+  const notes = JSON.parse(fs.readFileSync(path.join(fx.project, '.capcutctl', 'notes.json'), 'utf8'));
+  assert.equal(notes.decisions.at(-1).what, 'keep the indigo frame');
+  const todo = await fx.run(['notes', '--project', 'P', '--outstanding', 'fix the seam at 12s'], { forceRunning: false });
+  assert.equal(todo.error, null, todo.error?.message);
+  const both = await fx.run(['notes', '--project', 'P', '--decision', 'a', '--decide', 'b'], { forceRunning: false });
+  assert.equal(both.error?.code, 'NOTES_ARGS');
+});
+
+test('no boolean flag swallows a value another command documents', () => {
+  // One list of booleans serves every command. If `--name` is boolean here but some command
+  // documents `--name VALUE`, the value lands in the positionals and the flag reads true.
+  const camel = flag => flag.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+  const valued = new Set();
+  for (const [, flag] of HELP.matchAll(/--([a-z][a-z0-9-]*)[ =](?=[A-Z0-9"'{]|-[0-9])/g)) valued.add(camel(flag));
+  const collisions = [...valued].filter(key => BOOLEAN_FLAGS.has(key));
+  assert.deepEqual(collisions, [], 'boolean flags that HELP also documents with a value');
+
+  const documented = new Set(Object.values(buildContract().commands)
+    .flatMap(entry => entry.options).map(option => camel(option.slice(2))));
+  const undocumented = [...BOOLEAN_FLAGS].filter(key => key !== 'help' && !documented.has(key));
+  assert.deepEqual(undocumented, [], 'boolean flags no command documents');
 });

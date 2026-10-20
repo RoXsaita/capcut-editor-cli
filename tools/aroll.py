@@ -1379,6 +1379,35 @@ def _shell_command(parts):
     return " ".join(shlex.quote(str(part)) for part in parts)
 
 
+IN_PLACE_MARKER = "CAPCUTCTL_IN_PLACE_CUT"
+
+
+def capcutctl_cmd(*argv, root=None, force_running=False):
+    """The capcutctl that launched this tool, not whichever one PATH finds first.
+
+    `capcutctl cut` passes its own node and bin through the environment. Spawning bare
+    `capcutctl` could run another checkout's CLI against the project this one just cut.
+    """
+    node, binary = os.environ.get("CAPCUTCTL_NODE"), os.environ.get("CAPCUTCTL_BIN")
+    cmd = [node, binary] if node and binary else ["capcutctl"]
+    cmd += [str(part) for part in argv]
+    if root:
+        cmd += ["--root", str(root)]
+    if force_running:
+        cmd.append("--force-running")
+    return cmd
+
+
+def _run_capcutctl(cmd):
+    """Run a capcutctl child; a missing executable is a named failure, not a traceback."""
+    try:
+        return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    except FileNotFoundError:
+        print(f"error: could not run {cmd[0]!r}: not found. Run this through `capcutctl cut`, "
+              "or put capcutctl on PATH.", file=sys.stderr, flush=True)
+        return subprocess.CompletedProcess(cmd, 127, stdout="")
+
+
 def repair(idx, picked, fps=FPS):
     """
     Apply the lint's own suggestions. These are mechanical — the trough and the onset are
@@ -1507,7 +1536,8 @@ def cut_handoff(destination, timeline, mode="plan", track="content", frames=AUDI
     }
 
 
-def apply_audio_ramps(destination, timeline, dry_run=False, track="content", frames=AUDIO_RAMP_FRAMES, fps=FPS):
+def apply_audio_ramps(destination, timeline, dry_run=False, track="content", frames=AUDIO_RAMP_FRAMES, fps=FPS,
+                      root=None, force_running=False):
     """Apply all native fades in one transactional capcutctl spec, then remove the temp file."""
     spec = {"version": 1, "name": "aroll-audio-ramps", "operations":
             audio_ramp_operations(timeline, track=track, frames=frames, fps=fps)}
@@ -1516,13 +1546,14 @@ def apply_audio_ramps(destination, timeline, dry_run=False, track="content", fra
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", encoding="utf-8", delete=False) as handle:
             json.dump(spec, handle, ensure_ascii=False, indent=1)
             spec_path = handle.name
-        cmd = ["capcutctl", "apply", "--project", str(destination), "--spec", spec_path]
+        cmd = capcutctl_cmd("apply", "--project", str(destination), "--spec", spec_path,
+                            root=root, force_running=force_running)
         if dry_run:
             cmd.append("--dry-run")
         display = list(cmd)
         display[display.index("--spec") + 1] = "<aroll-audio-ramps>"
         print("\n$ " + _shell_command(display))
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        result = _run_capcutctl(cmd)
         output = getattr(result, "stdout", "") or ""
         if output:
             print(output, end="" if output.endswith("\n") else "\n")
@@ -1713,12 +1744,14 @@ def cmd_cut(args):
                   flush=True)
             return 1
         if getattr(args, "project", None):
-            cmd = ["capcutctl", "new", "--project", args.project,
-                   "--media", data["media"], "--scenes", scenes]
+            root = getattr(args, "root", None)
+            force_running = getattr(args, "force_running", False)
+            cmd = capcutctl_cmd("new", "--project", args.project, "--media", data["media"], "--scenes", scenes,
+                                root=root, force_running=force_running)
             if getattr(args, "dry_run", False):
                 cmd.append("--dry-run")
             print("\n$ " + _shell_command(cmd))
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            result = _run_capcutctl(cmd)
             output = getattr(result, "stdout", "") or ""
             if output:
                 print(output, end="" if output.endswith("\n") else "\n")
@@ -1728,8 +1761,11 @@ def cmd_cut(args):
             # transaction so root and active-timeline mirrors receive the same extras.
             if getattr(args, "dry_run", False):
                 return 0
-            return apply_audio_ramps(args.project, timeline, track="content", fps=fps)
-        return apply_audio_ramps(args.into, timeline, dry_run=getattr(args, "dry_run", False), track="content", fps=fps)
+            return apply_audio_ramps(args.project, timeline, track="content", fps=fps,
+                                     root=root, force_running=force_running)
+        return apply_audio_ramps(args.into, timeline, dry_run=getattr(args, "dry_run", False), track="content", fps=fps,
+                                 root=getattr(args, "root", None),
+                                 force_running=getattr(args, "force_running", False))
     return 0
 
 
@@ -1835,8 +1871,19 @@ def main():
     ap.add_argument("--no-repair", action="store_true", help="do not auto-fix seam faults")
     ap.add_argument("--force", action="store_true", help="build despite seam findings")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--root", default=None, help="CapCut drafts folder, forwarded to capcutctl")
+    ap.add_argument("--force-running", action="store_true",
+                    help="forwarded to capcutctl: write even while CapCut is open")
     ap.add_argument("--selftest", action="store_true", help="check the pure logic")
     args = ap.parse_args()
+
+    # The in-place recut is `capcutctl cut VIDEO --into PROJECT`: Node maps every anchored
+    # B-roll, layout and SFX through one transaction. Reaching this script with --into any
+    # other way (`--into=P` slipping past the router) only laid audio fades on the target's
+    # content track at the new cut's times, over the old cut. Refuse that path outright.
+    if args.into is not None and os.environ.get(IN_PLACE_MARKER) != "1":
+        ap.error("--into/--in-place must go through `capcutctl cut VIDEO --into PROJECT` "
+                 "(the transactional recut); nothing was applied")
 
     if args.selftest:
         sys.exit(cmd_selftest(args))

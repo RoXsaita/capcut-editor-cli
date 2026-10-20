@@ -37,9 +37,15 @@ def analyze(payload):
         if track.get("type") not in ("video", "audio"):
             continue
         for segment in track.get("segments", []):
-            volume = float(segment.get("volume", 1))
+            raw_volume = segment.get("volume", 1)
+            # A NaN volume from a bad flag reaches the draft as null; name the clip instead of
+            # dying in float(None) with a traceback.
+            try:
+                volume = float(raw_volume)
+            except (TypeError, ValueError):
+                raise ValueError(f"invalid clip volume {raw_volume!r} on segment {segment.get('id')}") from None
             if not math.isfinite(volume) or volume < 0:
-                raise ValueError("invalid clip volume")
+                raise ValueError(f"invalid clip volume {volume} on segment {segment.get('id')}")
             if volume == 0:
                 continue
             material = materials.get(segment.get("material_id"), {})

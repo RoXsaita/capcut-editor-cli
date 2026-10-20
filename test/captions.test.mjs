@@ -93,7 +93,9 @@ for (const [label, invalid] of [
   ['empty cues', []],
 ]) test(`caption input refuses ${label} before project mutation`, () => fixture(project => {
   const before = fs.readFileSync(path.join(project,'draft_info.json'),'utf8');
-  assert.throws(()=>applySpec(project,{version:1,operations:[operation({cues:invalid})]},{forceRunning:true}),/CAPTION_/);
+  // A NaN is now refused by applySpec's finite-number backstop (BAD_NUMBER) before the
+  // caption validator sees it; either way nothing is written.
+  assert.throws(()=>applySpec(project,{version:1,operations:[operation({cues:invalid})]},{forceRunning:true}),/CAPTION_|not a number/);
   assert.equal(fs.readFileSync(path.join(project,'draft_info.json'),'utf8'),before);
 }));
 

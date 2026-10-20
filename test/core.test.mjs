@@ -1417,3 +1417,53 @@ test('restore --snapshot LABEL resolves the newest <timestamp>-LABEL', async () 
   const real = restoreProjectSnapshot(fx.project, 'pre-x', { forceRunning: true, backup: false });
   assert.equal(path.basename(real.restored), path.basename(second));
 });
+
+test('applySpec refuses a NaN before the JSON clone turns it into null', async () => {
+  // JSON has no NaN: clone() wrote `volume: NaN` as `volume: null`, and every validator after
+  // the clone saw null, not a bad number. The backstop runs on the caller's spec.
+  const { writeCliProject, projectFingerprint } = await import('./helpers/cli-project.mjs');
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-nan-'));
+  try {
+    const media = path.join(temp, 'face.mp4');
+    fs.writeFileSync(media, 'fixture media');
+    const project = writeCliProject(temp, media);
+    const before = projectFingerprint(project);
+    assert.throws(() => applySpec(project, { version: 1, operations: [
+      { op: 'segment.patch', selector: { id: 'SEGMENT' }, set: { volume: NaN } },
+    ] }, { forceRunning: true }), error => error.code === 'BAD_NUMBER' && error.exitCode === 2
+      && /segment\.patch/.test(error.message) && /set\.volume/.test(error.message));
+    assert.equal(projectFingerprint(project), before);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test('doctor reports a null volume, fade or keyframe value as an error', async () => {
+  const { writeCliProject } = await import('./helpers/cli-project.mjs');
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-null-volume-'));
+  try {
+    const media = path.join(temp, 'face.mp4');
+    fs.writeFileSync(media, 'fixture media');
+    const project = writeCliProject(temp, media);
+    for (const dir of [project, path.join(project, 'Timelines', 'CLI-TIMELINE')]) {
+      for (const name of ['draft_info.json', 'draft_info.json.bak', 'template-2.tmp']) {
+        const file = path.join(dir, name);
+        const doc = JSON.parse(fs.readFileSync(file, 'utf8'));
+        const segment = doc.tracks[1].segments[0];
+        segment.volume = null;
+        segment.extra_material_refs = ['FADE'];
+        segment.common_keyframes = [{ id: 'KF', property_type: 'KFTypeScaleX',
+          keyframe_list: [{ id: 'K1', time_offset: 0, values: [null] }] }];
+        doc.materials.audio_fades = [{ id: 'FADE', type: 'audio_fade', fade_in_duration: null, fade_out_duration: 0 }];
+        fs.writeFileSync(file, `${JSON.stringify(doc, null, 2)}\n`);
+      }
+    }
+    const report = doctor(project);
+    const bad = report.issues.filter(item => item.code === 'BAD_NUMBER' && item.level === 'error');
+    assert.ok(bad.some(item => /volume/.test(item.message)), 'a null volume is an error');
+    assert.ok(bad.some(item => /fade_in_duration/.test(item.message)), 'a null fade is an error');
+    assert.ok(bad.some(item => /null value/.test(item.message)), 'a null keyframe value is an error');
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});

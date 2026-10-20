@@ -129,8 +129,8 @@ Usage:
                         --project fixes every leaking overlay on the timeline; --check only measures.
   capcutctl notes --project NAME [--reject TEXT --why TEXT | --accept TEXT --why TEXT | --decide TEXT [--why TEXT]
                   | --todo TEXT | --done N] [--brief] [--json]
-                      — the project's creative log: rejected looks and why, the accepted look, decisions,
-                        outstanding notes. Kept in <project>/.capcutctl/notes.json, outside snapshots,
+                      — the project's creative log: --reject a look and --why, --accept the look, --decide a
+                        decision, --todo an outstanding note (--done N closes it). Kept in <project>/.capcutctl/notes.json, outside snapshots,
                         so it survives restore, compaction and new sessions. Read --brief first each round.
   capcutctl restore --project NAME_OR_PATH --snapshot NAME|LABEL [--force-running] [--no-backup]
                       — LABEL picks the newest snapshot named <timestamp>-LABEL (e.g. --snapshot pre-build).
@@ -158,8 +158,9 @@ Usage:
                 [--src S] [--src-dur S | --cover IN-OUT] [--volume 0] [--desc TEXT] [--no-localize]
                 [--generated] [--derived-from ORIGINAL [--derived-offset S]] [--allow-ephemeral]
                 [--width W --height H --media-duration S]   (probe override when ffprobe is missing)
-  capcutctl replace-media --project NAME --file FILE --at S --track NAME|N | --segments ID
-                (--media FILE is an alias for --file FILE)
+  capcutctl replace-media --project NAME --file FILE --at S --track NAME|N | --segments ID[,ID...] [--all]
+                (--media FILE is an alias for --file FILE; --all relinks every clip that shares the
+                named clip's media, keeping each one's source window and keyframes)
                 [--retime] [--no-localize] [--generated] [--derived-from ORIGINAL] [--allow-ephemeral]
                 [--derived-offset S] [--width W --height H --media-duration S]
   capcutctl localize --project NAME   — copy outside videos into the project (fixes Link media)
@@ -168,9 +169,9 @@ Usage:
   capcutctl ripple --project NAME --from S --to S [--dry-run]
                       — delete a timeline range on every track and pull everything after it up
                         (dead air between words); clips keep their speed, the face stays 1x.
-  capcutctl remove --project NAME --at S --track NAME|N | --segments ID
-  capcutctl volume --project NAME --at S --track NAME|N | --segments ID  --level 0
-  capcutctl fade --project NAME --at S --track NAME|N | --segments ID  [--in 0.08] [--out 0.12] [--plan]
+  capcutctl remove --project NAME --at S --track NAME|N | --segments ID[,ID...]
+  capcutctl volume --project NAME --at S --track NAME|N | --segments ID[,ID...]  --level 0
+  capcutctl fade --project NAME --at S --track NAME|N | --segments ID[,ID...]  [--in 0.08] [--out 0.12] [--plan]
   capcutctl sfx --project NAME --sound typing|click|enter|"PALETTE NAME" --cues AT[:DUR[:SRC]],… [--volume 0.6] [--track sfx-keys]
                       — named palette sound at explicit timeline seconds (typing bed under a typed
                         command, an Enter click on the real Enter); SRC starts inside a long bed.
@@ -183,7 +184,7 @@ Usage:
                     holding its seam, a linked screen frame). --no-ease restores Line; --ease and
                     --ease-position are kept and now name the default. Scale and position curves
                     round-tripped in CapCut 9.4.0; check curveType, not just control objects.
-  capcutctl animate  --project NAME --at S --track NAME|N | --segments ID
+  capcutctl animate  --project NAME --at S --track NAME|N | --segments ID[,ID...]
                     [--intro fade-in [--intro-dur S]] [--outro fade-out [--outro-dur S]]
                     [--replace-existing] [--plan] [--dry-run]
                     — attach CapCut-native editable clip animations through material_animations.
@@ -205,7 +206,7 @@ Usage:
                       per shot is for a fresh agent in the session (no API billing) to
                       second-guess from the strip alone. CONTRADICTED exits non-zero and
                       blocks the build; INSUFFICIENT flags only. Never writes the draft.
-  capcutctl punch   --project NAME --on TEXT --segment ID|--at T [--word TEXT] [--track NAME|N]
+  capcutctl punch   --project NAME --on TEXT --segment ID|--at T [--word TEXT] [--track NAME|N] [--segments ID]
                     [--kind click|result] [--zoom 1.6] [--hold auto|S] [--ramp 0.2]
                     [--no-ease] [--ease] [--ease-position] [--plan] [--dry-run]
                     — name an on-screen element; the CLI locates it via OCR boxes and writes
@@ -291,7 +292,7 @@ Usage:
                                 --auto (a push on every scene) is deprecated: it reads as clockwork.
   capcutctl wrap                --project NAME_OR_PATH [--words TRANSCRIPT.json] [--text Follow] [--only BRANDS]
                                 [--zoom-at S[,S…]|--no-zoom] [--track N] [--glow] [--no-sfx] [--no-ease] [--plan]
-                                brand logos from what is said + the endcard, in one pass. Face pushes
+                                — brand logos from what is said + the endcard, in one pass. Face pushes
                                 are zoom --stress (or build); --zoom-at S places explicit ones.
   capcutctl build               --project NAME --edit edit.json [--dry-run] [--force] [--json]
                       — after A-roll sign-off, one edit plan becomes the finished project:
@@ -449,33 +450,137 @@ Safety defaults:
 
 const r2 = n => Math.round(n * 100) / 100;
 
+/**
+ * Flags that take no value, for every command at once. One list serves the whole CLI, so a
+ * name in it is a boolean everywhere: if another command documents `--name VALUE`, the value
+ * would be read as a positional and the flag silently set to true. test/cli-contract.test.mjs
+ * scans HELP for `--flag VALUE` and fails on any such collision.
+ */
+export const BOOLEAN_FLAGS = Object.freeze(new Set([
+  'json', 'dryRun', 'forceRunning', 'noBackup', 'help', 'noOverlay', 'blank', 'includeTemplate', 'newTimelineId',
+  'transcript', 'noTransitions', 'noSeam', 'auto', 'plan', 'noSfx', 'noZoom', 'retime',
+  'noLocalize', 'motivated', 'regen', 'music', 'polish', 'noInteractions', 'duck',
+  'waitForClose', 'force', 'reindex', 'noRepair', 'inPlace',
+  'generated', 'allowEphemeral', 'measure', 'apply', 'native', 'noCache', 'noGrade',
+  'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'noEase', 'easePosition', 'stress', 'allowBoost', 'values',
+  'faceDetail', 'replaceExisting', 'replace', 'record', 'allowUnsafe', 'markdown', 'brief', 'check', 'restyle',
+  'resetRounds', 'noReview', 'noGate', 'fix', 'all',
+]));
+
+/** Value flags that may repeat; each occurrence is kept, in order. */
+const REPEAT_VALUE_KEYS = new Set(['trimBeat', 'recoverBeat', 'set', 'allow', 'pause']);
+
+/**
+ * Value flags whose repeat is a mistake rather than a list. `--segments A --segments B` used
+ * to keep B alone and act on it as if A had never been named.
+ */
+const NO_REPEAT_KEYS = new Set(['segments']);
+
 export function parseArgs(argv) {
   const result = { _: [] };
-  const repeatValueKeys = new Set(['trimBeat', 'recoverBeat', 'set', 'allow', 'pause']);
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i];
     if (!token.startsWith('--')) { result._.push(token); continue; }
-    const key = token.slice(2).replace(/-([a-z])/g, (_, char) => char.toUpperCase());
-    if (['json', 'dryRun', 'forceRunning', 'noBackup', 'help', 'noOverlay', 'blank', 'includeTemplate', 'newTimelineId',
-         'transcript', 'noTransitions', 'noSeam', 'auto', 'plan', 'noSfx', 'noZoom', 'retime', 'localize',
-         'noLocalize', 'motivated', 'regen', 'music', 'noMusic', 'polish', 'noInteractions', 'duck',
-         'waitForClose', 'force', 'reindex', 'noRepair', 'inPlace',
-         'generated', 'allowEphemeral', 'measure', 'apply', 'native', 'noCache', 'noGrade',
-         'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'noEase', 'easePosition', 'stress', 'allowBoost', 'values',
-         'faceDetail', 'replaceExisting', 'replace', 'record', 'allowUnsafe', 'markdown', 'brief', 'check', 'restyle',
-         'resetRounds', 'noReview', 'noGate', 'fix'].includes(key)) result[key] = true;
-    else {
-      if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
-      const value = argv[++i];
-      if (repeatValueKeys.has(key)) {
-        if (!Array.isArray(result[key])) result[key] = [];
-        result[key].push(value);
-      } else {
-        result[key] = value;
+    // `--key=value` is the same flag as `--key value`. Split on the FIRST '=' so a value may
+    // itself contain one (`--recover-beat=3:out=0.8`).
+    const equals = token.indexOf('=');
+    const name = equals > 2 ? token.slice(0, equals) : token;
+    const inline = equals > 2 ? token.slice(equals + 1) : null;
+    const key = name.slice(2).replace(/-([a-z])/g, (_, char) => char.toUpperCase());
+    if (BOOLEAN_FLAGS.has(key)) {
+      if (inline != null) {
+        throw new CapcutError(`${name} takes no value; pass ${name} on its own.`, { code: 'FLAG_TAKES_NO_VALUE', exitCode: 2 });
       }
+      result[key] = true;
+      continue;
+    }
+    let value = inline;
+    if (value == null) {
+      if (argv[i + 1] == null || argv[i + 1].startsWith('--')) throw new CapcutError(`Missing value for ${token}.`, { exitCode: 2 });
+      value = argv[++i];
+    }
+    if (REPEAT_VALUE_KEYS.has(key)) {
+      if (!Array.isArray(result[key])) result[key] = [];
+      result[key].push(value);
+    } else {
+      if (NO_REPEAT_KEYS.has(key) && result[key] != null) {
+        throw new CapcutError(`${name} was given twice; name every id once, comma-separated: ${name} A,B.`,
+          { code: 'DUPLICATE_FLAG', exitCode: 2 });
+      }
+      result[key] = value;
     }
   }
   return result;
+}
+
+/**
+ * The number behind `--key`, or `def` when the flag is absent. `Number('0,5')` is NaN, and a
+ * NaN reached the draft as null (JSON has no NaN): a clip at volume null, a clip added at 0,
+ * a default keyframe scale. So every numeric flag goes through here and fails loudly instead.
+ */
+export function num(args, key, { min, max, int = false, def, flag } = {}) {
+  const raw = args?.[key];
+  if (raw == null) return def;
+  return parseNumber(raw, flag || flagName(key), { min, max, int });
+}
+
+/** A comma-separated list of numbers (`--at 3,9.5,12`); each item is checked like num(). */
+export function nums(args, key, { min, max, int = false, def, flag } = {}) {
+  const raw = args?.[key];
+  if (raw == null) return def;
+  const name = flag || flagName(key);
+  const items = String(raw).split(',').map(item => item.trim());
+  if (!items.length || items.some(item => item === '')) {
+    throw new CapcutError(`${name} "${raw}" has an empty item; give numbers separated by commas, e.g. 3,9.5.`,
+      { code: 'BAD_NUMBER', exitCode: 2 });
+  }
+  return items.map(item => parseNumber(item, name, { min, max, int, list: raw }));
+}
+
+const flagName = key => `--${String(key).replace(/[A-Z]/g, c => `-${c.toLowerCase()}`)}`;
+
+function parseNumber(raw, name, { min, max, int, list = null }) {
+  const text = String(raw).trim();
+  const value = text === '' ? NaN : Number(text);
+  const quoted = list != null ? `"${text}" in ${name} "${list}"` : `${name} "${text}"`;
+  if (!Number.isFinite(value)) {
+    let hint = 'give a plain number';
+    if (list == null && /^-?\d+,\d+$/.test(text)) hint = `use ${text.replace(',', '.')}`;
+    else if (/^-?(\d+\.?\d*|\.\d+)\s*[a-z%]+$/i.test(text)) {
+      const [figure] = text.match(/^-?(\d+\.?\d*|\.\d+)/);
+      const unit = text.slice(figure.length).trim().toLowerCase();
+      hint = unit === 'ms' ? `times are seconds: use ${Number(figure) / 1000}` : `drop the unit: use ${figure}`;
+    }
+    throw new CapcutError(`${quoted} is not a number; ${hint}.`, { code: 'BAD_NUMBER', exitCode: 2 });
+  }
+  if (int && !Number.isInteger(value)) {
+    throw new CapcutError(`${quoted} must be a whole number.`, { code: 'BAD_NUMBER', exitCode: 2 });
+  }
+  if (min != null && value < min) throw new CapcutError(`${quoted} must be at least ${min}.`, { code: 'BAD_NUMBER', exitCode: 2 });
+  if (max != null && value > max) throw new CapcutError(`${quoted} must be at most ${max}.`, { code: 'BAD_NUMBER', exitCode: 2 });
+  return value;
+}
+
+/** `--segments A, B,,C` → ['A', 'B', 'C']. */
+export function segmentIds(args) {
+  if (args?.segments == null) return [];
+  return String(args.segments).split(',').map(id => id.trim()).filter(Boolean);
+}
+
+/** One clip only: refuse a list instead of acting on its first id and ignoring the rest. */
+function singleSegment(command, args) {
+  const ids = segmentIds(args);
+  if (ids.length > 1) {
+    throw new CapcutError(`${command} acts on one clip; --segments named ${ids.length} (${ids.join(', ')}). `
+      + `Run ${command} once per clip.`, { code: 'MULTIPLE_SEGMENTS', exitCode: 2 });
+  }
+  return ids[0] ?? null;
+}
+
+/** POSIX shell quoting for a command line we print for an agent to paste. */
+export function shq(value) {
+  const text = String(value);
+  return /^[\w@%+=:,./-]+$/.test(text) ? text : `'${text.replace(/'/g, `'\\''`)}'`;
 }
 
 /**
@@ -788,9 +893,22 @@ export function buildArrollArgs(args, media) {
   return forwarded;
 }
 
+/**
+ * The environment every Python tool runs in. aroll.py calls capcutctl back (`new`, `apply`);
+ * these name THIS checkout's node and bin, so it never reaches a different capcutctl on PATH.
+ */
+export function toolEnv(extra = {}) {
+  return {
+    ...process.env,
+    CAPCUTCTL_NODE: process.execPath,
+    CAPCUTCTL_BIN: path.join(HERE, '..', 'bin', 'capcutctl.mjs'),
+    ...extra,
+  };
+}
+
 function runPython(interpreter, script, args) {
   return new Promise((resolve, reject) => {
-    const child = spawn(interpreter, [script, ...args], { stdio: 'inherit' });
+    const child = spawn(interpreter, [script, ...args], { stdio: 'inherit', env: toolEnv() });
     const forward = signal => { if (child.exitCode == null && child.signalCode == null) child.kill(signal); };
     const onInt = () => forward('SIGINT');
     const onTerm = () => forward('SIGTERM');
@@ -808,6 +926,55 @@ function runPython(interpreter, script, args) {
   });
 }
 
+/** Levenshtein distance, for "did you mean". Inputs are short command and flag names. */
+function editDistance(a, b) {
+  const row = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    let previous = row[0];
+    row[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const here = row[j];
+      row[j] = Math.min(row[j] + 1, row[j - 1] + 1, previous + (a[i - 1] === b[j - 1] ? 0 : 1));
+      previous = here;
+    }
+  }
+  return row[b.length];
+}
+
+/** Candidates within two edits, or sharing a prefix/substring, nearest first. */
+function nearest(word, candidates, limit = 3) {
+  const w = String(word).toLowerCase();
+  return candidates
+    .map(name => ({ name, d: editDistance(w, name.toLowerCase()) }))
+    .filter(({ name, d }) => d <= 2 || (w.length >= 3 && (name.startsWith(w) || name.includes(w) || w.includes(name))))
+    .sort((a, b) => a.d - b.d || a.name.localeCompare(b.name))
+    .slice(0, limit)
+    .map(({ name }) => name);
+}
+
+/** Words agents reach for that are another command's name here. */
+const COMMAND_ALIASES = Object.freeze({ list: ['projects'], ls: ['projects'], tracks: ['inspect', 'timeline'] });
+
+/**
+ * A short, pointed refusal. It used to append the whole 37 KB HELP and suggest nothing, which
+ * costs an agent its context and still leaves it guessing.
+ */
+export async function unknownCommandError(command) {
+  const { buildContract } = await import('./contract.mjs');
+  const names = Object.keys(buildContract().commands);
+  const guesses = [...new Set([...(COMMAND_ALIASES[command] || []), ...nearest(command, names)])];
+  const hint = guesses.length ? ` Did you mean: ${guesses.join(', ')}?` : '';
+  return new CapcutError(`Unknown command: ${command}.${hint} Run \`capcutctl help\`.`, { code: 'UNKNOWN_COMMAND', exitCode: 2 });
+}
+
+function unknownOptionError(command, key, options) {
+  const flag = `--${key.replace(/[A-Z]/g, c => `-${c.toLowerCase()}`)}`;
+  const guesses = nearest(flag.slice(2), options.map(option => option.slice(2))).map(name => `--${name}`);
+  const hint = guesses.length ? ` Did you mean ${guesses.join(' or ')}?` : '';
+  return new CapcutError(`Unknown ${command} option: ${flag}.${hint} ${command} takes: ${options.join(' ')}.`,
+    { code: 'UNKNOWN_OPTION', exitCode: 2 });
+}
+
 async function validateOptions(command, args) {
   const { buildContract } = await import('./contract.mjs');
   const commands = buildContract().commands;
@@ -818,10 +985,39 @@ async function validateOptions(command, args) {
     ...(entry.transactional || command === 'cut' ? ['forceRunning', 'noBackup', 'label'] : []),
   ]);
   const unknown = Object.keys(args).find(key => !allowed.has(key));
-  if (unknown) {
-    const flag = unknown.replace(/[A-Z]/g, c => `-${c.toLowerCase()}`);
-    throw new CapcutError(`Unknown ${command} option: --${flag}.`, { code: 'UNKNOWN_OPTION', exitCode: 2 });
+  if (unknown) throw unknownOptionError(command, unknown, entry.options);
+}
+
+/**
+ * Names agents guess for `notes` flags. The log's sections are called decisions and
+ * outstanding, so --decision and --outstanding (or --add) are the natural misreadings.
+ */
+const NOTES_ALIASES = Object.freeze({ decision: 'decide', outstanding: 'todo', add: 'todo' });
+
+function applyNotesAliases(args) {
+  for (const [alias, key] of Object.entries(NOTES_ALIASES)) {
+    if (args[alias] == null) continue;
+    if (args[key] != null) {
+      throw new CapcutError(`notes --${alias} is --${key}; pass one of them.`, { code: 'NOTES_ARGS', exitCode: 2 });
+    }
+    args[key] = args[alias];
+    delete args[alias];
   }
+}
+
+/** `cut` recuts an existing project in place when it names one: --into P, --into=P or --in-place. */
+export function isInPlaceCut(argv) {
+  return argv.some(token => token === '--into' || token.startsWith('--into=') || token === '--in-place');
+}
+
+/**
+ * Whether a cut invocation carries an editorial decision, i.e. whether it is the second,
+ * applying run rather than the first run's review handout. --recover-beat is a decision too:
+ * leaving it out meant `cut --into P --recover-beat 3:out=0.8` printed a table and applied nothing.
+ */
+export function hasEditorialDecision(args) {
+  const listed = key => Array.isArray(args?.[key]) ? args[key].length > 0 : Boolean(args?.[key]);
+  return Boolean(args?.keep || args?.drop || args?.order || args?.review || listed('trimBeat') || listed('recoverBeat'));
 }
 
 async function runInPlaceCut(args, root, apply = applySpec) {
@@ -837,15 +1033,16 @@ async function runInPlaceCut(args, root, apply = applySpec) {
   const script = path.join(HERE, '..', 'tools', 'aroll.py');
   const forwarded = buildArrollArgs(args, media);
   const python = pythonForTool('aroll.py');
-  const run = spawnSync(python.executable, [script, ...forwarded], { stdio: 'inherit' });
+  const run = spawnSync(python.executable, [script, ...forwarded], { stdio: 'inherit', env: toolEnv({ CAPCUTCTL_IN_PLACE_CUT: '1' }) });
   if (run.error) throw new CapcutError(`could not run ${script}: ${run.error.message}`, { exitCode: 2 });
   if ((run.status ?? 1) !== 0) { process.exitCode = run.status ?? 1; return null; }
 
-  // The first invocation without --keep/--drop is intentionally still the review handout.
+  // The first invocation without a decision is intentionally still the review handout.
   // This preserves the two-stage talking-head decision before any in-place mutation.
-  const hasEditorialDecision = Boolean(args.keep || args.drop || args.order || args.review
-    || (Array.isArray(args.trimBeat) && args.trimBeat.length));
-  if (!hasEditorialDecision) return null;
+  if (!hasEditorialDecision(args)) {
+    process.stderr.write('review handout only, nothing applied (pass --keep/--drop/--order/--review/--trim-beat/--recover-beat)\n');
+    return null;
+  }
   const mediaPath = path.resolve(media);
   const planPath = path.join(path.dirname(mediaPath), `${path.basename(mediaPath).replace(/\.[^.]+$/, '')}.plan.json`);
   if (!fs.existsSync(planPath)) {
@@ -879,7 +1076,7 @@ export async function main(argv, dependencies = {}) {
   if (command === '--version' || command === 'version') {
     return print(readJson(path.join(HERE, '..', 'package.json')).version);
   }
-  if (command === 'cut' && (argv.includes('--into') || argv.includes('--in-place'))) {
+  if (command === 'cut' && isInPlaceCut(argv)) {
     const cutArgs = parseArgs(argv);
     await validateOptions(command, cutArgs);
     const cutRoot = cutArgs.root ? path.resolve(cutArgs.root) : DEFAULT_ROOT;
@@ -900,7 +1097,15 @@ export async function main(argv, dependencies = {}) {
     return;
   }
   const args = parseArgs(argv);
-  if (!command || args.help || command === 'help') return print(HELP);
+  if (!command || command === 'help' || command === '--help') return print(HELP);
+  if (args.help) {
+    // `capcutctl notes --help` is a question about notes, not about all 60 commands.
+    const { commandHelp } = await import('./contract.mjs');
+    const slice = commandHelp(command);
+    if (!slice) throw await unknownCommandError(command);
+    return emit(slice);
+  }
+  if (command === 'notes') applyNotesAliases(args);
   await validateOptions(command, args);
   const root = args.root ? path.resolve(args.root) : DEFAULT_ROOT;
 
@@ -1221,8 +1426,10 @@ export async function main(argv, dependencies = {}) {
     return print({ files: results.length, results }, true);
   }
   if (command === 'preflight') {
-    const unknown = Object.keys(args).find(key => !['_', 'root', 'json'].includes(key));
-    if (unknown) throw new CapcutError(`Unknown preflight option: --${unknown}.`, { exitCode: 2 });
+    // --project is accepted and ignored: preflight checks the machine, not a project, and an
+    // agent that passes it out of habit should get the report, not an error.
+    const unknown = Object.keys(args).find(key => !['_', 'root', 'json', 'project'].includes(key));
+    if (unknown) throw unknownOptionError('preflight', unknown, ['--json', '--root']);
     if (args._.length !== 1) {
       throw new CapcutError('preflight does not take positional arguments.', { exitCode: 2 });
     }
@@ -1294,7 +1501,7 @@ export async function main(argv, dependencies = {}) {
     'replace-media', 'localize', 'trim', 'shift', 'ripple', 'remove', 'volume', 'fade', 'sfx', 'keyframe', 'animate',
     'preview', 'diff', 'apply', 'timeline', 'finish', 'music', 'grade', 'loudness', 'gate', 'build', 'mograph', 'notes'
   ]);
-  if (!NEEDS_PROJECT.has(command)) throw new CapcutError(`Unknown command: ${command}\n\n${HELP}`, { exitCode: 2 });
+  if (!NEEDS_PROJECT.has(command)) throw await unknownCommandError(command);
   const projectDir = resolveProject(args.project, root);
   // A staged copy is outside CapCut's drafts folder: no write to it waits for CapCut to close.
   if (isStageDir(projectDir)) args.forceRunning = true;
@@ -1348,6 +1555,9 @@ export async function main(argv, dependencies = {}) {
     backup: !args.noBackup,
     label: args.label
   };
+  // --plan never writes. Commands that print their own plan return before reaching applySpec;
+  // the rest (zoom --at, layout circle/full-face/split-screen…) used to commit a real edit.
+  if (args.plan) options.dryRun = true;
   if (command === 'sync') return print(syncMirrors(projectDir, options), true);
   if (command === 'restore') {
     if (!args.snapshot) throw new CapcutError('restore requires --snapshot NAME|LABEL.', { exitCode: 2 });
@@ -1372,10 +1582,10 @@ export async function main(argv, dependencies = {}) {
     }
     const op = {
       op: 'loudness',
-      target: args.target != null ? Number(args.target) : -14,
-      peak: args.peak != null ? Number(args.peak) : -1,
+      target: num(args, 'target', { def: -14 }),
+      peak: num(args, 'peak', { def: -1 }),
       ...(args.allowBoost ? { allowBoost: true } : {}),
-      ...(args.segments ? { segments: String(args.segments).split(',').map(s => s.trim()).filter(Boolean) } : {}),
+      ...(args.segments ? { segments: segmentIds(args) } : {}),
     };
     return print(applySpec(projectDir, { version: 1, name: 'loudness', operations: [op] },
       { ...options, dryRun: Boolean(args.plan || args.dryRun) }), true);
@@ -1477,9 +1687,9 @@ export async function main(argv, dependencies = {}) {
       if (args.cover) {
         const [a, b] = String(args.cover).split(/[-:,]/).map(Number);
         if (!(b > a)) throw new CapcutError('--cover expects IN-OUT in source seconds, e.g. --cover 178.6-190.5', { exitCode: 2 });
-        set.push({ at: Number(args.at), cover: [a, b] });
+        set.push({ at: num(args, 'at', { min: 0 }), cover: [a, b] });
       } else if (args.speed != null) {
-        set.push({ at: Number(args.at), speed: Number(args.speed) });
+        set.push({ at: num(args, 'at', { min: 0 }), speed: num(args, 'speed', { min: 0 }) });
       } else {
         throw new CapcutError('--at needs either --speed X or --cover IN-OUT', { exitCode: 2 });
       }
@@ -1499,11 +1709,11 @@ export async function main(argv, dependencies = {}) {
     const rampTrack = await trackIndex(projectDir, args.track);
     const spec = { version: 1, name: 'ramp', operations: [{
       op: 'ramp',
-      speed: args.speed != null ? Number(args.speed) : 20,
-      settle: args.settle != null ? Number(args.settle) : 0.5,
+      speed: num(args, 'speed', { min: 0, def: 20 }),
+      settle: num(args, 'settle', { min: 0, def: 0.5 }),
       ...(args.segment != null ? { segment: String(args.segment) } : {}),
-      ...(args.at != null ? { at: Number(args.at) } : {}),
-      ...(args.resultAt != null ? { resultAt: Number(args.resultAt) } : {}),
+      ...(args.at != null ? { at: num(args, 'at', { min: 0 }) } : {}),
+      ...(args.resultAt != null ? { resultAt: num(args, 'resultAt', { min: 0 }) } : {}),
       ...(rampTrack != null ? { track: rampTrack } : {}),
     }] };
     return print(applySpec(projectDir, spec, options), true);
@@ -1513,17 +1723,24 @@ export async function main(argv, dependencies = {}) {
     if (args.segment == null && args.segments == null && args.at == null) {
       throw new CapcutError('punch requires --segment ID or --at T.', { exitCode: 2 });
     }
+    if (args.segment != null && args.segments != null) {
+      throw new CapcutError('punch takes --segment ID or --segments ID, not both.', { code: 'MULTIPLE_SEGMENTS', exitCode: 2 });
+    }
+    const punchSegment = args.segments != null ? singleSegment('punch', args) : args.segment;
+    const zoom = num(args, 'zoom', { min: 0, def: 1.6 });
+    const punchRamp = num(args, 'ramp', { min: 0, def: 0.2 });
+    const punchAt = num(args, 'at', { min: 0 });
+    if (args.hold != null && args.hold !== 'auto') num(args, 'hold', { min: 0 });
     const punchTrack = await trackIndex(projectDir, args.track);
     const spec = { version: 1, name: 'punch', operations: [{
       op: 'punch',
       on: String(args.on),
       kind: args.kind || 'click',
-      zoom: args.zoom != null ? Number(args.zoom) : 1.6,
-      ramp: args.ramp != null ? Number(args.ramp) : 0.2,
+      zoom,
+      ramp: punchRamp,
       hold: args.hold == null ? 'auto' : args.hold,
-      ...(args.segment != null ? { segment: String(args.segment) } : {}),
-      ...(args.segments != null ? { segment: String(args.segments).split(',')[0].trim() } : {}),
-      ...(args.at != null ? { at: Number(args.at) } : {}),
+      ...(punchSegment != null ? { segment: String(punchSegment) } : {}),
+      ...(punchAt != null ? { at: punchAt } : {}),
       ...(args.word != null ? { word: String(args.word) } : {}),
       ...(punchTrack != null ? { track: punchTrack } : {}),
       ease: !args.noEase,
@@ -1664,8 +1881,7 @@ export async function main(argv, dependencies = {}) {
 
       // Timing: explicit --at, else the transcript. Detection only knows about registered
       // brands, so an unregistered mark must carry its own --at.
-      const ats = args.at != null ? list(args.at).map(Number) : null;
-      if (ats && ats.some(Number.isNaN)) throw new CapcutError('--at wants seconds.', { exitCode: 2 });
+      const ats = args.at != null ? nums(args, 'at', { min: 0 }) : null;
 
       if (marks && ats) {
         if (ats.length !== 1 && ats.length !== marks.length) {
@@ -1722,9 +1938,9 @@ export async function main(argv, dependencies = {}) {
             + 'detection; check the aliases match what Whisper actually wrote.', { exitCode: 2 });
       }
 
-      const scales = args.scale ? list(args.scale).map(Number) : null;
-      const holds = args.hold ? list(args.hold).map(Number) : null;
-      const pos = args.pos ? list(args.pos).map(Number) : null;
+      const scales = args.scale ? nums(args, 'scale', { min: 0 }) : null;
+      const holds = args.hold ? nums(args, 'hold', { min: 0 }) : null;
+      const pos = args.pos ? nums(args, 'pos') : null;
       const pick = (arr, i) => (arr == null ? null : (arr.length === 1 ? arr[0] : arr[i]));
       op.logos = logos.map((l, i) => ({ brand: l.brand, at: r3(l.at), logo: l.logo,
         ...(pick(scales, i) != null ? { scale: pick(scales, i) } : {}),
@@ -1758,17 +1974,17 @@ export async function main(argv, dependencies = {}) {
 
     if (command === 'endcard') {
       op.endcard = { ...(args.text ? { text: args.text } : {}),
-                     ...(args.at != null ? { at: Number(args.at) } : {}),
-                     ...(args.hold ? { hold: Number(args.hold) } : {}),
-                     ...(args.scale ? { scale: Number(args.scale) } : {}) };
+                     ...(args.at != null ? { at: num(args, 'at', { min: 0 }) } : {}),
+                     ...(args.hold ? { hold: num(args, 'hold', { min: 0 }) } : {}),
+                     ...(args.scale ? { scale: num(args, 'scale', { min: 0 }) } : {}) };
     }
     if (command === 'zoom') {
       if (args.stress) {
         const stressOp = {
           op: 'zoom.stress',
-          ...(args.to ? { to: Number(args.to) } : {}),
-          ...(args.hold != null ? { hold: Number(args.hold) } : {}),
-          ...(args.minLength ? { minLength: Number(args.minLength) } : {}),
+          ...(args.to ? { to: num(args, 'to', { min: 0 }) } : {}),
+          ...(args.hold != null ? { hold: num(args, 'hold', { min: 0 }) } : {}),
+          ...(args.minLength ? { minLength: num(args, 'minLength', { min: 0 }) } : {}),
           ease: !args.noEase,
           ...(args.words ? { wordsFile: path.resolve(args.words) } : {}),
         };
@@ -1783,16 +1999,18 @@ export async function main(argv, dependencies = {}) {
         process.stderr.write('warning: zoom --auto is deprecated (a push on every scene reads as clockwork); use zoom --stress.\n');
         const doc = await loadWorking(projectDir);
         const scenes = sig.talkingHeadScenes(doc, await trackIndex(projectDir, args.track),
-                                             args.minLength ? Number(args.minLength) : 2.5);
+                                             args.minLength ? num(args, 'minLength', { min: 0 }) : 2.5);
         if (!scenes.length) throw new CapcutError('no full-face scenes found (every principal clip carries a mask).', { exitCode: 2 });
         // fire a little after the cut, so the push reads as a move and not as the cut itself
         args.at = scenes.map(s => (s.start + 0.4).toFixed(2)).join(',');
         if (args.plan) return print({ talkingHeadScenes: scenes, zoomAt: args.at.split(',').map(Number) }, true);
       }
       if (args.at == null) throw new CapcutError('zoom requires --at SECONDS (comma-separated), or --auto, or --stress.', { exitCode: 2 });
-      op.zooms = String(args.at).split(',').map(Number).map(at => ({ at,
-        ...(args.to ? { to: Number(args.to) } : {}),
-        ...(args.hold != null ? { hold: Number(args.hold) } : {}) }));
+      const to = args.to ? num(args, 'to', { min: 0 }) : null;
+      const hold = num(args, 'hold', { min: 0 });
+      op.zooms = nums(args, 'at', { min: 0 }).map(at => ({ at,
+        ...(to != null ? { to } : {}),
+        ...(hold != null ? { hold } : {}) }));
     }
 
     if (command === 'wrap') {
@@ -1819,7 +2037,7 @@ export async function main(argv, dependencies = {}) {
       op.endcard = { ...(args.text ? { text: args.text } : {}) };
       // Face pushes are not wrap's job any more: one on every scene was clockwork. Emphasis
       // pushes come from `zoom --stress` (or `build`), which picks the stressed words.
-      if (args.zoomAt) op.zooms = String(args.zoomAt).split(',').map(Number).map(at => ({ at }));
+      if (args.zoomAt) op.zooms = nums(args, 'zoomAt', { min: 0 }).map(at => ({ at }));
       else op.zooms = [];
       if (args.plan) return print({ detected: hits, skippedNoLogo: missing.map(m => m.brand),
                                     endcard: op.endcard, zooms: op.zooms || [] }, true);
@@ -1882,11 +2100,11 @@ export async function main(argv, dependencies = {}) {
       if (args.template && args.scene) throw new CapcutError('mograph add takes --template or --scene, not both.', { code: 'MOGRAPH_TEMPLATE', exitCode: 2 });
       if (args.at == null && !args.say) throw new CapcutError('mograph add needs --at SECONDS or --say WORDS.', { code: 'MOGRAPH_PLACE', exitCode: 2 });
       const doc = await loadWorking(projectDir);
-      let at = args.at != null ? Number(args.at) : null;
+      let at = num(args, 'at', { min: 0, def: null });
       let anchor = null;
       if (args.say) {
         const { resolveAnchors } = await import('./anchors.mjs');
-        const [hit] = resolveAnchors([{ id: args.id || args.template || args.scene, say: args.say, occurrence: args.occurrence ? Number(args.occurrence) : 1 }],
+        const [hit] = resolveAnchors([{ id: args.id || args.template || args.scene, say: args.say, occurrence: num(args, 'occurrence', { min: 1, int: true, def: 1 }) }],
           { doc, wordsFile: args.words ? path.resolve(args.words) : null });
         at = Math.max(0, hit.at - profile.tokens.frames.lead / profile.canvas.fps);
         anchor = hit.anchor;
@@ -2115,9 +2333,9 @@ export async function main(argv, dependencies = {}) {
     }
     const spec = buildLayoutSpec(projectDir, name, {
       segments: args.segments ? String(args.segments).split(',').map(s => s.trim()).filter(Boolean) : null,
-      at: args.at ? String(args.at).split(',').map(Number) : null,
+      at: args.at ? nums(args, 'at', { min: 0 }) : null,
       track: await trackIndex(projectDir, args.track),
-      row: args.row, scale: args.scale, seam: args.noSeam ? false : undefined,
+      row: num(args, 'row'), scale: num(args, 'scale', { min: 0 }), seam: args.noSeam ? false : undefined,
       overlay: args.noOverlay ? false : undefined,
       includeTemplate: Boolean(args.includeTemplate)
     });
@@ -2130,25 +2348,33 @@ export async function main(argv, dependencies = {}) {
     if (!args.media) throw new CapcutError('add requires --media FILE.', { exitCode: 2 });
     if (args.at == null || args.dur == null) throw new CapcutError('add requires --at SECONDS and --dur SECONDS.', { exitCode: 2 });
     if (args.track == null) throw new CapcutError('add requires --track NAME (creates) or --track N (existing).', { exitCode: 2 });
-    const probe = await probeOrOverride(args.media, args);
+    // Numbers before the probe: `--at 3s` is the agent's mistake, not a media problem.
+    const at = num(args, 'at', { min: 0 });
+    const duration = num(args, 'dur', { min: 0 });
+    const srcFlag = num(args, 'src', { min: 0 });
+    const srcDur = num(args, 'srcDur', { min: 0 });
+    const volume = num(args, 'volume', { min: 0, def: 1 });
     let cover = null;
     if (args.cover) {
-      const [a, b] = String(args.cover).split(/[-:,]/).map(Number);
+      const parts = String(args.cover).split(/[-:,]/);
+      const [a, b] = parts.length === 2 ? parts.map(part => parseNumber(part, '--cover', { min: 0, list: args.cover })) : [];
       if (!(b > a)) throw new CapcutError('--cover expects IN-OUT in source seconds.', { exitCode: 2 });
       cover = [a, b];
     }
+    for (const key of ['width', 'height', 'mediaDuration']) num(args, key, { min: 0 });
+    const probe = await probeOrOverride(args.media, args);
     const op = {
       op: 'clip.add',
       media: path.resolve(args.media),
-      at: Number(args.at),
-      duration: Number(args.dur),
+      at,
+      duration,
       // default to the START of the media, not the timeline position — `add --at 30`
       // used to begin 30s into a file the user had just picked.
-      src: args.src != null ? Number(args.src) : (cover ? cover[0] : 0),
-      srcDur: args.srcDur != null ? Number(args.srcDur) : undefined,
+      src: srcFlag != null ? srcFlag : (cover ? cover[0] : 0),
+      srcDur,
       cover,
       track: args.track,
-      volume: args.volume != null ? Number(args.volume) : 1,
+      volume,
       desc: args.desc || '',
       width: probe.width,
       height: probe.height,
@@ -2159,7 +2385,13 @@ export async function main(argv, dependencies = {}) {
     const result = applySpec(projectDir, { version: 1, name: 'add', operations: [op] }, options);
     const added = (result.result || []).find(g => g.group === 'root')?.operations?.[0];
     if (added?.id) {
-      added.layout = `capcutctl layout broll --project ${args.project} --at ${added.at} --track ${added.track}`;
+      // A command the agent can paste as is: `layout broll` refuses without --row, and a
+      // project name with a space split into two words. The row defaults to the source's
+      // vertical centre; pick the row the action is on before running it.
+      const height = Number(probe.height);
+      const row = Number.isFinite(height) && height > 0 ? Math.round(height / 2) : 'SOURCE_Y_PX';
+      added.layout = `capcutctl layout broll --project ${shq(args.project)} --at ${added.at} --track ${shq(added.track)} --row ${row}`;
+      added.layoutNote = `--row ${row} is the source's vertical centre; set it to the source row the action is on.`;
     }
     return print(result, true);
   }
@@ -2167,11 +2399,18 @@ export async function main(argv, dependencies = {}) {
     const file = args.file || args.media;
     if (!file) throw new CapcutError('replace-media requires --file FILE.', { exitCode: 2 });
     if (args.at == null && !args.segments) throw new CapcutError('replace-media requires --at SECONDS or --segments ID.', { exitCode: 2 });
-    let selector;
-    if (args.segments) selector = { id: String(args.segments).split(',')[0].trim() };
+    const at = num(args, 'at', { min: 0 });
+    for (const key of ['width', 'height', 'mediaDuration', 'derivedOffset']) num(args, key);
+    const ids = segmentIds(args);
+    if (args.all && ids.length > 1) {
+      throw new CapcutError('replace-media --all relinks every clip sharing ONE clip\'s media; name that one clip: --segments ID --all.',
+        { code: 'MULTIPLE_SEGMENTS', exitCode: 2 });
+    }
+    let selectors;
+    if (ids.length) selectors = ids.map(id => ({ id }));
     else {
       const doc = loadProject(projectDir).groups.find(g => g.name === 'root').doc;
-      const us = Math.round(Number(args.at) * 1e6);
+      const us = Math.round(at * 1e6);
       const hits = [];
       for (const [ti, track] of (doc.tracks || []).entries()) {
         if (track.type !== 'video') continue;
@@ -2186,12 +2425,27 @@ export async function main(argv, dependencies = {}) {
       if (hits.length !== 1) {
         throw new CapcutError(`replace-media: ${hits.length} clips cover ${args.at}s. Pass --track NAME|N or --segments ID.`, { exitCode: 2 });
       }
-      selector = { id: hits[0].id };
+      selectors = [{ id: hits[0].id }];
+    }
+    let all = false;
+    if (args.all) {
+      // Every clip on the material the named clip plays: swapping the room composite is one
+      // command, not one per clip. Each keeps its own source window, keyframes and masks.
+      const doc = loadProject(projectDir).groups.find(g => g.name === 'root').doc;
+      const named = selectors[0].id;
+      const segment = (doc.tracks || []).flatMap(t => t.segments || []).find(s => s.id === named);
+      if (!segment) throw new CapcutError(`replace-media: no segment matched {"id":"${named}"}.`, { code: 'SELECTOR_EMPTY', exitCode: 2 });
+      if (!segment.material_id) throw new CapcutError(`replace-media: segment ${named} has no material.`, { code: 'MISSING_MATERIAL_REF', exitCode: 2 });
+      selectors = [{ material_id: segment.material_id }];
+      all = true;
     }
     const probe = await probeOrOverride(file, args);
-    const op = {
+    // One op per clip in one transaction. With localize the first op copies the file in and
+    // the rest find that copy (localizeMedia matches contents), so it is copied once.
+    const operations = selectors.map(selector => ({
       op: 'replace.media',
       selector,
+      ...(all ? { all: true } : {}),
       path: path.resolve(file),
       retime: Boolean(args.retime),
       localize: !args.noLocalize,
@@ -2199,23 +2453,26 @@ export async function main(argv, dependencies = {}) {
       height: probe.height,
       mediaDuration: probe.duration,
       ...originOptions(args)
-    };
-    return print(applySpec(projectDir, { version: 1, name: 'replace-media', operations: [op] }, options), true);
+    }));
+    return print(applySpec(projectDir, { version: 1, name: 'replace-media', operations }, options), true);
   }
   if (command === 'ripple') {
     if (args.from == null || args.to == null) throw new CapcutError('ripple requires --from S --to S', { exitCode: 2 });
     return print(applySpec(projectDir, { version: 1, name: 'ripple', operations: [{
-      op: 'timeline.ripple', from: Number(args.from), to: Number(args.to) }] },
+      op: 'timeline.ripple', from: num(args, 'from', { min: 0 }), to: num(args, 'to', { min: 0 }) }] },
       { ...options, dryRun: Boolean(args.dryRun) }), true);
   }
   if (command === 'sfx') {
     if (!args.sound) throw new CapcutError('sfx requires --sound typing|click|enter|"PALETTE NAME".', { exitCode: 2 });
     const cues = String(args.cues || '').split(',').filter(Boolean).map(item => {
-      const [at, dur, src] = item.split(':').map(Number);
-      return { at, ...(Number.isFinite(dur) ? { dur } : {}), ...(Number.isFinite(src) ? { src } : {}) };
+      const parts = item.split(':');
+      if (parts.length > 3) throw new CapcutError(`--cues item "${item}" is AT[:DUR[:SRC]].`, { code: 'BAD_NUMBER', exitCode: 2 });
+      const [at, dur, src] = parts.map(part => parseNumber(part, '--cues', { min: 0, list: args.cues }));
+      return { at, ...(dur != null ? { dur } : {}), ...(src != null ? { src } : {}) };
     });
+    const sfxVolume = num(args, 'volume', { min: 0 });
     const op = { op: 'sfx.place', sound: String(args.sound), cues,
-      ...(args.volume != null ? { volume: Number(args.volume) } : {}),
+      ...(sfxVolume != null ? { volume: sfxVolume } : {}),
       ...(args.track != null ? { track: String(args.track) } : {}) };
     return print(applySpec(projectDir, { version: 1, name: 'sfx', operations: [op] }, { ...options, dryRun: Boolean(args.dryRun) }), true);
   }
@@ -2224,70 +2481,79 @@ export async function main(argv, dependencies = {}) {
   }
   if (command === 'trim' || command === 'shift' || command === 'remove' || command === 'volume' || command === 'keyframe' || command === 'fade' || command === 'animate') {
     const { resolveClip } = await import('./add.mjs');
-    // --segments names the clip outright; only an --at lookup needs the draft.
-    const selector = args.segments
-      ? { id: String(args.segments).split(',')[0].trim() }
-      : { id: resolveClip(loadProject(projectDir).groups.find(g => g.name === 'root').doc,
-        { at: args.at != null ? Number(args.at) : undefined, track: args.track }).segment.id };
+    // Every number is checked before the draft is read, so a typo fails with BAD_NUMBER rather
+    // than a selector error, and long before anything is written.
+    const at = num(args, 'at', { min: 0 });
+    let make;
     if (command === 'animate') {
       if (!args.intro && !args.outro) throw new CapcutError('animate requires --intro SLUG and/or --outro SLUG.', { exitCode: 2 });
-      const op = {
+      const introDuration = num(args, 'introDur', { min: 0 });
+      const outroDuration = num(args, 'outroDur', { min: 0 });
+      make = selector => ({
         op: 'animation.apply',
         selector,
         ...(args.intro ? { intro: String(args.intro) } : {}),
         ...(args.outro ? { outro: String(args.outro) } : {}),
-        ...(args.introDur != null ? { introDuration: Number(args.introDur) } : {}),
-        ...(args.outroDur != null ? { outroDuration: Number(args.outroDur) } : {}),
+        ...(introDuration != null ? { introDuration } : {}),
+        ...(outroDuration != null ? { outroDuration } : {}),
         ...(args.replaceExisting ? { replace: true } : {}),
-      };
-      if (args.plan) return print(op, true);
-      return print(applySpec(projectDir, { version: 1, name: 'animate', operations: [op] },
-        { ...options, dryRun: Boolean(args.dryRun) }), true);
-    }
-    if (command === 'remove') {
-      return print(applySpec(projectDir, { version: 1, name: 'remove', operations: [{ op: 'segment.remove', selector }] }, options), true);
-    }
-    if (command === 'volume') {
+      });
+    } else if (command === 'remove') {
+      make = selector => ({ op: 'segment.remove', selector });
+    } else if (command === 'volume') {
       if (args.level == null) throw new CapcutError('volume requires --level 0..1', { exitCode: 2 });
-      return print(applySpec(projectDir, { version: 1, name: 'volume', operations: [{ op: 'segment.patch', selector, set: { volume: Number(args.level) } }] }, options), true);
-    }
-    if (command === 'trim') {
+      const level = num(args, 'level', { min: 0 });
+      make = selector => ({ op: 'segment.patch', selector, set: { volume: level } });
+    } else if (command === 'trim') {
       let src = null;
       if (args.src) {
-        const [a, b] = String(args.src).split(/[-:,]/).map(Number);
+        const parts = String(args.src).split(/[-:,]/);
+        if (parts.length !== 2) throw new CapcutError('--src expects IN-OUT in source seconds', { exitCode: 2 });
+        const [a, b] = parts.map(part => parseNumber(part, '--src', { min: 0, list: args.src }));
         if (!(b > a)) throw new CapcutError('--src expects IN-OUT in source seconds', { exitCode: 2 });
         src = [a, b];
       } else if (args.start != null && args.dur != null) {
-        src = [Number(args.start), Number(args.start) + Number(args.dur)];
+        const startS = num(args, 'start', { min: 0 });
+        src = [startS, startS + num(args, 'dur', { min: 0 })];
       } else {
         throw new CapcutError('trim requires --src IN-OUT or --start S --dur S', { exitCode: 2 });
       }
-      return print(applySpec(projectDir, { version: 1, name: 'trim', operations: [{ op: 'clip.trim', selector, src }] }, options), true);
-    }
-    if (command === 'shift') {
+      make = selector => ({ op: 'clip.trim', selector, src });
+    } else if (command === 'shift') {
       if (args.by == null) throw new CapcutError('shift requires --by SECONDS', { exitCode: 2 });
-      return print(applySpec(projectDir, { version: 1, name: 'shift', operations: [{
-        op: 'clip.shift', selector, by: Number(args.by)
-      }] }, options), true);
-    }
-    if (command === 'fade') {
-      const op = { op: 'clip.fade', selector,
-        in: args.in != null ? Number(args.in) : 0,
-        out: args.out != null ? Number(args.out) : 0 };
-      if (args.plan) return print(op, true);
-      return print(applySpec(projectDir, { version: 1, name: 'fade', operations: [op] }, options), true);
-    }
-    if (command === 'keyframe') {
-      const op = { op: 'keyframe.scale', selector, at: args.at != null ? Number(args.at) : undefined,
-        from: args.from != null ? Number(args.from) : undefined,
-        to: args.to != null ? Number(args.to) : undefined, hold: args.hold != null ? Number(args.hold) : undefined,
-        ramp: args.ramp != null ? Number(args.ramp) : undefined, track: args.track,
+      const by = num(args, 'by');
+      make = selector => ({ op: 'clip.shift', selector, by });
+    } else if (command === 'fade') {
+      const fadeIn = num(args, 'in', { min: 0, def: 0 });
+      const fadeOut = num(args, 'out', { min: 0, def: 0 });
+      make = selector => ({ op: 'clip.fade', selector, in: fadeIn, out: fadeOut });
+    } else {
+      const from = num(args, 'from', { min: 0 });
+      const to = num(args, 'to', { min: 0 });
+      const hold = num(args, 'hold', { min: 0 });
+      const ramp = num(args, 'ramp', { min: 0 });
+      make = selector => ({ op: 'keyframe.scale', selector, at, from, to, hold, ramp, track: args.track,
         focus: args.focus, viewport: args.viewport, clear: Boolean(args.clear),
         // Easing is the default (Q01); the flags only ever turn it off or force position on.
-        ease: !args.noEase, easePosition: args.easePosition ? true : !args.noEase };
-      return print(applySpec(projectDir, { version: 1, name: 'keyframe', operations: [op] },
-        { ...options, dryRun: Boolean(args.plan || args.dryRun) }), true);
+        ease: !args.noEase, easePosition: args.easePosition ? true : !args.noEase });
     }
+    // remove, volume, fade and animate take a list: one op per id in ONE transaction, so it is
+    // one snapshot, and one unknown id fails the whole list (SELECTOR_EMPTY) rather than half
+    // of it. trim, shift and keyframe act on one clip and refuse a list instead of quietly
+    // acting on its first id.
+    const ids = ['remove', 'volume', 'fade', 'animate'].includes(command)
+      ? segmentIds(args)
+      : [singleSegment(command, args)].filter(Boolean);
+    // --segments names the clips outright; only an --at lookup needs the draft.
+    const selectors = ids.length
+      ? ids.map(id => ({ id }))
+      : [{ id: resolveClip(loadProject(projectDir).groups.find(g => g.name === 'root').doc,
+        { at, track: args.track }).segment.id }];
+    const operations = selectors.map(make);
+    if (args.plan && (command === 'animate' || command === 'fade')) {
+      return print(operations.length === 1 ? operations[0] : operations, true);
+    }
+    return print(applySpec(projectDir, { version: 1, name: command, operations }, options), true);
   }
   if (command === 'preview') {
     const out = args.out || 'preview.mp4';
@@ -2347,5 +2613,5 @@ export async function main(argv, dependencies = {}) {
     if (!args.spec) throw new CapcutError('apply requires --spec FILE.', { exitCode: 2 });
     return print(applySpec(projectDir, readJson(path.resolve(args.spec)), options), true);
   }
-  throw new CapcutError(`Unknown command: ${command}\n\n${HELP}`, { exitCode: 2 });
+  throw await unknownCommandError(command);
 }

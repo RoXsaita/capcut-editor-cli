@@ -1252,6 +1252,14 @@ export function validateDocument(doc, {
           previous.reported = true;
         }
       } else seenMaterialIds.set(value.id, { kind, value, reported: false });
+      if (kind === 'audio_fades') {
+        for (const key of ['fade_in_duration', 'fade_out_duration']) {
+          if (value[key] === null || (value[key] !== undefined && !Number.isFinite(value[key]))) {
+            issues.push(issue('error', 'BAD_NUMBER', `Audio fade ${value.id}.${key} is ${JSON.stringify(value[key])}, not a number.`,
+              { file, id: value.id, key }));
+          }
+        }
+      }
       const mediaPath = value.path;
       if (checkFiles && typeof mediaPath === 'string' && mediaPath.startsWith('/') && !fs.existsSync(mediaPath)) {
         issues.push(isCapCutCachePath(mediaPath)
@@ -1338,6 +1346,23 @@ export function validateDocument(doc, {
         issues.push(issue('warning', range.duration === 0 ? 'ZERO_DURATION_SEGMENT' : 'SUBFRAME_SEGMENT',
           `${segment.id} lasts ${range.duration}µs, under one frame; CapCut cannot show it.`,
           { file, id: segment.id, key, durationUs: range.duration }));
+      }
+    }
+    // A NaN from a bad flag is written as null (JSON has no NaN). CapCut reads a null volume
+    // or keyframe value as nothing at all; absence (text segments) is fine, null is not.
+    if (segment.volume === null || (segment.volume !== undefined && !Number.isFinite(segment.volume))) {
+      issues.push(issue('error', 'BAD_NUMBER', `${segment.id}.volume is ${JSON.stringify(segment.volume)}, not a number.`,
+        { file, id: segment.id, key: 'volume' }));
+    }
+    for (const group of Array.isArray(segment.common_keyframes) ? segment.common_keyframes : []) {
+      for (const frame of Array.isArray(group?.keyframe_list) ? group.keyframe_list : []) {
+        const values = Array.isArray(frame?.values) ? frame.values : [];
+        if (frame?.time_offset === null || values.some(v => v === null || (typeof v === 'number' && !Number.isFinite(v)))) {
+          issues.push(issue('error', 'BAD_NUMBER',
+            `${segment.id}: ${group.property_type || 'keyframe'} key ${frame.id || ''} holds a null value.`,
+            { file, id: segment.id, key: 'common_keyframes' }));
+          break;
+        }
       }
     }
     const target = segment.target_timerange;
@@ -3806,8 +3831,32 @@ export function commitProjectFiles(projectDir, { writes = [], removes = [] } = {
   }
 }
 
+/**
+ * JSON has no NaN or Infinity: the clone below turns either into null, so a `volume: NaN`
+ * from a bad flag reached the draft as `volume: null` before any validator could see a
+ * number. Refuse them here, on the caller's spec, naming the op and the key.
+ */
+function assertFiniteNumbers(operations) {
+  const seen = new WeakSet();
+  const walk = (value, where, index, op) => {
+    if (typeof value === 'number') {
+      if (!Number.isFinite(value)) {
+        throw new CapcutError(`operation ${index} (${op}): ${where} is ${value}, not a number.`,
+          { code: 'BAD_NUMBER', exitCode: 2, details: { index, op, key: where } });
+      }
+      return;
+    }
+    if (!value || typeof value !== 'object' || seen.has(value)) return;
+    seen.add(value);
+    if (Array.isArray(value)) value.forEach((item, i) => walk(item, `${where}[${i}]`, index, op));
+    else for (const [key, item] of Object.entries(value)) walk(item, where ? `${where}.${key}` : key, index, op);
+  };
+  (Array.isArray(operations) ? operations : []).forEach((op, index) => walk(op, '', index, op?.op ?? '?'));
+}
+
 export function applySpec(projectDir, spec, options = {}) {
   if (spec.version !== 1) throw new CapcutError(`Unsupported spec version: ${spec.version}`, { code: 'SPEC_VERSION' });
+  assertFiniteNumbers(spec.operations);
   const operations = clone(spec.operations || []);
   for (const op of operations) {
     if (['segment.clone', 'material.clone', 'track.clone', 'clip.add'].includes(op.op) && !op.id) op.id = uuid();
