@@ -349,10 +349,14 @@ Usage:
                                 no flags = print the plan; --auto applies it
                                 --at T --speed X | --at T --cover IN-OUT for one clip
   capcutctl ramp                --project NAME --segment ID|--at T --speed 20 [--settle 0.5]
-                                [--result-at T] [--track N] [--dry-run]
+                                [--result-at T] [--reach-back 0] [--track N] [--dry-run]
                                 — split a B-roll clip at the result (first change-index peak
                                   after a quiet stretch), pace the waiting half, leave the
                                   result at 1×. Faces never ramp. Never writes curve_speed.
+                                  The wait never plays source before the in-point (minus
+                                  --reach-back S) or source another clip of the file shows;
+                                  short of source, the wait shortens and the result runs on
+                                  at 1×, else REACH_LIMITED names the span it needs.
   capcutctl polish              --project NAME_OR_PATH [--lead 0.14] [--track N] [--motivated] [--dry-run]
                                 [--no-transitions] [--no-sfx] [--no-interactions]
                                 transitions ride the principal (talking-head) track; it is sliced to fit
@@ -1723,6 +1727,7 @@ export async function main(argv, dependencies = {}) {
       ...(args.segment != null ? { segment: String(args.segment) } : {}),
       ...(args.at != null ? { at: num(args, 'at', { min: 0 }) } : {}),
       ...(args.resultAt != null ? { resultAt: num(args, 'resultAt', { min: 0 }) } : {}),
+      ...(args.reachBack != null ? { reachBack: num(args, 'reachBack', { min: 0 }) } : {}),
       ...(rampTrack != null ? { track: rampTrack } : {}),
     }] };
     return print(applySpec(projectDir, spec, options), true);

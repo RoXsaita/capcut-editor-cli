@@ -463,6 +463,13 @@ export function opSignature(doc, op, context = {}) {
         + `Run \`capcutctl brands\` to see which brands still need a transparent PNG.`,
         { code: 'NO_LOGO_ASSET', exitCode: 2 });
     }
+    // A pop that would not fit before the edit ends is skipped BEFORE anything is written: a
+    // skipped logo used to leave its video material (and its copy under the project) behind.
+    const remaining = S(editUs) - (l.at ?? 0);
+    if (!(remaining > 0.35)) {
+      result.logos.push({ brand: l.brand, at: l.at, skipped: 'past-end' });
+      continue;
+    }
     const key = `logo:${i}:${l.brand}`;
     const mat = clone(p.logoMaterialTemplate);
     mat.id = mint(`mat:${key}`);
@@ -495,11 +502,6 @@ export function opSignature(doc, op, context = {}) {
     const requested = l.scale ?? rules.logoDefaultScale;
     const scale = logoScaleFor(px.width, px.height, requested,
       doc.canvas_config || { width: 1080, height: 1920 }, { width: tplW, height: tplH });
-    const remaining = S(editUs) - (l.at ?? 0);
-    if (!(remaining > 0.35)) {
-      result.logos.push({ brand: l.brand, at: l.at, skipped: 'past-end' });
-      continue;
-    }
     const hold = Math.min(l.hold ?? rules.logoHoldSeconds, remaining);
     const seg = clone(p.logoSegmentTemplate);
     seg.id = mint(`seg:${key}`);

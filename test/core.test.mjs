@@ -1467,3 +1467,34 @@ test('doctor reports a null volume, fade or keyframe value as an error', async (
     fs.rmSync(temp, { recursive: true, force: true });
   }
 });
+
+test('cut.recut reports hand-placed sound it left at its old time, not build-owned cues', NEEDS_FFMPEG, () => {
+  const f = recutFixture();
+  writeRecutDocs(f, doc => {
+    const sound = (id, desc, start) => ({
+      id, material_id: 'AUDIO-MATERIAL', extra_material_refs: [], desc, speed: 1, volume: 1,
+      source_timerange: { start: 0, duration: 500_000 },
+      target_timerange: { start, duration: 500_000 },
+    });
+    doc.tracks.push({ id: 'KEYS-TRACK', type: 'audio', name: 'sfx-keys', segments: [
+      sound('HAND-SFX', 'sfx:typing', 2_500_000),
+      sound('MOGRAPH-SFX', 'mograph:sfx:X', 3_200_000),
+    ] });
+  });
+  const result = applySpec(f.project, recutSpec(f), { forceRunning: true });
+  assert.equal(result.committed, true);
+  const op = result.result.find(group => group.group === 'root').operations
+    .find(item => item?.operation === 'cut.recut');
+  assert.ok(op);
+  const listed = op.anchors.unownedAudio.map(item => item.id);
+  assert.ok(listed.includes('HAND-SFX'));
+  assert.equal(listed.includes('MOGRAPH-SFX'), false);
+  assert.deepEqual(op.anchors.unownedAudio.find(item => item.id === 'HAND-SFX'),
+    { id: 'HAND-SFX', track: 'sfx-keys', startUs: 2_500_000 });
+  assert.match(op.next, /unownedAudio/);
+  for (const dir of [f.project, f.timelineDir]) {
+    const keys = readJson(path.join(dir, 'draft_info.json')).tracks.find(track => track.id === 'KEYS-TRACK').segments;
+    assert.deepEqual(keys.find(s => s.id === 'HAND-SFX').target_timerange, { start: 2_500_000, duration: 500_000 });
+    assert.deepEqual(keys.find(s => s.id === 'MOGRAPH-SFX').target_timerange, { start: 3_200_000, duration: 500_000 });
+  }
+});

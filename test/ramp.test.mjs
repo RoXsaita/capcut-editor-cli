@@ -152,3 +152,77 @@ test('missing quiet stretch without --result-at fails clearly', () => {
     moments: [{ start: 95, end: 99.8, peak: 0.9 }],
   }), { code: 'NO_RESULT' });
 });
+
+test('a short clip never plays source from before its in-point: the wait shortens, the result runs on at 1x', () => {
+  const d = doc();
+  const out = opRamp(d, { segment: 'b0', speed: 20, settle: 0.5, resultAt: 99.5, __seed: 'in-point' });
+  const [wait, shown] = d.tracks[1].segments;
+  assert.equal(out.limited, true);
+  assert.ok(wait.source_timerange.start >= US(95), wait.source_timerange);
+  assert.equal(out.reachBack, 0);
+  assert.equal(wait.source_timerange.start + wait.source_timerange.duration, shown.source_timerange.start);
+  assert.equal(shown.target_timerange.start, wait.target_timerange.start + wait.target_timerange.duration);
+  // the clip keeps its place and length on the timeline
+  assert.equal(wait.target_timerange.start, 0);
+  assert.equal(shown.target_timerange.start + shown.target_timerange.duration, US(5));
+  assert.ok(Math.abs(out.wait.speed - 20) < 0.05, out.wait);
+  assert.ok(Math.abs(out.result.speed - 1) < 0.02, out.result);
+  assert.ok(out.reachForward > 3, out);
+});
+
+test('--reach-back never reaches into source another clip of the same file already shows', () => {
+  const d = doc();
+  d.tracks[1].segments.push({
+    id: 'earlier', material_id: 'FILE', desc: 'broll: files',
+    target_timerange: { start: US(6), duration: US(3) },
+    source_timerange: { start: US(60), duration: US(30) },
+    extra_material_refs: [], clip: { scale: { x: 1, y: 1 } },
+  });
+  d.tracks[1].segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
+  const out = opRamp(d, { segment: 'b0', speed: 20, settle: 0.5, resultAt: 99.5, reachBack: 30, __seed: 'reach' });
+  const wait = d.tracks[1].segments.find(s => s.id === out.wait.id);
+  assert.ok(wait.source_timerange.start >= US(90), wait.source_timerange);
+  assert.equal(out.limited, true);
+  assert.ok(Math.abs(out.reachBack - 5) < 0.01, out);
+});
+
+test('the pre-compressed 930-950 shot is not limited and reports no reach', () => {
+  const d = doc(); d.fps = 30;
+  const s = d.tracks[1].segments[0];
+  s.source_timerange = { start: US(930), duration: US(20) };
+  s.target_timerange = { start: US(22.3), duration: US(0.9) };
+  d.materials.videos.find(m => m.id === s.material_id).duration = US(1400);
+  const out = opRamp(d, { segment: 'b0', speed: 20, resultAt: 935.988822, settle: 0.5 });
+  assert.equal(out.limited, false);
+  assert.equal(out.reachBack, 0);
+  assert.equal(out.reachForward, 0);
+});
+
+test('when the result cannot run on, ramp refuses REACH_LIMITED and names the span', () => {
+  const d = doc();
+  d.materials.videos.find(m => m.id === 'FILE').duration = US(100);
+  assert.throws(() => opRamp(d, { segment: 'b0', speed: 20, settle: 0.5, resultAt: 99.5, __seed: 'eof' }),
+    error => error.code === 'REACH_LIMITED' && error.exitCode === 2 && /--reach-back/.test(error.message)
+      && error.details.reachBackNeeded > 0);
+  assert.throws(() => opRamp(doc(), { segment: 'b0', speed: 20, resultAt: 99.5, reachBack: -1 }), { code: 'BAD_REACH_BACK' });
+});
+
+test('ramp on a clip with a speed and two effects mints distinct extras for the result half', () => {
+  const d = doc();
+  d.materials.effects = [{ id: 'E1', type: 'sharpen' }, { id: 'E2', type: 'clear' }];
+  d.tracks[1].segments[0].extra_material_refs = ['sp1', 'E1', 'E2'];
+  opRamp(d, { segment: 'b0', speed: 20, settle: 0.5, resultAt: 99.5, __seed: 'fx' });
+  const ids = Object.values(d.materials).flatMap(v => Array.isArray(v) ? v.map(m => m.id) : []);
+  assert.equal(new Set(ids).size, ids.length, 'no material id repeats');
+  const [wait, shown] = d.tracks[1].segments;
+  assert.equal(new Set([...wait.extra_material_refs, ...shown.extra_material_refs]).size, 6);
+});
+
+test('ramp refuses a clip with a native intro/outro animation', () => {
+  const d = doc();
+  d.materials.material_animations = [{ id: 'ANIM', type: 'sticker_animation', animations: [{ type: 'in', duration: US(0.5) }] }];
+  d.tracks[1].segments[0].extra_material_refs.push('ANIM');
+  const before = JSON.stringify(d);
+  assert.throws(() => opRamp(d, { segment: 'b0', speed: 20, settle: 0.5, resultAt: 99.5, __seed: 'anim' }), { code: 'ANIMATED' });
+  assert.equal(JSON.stringify(d), before);
+});

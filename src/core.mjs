@@ -2722,6 +2722,13 @@ function recutIsParked(segment, projectDir) {
     && target.start >= range.start - RECUT_TOLERANCE_US);
 }
 
+/**
+ * Audio a later build pass re-places on the new timeline (mograph cues, polish seams, the
+ * finish music, signature pops). Any other timeline-anchored sound — an SFX dropped by hand or
+ * with `capcutctl sfx` — stays at its old time after a recut, so it is reported.
+ */
+const RECUT_OWNED_AUDIO = /^(mograph|polish|finish|sig):/;
+
 function recutValidateAnchors(doc, principal, oldMap, plan, projectDir = null) {
   const mapped = [];
   for (const [trackIndex, track] of (doc.tracks || []).entries()) {
@@ -2735,10 +2742,11 @@ function recutValidateAnchors(doc, principal, oldMap, plan, projectDir = null) {
       const audioLike = track.type === 'audio'
         || material?.type === 'audio'
         || /(?:^|[-_])(sfx|music)(?:$|[-_])/i.test(String(track.name || ''));
-      const timelineAnchored = (audioLike && !recutExplicitlyTiedToPrincipal(segment))
-        || recutIsParked(segment, projectDir);
+      const parked = recutIsParked(segment, projectDir);
+      const timelineAnchored = (audioLike && !recutExplicitlyTiedToPrincipal(segment)) || parked;
       if (timelineAnchored) {
-        mapped.push({ trackIndex, track, segment, pieces: null, timelineAnchored: true });
+        mapped.push({ trackIndex, track, segment, pieces: null, timelineAnchored: true,
+          unownedAudio: audioLike && !parked && !RECUT_OWNED_AUDIO.test(String(segment.desc || '')) });
         continue;
       }
       const pieces = recutAnchorPieces(segment, oldMap, plan);
@@ -3082,6 +3090,11 @@ function opCutRecut(doc, op, context = {}) {
     });
     replacementById.set(anchor.segment.id, rewritten);
   }
+  const unownedAudio = anchors.filter(anchor => anchor.unownedAudio).map(anchor => ({
+    id: anchor.segment.id,
+    track: anchor.track.name || anchor.track.id || anchor.trackIndex,
+    startUs: anchor.segment.target_timerange?.start ?? null,
+  }));
   const contentEnd = normalized.duration;
   for (const track of doc.tracks || []) {
     const original = before.get(track) || [];
@@ -3119,7 +3132,12 @@ function opCutRecut(doc, op, context = {}) {
       durationUs: normalized.duration,
       speed: 1
     },
-    anchors: { retimed, split, dropped, partialDropped },
+    anchors: { retimed, split, dropped, partialDropped, unownedAudio },
+    ...(unownedAudio.length ? {
+      next: `${unownedAudio.length} hand-placed sound(s) kept their old timeline time (anchors.unownedAudio). `
+        + 'Check each against the new cut: re-place it with `capcutctl remove --segments ID` + `capcutctl sfx --cues AT`, '
+        + 'or mark it source_tied_to_principal before a recut to have it mapped with the speech.'
+    } : {}),
     audioRamps: principalSegments.length,
     parkedDeltaUs
   };

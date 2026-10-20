@@ -560,7 +560,7 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
     // (a rebuild re-places graphics under their stable ids).
     const kept = new Set(previousOutputs);
     const outputs = [...segmentIds(finalDoc)].filter(id => !startIds.has(id) || kept.has(id));
-    const seamTransitions = ranPolish ? (finalDoc.materials?.transitions || []).map(m => m.id)
+    const seamTransitions = ranPolish ? (finalDoc.materials?.transitions || []).filter(m => m.capcutctl_polish === true).map(m => m.id)
       : prunedSeams ? [] : (Array.isArray(state.seamTransitions) ? state.seamTransitions : []);
     const next = { version: 1, hash: planHash(plan, profile, finalDoc, wordsFile, templateHashes, projectDir), builtFrom: hash,
       shots: stages.shots?.key || state.shots || null, shotOutputs, outputs, at: new Date().toISOString(), verdict: gate.verdict,

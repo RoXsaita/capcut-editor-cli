@@ -457,3 +457,21 @@ test('clearLogos takes the pops, their cue, their materials and the empty sig- t
   assert.equal(tagged('sig:sfx:endcard').length, 0);
   assert.throws(() => opSignature(doc(), {}), /NOTHING_TO_SIGN|wrote nothing/, 'an empty op still refuses');
 });
+
+test('a logo past the end of the edit writes no material and copies no file', () => {
+  const f = path.join(os.tmpdir(), 'capcutctl-logo-late.png');
+  fs.writeFileSync(f, PNG_1x1);
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'sig-late-logo-'));
+  const d = doc();
+  const videosBefore = d.materials.videos.length;
+  const r = opSignature(d, { logos: [{ brand: 'grok', at: 19.9, logo: f }], noSfx: true }, { projectDir: project });
+  assert.equal(r.logos[0].skipped, 'past-end');
+  assert.equal(d.materials.videos.length, videosBefore);
+  const copied = [];
+  const walk = dir => { for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) walk(p); else if (e.name.endsWith('.png')) copied.push(p);
+  } };
+  walk(project);
+  assert.deepEqual(copied, []);
+});
