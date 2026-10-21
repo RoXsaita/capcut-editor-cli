@@ -5,8 +5,10 @@ Input per window: the app/action timeline, each keyframe's NEW OCR lines (lines 
 this window are not repeated), and screenshots depending on --mode:
   ocr     - text only
   images  - every keyframe's JPEG
-  mixed   - JPEG only for keyframes whose new OCR text is short (visual screens: a figure, a video,
-            a design), text for the rest
+  mixed   - JPEG only for keyframes whose OCR text is short in total (visual screens: a figure, a
+            video, a design), text for the rest. A screen full of text goes as text even when little
+            of it is new, so a dense page is never attached just because it repeats the last one.
+Keyframes marked no_image by pick.py (frontmost app unknown) never go as a JPEG, in any mode.
 The model cites keyframe ids; this script maps ids to take + offset + wall clock, so the model never
 writes a timestamp. Calls `claude -p` headless on the user's own login (no API key; any
 ANTHROPIC_API_KEY in the environment is stripped so it can never bill a key).
@@ -27,7 +29,7 @@ from pathlib import Path
 HERE = os.path.dirname(os.path.abspath(__file__))
 WINDOW_S = 900
 MAX_OCR_CHARS = 1200
-IMAGE_IF_NEW_CHARS_BELOW = 300
+IMAGE_IF_OCR_CHARS_BELOW = 300   # the frame's whole OCR text, not just the new lines
 STRIP_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT",
              "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION")
 
@@ -56,7 +58,9 @@ def build_window(w, kfs, timeline, take, prev_summary, mode, kdir):
         if len(text) > MAX_OCR_CHARS:
             text = text[:MAX_OCR_CHARS] + " …"
         ocr_chars += len(text)
-        with_image = mode == "images" or (mode == "mixed" and len(text) < IMAGE_IF_NEW_CHARS_BELOW)
+        total = len(" | ".join(k["ocr"]))
+        with_image = not k.get("no_image") and (
+            mode == "images" or (mode == "mixed" and total < IMAGE_IF_OCR_CHARS_BELOW))
         label = f"{k['id']} {mmss(k['vt'])} [{k['app']}] {'+'.join(k['reasons'])}"
         content.append({"type": "text", "text": f"{label}{' (screenshot follows)' if with_image else ''}\nnew text: {text or '(none)'}"})
         if with_image:
