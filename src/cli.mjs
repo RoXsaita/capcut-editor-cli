@@ -244,9 +244,11 @@ Usage:
                       (timeline seconds) or --word "PHRASE" (the first kept place the talking
                       head says it, from its Whisper words or --words FILE), never both.
   capcutctl preview --project NAME --out preview.mp4 [--fps 6] [--from S] [--to S]
-                    [--resolution 360x640|--native] [--no-cache] [--no-grade]
+                    [--resolution 360x640|--native] [--no-cache] [--no-grade] [--max-minutes 15]
                       — lightweight streamed proxy; defaults to 360x640 and never writes
                         one PNG per frame. Use qa for bounded seam/pixel evidence.
+                        Stops (exit 3, PREVIEW_TOO_SLOW) when it projects past --max-minutes
+                        or no frame advances for 180s; --max-minutes 0 turns that off.
   capcutctl diff --project NAME --against NAME|--snapshot NAME|LABEL [--allow ID|track:NAME[,…]]
                       — what changed. --allow proves a scoped revision stayed in scope: every
                         change outside those segment ids / tracks is listed with both values
@@ -2757,10 +2759,23 @@ export async function main(argv, dependencies = {}) {
     if (args.native) previewArgs.push('--native');
     if (args.noCache) previewArgs.push('--no-cache');
     if (args.noGrade) previewArgs.push('--no-grade');
+    if (args.maxMinutes != null) {
+      const maxMinutes = Number(args.maxMinutes);
+      if (!Number.isFinite(maxMinutes) || maxMinutes < 0) {
+        throw new CapcutError('preview requires --max-minutes of zero (off) or more.', { code: 'BAD_MAX_MINUTES', exitCode: 2 });
+      }
+      previewArgs.push('--max-minutes', String(maxMinutes));
+    }
     const python = pythonForTool('frame_qa.py', { argv: previewArgs });
     let status;
     try { status = await runPython(python.executable, script, previewArgs, contentRangeEnv(projectDir)); }
     catch (error) { throw new CapcutError(`could not run ${script}: ${error.message}`, { exitCode: 2 }); }
+    if (status === 3) {
+      // frame_qa printed why (the projection or the stall) and the lighter options.
+      throw new CapcutError('preview stopped: it would overrun its time budget or stopped advancing; '
+        + 'retry at the default --fps 6, a shorter --from/--to, or --max-minutes 0.',
+      { code: 'PREVIEW_TOO_SLOW', exitCode: 3 });
+    }
     process.exitCode = status;
     return;
   }

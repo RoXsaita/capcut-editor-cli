@@ -51,11 +51,24 @@ SNIP = 150             # chars shown per row in the terminal
 SEND_LEAD = 6.0        # a Send click / typing burst this long before a prompt = typed at the screen
 STICKY = 25 * 60.0     # on-screen guess expires this long after the last typed prompt
 
-# Looks like a secret: vendor prefixes, JWTs, key=value assignments, long opaque blobs.
+# Looks like a secret: vendor prefixes, JWTs, key=value assignments, long opaque blobs. Three
+# branches keep a readable prefix and redact only what follows it: the password in
+# scheme://user:password@host, the path of a Slack webhook, and the value after an env-style
+# name such as STRIPE_SECRET_KEY= (a segment of the name is KEY, SECRET, TOKEN, PASSWORD,
+# PASSWD, PAT or AUTH, so PATH= and AUTHOR= are left alone).
+_ENV_WORD = r"(?:API)?KEYS?|SECRETS?|TOKENS?|PASSWORDS?|PASSWD|PATS?|AUTH"
 SECRET = re.compile(
-    r"(?:sk-[A-Za-z0-9_\-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{12,}|xox[abprs]-[A-Za-z0-9\-]{10,}"
+    r"(?:sk-[A-Za-z0-9_\-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}"
+    r"|AKIA[0-9A-Z]{12,}|xox[a-z]-[A-Za-z0-9\-]{10,}"
+    r"|(?<![A-Za-z0-9])(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{10,}"
+    r"|tskey-[a-z]+-[A-Za-z0-9\-]{10,}|glpat-[A-Za-z0-9_\-]{20,}"
+    r"|(?<![A-Za-z0-9])(?:hf|npm)_[A-Za-z0-9]{20,}"
     r"|AIza[0-9A-Za-z_\-]{30,}|eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{5,}"
     r"|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r"|(?P<hook>hooks\.slack\.com/services/)[A-Za-z0-9/_\-]{10,}"
+    r"|(?P<url>://[^\s/:@]+:)[^\s/@]+(?=@)"
+    r"|(?P<env>(?<![A-Za-z0-9_])(?:[A-Z0-9]+_)*(?:" + _ENV_WORD + r")(?:_[A-Z0-9]+)*(?![A-Za-z0-9])"
+    r"[\"']?\s*[:=]\s*[\"']?)[^\s\"',;]{8,}"
     r"|(?i:bearer)\s+[A-Za-z0-9._\-]{20,}"
     r"|(?i:(?:api[_-]?key|secret|token|passw(?:or)?d|authorization)[\"']?\s*[:=]\s*[\"']?)[^\s\"',;]{8,}"
     r"|(?<![\w/.\-])[A-Za-z0-9]{32,}(?![\w/.\-]))")
@@ -71,9 +84,73 @@ def redact(s):
         if re.fullmatch(r"[A-Za-z0-9]{32,}", t) and not (re.search(r"\d", t) and re.search(r"[A-Za-z]", t)):
             return t
         hit.append(1)
-        return "[redacted]"
+        keep = m.group("hook") or m.group("url") or m.group("env") or ""
+        return keep + "[redacted]"
     out = SECRET.sub(sub, s)
     return out, bool(hit)
+
+
+def selftest():
+    """Every token shape is built by concatenation, so nothing key-shaped lives in the repo."""
+    ok = []
+
+    def check(name, cond):
+        ok.append(cond)
+        print(f"  {'PASS' if cond else 'FAIL'}  {name}")
+
+    body = "Ab3" * 14                      # 42 chars, letters and digits
+    hexsha = "0123456789abcdef" * 2 + "01234567"
+    shapes = {
+        "openai sk-": "sk-" + body,
+        "github ghp_": "gh" + "p_" + body,
+        "github fine-grained pat": "github" + "_pat_" + body,
+        "stripe secret live": "sk" + "_live_" + body,
+        "stripe restricted test": "rk" + "_test_" + body,
+        "stripe publishable": "pk" + "_live_" + body,
+        "tailscale": "tskey" + "-auth-" + body,
+        "hugging face": "hf" + "_" + body,
+        "npm": "npm" + "_" + body,
+        "gitlab": "glpat" + "-" + body,
+        "slack bot": "xox" + "b-" + body,
+        "slack app-level": "xox" + "e-" + body,
+        "aws": "AKIA" + "ABCDEFGH12345678",
+        "jwt": "eyJ" + body + "." + body + "." + body,
+        "bearer": "Bearer " + body,
+        "bare blob": body,
+    }
+    for name, tok in shapes.items():
+        out, red = redact(f"run it with {tok} please")
+        check(f"redacts {name}", red and tok not in out and "[redacted]" in out)
+
+    hook_path = "T0" + "AAAA/B0" + "BBBB/" + body
+    out, red = redact("POST https://hooks.slack.com/services/" + hook_path)
+    check("redacts a Slack webhook path, keeps the host",
+          red and hook_path not in out and "hooks.slack.com/services/[redacted]" in out)
+    pw = "hunter" + "2pass"
+    out, red = redact("git clone https://alice:" + pw + "@example.com/repo.git")
+    check("redacts the password in URL credentials, keeps the user and host",
+          red and pw not in out and "://alice:[redacted]@example.com" in out)
+    for name in ("STRIPE_SECRET_KEY", "OPENAI_API_KEY", "GH_PAT", "DB_PASSWORD", "MY_AUTH_TOKEN", "SECRET_KEY"):
+        val = "v4lue" + "Xy9z" + "Qw"
+        out, red = redact(f"export {name}={val}")
+        check(f"redacts the value after {name}=, keeps the name",
+              red and val not in out and f"{name}=[redacted]" in out)
+
+    kept = {
+        "a path": "projects/capcut-cli/tools/claude_timeline.py",
+        "a slug": "carousel-limit-fix-20261021-variant-three-final",
+        "a long camelCase word": "thisIsAVeryLongCamelCaseIdentifierWithoutAnyDigits",
+        "a 40-hex SHA in a path": "/repo/.git/objects/pack/" + hexsha + "/index",
+        "PATH=": "PATH=/usr/local/bin:/usr/bin:/bin",
+        "AUTHOR=": "AUTHOR=someone-who-writes",
+        "a URL without credentials": "https://example.com:8080/a/b@c",
+    }
+    for name, text in kept.items():
+        out, red = redact(text)
+        check(f"keeps {name}", out == text and not red)
+
+    print("selftest:", "all passed" if all(ok) else "FAILURES")
+    return 0 if all(ok) else 1
 
 
 def one_line(s):
@@ -320,14 +397,19 @@ def row_line(r, multi=False):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--take", required=True, help="take folder name (in ~/Desktop/Screen Recordings) or path")
+    ap.add_argument("--take", help="take folder name (in ~/Desktop/Screen Recordings) or path")
     ap.add_argument("--grep", action="append", default=[], help="case-insensitive text; repeat for AND")
     ap.add_argument("--session", help="substring of session title, name or id")
     ap.add_argument("--kind", help="comma list of prompt,reply,tool,result")
     ap.add_argument("--from", dest="vfrom", type=float, help="video seconds")
     ap.add_argument("--to", dest="vto", type=float)
     ap.add_argument("--limit", type=int, default=300, help="max rows printed (default 300; the jsonl is never cut)")
+    ap.add_argument("--selftest", action="store_true", help="check the redaction rules and exit")
     a = ap.parse_args()
+    if a.selftest:
+        sys.exit(selftest())
+    if not a.take:
+        ap.error("--take is required")
 
     take = find_take(a.take)
     t0, wall0, dur = take_clock(take)

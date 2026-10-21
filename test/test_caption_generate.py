@@ -213,6 +213,26 @@ class CaptionTextModelTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {'CAPCUTCTL_CAPTION_TEXT_CHAIN': 'gpt-free'}):
             self.assertRaises(ValueError, caption_text_llm.chain)
 
+    def test_headless_claude_drops_api_keys_and_user_settings(self):
+        import os
+        from unittest import mock
+
+        import caption_text_llm
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen['argv'], seen['env'] = argv, kwargs['env']
+            return mock.Mock(stdout='{"fixes": []}')
+        parent = {'ANTHROPIC_API_KEY': 'fake-key', 'CLAUDECODE': '1', 'CLAUDE_CODE_SESSION_ID': 'parent'}
+        with mock.patch.dict(os.environ, parent), mock.patch.object(caption_text_llm.subprocess, 'run', fake_run):
+            caption_text_llm._claude('prompt', '.')
+        argv, env = seen['argv'], seen['env']
+        i = argv.index('--setting-sources')
+        self.assertEqual(argv[i + 1], '')
+        for name in parent:
+            self.assertNotIn(name, env)
+        self.assertEqual(env['MAX_THINKING_TOKENS'], '0')
+
 
 if __name__ == '__main__':
     unittest.main()

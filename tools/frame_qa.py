@@ -42,7 +42,7 @@ from itertools import pairwise
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
 DRAFTS = os.path.expanduser("~/Movies/CapCut/User Data/Projects/com.lveditor.draft")
 
@@ -64,6 +64,21 @@ class FrameExtractionError(SystemExit):
 
 class PreviewCancelled(FrameExtractionError):
     """The user interrupted a preview and all of its children were stopped."""
+
+
+class PreviewTooSlow(FrameExtractionError):
+    """The preview would overrun its time budget, or stopped advancing; children were stopped."""
+
+
+# A preview holds the shared heavy-render lock, so one that would take an hour blocks every
+# other render for that hour. Judge it once it has run a minute and done 2%, or when no frame
+# has advanced for three minutes.
+PREVIEW_BUDGET_MIN = 15.0
+PREVIEW_BUDGET_GRACE_S = 60.0
+PREVIEW_BUDGET_MIN_DONE = 0.02
+PREVIEW_STALL_S = 180.0
+PREVIEW_SLOW_HINT = ("render a lighter proxy at the default --fps 6, a shorter --from/--to range, "
+                     "or skip the preview with `capcutctl export --no-gate`; --max-minutes 0 turns this guard off")
 
 
 @dataclass
@@ -95,10 +110,20 @@ class FrameSample:
 class _PreviewRuntime:
     """Own preview children and the exact temporary workspace for cancellation cleanup."""
 
-    def __init__(self):
+    def __init__(self, budget_s=None):
         self.children = set()
         self.cancelled = False
         self._previous_handlers = {}
+        # budget_s None or 0 = no time budget and no stall guard.
+        self.budget_s = budget_s or None
+        self.frames_started = time.monotonic()
+        self.last_advance = self.frames_started
+        self.last_completed = 0
+
+    def begin_frames(self):
+        """Frame output starts now: the budget projects from here, and the stall clock resets."""
+        self.frames_started = self.last_advance = time.monotonic()
+        self.last_completed = 0
 
     def __enter__(self):
         global _ACTIVE_PREVIEW
@@ -215,6 +240,30 @@ def _run_command(command, **kwargs):
 def _check_preview_cancelled():
     if _ACTIVE_PREVIEW is not None and _ACTIVE_PREVIEW.cancelled:
         raise PreviewCancelled("preview cancelled")
+
+
+def _check_preview_budget(completed, total, started):
+    """Raise PreviewTooSlow when the projected run overruns the budget or frames stop advancing."""
+    runtime = _ACTIVE_PREVIEW
+    if runtime is None or not runtime.budget_s or total <= 0:
+        return
+    now = time.monotonic()
+    if completed > runtime.last_completed:
+        runtime.last_completed = completed
+        runtime.last_advance = now
+    stalled = now - runtime.last_advance
+    if completed < total and stalled >= PREVIEW_STALL_S:
+        raise PreviewTooSlow(
+            f"preview stalled: no frame advanced for {stalled:.0f}s at {completed}/{total}; {PREVIEW_SLOW_HINT}")
+    elapsed = now - started
+    if elapsed < PREVIEW_BUDGET_GRACE_S or completed < total * PREVIEW_BUDGET_MIN_DONE or completed <= 0:
+        return
+    rate_from = min(max(runtime.frames_started, started), now)
+    projected = elapsed + (now - rate_from) * (total - completed) / completed
+    if projected > runtime.budget_s:
+        raise PreviewTooSlow(
+            f"preview too slow: {completed}/{total} frames in {elapsed:.0f}s projects to "
+            f"{projected / 60:.1f} min, over the {runtime.budget_s / 60:g} min budget; {PREVIEW_SLOW_HINT}")
 
 # grab() memoises decoded frames. Sized for the 3-6 stills a QA run asks for it was
 # a plain dict; a default-fps --preview asks for ~1300 distinct stills and the same
@@ -485,7 +534,8 @@ def extract_frame(path, t, fps=None, force_accurate=False):
     requested = max(0.0, requested)
     if path.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
         with Image.open(path) as opened:
-            image = opened.convert("RGBA")
+            # Phone stills store their rotation in EXIF; without this they render sideways.
+            image = ImageOps.exif_transpose(opened).convert("RGBA")
         return FrameSample(
             image=image,
             requested_pts=requested,
@@ -1005,30 +1055,60 @@ def render(proj, tl, t, z="track", frame_reports=None, allow_missing=False, no_g
     return canvas, rows, W, H
 
 
-def contact_sheet(tiles, out, tile_w=240, pad=6, bar=22):
+def frame_name(t):
+    """The one spelling of a sample time, shared by `tNAME.png` and the `=== t=NAME` header:
+    30.0 -> "30", 12.5 -> "12.5", millisecond-exact (`:g` would round 1234.567 to 1234.57)."""
+    return f"{float(t):.6f}".rstrip("0").rstrip(".")
+
+
+def contact_sheet(tiles, out, tile_w=240, pad=6, bar=22, cols=None):
     """
     Every review in this project ended with a labelled grid of frames, and every one of
     them was a throwaway PIL script. It is the single most repeated thing here.
+
+    cols=None keeps every tile on one row; otherwise the grid wraps after `cols` tiles and
+    each row gets its own label bar.
     """
     ims = []
     for path, label in tiles:
-        im = Image.open(path).convert("RGB")
+        with Image.open(path) as opened:
+            im = opened.convert("RGB")
         h = max(1, round(im.height * tile_w / im.width))
         ims.append((im.resize((tile_w, h), Image.LANCZOS), label))
-    rows = max(i.height for i, _ in ims)
-    sheet = Image.new("RGB", (len(ims) * (tile_w + pad) + pad, rows + bar + pad * 2), (18, 18, 18))
+    cols = len(ims) if not cols else max(1, min(int(cols), len(ims)))
+    rows = [ims[i:i + cols] for i in range(0, len(ims), cols)]
+    heights = [max(im.height for im, _ in row) for row in rows]
+    sheet = Image.new("RGB", (cols * (tile_w + pad) + pad, sum(bar + pad + h for h in heights) + pad),
+                      (18, 18, 18))
     d = ImageDraw.Draw(sheet)
-    for i, (im, label) in enumerate(ims):
-        x = pad + i * (tile_w + pad)
-        sheet.paste(im, (x, bar + pad))
-        d.text((x + 2, 5), str(label)[:44], fill=(255, 235, 90))
+    y = 0
+    for row, row_h in zip(rows, heights, strict=True):
+        for i, (im, label) in enumerate(row):
+            x = pad + i * (tile_w + pad)
+            sheet.paste(im, (x, y + bar + pad))
+            d.text((x + 2, y + 5), str(label)[:44], fill=(255, 235, 90))
+        y += bar + pad + row_h
     sheet.save(out, compress_level=1)
     return out
 
 
+def qa_sheet_columns(count):
+    """The qa grid: up to six frames a row, so a dozen seams stay readable on one screen."""
+    return max(1, min(int(count), 6))
+
+
+def print_frames_summary(tiles, out_dir):
+    names = ", ".join(os.path.basename(path) for path, _label in tiles[:8])
+    more = f", … {len(tiles) - 8} more" if len(tiles) > 8 else ""
+    print(f"\nframes: {len(tiles)} in {out_dir} ({names}{more})")
+
+
 def write_simple_targeted(proj, tl, times, out_dir, sheet=None, labels=None,
                           guides=None, tile_w=240, z="track"):
-    """Export identity, single-source A-roll seam frames and its sheet in one ffmpeg pass."""
+    """Export identity, single-source A-roll seam frames in one ffmpeg pass, and their sheet.
+
+    Guides are drawn only when asked for; the sheet is built from the written PNGs, one tile
+    per requested time, so its labels cannot drift when two times share a source frame."""
     if z != "track":
         return None
     content_start, content_end = content_edit_range(proj, tl)
@@ -1067,7 +1147,7 @@ def write_simple_targeted(proj, tl, times, out_dir, sheet=None, labels=None,
     filters = [f"select='{selector}'", "showinfo",
                f"scale={width}:{height}:force_original_aspect_ratio=decrease:flags=fast_bilinear",
                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black", "setsar=1"]
-    for guide in (guides or [height / 2]):
+    for guide in guides or []:
         filters.append(f"drawbox=x=0:y={max(0, round(float(guide)) - 2)}:w=iw:h=4:color=red:t=fill")
 
     tmp = tempfile.mkdtemp(prefix="capcutctl-targeted-")
@@ -1078,21 +1158,8 @@ def write_simple_targeted(proj, tl, times, out_dir, sheet=None, labels=None,
             *_preview_decode_options(), "-ss", f"{seek_start:.9f}", "-i", source,
             "-t", f"{unique[-1] - seek_start + half + period:.9f}",
         ]
-        if sheet:
-            filter_graph = ",".join(filters) + (
-                f",split=2[full][small];[small]scale={int(tile_w)}:-1:flags=fast_bilinear,"
-                f"tile={len(unique)}x1:padding=6:margin=6[sheet]"
-            )
-            raw_sheet = os.path.join(tmp, "sheet.png")
-            command += [
-                "-filter_complex", filter_graph,
-                "-map", "[full]", "-an", "-fps_mode", "vfr", "-compression_level", "1", pattern,
-                "-map", "[sheet]", "-frames:v", "1", "-compression_level", "1", raw_sheet,
-            ]
-        else:
-            raw_sheet = None
-            command += ["-vf", ",".join(filters), "-an", "-fps_mode", "vfr",
-                        "-compression_level", "1", pattern]
+        command += ["-vf", ",".join(filters), "-an", "-fps_mode", "vfr",
+                    "-compression_level", "1", pattern]
         result = _run_command(command, check=False, capture_output=True, text=True)
         if result.returncode:
             raise FrameExtractionError(f"targeted QA ffmpeg failed: {(result.stderr or '').strip()}")
@@ -1106,23 +1173,19 @@ def write_simple_targeted(proj, tl, times, out_dir, sheet=None, labels=None,
         tiles = []
         labels = labels or []
         for index, (timeline_time, row, source_time_) in enumerate(mapped):
-            destination = os.path.join(out_dir, f"t{timeline_time:g}.png")
+            name = frame_name(timeline_time)
+            destination = os.path.join(out_dir, f"t{name}.png")
             shutil.copyfile(by_source[round(source_time_, 6)], destination)
-            label = labels[index] if index < len(labels) else f"t={timeline_time:g}"
+            label = labels[index] if index < len(labels) else f"t={name}"
             tiles.append((destination, label))
-            print(f"\n=== t={timeline_time}  z=track  canvas {width}x{height}")
+            print(f"\n=== t={name}  z=track  canvas {width}x{height}")
             delivered = delivered_times[round(source_time_, 6)]
             print(f"  frame requested PTS {source_time_:.6f}s delivered PTS {delivered:.6f}s (targeted-batch)")
             print(f"  trk{row['track_index']:<2} {str(row['segment'].get('id') or '')[:8]} "
                   f"{os.path.basename(source)[:34]} x0..{width} y0..{height}  {width}x{height}")
             print(f"  -> {destination}")
-        if sheet and raw_sheet:
-            image = Image.open(raw_sheet).convert("RGB")
-            draw = ImageDraw.Draw(image)
-            stride = int(tile_w) + 6
-            for index, (_destination, label) in enumerate(tiles):
-                draw.text((6 + index * stride, 5), str(label)[:44], fill=(255, 235, 90))
-            image.save(sheet, compress_level=1)
+        if sheet:
+            contact_sheet(tiles, sheet, int(tile_w), cols=qa_sheet_columns(len(tiles)))
             print(f"\n  -> {sheet}")
         return tiles
     finally:
@@ -1209,7 +1272,7 @@ def main():
                     help="targeted QA frame directory (incompatible with --preview)")
     ap.add_argument("--z", choices=["track", "render_index"], default="track")
     ap.add_argument("--guide", type=float, action="append", default=[],
-                    help="draw a horizontal guide at this y (repeatable); 960 = the half line")
+                    help="draw a horizontal guide at this y (repeatable; none by default); 960 = the half line")
     ap.add_argument("--rects-only", action="store_true")
     ap.add_argument("--no-grade", action="store_true",
                     help="render each clip ungraded — the before half of a before/after")
@@ -1226,6 +1289,9 @@ def main():
     ap.add_argument("--preview", nargs="?", const="preview.mp4", default=None,
                     help="write a streamed watchable proxy (optional path; separate from targeted QA)")
     ap.add_argument("--fps", type=float, default=6, help="preview frame rate (default 6)")
+    ap.add_argument("--max-minutes", dest="max_minutes", type=float, default=PREVIEW_BUDGET_MIN,
+                    help=f"stop a preview projected to run longer than this, or stalled for "
+                         f"{PREVIEW_STALL_S:.0f}s (default {PREVIEW_BUDGET_MIN:g}; 0 = off); exit 3")
     ap.add_argument("--allow-missing", action="store_true",
                     help="explicitly allow degraded black output for missing video media")
     ap.add_argument("--from", dest="from_time", type=float,
@@ -1293,10 +1359,13 @@ def main():
                                 start=render_start, end=render_end,
                                 allow_missing=a.allow_missing, resolution=a.resolution,
                                 native=a.native, cache=not a.no_cache, no_grade=a.no_grade,
-                                announce=False)
+                                announce=False, max_minutes=a.max_minutes)
         except PreviewCancelled:
             print("preview cancelled", file=sys.stderr)
             raise SystemExit(130) from None
+        except PreviewTooSlow as exc:
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(3) from None
         except FrameExtractionError as exc:
             ap.error(str(exc))
         print(f"  -> {out}")
@@ -1329,6 +1398,7 @@ def main():
                 guides=a.guide, tile_w=a.width or 240, z=a.z,
             )
         if fast is not None:
+            print_frames_summary(fast, qa_out)
             return
     failures = []
     tiles = []
@@ -1369,7 +1439,7 @@ def main():
                 if a.allow_missing:
                     kwargs["allow_missing"] = True
                 img, rows, W, H = render(proj, tl, t, a.z, **kwargs)
-            print(f"\n=== t={t}  z={a.z}  canvas {W}x{H}")
+            print(f"\n=== t={frame_name(t)}  z={a.z}  canvas {W}x{H}")
             report_extractions(t, frame_reports)
             for ti, sid, nm, rc in rows:
                 if rc is None:
@@ -1393,19 +1463,21 @@ def main():
                         report_frame(f, t, wanted, a.ocr, a.languages, failures)
                 continue
             d = ImageDraw.Draw(img)
-            for g in (a.guide or [H / 2]):
+            for g in a.guide:
                 d.line([0, g, W, g], fill=(255, 0, 0, 255), width=4)
                 d.text((14, g + 8), f"y={g:g}", fill=(255, 90, 90, 255))
-            f = os.path.join(qa_out, f"t{t:g}.png")
+            f = os.path.join(qa_out, f"t{frame_name(t)}.png")
             img.convert("RGB").save(f, compress_level=1)
             print(f"  -> {f}")
             if a.ocr or wanted:
                 report_frame(f, t, wanted, a.ocr, a.languages, failures)
-            tiles.append((f, a.label[len(tiles)] if len(tiles) < len(a.label) else f"t={t:g}"))
+            tiles.append((f, a.label[len(tiles)] if len(tiles) < len(a.label) else f"t={frame_name(t)}"))
 
     if a.sheet and tiles:
         out = a.sheet if os.path.isabs(a.sheet) else os.path.join(qa_out, a.sheet)
-        print(f"\n  -> {contact_sheet(tiles, out, a.width or 240)}")
+        print(f"\n  -> {contact_sheet(tiles, out, a.width or 240, cols=qa_sheet_columns(len(tiles)))}")
+    if tiles:
+        print_frames_summary(tiles, qa_out)
 
     if failures or unchecked:
         print(f"\n{len(failures) + len(unchecked)} expectation(s) failed:")
@@ -1964,6 +2036,7 @@ def format_preview_estimate(estimate):
 
 
 def _emit_preview_progress(callback, completed, total, started):
+    _check_preview_budget(completed, total, started)
     elapsed = max(0.0, time.monotonic() - started)
     eta = (elapsed * (total - completed) / completed) if completed else None
     if callback is not None:
@@ -2182,6 +2255,7 @@ class _PreviewFrameProvider:
         self.frames = {}
         self.source_sizes = {}
         self.batch_paths = set()
+        self.fallbacks = 0     # frames served by the slow per-frame grab() path
         for path, requests in _preview_requests(project_dir, tl, times).items():
             info = _probe_video_info(path)
             self.source_sizes[path] = _source_preview_dimensions(info, output_size)
@@ -2196,6 +2270,7 @@ class _PreviewFrameProvider:
         if sample is not None:
             return _copy_sample(sample)
         size = self.source_sizes.get(path)
+        self.fallbacks += 1
         return grab(path, timeline_time, return_info=True, fps=self.tl.get("fps"), size=size)
 
 
@@ -2226,9 +2301,12 @@ def _run_progress_encoder(command, total_frames, fps, started, callback):
     process = _start_process(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     last = 0
     heartbeat = time.monotonic()
+    if _ACTIVE_PREVIEW is not None:
+        _ACTIVE_PREVIEW.begin_frames()
     try:
         while True:
             _check_preview_cancelled()
+            _check_preview_budget(last, total_frames, started)
             ready = []
             if process.stderr is not None:
                 try:
@@ -2271,6 +2349,9 @@ def _run_progress_encoder(command, total_frames, fps, started, callback):
         if process.stderr is not None:
             process.stderr.close()
         return_code = process.wait()
+    except BaseException:
+        _terminate_process(process)
+        raise
     finally:
         if _ACTIVE_PREVIEW is not None:
             _ACTIVE_PREVIEW.discard(process)
@@ -2435,9 +2516,12 @@ def _encode_compositor_stream(project_dir, tl, times, output, fps, z, output_siz
     process = _start_process(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
                              stderr=subprocess.PIPE)
     rendered_at_low_resolution = provider is not None and bool(provider.batch_paths)
+    if _ACTIVE_PREVIEW is not None:
+        _ACTIVE_PREVIEW.begin_frames()
     try:
         for index, timeline_time in enumerate(times, start=1):
             _check_preview_cancelled()
+            _check_preview_budget(index - 1, len(times), started)
             kwargs = {}
             if allow_missing:
                 kwargs["allow_missing"] = True
@@ -2450,6 +2534,9 @@ def _encode_compositor_stream(project_dir, tl, times, output, fps, z, output_siz
                 image = image.resize(output_size, Image.LANCZOS)
             process.stdin.write(image.convert("RGB").tobytes())
             _emit_preview_progress(callback, index, len(times), started)
+        if provider is not None and provider.fallbacks:
+            print(f"preview: {provider.fallbacks} of {len(times)} frames fell back to per-frame decoding "
+                  "(the slow path)", flush=True)
         process.stdin.close()
         stderr = process.stderr.read() if process.stderr is not None else b""
         if process.stderr is not None:
@@ -2469,8 +2556,11 @@ def _encode_compositor_stream(project_dir, tl, times, output, fps, z, output_siz
 
 def write_preview(proj, tl, out_path, fps=6, z="track", start=None, end=None,
                   allow_missing=False, resolution=None, native=False, cache=True,
-                  no_grade=False, progress=None, announce=True):
-    """Write a bounded preview without materialising full-resolution frame files."""
+                  no_grade=False, progress=None, announce=True, max_minutes=PREVIEW_BUDGET_MIN):
+    """Write a bounded preview without materialising full-resolution frame files.
+
+    max_minutes bounds the run (PreviewTooSlow); 0 or None turns the budget and stall guard off.
+    """
     try:
         estimate = preview_estimate(
             proj, tl, fps=fps, start=start, end=end, resolution=resolution, native=native,
@@ -2511,7 +2601,7 @@ def write_preview(proj, tl, out_path, fps=6, z="track", start=None, end=None,
     tmp = tempfile.mkdtemp(prefix="capcutctl-preview-")
     encoded = os.path.join(tmp, "preview.mp4")
     try:
-        with _PreviewRuntime():
+        with _PreviewRuntime(budget_s=(max_minutes or 0) * 60):
             _emit_preview_progress(progress, 0, total_frames, started)
             if mode == "a-roll-concat":
                 segments = simple_aroll_segments(proj, tl, render_start, render_end)
@@ -2731,8 +2821,48 @@ def _selftest():
     check("sharpen raises edge contrast on a soft edge (approx)",
           face_detail_metrics(sharp)["edge_contrast"] > before_edge)
 
+    _selftest_preview_budget(check)
+
     print("selftest:", "all passed" if all(ok) else "FAILURES")
     return 0 if all(ok) else 1
+
+
+def _selftest_preview_budget(check):
+    """The preview budget on a fake clock and a runtime that owns no children or signals."""
+    global _ACTIVE_PREVIEW
+    clock = [1000.0]
+    real_monotonic, saved_runtime = time.monotonic, _ACTIVE_PREVIEW
+
+    def outcome(steps, budget_s=900):
+        """steps: [(seconds since start, frames done)] of 1000 frames; -> the raised message or None."""
+        global _ACTIVE_PREVIEW
+        clock[0] = 1000.0
+        _ACTIVE_PREVIEW = _PreviewRuntime(budget_s=budget_s)
+        try:
+            for at, done in steps:
+                clock[0] = 1000.0 + at
+                _check_preview_budget(done, 1000, 1000.0)
+        except PreviewTooSlow as exc:
+            return str(exc)
+        finally:
+            _ACTIVE_PREVIEW = None
+        return None
+
+    time.monotonic = lambda: clock[0]
+    try:
+        slow = outcome([(30, 10), (61, 25)])            # 25 frames a minute -> 40 min
+        check("a preview projected past its budget stops", slow is not None and "too slow" in slow
+              and "--fps 6" in slow and "--from/--to" in slow and "--no-gate" in slow)
+        check("under the grace minute nothing is judged", outcome([(30, 10), (59, 20)]) is None)
+        check("under the budget nothing is raised", outcome([(61, 100), (300, 500), (590, 1000)]) is None)
+        stalled = outcome([(10, 300), (100, 310), (289, 310), (291, 310)], budget_s=10 ** 6)
+        check("no frame advancing for 180s stops", stalled is not None and "stalled" in stalled)
+        check("179s without a frame is not yet a stall",
+              outcome([(10, 300), (100, 310), (279, 310)], budget_s=10 ** 6) is None)
+        check("--max-minutes 0 turns the guard off", outcome([(61, 25), (400, 25)], budget_s=0) is None)
+    finally:
+        time.monotonic = real_monotonic
+        _ACTIVE_PREVIEW = saved_runtime
 
 
 if __name__ == "__main__":

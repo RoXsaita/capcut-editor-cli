@@ -87,7 +87,10 @@ def ask_jev(beats=None, triage=None, model="typesafe:jev-latest"):
     if r.returncode:
         # Never echo the environment; the key lives there.
         raise JevUnavailable(f"Jev call failed: {r.stderr.strip().replace(key, '***')[-300:]}")
-    return json.loads(r.stdout)
+    reply = json.loads(r.stdout)
+    # Per-call errors are provider messages and end up in xray.json; one can quote the key.
+    reply["errors"] = [str(e).replace(key, "***") for e in reply.get("errors") or []]
+    return reply
 
 
 # ---------------------------------------------------------------- beats

@@ -62,7 +62,7 @@ export const TOOL_OPTIONS = Object.freeze({
   ]),
   qa: Object.freeze([
     '--allow-missing', '--at-broll', '--at-cuts', '--at-scenes', '--cut-window', '--expect',
-    '--fps', '--from', '--guide', '--label', '--languages', '--native', '--no-cache', '--no-grade',
+    '--fps', '--from', '--guide', '--label', '--languages', '--max-minutes', '--native', '--no-cache', '--no-grade',
     '--ocr', '--out', '--preview', '--project', '--rects-only', '--resolution', '--selftest',
     '--sheet', '--times', '--to', '--width', '--z',
   ]),

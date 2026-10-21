@@ -825,6 +825,7 @@
       "options": [
         "--fps",
         "--from",
+        "--max-minutes",
         "--native",
         "--no-cache",
         "--no-grade",
@@ -903,6 +904,7 @@
         "--guide",
         "--label",
         "--languages",
+        "--max-minutes",
         "--native",
         "--no-cache",
         "--no-grade",
