@@ -149,9 +149,9 @@ snapshot unless `--no-backup` is supplied, and validate before committing.
 
 Follow the companion repository's
 [skill installation steps](https://github.com/RoXsaita/capcut-skills/blob/main/CONTRIBUTING.md#install).
-They link the four skill directories and preserve existing installations for review.
+They link the three skill directories (`capcut-editing`, `capcut-cli`, `capcut-motion`) and preserve existing installations for review.
 
-Read `capcut-editing/SKILL.md` first — it is the hub and links to the other three.
+Read `capcut-editing/SKILL.md` first — it is the hub and links to the other two.
 
 **Agents: before the first write, ask which style to use** (bundled house style,
 harvest their CapCut library, or start blank). See README → *Presets and machine-local resources*.
