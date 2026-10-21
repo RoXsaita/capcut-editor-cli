@@ -37,7 +37,7 @@ the captions are the ones the edit shipped with.
 | Talking head | 40 spoken beats, repeated lines, dead air | the last clean take of each line, cut on acoustic boundaries (`capcutctl cut`) |
 | Picture | a person talking to camera | split screens, full-frame scenes with a circle PiP, proof shots from the real session |
 | Text | none | 113 editable word-by-word caption clips |
-| Checks | none | `doctor` 0 errors, `gate` WARN with no FAIL, `xray` loudness −14.2 LUFS, true peak −1.2 dBTP |
+| Checks | none | `doctor` 0 errors; the draft `gate` passed with warnings and no FAIL; the export measures −14.3 LUFS |
 | In CapCut | | still a native project: open it and move, retime or delete anything |
 
 ### More from the same edit
