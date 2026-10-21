@@ -51,8 +51,14 @@ export function takeParts(takeDir, session = null) {
 /** { file, t } for a take-wide vt, or null when it is in no file (a restart gap). */
 export function locateVt(parts, vt) {
   if (!finite(vt)) return null;
-  for (const part of parts || []) {
-    const end = part.endVt == null ? Infinity : part.endVt + END_SLACK;
+  const list = parts || [];
+  for (let i = 0; i < list.length; i++) {
+    const part = list[i];
+    let end = part.endVt == null ? Infinity : part.endVt + END_SLACK;
+    // The slack never reaches into the next part: its first frames are its own (a derived
+    // end_vt is exactly the next start, and a restart gap can be shorter than the slack).
+    const next = list[i + 1];
+    if (next && finite(next.startVt)) end = Math.min(end, next.startVt - 1e-6);
     if (vt >= part.startVt - 1e-6 && vt <= end) return { file: part.file, t: Math.max(0, vt - part.startVt) };
   }
   return null;

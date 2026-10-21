@@ -70,11 +70,33 @@ export function testFiles(dir = HERE) {
     .map(name => path.join('test', name));
 }
 
+/** `node --test` flags that take a value, which may come as the next argument. */
+const VALUE_FLAGS = new Set([
+  '--test-name-pattern', '--test-skip-pattern', '--test-reporter', '--test-reporter-destination',
+  '--test-concurrency', '--test-timeout', '--test-shard', '--test-coverage-include',
+  '--test-coverage-exclude', '--test-coverage-branches', '--test-coverage-functions',
+  '--test-coverage-lines', '--test-global-setup',
+]);
+
+/**
+ * Split runner arguments into node flags and test files. `--flag=value` and `--flag value`
+ * both stay flags: without this, `npm test -- --test-name-pattern foo` ran `foo` as a file.
+ */
+export function splitArgs(args) {
+  const named = [];
+  const flags = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (!arg.startsWith('-')) { named.push(arg); continue; }
+    flags.push(arg);
+    if (VALUE_FLAGS.has(arg) && i + 1 < args.length) flags.push(args[++i]);
+  }
+  return { named, flags };
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   // `npm test -- test/duck.test.mjs` runs just that file; flags pass through to `node --test`.
-  const args = process.argv.slice(2);
-  const named = args.filter(arg => !arg.startsWith('-'));
-  const flags = args.filter(arg => arg.startsWith('-'));
+  const { named, flags } = splitArgs(process.argv.slice(2));
   const files = named.length ? named : testFiles();
   if (!files.length) {
     process.stderr.write('test/run.mjs: no test/*.test.mjs or test/*.test.cjs files found\n');

@@ -57,7 +57,8 @@ test('findResultMoment is the first peak after a quiet stretch, not the in-point
 test('opRamp splits at the result, paces the wait, and leaves the result at 1×', () => {
   const d = doc();
   const out = opRamp(d, {
-    segment: 'b0', speed: DEFAULT_SPEED, settle: 0.5, resultAt: 99.5, __seed: 'ramp-test',
+    // The fixture's wait needs 80s of source before its in-point; this test allows it.
+    segment: 'b0', speed: DEFAULT_SPEED, settle: 0.5, resultAt: 99.5, reachBack: 80, __seed: 'ramp-test',
   });
   const wait = d.tracks[1].segments[0];
   const shown = d.tracks[1].segments[1];
@@ -79,7 +80,7 @@ test('opRamp splits at the result, paces the wait, and leaves the result at 1×'
 
 test('opRamp --result-at does not need a change sidecar', () => {
   const d = doc();
-  const out = opRamp(d, { at: 0, resultAt: 99.5, speed: 20, settle: 0.5, __seed: 'ramp-override' });
+  const out = opRamp(d, { at: 0, resultAt: 99.5, speed: 20, settle: 0.5, reachBack: 80, __seed: 'ramp-override' });
   assert.equal(out.resultAt, 99.5);
   assert.equal(d.tracks[1].segments.length, 2);
 });
@@ -121,7 +122,7 @@ test('an unpaced wait keeps the slice source seam instead of jumping to the snap
 test('opRamp uses the first peak after quiet when moments are supplied', () => {
   const d = doc();
   const out = opRamp(d, {
-    segment: 'b0', speed: 20, settle: 0.5, __seed: 'ramp-moments',
+    segment: 'b0', speed: 20, settle: 0.5, reachBack: 80, __seed: 'ramp-moments',
     moments: [
       { start: 95, end: 95.3, peak: 0.8 },
       { start: 99.5, end: 99.8, peak: 0.91 },
@@ -153,9 +154,9 @@ test('missing quiet stretch without --result-at fails clearly', () => {
   }), { code: 'NO_RESULT' });
 });
 
-test('a short clip never plays source from before its in-point: the wait shortens, the result runs on at 1x', () => {
+test('a short clip never plays source from before its in-point: with --reach-forward the wait shortens, the result runs on at 1x', () => {
   const d = doc();
-  const out = opRamp(d, { segment: 'b0', speed: 20, settle: 0.5, resultAt: 99.5, __seed: 'in-point' });
+  const out = opRamp(d, { segment: 'b0', speed: 20, settle: 0.5, resultAt: 99.5, reachForward: 10, __seed: 'in-point' });
   const [wait, shown] = d.tracks[1].segments;
   assert.equal(out.limited, true);
   assert.ok(wait.source_timerange.start >= US(95), wait.source_timerange);
@@ -168,6 +169,18 @@ test('a short clip never plays source from before its in-point: the wait shorten
   assert.ok(Math.abs(out.wait.speed - 20) < 0.05, out.wait);
   assert.ok(Math.abs(out.result.speed - 1) < 0.02, out.result);
   assert.ok(out.reachForward > 3, out);
+});
+
+test('by default the result never runs past the out-point: too little source refuses and names --reach-forward', () => {
+  const d = doc();
+  const before = structuredClone(d);
+  assert.throws(() => opRamp(d, { segment: 'b0', speed: 20, settle: 0.5, resultAt: 99.5, __seed: 'out-point' }),
+    error => error.code === 'REACH_LIMITED' && /--reach-forward \d/.test(error.message)
+      && error.details.reachForwardNeeded > 3);
+  assert.throws(() => opRamp(before, { segment: 'b0', speed: 20, resultAt: 99.5, reachForward: -1 }), { code: 'BAD_REACH_FORWARD' });
+  // The extension is capped at what --reach-forward allows, not merely at the material end.
+  assert.throws(() => opRamp(doc(), { segment: 'b0', speed: 20, settle: 0.5, resultAt: 99.5, reachForward: 1, __seed: 'short' }),
+    { code: 'REACH_LIMITED' });
 });
 
 test('--reach-back never reaches into source another clip of the same file already shows', () => {
@@ -184,6 +197,10 @@ test('--reach-back never reaches into source another clip of the same file alrea
   assert.ok(wait.source_timerange.start >= US(90), wait.source_timerange);
   assert.equal(out.limited, true);
   assert.ok(Math.abs(out.reachBack - 5) < 0.01, out);
+  // Enough source for a slower ramp: the wait keeps its length and the result stays inside.
+  assert.equal(out.reachForward, 0, out);
+  assert.equal(out.wait.clamped, true, out.wait);
+  assert.ok(out.wait.speed > 1.02 && out.wait.speed < 20, out.wait);
 });
 
 test('the pre-compressed 930-950 shot is not limited and reports no reach', () => {
@@ -211,7 +228,7 @@ test('ramp on a clip with a speed and two effects mints distinct extras for the 
   const d = doc();
   d.materials.effects = [{ id: 'E1', type: 'sharpen' }, { id: 'E2', type: 'clear' }];
   d.tracks[1].segments[0].extra_material_refs = ['sp1', 'E1', 'E2'];
-  opRamp(d, { segment: 'b0', speed: 20, settle: 0.5, resultAt: 99.5, __seed: 'fx' });
+  opRamp(d, { segment: 'b0', speed: 20, settle: 0.5, resultAt: 99.5, reachBack: 80, __seed: 'fx' });
   const ids = Object.values(d.materials).flatMap(v => Array.isArray(v) ? v.map(m => m.id) : []);
   assert.equal(new Set(ids).size, ids.length, 'no material id repeats');
   const [wait, shown] = d.tracks[1].segments;
@@ -225,4 +242,18 @@ test('ramp refuses a clip with a native intro/outro animation', () => {
   const before = JSON.stringify(d);
   assert.throws(() => opRamp(d, { segment: 'b0', speed: 20, settle: 0.5, resultAt: 99.5, __seed: 'anim' }), { code: 'ANIMATED' });
   assert.equal(JSON.stringify(d), before);
+});
+
+test('match plans its ramp with a reach-forward bounded by the shot length', async () => {
+  const { planShotOps } = await import('../src/match.mjs');
+  const ops = planShotOps({
+    decision: 'place', moment: {}, id: 's1', onScreen: 5,
+    timeline: { start: 0 }, source: { in: 95, out: 100 }, resultAt: 99.5,
+  }, { screen: '/screen.mp4' });
+  const ramp = ops.find(op => op.op === 'ramp');
+  assert.equal(ramp.reachForward, 5);
+  // The planned op ramps the same short 1x clip the default refuses.
+  const out = opRamp(doc(), { segment: 'b0', speed: ramp.speed, settle: 0.5, resultAt: ramp.resultAt,
+    reachForward: ramp.reachForward, __seed: 'match' });
+  assert.equal(out.limited, true);
 });

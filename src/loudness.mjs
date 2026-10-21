@@ -28,7 +28,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
-import { CapcutError, contentEndUs, resolveMediaPath } from './core.mjs';
+import { CapcutError, ledgerContentEndUs, preservedRange, resolveMediaPath } from './core.mjs';
 import { isBrollSegment } from './broll-lint.mjs';
 import { pythonForTool, PACKAGE_ROOT } from './python.mjs';
 
@@ -37,10 +37,20 @@ const r6 = n => Math.round(n * 1e6) / 1e6;
 
 export const DEFAULT_TARGET_LUFS = -14;
 
+/**
+ * Where parked parts-bin clips begin, or 0 (nothing is parked) when the project records no
+ * parked range. Read from the ledger-restored doc: after a CapCut save strips the follow
+ * ender's identity, the raw doc's content end stops before the ender, and the ender and its
+ * cue would drop out of measurement and peak limiting as if parked.
+ */
+function parkedFromUs(doc, projectDir) {
+  return preservedRange(projectDir) ? ledgerContentEndUs(doc, projectDir) : 0;
+}
+
 export function analyzeAudio(doc, projectDir, { mixOnly = false } = {}) {
   const python = pythonForTool('audio_levels.py');
   // Parked parts-bin clips past the edit are not in the video: leave them out of the mix.
-  const endUs = contentEndUs(doc, projectDir);
+  const endUs = parkedFromUs(doc, projectDir);
   const result = spawnSync(python.executable, [path.join(PACKAGE_ROOT, 'tools/audio_levels.py')], {
     input: JSON.stringify({ doc, projectDir: projectDir || '.', mixOnly, ...(endUs > 0 ? { contentEndUs: endUs } : {}) }),
     encoding: 'utf8', timeout: 300_000, maxBuffer: 16 * 1024 * 1024,
@@ -268,7 +278,7 @@ export function opLoudness(doc, op = {}, context = {}) {
   const loudnessesBefore = doc.loudnesses ? JSON.stringify(doc.loudnesses) : null;
   const analysis = op.measurements == null ? analyzeAudio(doc, context.projectDir) : null;
   const before = analysis ? structuredClone(doc) : null;
-  const endUs = contentEndUs(doc, context.projectDir);
+  const endUs = parkedFromUs(doc, context.projectDir);
   const segments = [];
   const skipped = [];
   const refused = [];

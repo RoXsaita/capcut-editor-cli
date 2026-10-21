@@ -24,6 +24,7 @@ import {
   durationInfo,
   executeTransaction,
   inspectProject,
+  ledgerContentEndUs,
   LIVE_FILE_NAMES,
   PRESET3_DUPLICATE_BASELINE,
   projectLockStatus,
@@ -1264,6 +1265,79 @@ test('a transition orphaned before the edit is a preexisting warning, and the ap
   assert.equal(real.committed, true);
   assert.equal(readJson(path.join(fx.project, 'draft_info.json')).tracks[0].segments[0].volume, 0.5);
   assert.deepEqual(listSnapshots(fx.project), [], 'no rollback snapshot left behind');
+});
+
+test('a null volume the draft already had is a preexisting warning; a new one still refuses', () => {
+  const fx = fixture({ drift: false });
+  // An older capcutctl wrote a bad flag's NaN as null.
+  rewriteMirrors(fx, doc => { doc.tracks[0].segments[0].volume = null; });
+  assert.ok(doctor(fx.project).issues.some(item => item.code === 'BAD_NUMBER' && item.level === 'error'));
+  const alpha = { version: 1, operations: [{ op: 'segment.patch', selector: { id: 'SEGMENT-ONE' }, set: { clip: { alpha: 0.8 } } }] };
+  const dry = applySpec(fx.project, alpha, { forceRunning: true, dryRun: true });
+  const legacy = dry.validation.filter(item => item.code === 'BAD_NUMBER');
+  assert.ok(legacy.length && legacy.every(item => item.level === 'warning' && item.preexisting === true), JSON.stringify(legacy));
+  const real = applySpec(fx.project, alpha, { forceRunning: true, backup: false });
+  assert.equal(real.committed, true, 'the post-write doctor baselines it too');
+  assert.equal(readJson(path.join(fx.project, 'draft_info.json')).tracks[0].segments[0].clip.alpha, 0.8);
+  // A bad value the edit writes is not baselined by the null volume, even on the same segment.
+  const nullKey = groups => {
+    for (const group of groups) group.doc.tracks[0].segments[0].common_keyframes = [{ property_type: 'KFTypeAlpha',
+      keyframe_list: [{ id: 'K1', time_offset: 0, values: [null] }] }];
+  };
+  const fractional = groups => {
+    for (const group of groups) group.doc.tracks[0].segments[0].target_timerange.start = 0.5;
+  };
+  for (const [mutate, code] of [[nullKey, 'BAD_NUMBER'], [fractional, 'NON_INTEGER_TIMERANGE']]) {
+    assert.throws(() => executeTransaction(fx.project, mutate, { forceRunning: true, dryRun: true }),
+      error => error.code === 'VALIDATION_FAILED' && error.details.some(item => item.code === code));
+  }
+});
+
+test('restore puts back a snapshot that carries a legacy null volume', () => {
+  const fx = fixture({ drift: false });
+  rewriteMirrors(fx, doc => { doc.tracks[0].segments[0].volume = null; });
+  createSnapshot(fx.project, 'legacy');
+  rewriteMirrors(fx, doc => { doc.tracks[0].segments[0].volume = 1; });
+  const dry = restoreProjectSnapshot(fx.project, 'legacy', { forceRunning: true, dryRun: true });
+  assert.ok(dry.validation.some(item => item.code === 'BAD_NUMBER' && item.level === 'warning'));
+  const real = restoreProjectSnapshot(fx.project, 'legacy', { forceRunning: true, backup: false });
+  assert.ok(real.restored);
+  assert.equal(readJson(path.join(fx.project, 'draft_info.json')).tracks[0].segments[0].volume, null);
+});
+
+test('a snapshot label is matched whole: build never picks <timestamp>-pre-build', async () => {
+  const fx = fixture({ drift: false });
+  const build = createSnapshot(fx.project, 'build');
+  await new Promise(resolve => setTimeout(resolve, 5));
+  createSnapshot(fx.project, 'pre-build');
+  assert.equal(resolveSnapshotDir(fx.project, 'build').name, path.basename(build));
+  assert.match(resolveSnapshotDir(fx.project, 'pre-build').name, /-pre-build$/);
+  assert.throws(() => resolveSnapshotDir(fx.project, 'uild'), { code: 'SNAPSHOT_NOT_FOUND' });
+});
+
+test('ledgerContentEndUs keeps the follow ender after a CapCut save strips its identity', () => {
+  const dir = tmpDir('capcutctl-ender-');
+  fs.mkdirSync(path.join(dir, '.capcutctl'), { recursive: true });
+  const seg = (id, material, start, duration) => ({ id, material_id: material, extra_material_refs: [],
+    source_timerange: { start: 0, duration }, target_timerange: { start, duration } });
+  // As CapCut saves it: no desc on the ender, no capcutctl_mograph on its material.
+  const doc = {
+    fps: 30, duration: 7_000_000,
+    materials: { videos: [
+      { id: 'FACE', type: 'video', path: '/face.mp4', duration: 60_000_000 },
+      { id: 'ENDER', type: 'video', path: '/ender.mov', duration: 2_000_000 },
+    ] },
+    tracks: [
+      { id: 'T0', type: 'video', segments: [seg('F1', 'FACE', 0, 5_000_000)] },
+      { id: 'T1', type: 'video', segments: [seg('END', 'ENDER', 5_000_000, 2_000_000)] },
+    ],
+  };
+  fs.writeFileSync(path.join(dir, '.capcutctl', 'meta-ledger.json'), JSON.stringify({ version: 1,
+    materials: { ENDER: { kind: 'videos', path: null, fields: { capcutctl_mograph: { template: 'scene:follow-ending' } } } },
+    segments: { END: { material_id: 'ENDER', fields: { desc: 'mograph:follow-ender' } } } }));
+  assert.equal(contentEndUs(doc, dir), 5_000_000, 'the raw saved doc no longer knows its ender');
+  assert.equal(ledgerContentEndUs(doc, dir), 7_000_000);
+  assert.equal(doc.tracks[1].segments[0].desc, undefined, 'the caller\'s doc is not changed');
 });
 
 test('an edit that orphans a transition refuses at the dry run, not after the write', () => {

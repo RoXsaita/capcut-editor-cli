@@ -71,8 +71,13 @@ def locate(take_parts, vt):
     or before the first part)."""
     if not _finite(vt):
         return None
-    for part in take_parts:
+    take_parts = list(take_parts)
+    for index, part in enumerate(take_parts):
         end = math.inf if part.end_vt is None else part.end_vt + END_SLACK
+        # The slack never reaches into the next part: its first frames are its own (a derived
+        # end_vt is exactly the next start, and a restart gap can be shorter than the slack).
+        if index + 1 < len(take_parts) and _finite(take_parts[index + 1].start_vt):
+            end = min(end, take_parts[index + 1].start_vt - 1e-6)
         if part.start_vt - 1e-6 <= vt <= end:
             return part.file, max(0.0, vt - part.start_vt)
     return None

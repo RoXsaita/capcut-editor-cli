@@ -79,13 +79,27 @@ def _token_hash(token):
     return value if isinstance(value, str) and value else None
 
 
+def _token_int(token, *keys):
+    for key in keys:
+        value = token.get(key)
+        if isinstance(value, bool):
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def same_source(stored, current):
     """Whether a cache stamped with `stored` describes the media whose token is `current`.
 
-    The evidence is the bytes: the same size and the same content hash. inode and mtime are
-    not compared. A copy (a project's `Downloads__take.mp4`, a relink) has neither, and a
-    touched original keeps its bytes; both are the same source. A same-path, same-size
-    overwrite changes the content hash and is not.
+    Always: the same size and the same content hash. On the same inode (the file itself) the
+    mtime_ns must match too: the content hash only samples five 64 KiB windows, so a same-size
+    rewrite in place (a re-rendered stem with a muted or ducked stretch) can keep it, and the
+    mtime is what catches that. src/video-index.mjs applies the same rule. A different inode
+    is a copy or a relink (a project's `Downloads__take.mp4`), which carries no mtime of its
+    own; the bytes are its evidence.
     """
     if not isinstance(stored, dict) or not isinstance(current, dict):
         return False
@@ -93,9 +107,16 @@ def same_source(stored, current):
     if digest is None or digest != _token_hash(current):
         return False
     try:
-        return int(stored.get("size")) == int(current.get("size"))
+        if int(stored.get("size")) != int(current.get("size")):
+            return False
     except (TypeError, ValueError):
         return False
+    stored_ino, current_ino = _token_int(stored, "ino", "inode"), _token_int(current, "ino", "inode")
+    if stored_ino is not None and stored_ino == current_ino:
+        stored_mtime, current_mtime = _token_int(stored, "mtime_ns"), _token_int(current, "mtime_ns")
+        if stored_mtime is not None and stored_mtime != current_mtime:
+            return False
+    return True
 
 
 def source_key(token):
@@ -185,9 +206,8 @@ class AudioIndex:
                     and all(isinstance(value, (int, float)) and math.isfinite(value) for value in d["db"])
                     and isinstance(d.get("bin"), (int, float)) and math.isfinite(d["bin"]) and d["bin"] > 0):
                 if candidate != key or d.get("token") != token:
-                    # Same bytes, newer stamp (a touched original, or a legacy file): write the
-                    # keyed file with the current token so the Node readers, which still check
-                    # mtime on the same inode, accept it too. The legacy file is left alone.
+                    # A legacy unkeyed file (or a keyed one stamped by a copy): write the keyed
+                    # file with the current token. The legacy file is left alone.
                     _write_json_atomic(key, {**d, "token": token})
                 return AudioIndex(d["db"], d["bin"], media, token=token)
 

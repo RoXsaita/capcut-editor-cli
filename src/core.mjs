@@ -482,6 +482,8 @@ export const seededId = (seed, key) => {
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
 };
 export const nowStamp = () => new Date().toISOString().replace(/[:.]/g, '-');
+/** `<nowStamp()>-<label>`, the name createSnapshot gives a snapshot; group 1 is the label. */
+const SNAPSHOT_NAME = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-(.+)$/;
 export const sha256 = data => crypto.createHash('sha256').update(data).digest('hex');
 export const stableJson = value => `${JSON.stringify(value, null, 2)}\n`;
 
@@ -912,6 +914,18 @@ export function assertCapcutClosed({ forceRunning = false, probe = capcutProcess
  */
 export function contentEndUs(doc, projectDir = null) {
   return editEndUs(doc, projectDir, true);
+}
+
+/**
+ * contentEndUs on a copy of `doc` with the metadata a CapCut save strips (the follow ender's
+ * desc and capcutctl_mograph) put back from the meta ledger, the way loadWorkingDoc does. A
+ * raw saved doc no longer knows its ender, so its contentEndUs stops short by the ender.
+ */
+export function ledgerContentEndUs(doc, projectDir = null) {
+  if (!projectDir || !doc) return contentEndUs(doc, projectDir);
+  const copy = clone(doc);
+  try { restoreMeta(copy, readMetaRecord(projectDir)); } catch { /* no ledger: the raw doc is all there is */ }
+  return contentEndUs(copy, projectDir);
 }
 
 export function principalEndUs(doc, projectDir = null) {
@@ -1909,6 +1923,31 @@ function setIssueKey(item) {
   return [item.code, item.group ?? item.file ?? '', item.track ?? '',
     Number.isFinite(item.at) ? Math.round(item.at * 100) : ''].join('|');
 }
+
+/**
+ * Per-document value errors a draft can already carry from an older capcutctl (a bad flag's
+ * NaN was written as null; seconds were written raw as a fractional timerange). An edit that
+ * did not write them is not refused for them: they are baselined like documentSetIssues.
+ */
+const LEGACY_VALUE_CODES = new Set(['BAD_NUMBER', 'NON_INTEGER_TIMERANGE']);
+
+function docIssueKey(item) {
+  return [item.code, item.file ?? '', item.id ?? '', item.key ?? ''].join('|');
+}
+
+/** The legacy value errors `groups` already hold, keyed by docIssueKey. */
+function legacyValueKeys(groups) {
+  const keys = new Set();
+  for (const group of groups || []) {
+    for (const item of validateDocument(group.doc, { file: group.canonical, checkFiles: false })) {
+      if (item.level === 'error' && LEGACY_VALUE_CODES.has(item.code)) keys.add(docIssueKey(item));
+    }
+  }
+  return keys;
+}
+
+const isLegacyValueError = item => item.level === 'error' && LEGACY_VALUE_CODES.has(item.code);
+const asPreexisting = (item, preexisting = true) => ({ ...item, level: 'warning', preexisting });
 
 export function doctor(projectDir, { checkFiles = true, duplicateBaseline = null } = {}) {
   const state = loadProject(projectDir);
@@ -3827,6 +3866,7 @@ export function executeTransaction(projectDir, mutator, {
   const renamed = [];
   let commitAttempted = false;
   let preexisting = new Set();
+  let legacyBaseline = null;
   try {
     const state = loadProject(projectDir);
     const working = state.groups.map(group => ({ ...group, doc: clone(group.doc) }));
@@ -3843,6 +3883,17 @@ export function executeTransaction(projectDir, mutator, {
       parked,
       duplicateBaseline: knownPreset3DuplicateBaseline(projectDir),
     }));
+    // A null volume or a fractional timerange the draft already had (an older capcutctl wrote
+    // it) is passed through as a warning, so an edit elsewhere is not refused for it. One the
+    // edit introduced, or on another segment/key, still refuses. Computed only when needed.
+    if (validation.some(isLegacyValueError)) {
+      legacyBaseline = legacyValueKeys(state.groups);
+      for (let i = 0; i < validation.length; i++) {
+        if (isLegacyValueError(validation[i]) && legacyBaseline.has(docIssueKey(validation[i]))) {
+          validation[i] = asPreexisting(validation[i]);
+        }
+      }
+    }
     let errors = validation.filter(item => item.level === 'error');
     if (errors.length) throw new CapcutError(`Transaction failed validation with ${errors.length} error(s).`, { code: 'VALIDATION_FAILED', details: errors });
     // The checks doctor runs on the whole set used to run only AFTER the write, so a dry run
@@ -3897,7 +3948,12 @@ export function executeTransaction(projectDir, mutator, {
     commitAttempted = true;
     commitStaged(staged, renamed);
     const post = doctor(projectDir, { checkFiles: true });
-    const newErrors = post.issues.filter(item => item.level === 'error' && !preexisting.has(setIssueKey(item)));
+    const newErrors = post.issues.filter(item => {
+      if (item.level !== 'error' || preexisting.has(setIssueKey(item))) return false;
+      if (!isLegacyValueError(item)) return true;
+      legacyBaseline ??= legacyValueKeys(state.groups);
+      return !legacyBaseline.has(docIssueKey(item));
+    });
     if (newErrors.length) throw new CapcutError(`Post-write validation found ${newErrors.length} errors.`, { code: 'POST_WRITE_VALIDATION', details: post.issues });
     return { ...preview, committed: true, snapshot, postDoctor: post };
   } catch (error) {
@@ -3937,6 +3993,9 @@ export function commitProjectFiles(projectDir, { writes = [], removes = [] } = {
   let commitAttempted = false;
   try {
     if (check) check();
+    // Legacy value errors the live project already had are not this commit's doing.
+    let legacyBaseline = new Set();
+    try { legacyBaseline = legacyValueKeys(loadProject(projectDir).groups); } catch { /* nothing to baseline */ }
     journal = captureRollbackJournal([...writes.map(write => write.file), ...removes]);
     if (backup) snapshot = createSnapshot(projectDir, label);
     const transactionId = uuid();
@@ -3959,7 +4018,9 @@ export function commitProjectFiles(projectDir, { writes = [], removes = [] } = {
       fs.unlinkSync(file);
     }
     const post = doctor(projectDir, { checkFiles: true });
-    if (post.errors) throw new CapcutError(`Post-write validation found ${post.errors} errors.`, { code: 'POST_WRITE_VALIDATION', details: post.issues });
+    const newErrors = post.issues.filter(item => item.level === 'error'
+      && !(isLegacyValueError(item) && legacyBaseline.has(docIssueKey(item))));
+    if (newErrors.length) throw new CapcutError(`Post-write validation found ${newErrors.length} errors.`, { code: 'POST_WRITE_VALIDATION', details: post.issues });
     return { committed: true, snapshot, postDoctor: post };
   } catch (error) {
     if (!commitAttempted && !snapshot) throw error;
@@ -4061,7 +4122,7 @@ export function applySpec(projectDir, spec, options = {}) {
       if (!created?.preserved) return [];
       const group = (working || []).find(g => g.name?.startsWith('timeline:')) || working?.[0];
       if (!group?.doc) return [];
-      const live = contentEndUs(group.doc, projectDir);
+      const live = ledgerContentEndUs(group.doc, projectDir);
       if (!(live > 0) || created.contentEnd === live) return [];
       return [{ file: path.join(projectDir, SIDECAR_RELATIVE), data: stableJson({ ...created, contentEnd: live }) }];
     },
@@ -4089,7 +4150,9 @@ export function resolveSnapshotDir(projectDir, nameOrPath) {
   } else {
     const label = raw.replace(/[^a-zA-Z0-9._-]/g, '_');
     const snapshots = listSnapshots(projectDir);
-    const hit = snapshots.find(entry => entry.name.endsWith(`-${label}`));
+    // The label is everything after the timestamp, compared whole: `build` must not pick
+    // `<ts>-pre-build` (a bare endsWith('-build') did).
+    const hit = snapshots.find(entry => SNAPSHOT_NAME.exec(entry.name)?.[1] === label);
     if (!hit) {
       const newest = snapshots.slice(0, 5).map(entry => entry.name);
       throw new CapcutError(`Snapshot not found: ${raw}.${newest.length ? ` Newest: ${newest.join(', ')}` : ' This project has no snapshots.'}`,
@@ -4117,8 +4180,11 @@ export function restoreProjectSnapshot(projectDir, snapshotNameOrPath, options =
     const prepared = snapshotRestoreFiles(snapshotDir, projectDir);
     const sidecar = prepared.files.find(item => item.destination === path.resolve(projectDir, SIDECAR_RELATIVE));
     const parked = pendingSidecarRange(sidecar ? { data: sidecar.data } : null, projectDir);
+    // A snapshot is bytes this project once held: a legacy null volume or fractional
+    // timerange in it (an older capcutctl wrote it) is reported, not a reason to refuse an undo.
     const validation = prepared.files.filter(item => path.basename(item.destination) === 'draft_info.json')
-      .flatMap(item => validateDocument(JSON.parse(item.data), { file: item.destination, checkFiles: false, projectDir, parked }));
+      .flatMap(item => validateDocument(JSON.parse(item.data), { file: item.destination, checkFiles: false, projectDir, parked }))
+      .map(item => isLegacyValueError(item) ? asPreexisting(item, 'snapshot') : item);
     const errors = validation.filter(item => item.level === 'error');
     if (errors.length) throw new CapcutError(`Snapshot failed validation with ${errors.length} error(s).`, { code: 'RESTORE_VALIDATION', details: errors });
     return { dryRun: true, restored: false, snapshot: snapshotDir, snapshotName, resolvedFrom,
@@ -4148,7 +4214,8 @@ export function restoreProjectSnapshot(projectDir, snapshotNameOrPath, options =
     // unrestorable after a rename.
     restoreSnapshot(snapshotDir, projectDir, prepared);
     const post = doctor(projectDir, { checkFiles: true });
-    if (post.errors) throw new CapcutError(`Restored snapshot has ${post.errors} validation error(s).`, { code: 'RESTORE_VALIDATION', details: post.issues });
+    const errorCount = post.issues.filter(item => item.level === 'error' && !isLegacyValueError(item)).length;
+    if (errorCount) throw new CapcutError(`Restored snapshot has ${errorCount} validation error(s).`, { code: 'RESTORE_VALIDATION', details: post.issues });
     return { restored: snapshotDir, snapshotName, resolvedFrom, rescue, postDoctor: post };
   } catch (error) {
     // The journal must run even when the rescue restore throws: it is the exact bytes from

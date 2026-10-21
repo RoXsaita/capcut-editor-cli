@@ -156,8 +156,8 @@ def transcribe(media, lang, model, cache_dir, force=False):
                 and d.get("_settings") == settings and isinstance(d.get("segments"), list)):
             print(f"  transcript: cached ({model})", file=sys.stderr)
             if candidate != cache or d.get("_token") != token:
-                # Re-stamp under the keyed name (never the legacy one) so readers that also
-                # check mtime on the same inode (src/video-index.mjs) accept a touched original.
+                # Re-stamp under the keyed name (never the legacy one), so a legacy hit is
+                # migrated and readers keyed on this media's own token accept it.
                 d = {**d, "_token": token}
                 _write_json_atomic(cache, d)
             return d

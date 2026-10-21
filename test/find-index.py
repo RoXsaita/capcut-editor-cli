@@ -118,7 +118,7 @@ class FindIndexTests(unittest.TestCase):
                 self.assertEqual(find.load_transcript(first)["segments"][0]["text"], "alpha")
                 self.assertEqual(find.load_transcript(second)["segments"][0]["text"], "beta")
 
-    def test_a_project_copy_and_a_touched_original_still_hit_every_index(self):
+    def test_a_project_copy_hits_every_index_and_a_touched_original_re_indexes(self):
         box = {"text": "Publish", "conf": 0.9, "x": 0.2, "y": 0.4, "w": 0.18, "h": 0.04}
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -140,11 +140,15 @@ class FindIndexTests(unittest.TestCase):
             os.utime(media, ns=(stat.st_atime_ns, stat.st_mtime_ns + 7_000_000_000))
             with patch.object(find, "CACHE", str(cache)), \
                     patch.object(find, "_probe_duration", return_value=2.0):
-                for source in (copy, media):
-                    with self.subTest(source=source.name):
-                        self.assertEqual(find.load_transcript(source)["segments"][0]["text"], "alpha")
-                        self.assertEqual(find.load_ocr(source), {0: "hit publish", 1: "idle"})
-                        self.assertEqual(find.ocr_boxes(source, 0.4), [box])
+                self.assertEqual(find.load_transcript(copy)["segments"][0]["text"], "alpha")
+                self.assertEqual(find.load_ocr(copy), {0: "hit publish", 1: "idle"})
+                self.assertEqual(find.ocr_boxes(copy, 0.4), [box])
+                # A new mtime on the same inode may be a same-size rewrite outside the sampled
+                # hash windows, so the original's indexes are stale until the next index run.
+                with self.assertRaisesRegex(SystemExit, "stale"):
+                    find.load_ocr(media)
+                with self.assertRaisesRegex(SystemExit, "no verified transcript"):
+                    find.load_transcript(media)
 
                 # The same path rewritten with different bytes of the same size re-indexes.
                 media.write_bytes(b"replaced take bytes")

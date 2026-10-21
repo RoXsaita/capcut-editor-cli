@@ -218,6 +218,14 @@ class MultiPartTakeTests(unittest.TestCase):
         self.assertEqual(file, "screen-part02.mp4")
         self.assertAlmostEqual(at, 9.94, places=6)
         self.assertIsNone(rl2_take.locate(parts, 2395.0))
+        # The first frames of a restarted part are its own, not the previous part's end slack.
+        derived = [rl2_take.Part("screen.mp4", 0.0, 100.0), rl2_take.Part("screen-part02.mp4", 100.0, None)]
+        file, at = rl2_take.locate(derived, 100.02)
+        self.assertEqual(file, "screen-part02.mp4")
+        self.assertAlmostEqual(at, 0.02)
+        tight = [rl2_take.Part("screen.mp4", 0.0, 99.98), rl2_take.Part("screen-part02.mp4", 100.0, None)]
+        self.assertEqual(rl2_take.locate(tight, 100.01)[0], "screen-part02.mp4")
+        self.assertEqual(rl2_take.locate(tight, 99.99)[0], "screen.mp4")
         self.assertEqual(rl2_take.locate(rl2_take.parts("missing-take"), 42.0), ("screen.mp4", 42.0))
         self.assertEqual(rl2_take.part_for_media(parts, "take__screen-part02.mp4").file, "screen-part02.mp4")
         self.assertIsNone(rl2_take.part_for_media(parts, "other.mp4"))

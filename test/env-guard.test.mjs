@@ -23,3 +23,11 @@ test('no unexpected CAPCUTCTL_* variable reaches the suite', () => {
   assert.deepEqual(extra, [], 'test/run.mjs allowlists the environment; these leaked in');
   assert.equal(process.env.CAPCUTCTL_ASSUME_RUNNING, '1', 'every write must be tested as if CapCut were open');
 });
+
+test('the runner keeps `--flag value` pairs together instead of running the value as a file', async () => {
+  const { splitArgs } = await import('./run.mjs');
+  assert.deepEqual(splitArgs(['--test-name-pattern', 'foo', 'test/duck.test.mjs']),
+    { named: ['test/duck.test.mjs'], flags: ['--test-name-pattern', 'foo'] });
+  assert.deepEqual(splitArgs(['--test-name-pattern=foo', '--test-only']),
+    { named: [], flags: ['--test-name-pattern=foo', '--test-only'] });
+});

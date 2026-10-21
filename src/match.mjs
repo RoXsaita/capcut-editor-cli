@@ -422,6 +422,10 @@ export function planShotOps(shot, {
       at,
       speed: 20,
       resultAt: shot.resultAt,
+      // match picked this out-point itself, not an editor's cut: a short 1× shot's result may
+      // run on past it, by at most the shot's own length (ramp still stops at the material
+      // end and the next shot from the same file).
+      reachForward: duration,
     });
   }
   return ops;

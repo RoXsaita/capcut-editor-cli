@@ -107,7 +107,7 @@ class ArollCacheFindingsTest(unittest.TestCase):
             self.assertNotEqual(before["content_hash"], after["content_hash"])
             self.assertFalse(index_is_current(index, media))
 
-    def test_touched_or_copied_media_keeps_its_index_and_same_named_takes_keep_their_transcripts(self):
+    def test_copied_media_keeps_its_index_touched_media_does_not_and_same_named_takes_keep_their_transcripts(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             media = root / "take.mp4"
@@ -116,13 +116,15 @@ class ArollCacheFindingsTest(unittest.TestCase):
             index.write_text(json.dumps({
                 "version": AROLL_INDEX_VERSION, "media": str(media), "source_token": media_token(media),
             }))
-            stat = media.stat()
-            os.utime(media, ns=(stat.st_atime_ns, stat.st_mtime_ns + 3_000_000_000))
-            self.assertTrue(index_is_current(index, media), "a touch does not change the source")
             copy = root / "proj" / "Downloads__take.mp4"
             copy.parent.mkdir()
             shutil.copy2(media, copy)
             self.assertTrue(index_is_current(index, copy), "a copy has the same bytes")
+            stat = media.stat()
+            os.utime(media, ns=(stat.st_atime_ns, stat.st_mtime_ns + 3_000_000_000))
+            self.assertFalse(index_is_current(index, media),
+                             "a new mtime on the same inode may be a rewrite the sampled hash misses")
+            self.assertTrue(index_is_current(index, copy), "the copy is still the same bytes")
 
             first, second = root / "one" / "face.wav", root / "two" / "face.wav"
             first.parent.mkdir()
@@ -153,10 +155,12 @@ class ArollCacheFindingsTest(unittest.TestCase):
             stat = first.stat()
             os.utime(first, ns=(stat.st_atime_ns, stat.st_mtime_ns + 9_000_000_000))
             with patch.dict(sys.modules, {"whisper": whisper}), patch("aroll.shutil.which", return_value=None):
-                self.assertEqual(transcribe(str(first), "ar", "tiny", str(cache))["language"], "legacy-first")
-            self.assertEqual(calls, [str(second)], "a touched original is still a cache hit")
+                self.assertEqual(transcribe(str(first), "ar", "tiny", str(cache))["language"], "one")
+            self.assertEqual(calls, [str(second), str(first)], "a touched original is transcribed again")
             stamps = [json.loads(path.read_text())["_token"] for path in cache.glob("face.whisper-tiny.*.json")]
             self.assertIn(media_token(first), stamps, "and its keyed file carries the current stamp")
+            self.assertEqual(json.loads(legacy.read_text())["language"], "legacy-first",
+                             "the legacy unkeyed transcript is still never overwritten")
 
     def test_arabic_prefix_chain_is_review_only_and_all_beats_are_retained(self):
         beats = [

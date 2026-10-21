@@ -932,6 +932,7 @@
         "--dry-run",
         "--project",
         "--reach-back",
+        "--reach-forward",
         "--result-at",
         "--segment",
         "--settle",
@@ -1028,6 +1029,7 @@
       "options": [
         "--fps",
         "--id",
+        "--max-minutes",
         "--out",
         "--project",
         "--width"

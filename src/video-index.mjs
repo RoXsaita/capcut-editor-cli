@@ -14,8 +14,10 @@
  *
  * A file is accepted only when its recorded size equals the media's. Same inode: the file
  * itself, so mtime_ns must match too. A different inode is a copy (localize, relink), and
- * size is the evidence a copy can carry. The content hash is never recomputed here. Files
- * written before tokens existed are accepted last, marked `legacy`.
+ * size is the evidence a copy can carry. The content hash is never recomputed here. This is
+ * tools/audio_index.py same_source's inode rule, so a touched original is stale on both sides
+ * until the next index run re-stamps it. Files written before tokens existed are accepted
+ * last, marked `legacy`.
  */
 import fs from 'node:fs';
 import os from 'node:os';

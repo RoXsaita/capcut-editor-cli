@@ -116,8 +116,9 @@ Usage:
                         edit (--project), then hand off. Exit 1 on blockers or a discarded review.
   capcutctl review-video --decide REVIEW.json --issue ID --verdict accept|reject --reason "one line"
                       — log the verdict on one Gemini issue after checking its evidence.
-  capcutctl review --project NAME [--out DIR] [--id NAME] [--fps 6] [--width 240]
-                      — write outputs/<id>/proxy.mp4, edl.json, and contact-sheet.png (never CapCut export)
+  capcutctl review --project NAME [--out DIR] [--id NAME] [--fps 6] [--width 240] [--max-minutes 0]
+                      — write outputs/<id>/proxy.mp4, edl.json, and contact-sheet.png (never CapCut export).
+                        --max-minutes N stops the proxy (exit 3, PREVIEW_TOO_SLOW) past N minutes; 0 = no budget.
   capcutctl new --project NAME [--media FILE] [--scenes 0:6,6:12,12:18]
                 [--from TEMPLATE] [--blank] [--canvas 1080x1920] [--fps 30] [--dry-run] [--force-running]
                 [--no-localize] [--generated] [--derived-from ORIGINAL [--derived-offset S]] [--allow-ephemeral]
@@ -386,14 +387,16 @@ Usage:
                                 no flags = print the plan; --auto applies it
                                 --at T --speed X | --at T --cover IN-OUT for one clip
   capcutctl ramp                --project NAME --segment ID|--at T --speed 20 [--settle 0.5]
-                                [--result-at T] [--reach-back 0] [--track N] [--dry-run]
+                                [--result-at T] [--reach-back 0] [--reach-forward 0] [--track N] [--dry-run]
                                 — split a B-roll clip at the result (first change-index peak
                                   after a quiet stretch), pace the waiting half, leave the
                                   result at 1×. Faces never ramp. Never writes curve_speed.
                                   The wait never plays source before the in-point (minus
                                   --reach-back S) or source another clip of the file shows;
                                   short of source, the wait shortens and the result runs on
-                                  at 1×, else REACH_LIMITED names the span it needs.
+                                  at 1× past the out-point only within --reach-forward S;
+                                  else the wait paces slower, else REACH_LIMITED names the
+                                  span it needs.
   capcutctl polish              --project NAME_OR_PATH [--lead 0.14] [--track N] [--motivated] [--dry-run]
                                 [--no-transitions] [--no-sfx] [--no-interactions]
                                 transitions ride the principal (talking-head) track; it is sliced to fit
@@ -1509,6 +1512,7 @@ export async function main(argv, dependencies = {}) {
       id: args.id,
       fps: args.fps != null ? Number(args.fps) : 6,
       width: args.width != null ? Number(args.width) : 240,
+      maxMinutes: args.maxMinutes != null ? Number(args.maxMinutes) : 0,
     }), true);
   }
   if (command === 'rm') {
@@ -1841,6 +1845,7 @@ export async function main(argv, dependencies = {}) {
       ...(args.at != null ? { at: num(args, 'at', { min: 0 }) } : {}),
       ...(args.resultAt != null ? { resultAt: num(args, 'resultAt', { min: 0 }) } : {}),
       ...(args.reachBack != null ? { reachBack: num(args, 'reachBack', { min: 0 }) } : {}),
+      ...(args.reachForward != null ? { reachForward: num(args, 'reachForward', { min: 0 }) } : {}),
       ...(rampTrack != null ? { track: rampTrack } : {}),
     }] };
     return print(applySpec(projectDir, spec, options), true);

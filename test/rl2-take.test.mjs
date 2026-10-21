@@ -48,6 +48,25 @@ test('a restarted take locates vt in its part and refuses the gap', () => {
   assert.equal(partForMedia(parts, 'other.mp4'), null);
 });
 
+test('the first frames of a restarted part are its own, not the previous part\'s end slack', () => {
+  // No end_vt recorded: part 1's end is derived as part 2's start.
+  const derived = takeParts('unused', { video_segments: [
+    { file: 'screen.mp4', start_vt: 0, frames: 10 },
+    { file: 'screen-part02.mp4', start_vt: 100, frames: 10 },
+  ] });
+  const at = locateVt(derived, 100.02);
+  assert.equal(at.file, 'screen-part02.mp4');
+  assert.ok(Math.abs(at.t - 0.02) < 1e-6, at);
+  assert.equal(locateVt(derived, 99.99).file, 'screen.mp4');
+  // A restart gap shorter than the end slack.
+  const tight = [
+    { file: 'screen.mp4', startVt: 0, endVt: 99.98 },
+    { file: 'screen-part02.mp4', startVt: 100, endVt: null },
+  ];
+  assert.equal(locateVt(tight, 100.01).file, 'screen-part02.mp4');
+  assert.equal(locateVt(tight, 99.99).file, 'screen.mp4', 'the slack still covers the last frame');
+});
+
 test('a one-part take is the plain case: its file, and vt is the file time', () => {
   const dir = twoPartTake([{ file: 'screen.mp4', start_vt: 0, frames: 10 }]);
   const parts = takeParts(dir);

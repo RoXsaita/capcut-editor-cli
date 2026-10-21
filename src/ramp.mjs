@@ -200,6 +200,14 @@ export function opRamp(doc, op = {}, context = {}) {
       code: 'BAD_REACH_BACK', exitCode: 2,
     });
   }
+  // How far past the clip's out-point the result may run on when the wait is shortened. 0 by
+  // default: what follows the out-point was cut on purpose, like what precedes the in-point.
+  const reachForwardAllowed = Number(op.reachForward ?? 0);
+  if (!Number.isFinite(reachForwardAllowed) || reachForwardAllowed < 0) {
+    throw new CapcutError('ramp --reach-forward must be a nonnegative number of seconds.', {
+      code: 'BAD_REACH_FORWARD', exitCode: 2,
+    });
+  }
   if (!(speed > 1) || !Number.isFinite(speed)) {
     throw new CapcutError(`ramp --speed must be greater than 1, got ${op.speed}`, {
       code: 'BAD_SPEED', exitCode: 2,
@@ -291,31 +299,45 @@ export function opRamp(doc, op = {}, context = {}) {
   const limited = sourceStart > wantStart + 1e-6;
   let actualSpeed = speed;
   if (limited) {
-    // Not enough source before the result to fill the wait at this speed. Rather than play
-    // source from before the in-point (an earlier shot, or content cut on purpose) or slow the
-    // wait down, shorten the wait and give the freed timeline to the result at 1×.
+    // Not enough source before the result to fill the wait at this speed, and source before
+    // the in-point (an earlier shot, or content cut on purpose) may not play. Two ways out that
+    // keep the clip's place and length on the timeline:
+    //   - shorten the wait and give the freed timeline to the result at 1×, which plays source
+    //     past the out-point: only within --reach-forward, since that too was cut on purpose;
+    //   - otherwise keep the wait and pace it at the speed the reachable source allows.
     const shownEndUs = shown.target_timerange.start + shown.target_timerange.duration;
     const newSplitAt = snap(S(wait.target_timerange.start) + (splitSrc - sourceStart) / speed);
     const newWaitUs = US(newSplitAt) - wait.target_timerange.start;
     const resultUs = shownEndUs - US(newSplitAt);
     const needEnd = splitSrc + S(resultUs);
-    if (!(newWaitUs > 0) || needEnd > bounds.ceiling + 1e-3) {
+    const ceiling = Math.min(bounds.ceiling, srcOut + reachForwardAllowed);
+    const ceilingBy = bounds.ceiling <= srcOut + reachForwardAllowed ? bounds.ceilingBy
+      : reachForwardAllowed > 0 ? 'reach-forward' : 'out-point';
+    const slowSpeed = waitTl > 0 ? (splitSrc - sourceStart) / waitTl : 0;
+    if (newWaitUs > 0 && needEnd <= ceiling + 1e-3) {
+      wait.target_timerange.duration = newWaitUs;
+      shown.target_timerange.start = US(newSplitAt);
+      shown.target_timerange.duration = resultUs;
+      actualSpeed = (US(splitSrc) - US(sourceStart)) / newWaitUs;
+    } else if (slowSpeed > 1.02) {
+      actualSpeed = slowSpeed;
+    } else {
       const backNeeded = Math.max(0, srcIn - wantStart);
+      const forwardNeeded = Math.max(0, needEnd - srcOut);
       throw new CapcutError(
         `ramp needs source ${r3(wantStart)}-${r3(splitSrc)}s for the wait, but nothing before `
         + `${r3(bounds.floor)}s (${bounds.floorBy}) may play; shortening the wait instead needs `
-        + `${r3(splitSrc)}-${r3(needEnd)}s at 1× for the result, past ${r3(bounds.ceiling)}s (${bounds.ceilingBy}). `
-        + `Pass --reach-back ${r3(backNeeded)} if the earlier source may show, or pick a shorter clip / smaller --speed.`,
+        + `${r3(splitSrc)}-${r3(needEnd)}s at 1× for the result, past ${r3(ceiling)}s (${ceilingBy}). `
+        + `Pass --reach-back ${r3(backNeeded)} if the earlier source may show`
+        + (needEnd <= bounds.ceiling + 1e-3 ? `, or --reach-forward ${r3(forwardNeeded)} if the source after the out-point may` : '')
+        + ', or pick a shorter clip / smaller --speed.',
         { code: 'REACH_LIMITED', exitCode: 2, details: {
           wait: [r3(wantStart), r3(splitSrc)], result: [r3(splitSrc), r3(needEnd)],
-          floor: r3(bounds.floor), ceiling: r3(bounds.ceiling), reachBackNeeded: r3(backNeeded),
+          floor: r3(bounds.floor), ceiling: r3(ceiling), reachBackNeeded: r3(backNeeded),
+          reachForwardNeeded: r3(forwardNeeded),
         } }
       );
     }
-    wait.target_timerange.duration = newWaitUs;
-    shown.target_timerange.start = US(newSplitAt);
-    shown.target_timerange.duration = resultUs;
-    actualSpeed = (US(splitSrc) - US(sourceStart)) / newWaitUs;
   }
   const paced = limited || actualSpeed > 1.02
     ? setSpeed(doc, wait, actualSpeed, { sourceStart: US(sourceStart) })

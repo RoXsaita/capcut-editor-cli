@@ -365,6 +365,16 @@ test('a parked parts-bin clip past the content end is neither measured nor rewri
   assert.equal(out.afterMix.truePeak, quiet.afterMix.truePeak);
 });
 
+test('without a parked range nothing counts as parked, so a cue past the raw content end is measured', t => {
+  // After a CapCut save strips the follow ender's identity, the raw content end stops before
+  // the ender: its cue must not drop out of measurement as if it were parked.
+  const { root, d, audio } = stems(t);
+  d.tracks.push(audio('late', 'HIT', 6.2, 0.3, 1, 'sfx:hit'));
+  assert.ok(analyzeAudio(d, root).segments.late, 'the cue past the raw content end is measured');
+  const out = opLoudness(d, { target: -14, peak: -1 }, { projectDir: root });
+  assert.ok(!out.skipped.some(r => r.reason === 'parked'), JSON.stringify(out.skipped));
+});
+
 test('--peak-only limits the current mix without re-matching clips', t => {
   const { root, d } = stems(t);
   const voice = d.tracks[0].segments[0];

@@ -34,7 +34,7 @@ def analyze(payload):
     audio_effect_ids = {m["id"] for m in doc.get("materials", {}).get("audio_effects", [])}
     sources, probes, keyed = [], {}, set()
     # Parked parts-bin clips past the edit are not in the video. Without the field
-    # (an older caller) every clip is measured, as before.
+    # (an older caller, or a project with no parked range) every clip is measured.
     content_end = payload.get("contentEndUs")
     content_end = float(content_end) if isinstance(content_end, (int, float)) and content_end > 0 else None
     for track in doc.get("tracks", []):

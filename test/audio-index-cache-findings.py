@@ -139,15 +139,25 @@ class AudioIndexCacheFindingsTest(unittest.TestCase):
                 shutil.copy2(first, copy)
                 stat = first.stat()
                 os.utime(first, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
+                # The same inode with a new mtime may be a same-size rewrite outside the hash's
+                # sampled windows: it is re-indexed, and the new stamp is what readers then match.
                 self.assertEqual(AudioIndex.build_or_load(first, cache_dir=cache).db, loud.db)
-                self.assertEqual(len(calls), 2, "touching the original keeps its index")
+                self.assertEqual(len(calls), 3, "a touched original is re-indexed")
                 stamps = [json.loads(path.read_text())["token"] for path in cache.glob("screen.energy10.*.json")]
-                self.assertIn(source_token(first), stamps, "the hit is re-stamped for mtime-checking readers")
+                self.assertIn(source_token(first), stamps, "the rebuilt index carries the current stamp")
+                self.assertEqual(AudioIndex.build_or_load(first, cache_dir=cache).db, loud.db)
+                self.assertEqual(len(calls), 3, "and is a cache hit again")
             self.assertNotEqual(loud.db, quiet.db)
 
             # A copy has its own stem, so it has its own file name; the bytes still say it is
             # the same source (see find.py and src/video-index.mjs for the cross-name lookup).
             self.assertTrue(same_source(source_token(copy), source_token(first)))
+            # A same-path, same-size rewrite the sampled hash cannot see: the mtime catches it.
+            token = source_token(first)
+            self.assertFalse(same_source(token, {**token, "mtime_ns": token["mtime_ns"] + 1}))
+            self.assertTrue(same_source(token, {**token, "ino": token["ino"] + 1, "inode": token["inode"] + 1,
+                                                "mtime_ns": token["mtime_ns"] + 1}),
+                            "a relink to another inode with the same bytes is the same source")
             first.write_bytes(b"C" * 8192)
             os.utime(first, ns=(stat.st_atime_ns, stat.st_mtime_ns))
             self.assertFalse(same_source(source_token(copy), source_token(first)))
