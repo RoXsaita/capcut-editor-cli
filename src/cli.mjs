@@ -670,7 +670,8 @@ async function probeOrOverride(file, args) {
     return probeMedia(path.resolve(file));
   } catch (error) {
     if (args.width && args.height && args.mediaDuration != null) {
-      return { width: Number(args.width), height: Number(args.height), duration: Math.round(Number(args.mediaDuration) * 1e6) };
+      return { width: num(args, 'width', { min: 1, int: true }), height: num(args, 'height', { min: 1, int: true }),
+        duration: Math.round(num(args, 'mediaDuration', { min: 0 }) * 1e6) };
     }
     throw error;
   }
@@ -681,7 +682,7 @@ function originOptions(args) {
   return {
     generated: Boolean(args.generated),
     derivedFrom: args.derivedFrom ? path.resolve(args.derivedFrom) : null,
-    derivedOffset: args.derivedOffset != null ? Number(args.derivedOffset) : null,
+    derivedOffset: num(args, 'derivedOffset', { def: null }),
     allowEphemeral: Boolean(args.allowEphemeral)
   };
 }
@@ -1612,7 +1613,7 @@ export async function main(argv, dependencies = {}) {
     let words = { file: args.words ? path.resolve(args.words) : null, offset: 0 };
     if (!words.file) try { words = findWords(await loadWorking(projectDir), null, { projectDir }); } catch { words = { file: null, offset: 0 }; }
     const result = await runVariant(projectDir, {
-      hook, name: args.name || null, opening: args.opening != null ? Number(args.opening) : null,
+      hook, name: args.name || null, opening: num(args, 'opening', { min: 0, def: null }),
       words: words.file ? shiftWords(loadWords(words.file), Number(words.offset) || 0) : null, language: args.lang || 'ar',
       dryRun: Boolean(args.dryRun), forceRunning: Boolean(args.forceRunning), gate: !args.noGate,
     });
@@ -1756,10 +1757,10 @@ export async function main(argv, dependencies = {}) {
       if (!target || typeof target !== 'object' || Array.isArray(target)) throw new CapcutError('--target requires a JSON object of scope targets.', { exitCode: 2 });
     }
     const plan = g.planGrade(doc, projectDir, {
-      strength: args.strength != null ? Number(args.strength) : 1,
-      samples: args.samples != null ? Number(args.samples) : 3,
+      strength: num(args, 'strength', { min: 0, def: 1 }),
+      samples: num(args, 'samples', { min: 1, int: true, def: 3 }),
       target, reference: args.reference,
-      referenceAt: args.referenceAt != null ? Number(args.referenceAt) : undefined,
+      referenceAt: num(args, 'referenceAt', { min: 0 }),
     });
     // --set FILE:slider=v,slider=v  (repeatable) overrides whatever the solver proposed
     for (const raw of [].concat(args.set || [])) {
@@ -1769,16 +1770,16 @@ export async function main(argv, dependencies = {}) {
       const row = g.resolveGradeSource(plan, file);
       for (const pair of String(list || '').split(',').filter(Boolean)) {
         const [k, v] = pair.split('=');
-        row.sliders[k.trim()] = Number(v);
+        row.sliders[k.trim()] = parseNumber(v ?? '', '--set', { list: raw });
       }
     }
     const wantDetail = Boolean(args.faceDetail || args.sharpen != null || args.clarity != null || args.vignette != null);
     if (wantDetail) {
       const detail = g.faceDetailSliders({
-        ...(args.sharpen != null ? { sharpen: Number(args.sharpen) } : {}),
-        ...(args.clarity != null ? { clarity: Number(args.clarity) } : {}),
-        ...(args.vignette != null ? { vignette: Number(args.vignette) } : {}),
-        strength: args.strength != null ? Number(args.strength) : 1,
+        ...(args.sharpen != null ? { sharpen: num(args, 'sharpen') } : {}),
+        ...(args.clarity != null ? { clarity: num(args, 'clarity') } : {}),
+        ...(args.vignette != null ? { vignette: num(args, 'vignette') } : {}),
+        strength: num(args, 'strength', { min: 0, def: 1 }),
       });
       const faces = plan.sources.filter(row => row.role === 'face');
       if (!faces.length) {
@@ -1808,14 +1809,14 @@ export async function main(argv, dependencies = {}) {
     if (!hasAction) {                                     // read-only: the plan
       const doc = await loadWorking(projectDir);
       const rows = pacePlan(doc, { track: await trackIndex(projectDir, args.track),
-                                   max: args.max ? Number(args.max) : 100,
-                                   minGap: args.minGap ? Number(args.minGap) : 5.0 });
+                                   max: num(args, 'max', { min: 0, def: 100 }),
+                                   minGap: num(args, 'minGap', { min: 0, def: 5.0 }) });
       return print({ plan: rows.map(({ __seg, ...r }) => r) }, true);
     }
     const set = [];
     if (args.at != null) {
       if (args.cover) {
-        const [a, b] = String(args.cover).split(/[-:,]/).map(Number);
+        const [a, b] = String(args.cover).split(/[-:,]/).map(part => parseNumber(part, '--cover', { min: 0, list: args.cover }));
         if (!(b > a)) throw new CapcutError('--cover expects IN-OUT in source seconds, e.g. --cover 178.6-190.5', { exitCode: 2 });
         set.push({ at: num(args, 'at', { min: 0 }), cover: [a, b] });
       } else if (args.speed != null) {
@@ -1828,8 +1829,8 @@ export async function main(argv, dependencies = {}) {
     const spec = { version: 1, name: 'pace', operations: [{ op: 'pace',
       ...(set.length ? { set } : {}), ...(args.auto ? { auto: true } : {}),
       ...(paceTrack != null ? { track: paceTrack } : {}),
-      ...(args.max ? { max: Number(args.max) } : {}),
-      ...(args.minGap ? { minGap: Number(args.minGap) } : {}) }] };
+      ...(args.max != null ? { max: num(args, 'max', { min: 0 }) } : {}),
+      ...(args.minGap != null ? { minGap: num(args, 'minGap', { min: 0 }) } : {}) }] };
     return print(applySpec(projectDir, spec, options), true);
   }
   if (command === 'ramp') {
@@ -1926,7 +1927,7 @@ export async function main(argv, dependencies = {}) {
         mediaDuration: probe.duration,
         canvas: doc.canvas_config,
         sourceDims: probe.width ? { width: probe.width, height: probe.height } : null,
-        minMargin: args.minMargin != null ? Number(args.minMargin) : matcher.DEFAULT_MIN_MARGIN,
+        minMargin: num(args, 'minMargin', { def: matcher.DEFAULT_MIN_MARGIN }),
       });
     }
     if (args.out) {
@@ -2357,7 +2358,7 @@ export async function main(argv, dependencies = {}) {
     assertFirstPictureProof(await loadWorking(projectDir));
     const polishTrack = await trackIndex(projectDir, args.track);
     const spec = { version: 1, name: 'polish',
-                   operations: [{ op: 'polish', ...(args.lead ? { lead: Number(args.lead) } : {}),
+                   operations: [{ op: 'polish', ...(args.lead != null ? { lead: num(args, 'lead', { min: 0 }) } : {}),
                                   ...(polishTrack != null ? { track: polishTrack } : {}),
                                   ...(args.noTransitions ? { noTransitions: true } : {}),
                                   ...(args.noSfx ? { noSfx: true } : {}),
@@ -2386,7 +2387,7 @@ export async function main(argv, dependencies = {}) {
   }
   if (command === 'cursor') {
     const op = { op: 'cursor', segment: args.segment, auto: Boolean(args.auto), style: args.style,
-      ...(args.size != null ? { size: Number(args.size) } : {}) };
+      ...(args.size != null ? { size: num(args, 'size', { min: 0 }) } : {}) };
     return planOrApply(projectDir, 'cursor', op, args, options,
       async () => (await import('./cursor.mjs')).planCursor);
   }
@@ -2426,7 +2427,7 @@ export async function main(argv, dependencies = {}) {
         score.musicPrepared = await prepareMusic(projectDir, doc, {
           dryRun: true, prompt: args.prompt, file: args.file, regen: Boolean(args.regen),
           hits: args.hits, offset: args.offset,
-          ...(args.volume != null ? { volume: Number(args.volume) } : {}),
+          ...(args.volume != null ? { volume: num(args, 'volume', { min: 0 }) } : {}),
         });
         score.musicPrompt = score.musicPrepared.prompt;
       }
@@ -2439,7 +2440,7 @@ export async function main(argv, dependencies = {}) {
       if (!args.dryRun) assertCapcutClosed({ forceRunning: Boolean(args.forceRunning) });
       const prepared = await prepareMusic(projectDir, doc, {
         regen: Boolean(args.regen),
-        volume: args.volume != null ? Number(args.volume) : DEFAULT_MUSIC_VOLUME,
+        volume: num(args, 'volume', { min: 0, def: DEFAULT_MUSIC_VOLUME }),
         prompt: args.prompt || undefined,
         file: args.file || undefined,
         hits: args.hits, offset: args.offset,
@@ -2497,13 +2498,13 @@ export async function main(argv, dependencies = {}) {
       }
       const media = path.resolve(args.media);
       const probe = await probeOrOverride(media, args);
-      const duration = args.dur != null ? Number(args.dur) : Number(probe.duration) / 1e6;
+      const duration = num(args, 'dur', { min: 0, def: Number(probe.duration) / 1e6 });
       const spec = buildScreenLayoutSpec({
         media,
-        at: Number(args.at),
+        at: num(args, 'at', { min: 0 }),
         duration,
-        sourceStart: args.src != null ? Number(args.src) : 0,
-        sourceDuration: args.srcDur != null ? Number(args.srcDur) : duration,
+        sourceStart: num(args, 'src', { min: 0, def: 0 }),
+        sourceDuration: num(args, 'srcDur', { min: 0, def: duration }),
         width: probe.width,
         height: probe.height,
         mediaDuration: probe.duration,

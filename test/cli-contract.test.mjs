@@ -343,6 +343,12 @@ test('a number that is not a number fails with BAD_NUMBER and writes nothing', a
     ['keyframe', '--project', 'P', '--segments', 'A', '--to', '1,3'],
     ['loudness', '--project', 'P', '--target', '-14LUFS'],
     ['zoom', '--project', 'P', '--at', '1,x'],
+    ['layout', 'screen', '--project', 'P', '--media', 'T/face.mp4', '--at', '1,5',
+      '--width', '1920', '--height', '1080', '--media-duration', '3'],
+    ['layout', 'screen', '--project', 'P', '--media', 'T/face.mp4', '--at', '1',
+      '--width', '1920', '--height', '1080', '--media-duration', '3s'],
+    ['pace', '--project', 'P', '--at', '1', '--cover', '1-x'],
+    ['pace', '--project', 'P', '--auto', '--min-gap', '5s'],
   ]) {
     const { error, changed } = await fx.run(argv);
     assert.equal(error?.code, 'BAD_NUMBER', `${argv.join(' ')}: ${error?.message}`);
