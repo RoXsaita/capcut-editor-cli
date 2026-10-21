@@ -11,7 +11,7 @@ import { pathToFileURL } from 'node:url';
 import { applySpec, readJson } from '../src/core.mjs';
 import { normalizePlan } from '../src/build.mjs';
 import { gateReport, graphicEvents } from '../src/gate.mjs';
-import { loadPlaywright } from '../src/mograph.mjs';
+import { launch, loadPlaywright } from '../src/mograph.mjs';
 import { SCENE_DIR, listScenes, probeScene, renderScene, sceneInput } from '../src/mograph-scene.mjs';
 import { loadProfile } from '../src/profile.mjs';
 import { CUE_KINDS, synthesize } from '../mograph/scenes/sound.mjs';
@@ -42,8 +42,7 @@ function sharedBrowser() {
   browserPromise ??= (async () => {
     try {
       const playwright = await loadPlaywright();
-      return { browser: await playwright.chromium.launch({ executablePath: process.env.CAPCUTCTL_CHROMIUM || undefined,
-        args: ['--font-render-hinting=none', '--disable-lcd-text'] }) };
+      return { browser: await launch(playwright) };
     } catch (error) {
       if (error.code === 'MOGRAPH_BROWSER' || /Executable doesn't exist|browserType\.launch|Failed to launch/i.test(String(error.message))) {
         return { skip: `scene browser unavailable: ${String(error.message).split('\n')[0]}` };

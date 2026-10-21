@@ -99,8 +99,10 @@ test('build places graphics on their words, is a no-op when nothing changed, and
   assert.equal(placed().length, 1);
   const lead = 3 / 30;
   assert.ok(Math.abs(placed()[0].target_timerange.start / 1e6 - (5 - lead)) < 1 / 30, 'lands its lead frames before the word');
-  assert.ok(fs.existsSync(path.join(dir, 'mograph', 'kw.mov')));
-  assert.equal(readJson(path.join(dir, 'mograph', 'kw.json')).anchor.say, 'أسرع');
+  const sidecar = readJson(path.join(dir, 'mograph', 'kw.json'));
+  assert.match(path.basename(sidecar.file), /^kw-[0-9a-f]{16}\.mov$/, 'rendered under its fingerprint');
+  assert.ok(fs.existsSync(sidecar.file));
+  assert.equal(sidecar.anchor.say, 'أسرع');
   assert.ok(first.gate.checks.length > 5);
 
   const bytes = fs.readFileSync(path.join(dir, 'draft_info.json'), 'utf8');

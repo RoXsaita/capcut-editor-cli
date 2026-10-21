@@ -30,8 +30,8 @@ import {
 } from './core.mjs';
 import { findWords, resolveAnchors } from './anchors.mjs';
 import { shiftTranscript } from './video-index.mjs';
-import { layoutAt } from './mograph-place.mjs';
-import { safeZoneViolations } from './mograph-geometry.mjs';
+import { anchoredStart, layoutAt, resolvePlacementSfx } from './mograph-place.mjs';
+import { safeZoneAdvice, safeZoneText } from './mograph-geometry.mjs';
 import { loadProfile, applyStyle } from './profile.mjs';
 import { principalTrack, pictureChanges } from './polish.mjs';
 import { firstPictureProof } from './finish.mjs';
@@ -128,11 +128,12 @@ function principalSignature(doc, projectDir = null) {
     s.target_timerange?.start, s.target_timerange?.duration].join(':')).join('|');
 }
 
-function planHash(plan, profile, doc, wordsFile, templateHashes, projectDir = null) {
+function planHash(plan, profile, doc, wordsFile, templateHashes, projectDir = null, assets = []) {
   let wordsStamp = null;
   if (wordsFile && fs.existsSync(wordsFile)) { const st = fs.statSync(wordsFile); wordsStamp = `${st.size}:${st.mtimeMs}`; }
   return crypto.createHash('sha256').update(JSON.stringify({
     plan, profile, principal: principalSignature(doc, projectDir), wordsStamp, templateHashes,
+    ...(assets.length ? { assets } : {}),
   })).digest('hex').slice(0, 24);
 }
 
@@ -170,61 +171,85 @@ async function planLogos(plan, doc, wordsFile, templates, wordsOffset = 0) {
   return { logos, chips, missingArt: missing.map(h => h.brand) };
 }
 
-async function renderGraphics(projectDir, graphics, { dryRun, profile }) {
-  const mograph = await import('./mograph.mjs');
+/**
+ * A finished render of this exact graphic (fingerprint + format) whose file still exists: the
+ * sidecar of the last placement, or the render cache a failed build left behind.
+ */
+function reusableRender(mograph, dir, id, fingerprint, format) {
+  const sidecarFile = path.join(dir, `${id}.json`);
+  const usable = c => (c && c.fingerprint === fingerprint && c.format === format && c.file && fs.existsSync(c.file) ? c : null);
+  return usable(fs.existsSync(sidecarFile) ? readJson(sidecarFile) : null) || usable(mograph.readRenderCache(dir, id));
+}
+
+/** The MOGRAPH_SAFE_ZONE refusal, with the box, the overlaps and a centre to try. */
+function refuseUnsafeBox(g, box, profile) {
+  if (g.allowUnsafe) return;
+  const advice = safeZoneAdvice(box, profile);
+  if (!advice.hits.length) return;
+  fail('MOGRAPH_SAFE_ZONE', `${g.id} (${g.template}) sits in the platform UI: ${safeZoneText(box, advice)}. `
+    + 'Move it with params.center/layout, or set "allowUnsafe": true if intended.', { box, ...advice });
+}
+
+/**
+ * Render (or reuse) each graphic. Renders go to `mograph/<id>-<fingerprint>`, so the file a
+ * placed graphic uses is never overwritten; the safe zones refuse before a frame is encoded;
+ * each finished render is cached at once, so a later refusal does not throw it away.
+ */
+async function renderGraphics(projectDir, graphics, { dryRun, profile, mograph }) {
   const dir = path.join(projectDir, 'mograph');
   const out = [];
   for (const g of graphics) {
     const sidecarFile = path.join(dir, `${g.id}.json`);
     const fingerprint = mograph.fingerprint(g.template, g.params, profile);
-    const cached = fs.existsSync(sidecarFile) ? readJson(sidecarFile) : null;
+    const file = mograph.renderOut(dir, g.id, fingerprint);
+    const cached = reusableRender(mograph, dir, g.id, fingerprint, g.format);
     let rendered;
-    if (cached && cached.fingerprint === fingerprint && cached.format === g.format && fs.existsSync(cached.file)) {
+    if (cached) {
       rendered = { ...cached, cached: true };
     } else if (dryRun) {
       const probe = await mograph.probeMograph({ template: g.template, params: g.params, profile });
       rendered = { template: g.template, params: g.params, format: g.format, box: probe.box, meta: probe.meta, fingerprint,
-        file: path.join(dir, `${g.id}.${g.format === 'png-still' ? 'png' : 'mov'}`), importVerified: g.format === 'png-still' };
+        file: `${file}.${g.format === 'png-still' ? 'png' : 'mov'}`, importVerified: g.format === 'png-still' };
     } else {
-      rendered = await mograph.renderMograph({ template: g.template, params: g.params, out: path.join(dir, g.id), format: g.format, profile });
+      rendered = await mograph.renderMograph({ template: g.template, params: g.params, out: file, format: g.format, profile,
+        checkBox: box => refuseUnsafeBox(g, box, profile) });
+      mograph.writeRenderCache(dir, g.id, rendered);
     }
-    const unsafe = safeZoneViolations(rendered.box, profile);
-    if (unsafe.length && !g.allowUnsafe) {
-      fail('MOGRAPH_SAFE_ZONE', `${g.id} (${g.template}) sits in the platform UI (${unsafe.join(', ')}). `
-        + 'Move it with params.center/layout, or set "allowUnsafe": true if intended.');
-    }
+    refuseUnsafeBox(g, rendered.box, profile);          // a cached or probed box is checked here
     out.push({ ...g, rendered, sidecarFile, fingerprint });
   }
   return out;
 }
 
-async function renderScenes(projectDir, scenes, { dryRun, profile }) {
+async function renderScenes(projectDir, scenes, { dryRun, profile, mograph, sceneModule }) {
   if (!scenes.length) return [];
-  const mod = await import('./mograph-scene.mjs');
+  const mod = sceneModule || await import('./mograph-scene.mjs');
   const dir = path.join(projectDir, 'mograph');
+  const box = { x: 0, y: 0, w: profile.canvas.width, h: profile.canvas.height };
   const out = [];
   for (const g of scenes) {
     const sidecarFile = path.join(dir, `${g.id}.json`);
     const fingerprint = mod.sceneFingerprint(g.scene, g.params, profile);
-    const cached = fs.existsSync(sidecarFile) ? readJson(sidecarFile) : null;
+    const file = mograph.renderOut(dir, g.id, fingerprint);
+    const cached = reusableRender(mograph, dir, g.id, fingerprint, 'prores');
     let rendered;
-    if (cached && cached.fingerprint === fingerprint && fs.existsSync(cached.file)) {
+    if (cached) {
       rendered = { ...cached, unsafe: [], cached: true };
     } else if (dryRun) {
       const probe = await mod.probeScene({ scene: g.scene, params: g.params, profile });
       rendered = { scene: g.scene, params: g.params, format: 'prores', meta: probe.meta, unsafe: probe.unsafe, fingerprint,
-        file: path.join(dir, `${g.id}.mov`) };
+        file: `${file}.mov` };
     } else {
-      rendered = await mod.renderScene({ scene: g.scene, params: g.params, out: path.join(dir, g.id), format: 'prores', profile,
+      // renderScene refuses unsafe readable text before it draws a frame.
+      rendered = await mod.renderScene({ scene: g.scene, params: g.params, out: file, format: 'prores', profile,
         allowUnsafe: Boolean(g.allowUnsafe) });
+      mograph.writeRenderCache(dir, g.id, { ...rendered, box });
     }
     if (rendered.unsafe?.length && !g.allowUnsafe) {
-      const u = rendered.unsafe[0];
-      fail('SCENE_SAFE_ZONE', `${g.id} (${g.scene}): "${u.text}" is in the ${u.zone} zone at ${u.t}s. `
-        + 'Shorten the text, or set "allowUnsafe": true if intended.');
+      fail('SCENE_SAFE_ZONE', `${g.id} (${g.scene}): ${mod.sceneHitText(rendered.unsafe[0])}. `
+        + 'Shorten the text, or set "allowUnsafe": true if intended.', { unsafe: rendered.unsafe });
     }
-    out.push({ ...g, template: null, format: 'prores', rendered, sidecarFile, fingerprint,
-      box: { x: 0, y: 0, w: profile.canvas.width, h: profile.canvas.height } });
+    out.push({ ...g, template: null, format: 'prores', rendered, sidecarFile, fingerprint, box });
   }
   return out;
 }
@@ -233,10 +258,12 @@ function writeSidecars(graphics) {
   for (const g of graphics) {
     const r = g.rendered;
     fs.mkdirSync(path.dirname(g.sidecarFile), { recursive: true });
+    // sfx (null included: "no cue") and allowUnsafe are the plan's choices; a rerender keeps them.
     fs.writeFileSync(g.sidecarFile, stableJson({
       version: 1, id: g.id, ...(g.scene ? { scene: g.scene } : {}), template: g.template, params: g.params, format: g.format,
       file: r.file, box: g.box || r.box,
       meta: r.meta, fingerprint: g.fingerprint, anchor: g.anchor || null, at: g.at, duration: g.duration,
+      ...(g.sfx !== undefined ? { sfx: g.sfx } : {}), ...(g.allowUnsafe ? { allowUnsafe: true } : {}),
       importVerified: !g.scene && g.format === 'png-still',
     }));
   }
@@ -276,10 +303,12 @@ async function preflight(projectDir, plan, doc, profile, wordsOps, dryRun) {
  * writes nothing (renders are probed, not encoded). A stage that throws after an earlier one
  * committed restores the draft to before the build (error.details.rolledBack).
  */
-export async function runBuild(projectDir, plan, { dryRun = false, force = false, forceRunning = false, backup = true, record = true } = {}) {
+export async function runBuild(projectDir, plan, { dryRun = false, force = false, forceRunning = false, backup = true, record = true,
+  renderers = {} } = {}) {
   const profileFile = plan.profile || null;
   const profile = applyStyle(loadProfile({ file: profileFile }), plan.style);
-  const mograph = await import('./mograph.mjs');
+  // `renderers` ({ mograph, scenes }) stands in for the browser renderers in tests.
+  const mograph = renderers.mograph || await import('./mograph.mjs');
   const templates = mograph.listTemplates();
   const txn = label => ({ dryRun, forceRunning, backup, label });
   const stages = {};
@@ -306,7 +335,9 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
     if (unknown) fail('PLAN_INVALID', `unknown scene "${unknown.scene}" (see capcutctl mograph scenes)`);
     for (const id of new Set(plan.scenes.map(x => x.scene))) templateHashes[`scene:${id}`] = sceneFingerprint(id, {}, profile);
   }
-  const hash = planHash(plan, profile, doc, wordsFile, templateHashes, projectDir);
+  // A logo file's bytes are part of its graphic: new bytes under the same path rebuild it.
+  const assets = plan.graphics.map(g => [g.id, mograph.assetStamps(g.params)]).filter(([, stamps]) => stamps.length);
+  const hash = planHash(plan, profile, doc, wordsFile, templateHashes, projectDir, assets);
   const stateFile = path.join(projectDir, BUILD_STATE_RELATIVE);
   const state = fs.existsSync(stateFile) ? readJson(stateFile) : {};
   const startIds = segmentIds(doc);
@@ -394,11 +425,10 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
     logoPlan = await planLogos(plan, doc, wordsFile, templates, wordsOffset);
     const wanted = [...plan.graphics, ...logoPlan.chips];
     const anchored = resolveAnchors(wanted, { doc, wordsFile, wordsOffset });
-    const lead = profile.tokens.frames.lead / profile.canvas.fps;
     const graphics = anchored.map(g => {
       // Anchored graphics lead their word by the profile's lead frames (the anchor already
       // carries any offset); timed ones take `at` plus their offset as given.
-      const at = Math.max(0, g.say ? g.at - lead : Number(g.at) + Number(g.offset || 0));
+      const at = g.say ? anchoredStart(g, { profile }) : Math.max(0, Number(g.at) + Number(g.offset || 0));
       const params = { ...g.params };
       if (!params.center && !params.box && !params.layout) params.layout = layoutAt(doc, at);
       if (g.hold != null && params.hold == null) params.hold = g.hold;
@@ -406,28 +436,29 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
       return { ...g, at: r3(at), params, format };
     });
     const sceneItems = resolveAnchors(plan.scenes, { doc, wordsFile, wordsOffset })
-      .map(g => ({ ...g, at: r3(Math.max(0, g.say ? g.at : Number(g.at) + Number(g.offset || 0))) }));
+      .map(g => ({ ...g, at: g.say ? anchoredStart(g, { scene: true, profile }) : r3(Math.max(0, Number(g.at) + Number(g.offset || 0))) }));
     rendered = [
-      ...(await renderGraphics(projectDir, graphics, { dryRun, profile })),
-      ...(await renderScenes(projectDir, sceneItems, { dryRun, profile })),
+      ...(await renderGraphics(projectDir, graphics, { dryRun, profile, mograph })),
+      ...(await renderScenes(projectDir, sceneItems, { dryRun, profile, mograph, sceneModule: renderers.scenes })),
     ].sort((a, b) => a.at - b.at);
     for (const g of rendered) g.duration = r3(g.rendered.meta.duration);
     // null: profile ending.auto decides; false also removes an ending placed earlier.
     const ending = plan.ending ?? (profile.ending?.auto ? true : null);
     const graphicOps = [{ op: 'mograph.prune', keep: rendered.map(g => g.id), dropEnding: plan.ending === false }];
+    const canvas = { width: profile.canvas.width, height: profile.canvas.height };
     for (const g of rendered) {
       if (g.scene) {
         graphicOps.push({
           op: 'mograph.place', id: g.id, template: `scene:${g.scene}`, file: g.rendered.file, format: 'prores',
-          at: g.at, duration: g.duration, box: g.box, fingerprint: g.fingerprint, sfx: null,
+          at: g.at, duration: g.duration, box: g.box, fingerprint: g.fingerprint, sfx: null, canvas,
           ...(g.volume != null ? { clipVolume: g.volume } : {}), importVerified: false,
         });
         continue;
       }
       graphicOps.push({
         op: 'mograph.place', id: g.id, template: g.template, file: g.rendered.file, format: g.format,
-        at: g.at, duration: g.duration, box: g.rendered.box, fingerprint: g.fingerprint,
-        sfx: g.sfx === null ? null : (g.sfx || g.rendered.meta.sfx), sfxLead: 0,
+        at: g.at, duration: g.duration, box: g.rendered.box, fingerprint: g.fingerprint, canvas,
+        sfx: resolvePlacementSfx(g.sfx, g.rendered.meta.sfx), sfxLead: 0,
         importVerified: g.format === 'png-still',
       });
     }
@@ -568,7 +599,7 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
     const outputs = [...segmentIds(finalDoc)].filter(id => !startIds.has(id) || kept.has(id));
     const seamTransitions = ranPolish ? (finalDoc.materials?.transitions || []).filter(m => m.capcutctl_polish === true).map(m => m.id)
       : prunedSeams ? [] : (Array.isArray(state.seamTransitions) ? state.seamTransitions : []);
-    const next = { version: 1, hash: planHash(plan, profile, finalDoc, wordsFile, templateHashes, projectDir), builtFrom: hash,
+    const next = { version: 1, hash: planHash(plan, profile, finalDoc, wordsFile, templateHashes, projectDir, assets), builtFrom: hash,
       shots: stages.shots?.key || state.shots || null, shotOutputs, outputs, at: new Date().toISOString(), verdict: gate.verdict,
       // logo pops placed (a later build with none clears them), the stages it could not run (the
       // up-to-date path re-reports them), the polish transitions it owns, and what export gates with

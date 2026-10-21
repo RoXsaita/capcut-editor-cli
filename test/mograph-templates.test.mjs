@@ -9,13 +9,13 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { pathToFileURL } from 'node:url';
 import {
-  TEMPLATE_DIR, listTemplates, loadPlaywright, renderFrames, safeZoneViolations, templateInput, templatePath,
+  TEMPLATE_DIR, assetStamps, fingerprint, launch, listTemplates, loadPlaywright, renderFrames, renderMograph, safeZoneViolations,
+  templateInput, templatePath,
 } from '../src/mograph.mjs';
 import { loadProfile } from '../src/profile.mjs';
 
 const profile = loadProfile();
 const FPS = profile.canvas.fps;
-const LAUNCH_ARGS = ['--font-render-hinting=none', '--disable-lcd-text'];
 
 // Every v1 template with default-placement params (Arabic wherever there is text) and the words
 // the viewer should see, in reading order.
@@ -32,12 +32,12 @@ const TIMES = [2, 7, 22].map(f => f / FPS);        // entrance, mid-entrance, ho
 
 // ---- browser availability --------------------------------------------------------------------
 let browserPromise = null;
-/** One shared Chromium for page-level inspection, or a skip reason when it cannot launch. */
+/** One shared Chromium for page-level inspection (the product's own launch), or a skip reason when it cannot launch. */
 function sharedBrowser() {
   browserPromise ??= (async () => {
     try {
       const playwright = await loadPlaywright();
-      return { browser: await playwright.chromium.launch({ executablePath: process.env.CAPCUTCTL_CHROMIUM || undefined, args: LAUNCH_ARGS }) };
+      return { browser: await launch(playwright) };
     } catch (error) {
       if (error.code === 'MOGRAPH_BROWSER' || /Executable doesn't exist|browserType\.launch|Failed to launch/i.test(String(error.message))) {
         return { skip: `mograph browser unavailable: ${String(error.message).split('\n')[0]}` };
@@ -120,6 +120,26 @@ test('templates take colours, fonts and timing from the profile tokens only', ()
   }
 });
 
+// ---- fingerprint (no browser) ----------------------------------------------------------------
+test('a logo\'s bytes are part of the fingerprint, by path or file:// URL', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mg-stamp-'));
+  const logo = path.join(dir, 'logo.png');
+  fs.writeFileSync(logo, solidPng(8, 8, [16, 163, 127]));
+  const byPath = { name: 'ChatGPT', logo };
+  const byUrl = { name: 'ChatGPT', logo: pathToFileURL(logo).href };
+  const before = [fingerprint('brand-chip', byPath, profile), fingerprint('brand-chip', byUrl, profile)];
+  assert.equal(assetStamps(byPath).length, 1);
+  assert.equal(assetStamps(byPath)[0].size, fs.statSync(logo).size);
+  fs.writeFileSync(logo, solidPng(8, 8, [200, 30, 30]));          // same name, new bytes
+  assert.notEqual(fingerprint('brand-chip', byPath, profile), before[0]);
+  assert.notEqual(fingerprint('brand-chip', byUrl, profile), before[1]);
+  // A missing file, a relative path and plain text are not stamps: the fingerprint is stable.
+  for (const params of [{ name: 'x', logo: path.join(dir, 'missing.png') }, { name: 'x', logo: 'logo.png' }, { name: 'جوجل' }]) {
+    assert.deepEqual(assetStamps(params), []);
+    assert.equal(fingerprint('brand-chip', params, profile), fingerprint('brand-chip', params, profile));
+  }
+});
+
 // ---- render, determinism, safe zones ---------------------------------------------------------
 test('every template renders deterministically inside the safe zones', { concurrency: 3 }, async t => {
   const env = await sharedBrowser();
@@ -145,6 +165,69 @@ test('every template renders deterministically inside the safe zones', { concurr
       'two runs produce identical frames regardless of seek order');
     const alone = await renderFrames({ template, params: c.params, times: [TIMES[1]], profile });
     assert.ok(alone.frames[0].equals(a.frames[1]), 'frame N rendered alone equals frame N in sequence');
+  })));
+});
+
+// ---- the crop holds everything painted -------------------------------------------------------
+/** RGBA pixels of an 8-bit, non-interlaced PNG (what Chromium screenshots with omitBackground). */
+function decodePng(buffer) {
+  let pos = 8, width = 0, height = 0, type = 0, depth = 0;
+  const idat = [];
+  while (pos < buffer.length) {
+    const len = buffer.readUInt32BE(pos), kind = buffer.toString('latin1', pos + 4, pos + 8);
+    const data = buffer.subarray(pos + 8, pos + 8 + len);
+    if (kind === 'IHDR') { width = data.readUInt32BE(0); height = data.readUInt32BE(4); depth = data[8]; type = data[9]; }
+    else if (kind === 'IDAT') idat.push(data);
+    pos += 12 + len;
+  }
+  assert.equal(depth, 8, 'an 8-bit PNG');
+  assert.equal(type, 6, 'an RGBA PNG (transparent background)');
+  const raw = zlib.inflateSync(Buffer.concat(idat));
+  const bpp = 4, stride = width * bpp;
+  const out = Buffer.alloc(stride * height);
+  for (let y = 0; y < height; y++) {
+    const filter = raw[y * (stride + 1)];
+    const row = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1));
+    for (let i = 0; i < stride; i++) {
+      const a = i >= bpp ? out[y * stride + i - bpp] : 0;
+      const b = y > 0 ? out[(y - 1) * stride + i] : 0;
+      const c = i >= bpp && y > 0 ? out[(y - 1) * stride + i - bpp] : 0;
+      let v = row[i];
+      if (filter === 1) v += a;
+      else if (filter === 2) v += b;
+      else if (filter === 3) v += (a + b) >> 1;
+      else if (filter === 4) {
+        const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
+        v += pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+      }
+      out[y * stride + i] = v & 0xff;
+    }
+  }
+  return { width, height, pixels: out };
+}
+
+/** Largest alpha on each outer edge of the crop (an edge clamped to the canvas border is skipped). */
+function edgeAlpha(frame, box) {
+  const { width, height, pixels } = decodePng(frame);
+  const alpha = (x, y) => pixels[(y * width + x) * 4 + 3];
+  const edges = {};
+  if (box.y > 0) edges.top = Math.max(...Array.from({ length: width }, (_, x) => alpha(x, 0)));
+  if (box.y + box.h < profile.canvas.height) edges.bottom = Math.max(...Array.from({ length: width }, (_, x) => alpha(x, height - 1)));
+  if (box.x > 0) edges.left = Math.max(...Array.from({ length: height }, (_, y) => alpha(0, y)));
+  if (box.x + box.w < profile.canvas.width) edges.right = Math.max(...Array.from({ length: height }, (_, y) => alpha(width - 1, y)));
+  return edges;
+}
+
+test('the crop box holds every shadow, glow and blur: the outer edge is transparent on every frame', { concurrency: 3 }, async t => {
+  const env = await sharedBrowser();
+  if (env.skip) { t.skip(env.skip); return; }
+  await Promise.all(Object.entries(CASES).map(([template, c]) => t.test(template, async () => {
+    const { box, frames } = await renderFrames({ template, params: c.params, profile });   // every frame time
+    let worst = { alpha: 0 };
+    frames.forEach((frame, i) => {
+      for (const [edge, alpha] of Object.entries(edgeAlpha(frame, box))) if (alpha > worst.alpha) worst = { alpha, edge, frame: i };
+    });
+    assert.ok(worst.alpha <= 2, `${template}: alpha ${worst.alpha}/255 on the ${worst.edge} edge at frame ${worst.frame} of ${JSON.stringify(box)}`);
   })));
 });
 
@@ -201,6 +284,16 @@ test('template contracts', { concurrency: 3 }, async t => {
     assert.ok(withLogo.box.w > without.box.w, 'the logo widens the pill');
     assert.deepEqual(safeZoneViolations(withLogo.box, profile), []);
     await refuse('brand-chip', { name: 'ChatGPT', logo: `${logo}.missing` }, 'MOGRAPH_ASSET');
+  });
+
+  await t.test('a checkBox refusal comes before any frame and writes no file', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mg-check-'));
+    let seen = null;
+    await assert.rejects(renderMograph({ template: 'keyword-super', params: CASES['keyword-super'].params, out: path.join(dir, 'kw'),
+      profile, checkBox: (box, meta) => { seen = { box, meta }; throw Object.assign(new Error('refused'), { code: 'MOGRAPH_SAFE_ZONE' }); } }),
+    error => error.code === 'MOGRAPH_SAFE_ZONE');
+    assert.ok(seen?.box.w > 0 && seen.meta.duration > 0, 'checkBox saw the measured box and meta');
+    assert.deepEqual(fs.readdirSync(dir), [], 'nothing written, not even a partial');
   });
 
   await t.test('text templates refuse sentences and empty text', async () => {

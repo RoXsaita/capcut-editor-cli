@@ -23,14 +23,15 @@ and places them all (see the `capcut-editing` skill).
 | Property | How |
 |---|---|
 | **Deterministic** | A template's picture at `t` is a pure function of `(params, t)`. The runtime freezes `Date.now`, `performance.now`, `requestAnimationFrame`, CSS animations/transitions and `will-change` (layer caching re-used stale rasters), and seeds `Math.random`. Tested: two runs are byte-identical, and frame N rendered alone equals frame N in sequence. |
-| **Tight** | The renderer crops to the union of every element's box across the clip, plus a pad for blur/glow. Never a full-frame overlay. |
+| **Tight** | The renderer crops to the union of what every element paints across every frame (its box widened by text-shadow, box-shadow and filter blur/drop-shadow, `MG.reach`), plus the template's pad. Never a full-frame overlay; the crop's outer edge is transparent (tested). |
 | **Exactly placed** | Templates draw on a real 1080×1920 canvas, so the crop box is the canvas position. `mograph.place` turns it into CapCut clip scale and half-canvas transform (y up). |
 | **On-brand** | Colours, type, easing and frame timings come from `presets/profile.json` tokens. Templates contain no literal colours or font names (a test enforces it). |
 | **Arabic-correct** | IBM Plex Sans Arabic (600/700, OFL, bundled in `mograph/fonts/`) loads before layout; a template whose text fell back to another face refuses (`MOGRAPH_FONT_FALLBACK`). Text animates by **word**, never by letter, so joined forms stay joined. |
-| **Safe** | Default placements stay inside the profile's text bands; a box in the platform UI zones refuses (`MOGRAPH_SAFE_ZONE`) unless `--allow-unsafe`. |
+| **Safe** | Default placements stay inside the profile's text bands; a box in the platform UI zones refuses (`MOGRAPH_SAFE_ZONE`) unless `--allow-unsafe`, before a frame is encoded, with the box, each overlap in px and a `params.center` to try. A draft whose canvas is not the profile's refuses (`MOGRAPH_CANVAS`). |
 | **Paired sound** | Each template names its cue (`pop`, `impact`, `enter`, `select`…, mapped through `presets/sfx.json` accents). `mograph.place` writes it on `mograph-sfx`; a cue missing on this machine is reported, not faked. |
 | **Owned & idempotent** | Output is tagged `mograph:<id>` / `mograph:sfx:<id>`; placing the same id replaces it with the same ids. `build` prunes graphics its plan no longer names. |
-| **Keeps your levels** | `rerender` and a rebuild carry the replaced clip's and cue's volume and audio fade onto the new ones, so a pop turned down in CapCut stays down. An explicit `clipVolume` / `sfxVolume` on the op (or `--no-sfx` for a scene) still wins. |
+| **Never overwrites what plays** | A render is `mograph/<id>-<fingerprint>.mov` (or `.png`), written to `.partial` and renamed, so a re-render with new params never touches the file the draft uses until its transaction lands. The fingerprint covers the template, the runtime, the params, the profile and the bytes of any local file a param names (a logo). `mograph/.render/<id>.json` records each finished render at once, so a build refused on a later graphic reuses the earlier ones. |
+| **Keeps your levels** | `rerender` and a rebuild carry the replaced clip's and cue's volume and audio fade onto the new ones, so a pop turned down in CapCut stays down. An explicit `clipVolume` / `sfxVolume` on the op (or `--no-sfx` for a scene) still wins. `rerender` also keeps the graphic where it sits now (after a ripple or a hand move; it reports `moved`), and the placement's `sfx: null` / `--no-sfx` and `allowUnsafe`. |
 
 ## Formats
 

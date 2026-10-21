@@ -2210,10 +2210,16 @@ export async function main(argv, dependencies = {}) {
     if (!['add', 'rerender'].includes(sub)) {
       throw new CapcutError('mograph takes list | preview | render | scenes | scene-preview | scene-render | add | rerender.', { code: 'MOGRAPH_SUBCOMMAND', exitCode: 2 });
     }
-    const mograph = await import('./mograph.mjs');
+    // `dependencies.mograph` / `.scenes` stand in for the browser renderers in tests.
+    const mograph = dependencies.mograph || await import('./mograph.mjs');
+    const place = await import('./mograph-place.mjs');
     const { loadProfile } = await import('./profile.mjs');
     const profile = loadProfile();
+    const canvas = { width: profile.canvas.width, height: profile.canvas.height };
+    // The transaction would refuse a running CapCut anyway: refuse before the render, not after it.
+    if (!options.dryRun) assertCapcutClosed({ forceRunning: Boolean(args.forceRunning) });
     const dir = path.join(projectDir, 'mograph');
+    const doc = await loadWorking(projectDir);
     let item;
     if (sub === 'rerender') {
       if (!args.id) throw new CapcutError('mograph rerender needs --id.', { code: 'MOGRAPH_PLACE', exitCode: 2 });
@@ -2221,81 +2227,95 @@ export async function main(argv, dependencies = {}) {
       if (!fs.existsSync(sidecar)) throw new CapcutError(`no rendered graphic "${args.id}" in ${dir}.`, { code: 'MOGRAPH_MISSING', exitCode: 2 });
       const prev = readJson(sidecar);
       const params = args.params || args.paramsFile ? { ...prev.params, ...mographParams(args) } : prev.params;
-      item = { id: prev.id, template: prev.template, scene: prev.scene || null, params, format: prev.format, at: prev.at, anchor: prev.anchor };
+      // Where the graphic sits NOW (a ripple or a hand move in CapCut), not where it was rendered.
+      const live = place.liveMographStart(doc, prev.id);
+      const at = live ?? prev.at;
+      item = { id: prev.id, template: prev.template, scene: prev.scene || null, params, format: prev.format, at, anchor: prev.anchor,
+        // the placement's own choices: a "no cue" (null) and an accepted unsafe box carry over
+        sfx: args.noSfx ? null : prev.sfx, allowUnsafe: Boolean(args.allowUnsafe || prev.allowUnsafe),
+        ...(live != null && prev.at != null && r3(live) !== r3(prev.at) ? { moved: { from: prev.at, to: live } } : {}) };
     } else {
       if (!args.template && !args.scene) throw new CapcutError('mograph add needs --template ID or --scene ID.', { code: 'MOGRAPH_TEMPLATE', exitCode: 2 });
       if (args.template && args.scene) throw new CapcutError('mograph add takes --template or --scene, not both.', { code: 'MOGRAPH_TEMPLATE', exitCode: 2 });
       if (args.at == null && !args.say) throw new CapcutError('mograph add needs --at SECONDS or --say WORDS.', { code: 'MOGRAPH_PLACE', exitCode: 2 });
-      const doc = await loadWorking(projectDir);
       let at = num(args, 'at', { min: 0, def: null });
       let anchor = null;
       if (args.say) {
         const { resolveAnchors } = await import('./anchors.mjs');
         const [hit] = resolveAnchors([{ id: args.id || args.template || args.scene, say: args.say, occurrence: num(args, 'occurrence', { min: 1, int: true, def: 1 }) }],
           { doc, projectDir, wordsFile: args.words ? path.resolve(args.words) : null });
-        at = Math.max(0, hit.at - profile.tokens.frames.lead / profile.canvas.fps);
+        // a template leads its word; a scene is a cut and starts on it
+        at = place.anchoredStart(hit, { scene: Boolean(args.scene), profile });
         anchor = hit.anchor;
       }
       const params = mographParams(args);
+      const choices = { sfx: args.noSfx ? null : undefined, allowUnsafe: Boolean(args.allowUnsafe) };
       if (args.scene) {
         item = { id: args.id || `${args.scene}-${Math.round(at * 1000)}`, template: null, scene: args.scene, params,
-          format: 'prores', at: Math.round(at * 1000) / 1000, anchor };
+          format: 'prores', at: Math.round(at * 1000) / 1000, anchor, ...choices };
       } else {
-        if (!params.center && !params.box && !params.layout) {
-          const { layoutAt } = await import('./mograph-place.mjs');
-          params.layout = layoutAt(doc, at);
-        }
+        if (!params.center && !params.box && !params.layout) params.layout = place.layoutAt(doc, at);
         const motion = mograph.listTemplates().find(t => t.id === args.template)?.motion || 'rich';
         item = { id: args.id || `${args.template}-${Math.round(at * 1000)}`, template: args.template, params,
-          format: args.format || (motion === 'rich' ? 'prores' : 'png-still'), at: Math.round(at * 1000) / 1000, anchor };
+          format: args.format || (motion === 'rich' ? 'prores' : 'png-still'), at: Math.round(at * 1000) / 1000, anchor, ...choices };
       }
     }
+    const moved = item.moved ? { moved: item.moved } : {};
+    const writeSidecar = record => {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, `${item.id}.json`), stableJson({
+        version: 1, id: item.id, ...record, params: item.params, anchor: item.anchor || null, at: item.at,
+        ...(item.sfx !== undefined ? { sfx: item.sfx } : {}), ...(item.allowUnsafe ? { allowUnsafe: true } : {}) }));
+    };
     if (item.scene) {
       // A scene is the whole frame: its readable text is proven safe by the renderer, it carries
       // its own synthesised sound, and it lands at canvas scale 1 on a mograph lane.
-      const scenes = await import('./mograph-scene.mjs');
+      const scenes = dependencies.scenes || await import('./mograph-scene.mjs');
       const fingerprint = scenes.sceneFingerprint(item.scene, item.params, profile);
+      const out = mograph.renderOut(dir, item.id, fingerprint);
       const rendered = args.dryRun
-        ? { ...(await scenes.probeScene({ scene: item.scene, params: item.params, profile })), file: path.join(dir, `${item.id}.mov`) }
-        : await scenes.renderScene({ scene: item.scene, params: item.params, out: path.join(dir, item.id), format: 'prores', profile,
-          allowUnsafe: Boolean(args.allowUnsafe) });
-      if (args.dryRun && rendered.unsafe.length && !args.allowUnsafe) {
-        const u = rendered.unsafe[0];
-        throw new CapcutError(`${item.id}: "${u.text}" is in the ${u.zone} zone at ${u.t}s; shorten it or pass --allow-unsafe.`,
-          { code: 'SCENE_SAFE_ZONE', exitCode: 2 });
+        ? { ...(await scenes.probeScene({ scene: item.scene, params: item.params, profile })), file: `${out}.mov` }
+        : await scenes.renderScene({ scene: item.scene, params: item.params, out, format: 'prores', profile,
+          allowUnsafe: item.allowUnsafe });
+      if (args.dryRun && rendered.unsafe.length && !item.allowUnsafe) {
+        throw new CapcutError(`${item.id}: ${scenes.sceneHitText(rendered.unsafe[0])}; shorten it or pass --allow-unsafe.`,
+          { code: 'SCENE_SAFE_ZONE', exitCode: 2, details: { unsafe: rendered.unsafe } });
       }
       const box = { x: 0, y: 0, w: profile.canvas.width, h: profile.canvas.height };
       const op = { op: 'mograph.place', id: item.id, template: `scene:${item.scene}`, file: rendered.file, format: 'prores',
-        at: item.at, duration: rendered.meta.duration, box, fingerprint, sfx: null, ...(args.noSfx ? { clipVolume: 0 } : {}),
+        at: item.at, duration: rendered.meta.duration, box, fingerprint, sfx: null, canvas, ...(args.noSfx ? { clipVolume: 0 } : {}),
         importVerified: false };
-      if (args.dryRun) return print({ dryRun: true, placement: op, meta: rendered.meta, unsafe: rendered.unsafe }, true);
+      if (args.dryRun) return print({ dryRun: true, placement: op, meta: rendered.meta, unsafe: rendered.unsafe, ...moved }, true);
       const result = applySpec(projectDir, { version: 1, name: `mograph-${sub}`, operations: [op] }, options);
-      fs.writeFileSync(path.join(dir, `${item.id}.json`), stableJson({
-        version: 1, id: item.id, scene: item.scene, template: null, params: item.params, format: 'prores', file: rendered.file,
-        box, meta: rendered.meta, fingerprint, anchor: item.anchor || null, at: item.at,
-        duration: rendered.meta.duration, importVerified: false }));
-      return print(result, true);
+      writeSidecar({ scene: item.scene, template: null, format: 'prores', file: rendered.file, box, meta: rendered.meta, fingerprint,
+        duration: rendered.meta.duration, importVerified: false });
+      return print({ ...result, ...moved }, true);
     }
     const fingerprint = mograph.fingerprint(item.template, item.params, profile);
+    const out = mograph.renderOut(dir, item.id, fingerprint);
+    // The safe zones refuse with numbers: the box, each overlap and a centre to try.
+    const refuseUnsafe = box => {
+      if (item.allowUnsafe) return;
+      const advice = mograph.safeZoneAdvice(box, profile);
+      if (!advice.hits.length) return;
+      throw new CapcutError(`${item.id} sits in the platform UI: ${mograph.safeZoneText(box, advice)}; `
+        + 'move it (params center/layout) or pass --allow-unsafe.', { code: 'MOGRAPH_SAFE_ZONE', exitCode: 2, details: { box, ...advice } });
+    };
     const rendered = args.dryRun
       ? { ...(await mograph.probeMograph({ template: item.template, params: item.params, profile })),
-        file: path.join(dir, `${item.id}.${item.format === 'png-still' ? 'png' : 'mov'}`) }
-      : await mograph.renderMograph({ template: item.template, params: item.params, out: path.join(dir, item.id), format: item.format, profile });
-    const unsafe = mograph.safeZoneViolations(rendered.box, profile);
-    if (unsafe.length && !args.allowUnsafe) {
-      throw new CapcutError(`${item.id} sits in the platform UI (${unsafe.join(', ')}); move it (params center/layout) or pass --allow-unsafe.`,
-        { code: 'MOGRAPH_SAFE_ZONE', exitCode: 2 });
-    }
+        file: `${out}.${item.format === 'png-still' ? 'png' : 'mov'}` }
+      : await mograph.renderMograph({ template: item.template, params: item.params, out, format: item.format, profile,
+        checkBox: refuseUnsafe });
+    refuseUnsafe(rendered.box);
     const op = { op: 'mograph.place', id: item.id, template: item.template, file: rendered.file, format: item.format,
-      at: item.at, duration: rendered.meta.duration, box: rendered.box, fingerprint,
-      sfx: args.noSfx ? null : rendered.meta.sfx, sfxLead: 0, importVerified: item.format === 'png-still' };
-    if (args.dryRun) return print({ dryRun: true, placement: op, box: rendered.box, meta: rendered.meta }, true);
+      at: item.at, duration: rendered.meta.duration, box: rendered.box, fingerprint, canvas,
+      sfx: place.resolvePlacementSfx(item.sfx, rendered.meta.sfx, Boolean(args.noSfx)), sfxLead: 0,
+      importVerified: item.format === 'png-still' };
+    if (args.dryRun) return print({ dryRun: true, placement: op, box: rendered.box, meta: rendered.meta, ...moved }, true);
     const result = applySpec(projectDir, { version: 1, name: `mograph-${sub}`, operations: [op] }, options);
-    fs.writeFileSync(path.join(dir, `${item.id}.json`), stableJson({
-      version: 1, id: item.id, template: item.template, params: item.params, format: item.format, file: rendered.file,
-      box: rendered.box, meta: rendered.meta, fingerprint, anchor: item.anchor || null, at: item.at,
-      duration: rendered.meta.duration, importVerified: item.format === 'png-still' }));
-    return print(result, true);
+    writeSidecar({ template: item.template, format: item.format, file: rendered.file, box: rendered.box, meta: rendered.meta,
+      fingerprint, duration: rendered.meta.duration, importVerified: item.format === 'png-still' });
+    return print({ ...result, ...moved }, true);
   }
   if (command === 'polish') {
     const { assertFirstPictureProof } = await import('./finish.mjs');

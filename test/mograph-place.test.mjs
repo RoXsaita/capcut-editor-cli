@@ -3,9 +3,17 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 
+import crypto from 'node:crypto';
+
 import { applySpec, readJson } from '../src/core.mjs';
-import { placementFor, safeZoneViolations } from '../src/mograph-geometry.mjs';
+import { main, setOutput } from '../src/cli.mjs';
+import { normalizePlan, runBuild } from '../src/build.mjs';
+import { placementFor, safeZoneAdvice, safeZoneViolations } from '../src/mograph-geometry.mjs';
+import { anchoredStart, liveMographStart, opMographPlace } from '../src/mograph-place.mjs';
+import { opRipple } from '../src/ripple.mjs';
+import { loadProfile } from '../src/profile.mjs';
 import { buildProject } from './helpers/polish-project.mjs';
+import { stubMograph } from './helpers/mograph-stub.mjs';
 
 const PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
@@ -100,4 +108,132 @@ test('an unchanged placement is byte-identical on re-apply (stable ids)', () => 
 test('webm is refused for placement', () => {
   const { dir, mov } = project();
   assert.throws(() => applySpec(dir, { version: 1, operations: [place({ file: mov, format: 'webm' })] }), /cannot be placed/);
+});
+
+test('safeZoneAdvice gives the overlap in px and the smallest move that clears every zone', () => {
+  const box = { x: 100, y: 100, w: 600, h: 200 };
+  const advice = safeZoneAdvice(box);
+  assert.deepEqual(advice.hits.map(h => h.name), ['top-bar']);
+  const top = advice.hits[0];
+  assert.equal(top.overlapY, 120, 'y 100–300 against a 220 px top bar');
+  assert.equal(top.overlapX, 600);
+  assert.deepEqual(top.zone, { x: 0, y: 0, w: 1080, h: 220 });
+  assert.ok(advice.suggestCenter, 'a single move clears it');
+  const [cx, cy] = advice.suggestCenter;
+  const moved = { x: cx - box.w / 2, y: cy - box.h / 2, w: box.w, h: box.h };
+  assert.deepEqual(safeZoneViolations(moved), [], `the suggested centre ${advice.suggestCenter} is clear`);
+  assert.equal(advice.shift.y, 120, 'down by exactly the overlap');
+  // Nothing to move inside the safe band; nothing a single move can fix for the whole canvas.
+  assert.deepEqual(safeZoneAdvice({ x: 100, y: 1180, w: 600, h: 200 }).hits, []);
+  assert.equal(safeZoneAdvice({ x: 0, y: 0, w: 1080, h: 1920 }).suggestCenter, null);
+});
+
+test('liveMographStart reads where a graphic sits now; anchoredStart leads a template, not a scene', () => {
+  const { dir, mov } = project();
+  const d = doc(dir);
+  opMographPlace(d, place({ file: mov }), { projectDir: dir });
+  assert.equal(liveMographStart(d, 'kw-1'), 2);
+  opRipple(d, { from: 0.5, to: 1.0 }, { projectDir: dir });
+  assert.equal(liveMographStart(d, 'kw-1'), 1.5, 'a ripple moved it; the sidecar does not know');
+  assert.equal(liveMographStart(d, 'nope'), null);
+
+  const profile = loadProfile();
+  assert.equal(anchoredStart({ at: 5 }, { scene: true, profile }), 5, 'a scene is a cut on its word');
+  assert.ok(Math.abs(anchoredStart({ at: 5 }, { profile }) - 4.9) < 1e-9, 'a template leads its word by 3 frames');
+  assert.equal(anchoredStart({ at: 0.05 }, { profile }), 0, 'never before 0');
+});
+
+test('mograph.place refuses a draft whose canvas is not the one the graphic was rendered for', () => {
+  const { dir, mov } = project();
+  const d = doc(dir);
+  d.canvas_config = { ...d.canvas_config, width: 2160, height: 3840 };
+  const before = JSON.stringify(d);
+  assert.throws(() => opMographPlace(d, place({ file: mov }), { projectDir: dir }),
+    error => error.code === 'MOGRAPH_CANVAS' && error.exitCode === 2 && /2160×3840/.test(error.message));
+  assert.equal(JSON.stringify(d), before, 'the draft is untouched');
+  // No canvas_config: falls back to the 1080×1920 arithmetic, at scale 1 for a full-canvas box.
+  delete d.canvas_config;
+  const out = opMographPlace(d, place({ file: mov, box: { x: 0, y: 0, w: 1080, h: 1920 } }), { projectDir: dir });
+  assert.equal(out.scale, 1);
+});
+
+/** `capcutctl …` against a project, its JSON output parsed. */
+async function cli(argv, dependencies) {
+  let out = '';
+  const restore = setOutput(chunk => { out += String(chunk); return true; });
+  try { await main([...argv, '--force-running', '--no-backup'], dependencies); } finally { restore(); }
+  return out.trim() ? JSON.parse(out) : null;
+}
+const sha = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+const placedFile = (dir, id) => {
+  const d = doc(dir);
+  const segment = d.tracks.flatMap(t => t.segments || []).find(s => s.desc === `mograph:${id}`);
+  return d.materials.videos.find(m => m.id === segment.material_id).path;
+};
+
+test('a rerender renders to a new fingerprinted file; an unsafe one leaves the placed bytes alone', async () => {
+  const dir = buildProject();
+  const mograph = stubMograph();
+  await cli(['mograph', 'add', '--project', dir, '--template', 'keyword-super', '--id', 'g1', '--at', '2',
+    '--params', JSON.stringify({ text: 'one' })], { mograph });
+  const first = placedFile(dir, 'g1');
+  assert.match(path.basename(first), /^g1-[0-9a-f]{16}\.mov$/, 'named by its fingerprint');
+  const bytes = sha(first);
+  assert.equal(readJson(path.join(dir, 'mograph', 'g1.json')).file, first);
+
+  // An unsafe box: refused with numbers, before anything is written, and the draft still plays the original.
+  await assert.rejects(cli(['mograph', 'rerender', '--project', dir, '--id', 'g1',
+    '--params', JSON.stringify({ text: 'two', testBox: [100, 100, 600, 200] })], { mograph }),
+  error => error.code === 'MOGRAPH_SAFE_ZONE' && /top-bar/.test(error.message) && /by 600×120px/.test(error.message)
+    && /params\.center \[/.test(error.message));
+  assert.equal(placedFile(dir, 'g1'), first);
+  assert.equal(sha(first), bytes, 'the placed file was not overwritten');
+  assert.deepEqual(fs.readdirSync(path.join(dir, 'mograph')).filter(f => f.endsWith('.mov')), [path.basename(first)],
+    'the refused render wrote nothing');
+
+  // A safe rerender: a new file, and the sidecar names it.
+  await cli(['mograph', 'rerender', '--project', dir, '--id', 'g1', '--params', JSON.stringify({ text: 'two' })], { mograph });
+  const second = placedFile(dir, 'g1');
+  assert.notEqual(second, first);
+  assert.match(path.basename(second), /^g1-[0-9a-f]{16}\.mov$/);
+  assert.equal(readJson(path.join(dir, 'mograph', 'g1.json')).file, second);
+  assert.equal(sha(first), bytes, 'the old render is still intact for a restore');
+});
+
+test('a rerender keeps the graphic where it sits now and says it moved', async () => {
+  const dir = buildProject();
+  const mograph = stubMograph();
+  await cli(['mograph', 'add', '--project', dir, '--template', 'keyword-super', '--id', 'g1', '--at', '2',
+    '--params', JSON.stringify({ text: 'one' })], { mograph });
+  applySpec(dir, { version: 1, operations: [{ op: 'timeline.ripple', from: 0.5, to: 1 }] }, { forceRunning: true, backup: false });
+  assert.equal(liveMographStart(doc(dir), 'g1'), 1.5);
+  const out = await cli(['mograph', 'rerender', '--project', dir, '--id', 'g1', '--params', JSON.stringify({ text: 'two' })], { mograph });
+  assert.deepEqual(out.moved, { from: 2, to: 1.5 });
+  assert.equal(liveMographStart(doc(dir), 'g1'), 1.5, 'not back at the sidecar time');
+  assert.equal(readJson(path.join(dir, 'mograph', 'g1.json')).at, 1.5);
+});
+
+test('a build that refuses a graphic keeps the renders it finished, and reuses them after the fix', async () => {
+  const dir = buildProject();
+  const mograph = stubMograph();
+  const plan = boxB => normalizePlan({
+    version: 1, logos: false, layout: false, camera: { stress: false }, sound: { seams: false, loudness: false, music: false },
+    graphics: [
+      { id: 'A', template: 'keyword-super', at: 1, params: { text: 'a' } },
+      { id: 'B', template: 'keyword-super', at: 3, params: { text: 'b', testBox: boxB } },
+    ],
+  });
+  await assert.rejects(runBuild(dir, plan([100, 100, 600, 200]), { forceRunning: true, backup: false, renderers: { mograph } }),
+    error => error.code === 'MOGRAPH_SAFE_ZONE' && /^B /.test(error.message) && /overlaps top-bar/.test(error.message));
+  const files = fs.readdirSync(path.join(dir, 'mograph'));
+  assert.ok(!files.some(f => f.startsWith('B-')), 'the refused graphic was never encoded');
+  const cacheA = readJson(path.join(dir, 'mograph', '.render', 'A.json'));
+  assert.ok(fs.existsSync(cacheA.file), 'A finished and is cached');
+  assert.equal(mograph.calls.length, 2);
+
+  const fixed = await runBuild(dir, plan([205, 1212, 582, 188]), { forceRunning: true, backup: false, renderers: { mograph } });
+  const planned = Object.fromEntries(fixed.stages.graphics.planned.map(g => [g.id, g]));
+  assert.equal(planned.A.cached, true, 'A came from the render cache');
+  assert.equal(planned.B.cached, false);
+  assert.equal(mograph.calls.length, 3, 'only B rendered again');
 });

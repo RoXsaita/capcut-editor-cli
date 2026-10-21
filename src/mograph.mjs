@@ -149,13 +149,31 @@ async function shoot(page, box, t) {
   return page.screenshot({ clip: { x: box.x, y: box.y, width: box.w, height: box.h }, omitBackground: true, type: 'png' });
 }
 
+// The muxer is named, not inferred: the encoder writes `<file>.partial` and renames it.
 function encoderArgs(format, fps, out) {
   const input = ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'image2pipe', '-framerate', String(fps), '-c:v', 'png', '-i', '-'];
   if (format === 'prores') {
     // Premultiplied: CapCut reads ProRes alpha that way (alpha.mjs). Straight alpha painted glows solid.
-    return [...input, '-vf', PREMULTIPLY_FILTER, ...PRORES_ALPHA_ARGS, '-movflags', '+faststart', out];
+    return [...input, '-vf', PREMULTIPLY_FILTER, ...PRORES_ALPHA_ARGS, '-movflags', '+faststart', '-f', 'mov', out];
   }
-  return [...input, '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-b:v', '0', '-crf', '28', '-auto-alt-ref', '0', out];
+  return [...input, '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-b:v', '0', '-crf', '28', '-auto-alt-ref', '0', '-f', 'webm', out];
+}
+
+/**
+ * Write `file` all at once: `produce(partial)` writes `<file>.partial`, which is renamed over
+ * `file` only when it finished. A failed or interrupted render never leaves a truncated file
+ * under the name a draft (or a later cache check) trusts.
+ */
+export async function writeAtomic(file, produce) {
+  const partial = `${file}.partial`;
+  try {
+    await produce(partial);
+    fs.renameSync(partial, file);
+  } catch (error) {
+    fs.rmSync(partial, { force: true });
+    throw error;
+  }
+  return file;
 }
 
 /** ffmpeg fed PNG frames on stdin, with backpressure; `end()` resolves once the file is written. */
@@ -178,22 +196,74 @@ export function pngPipeEncoder(args, out, code) {
 
 async function encode(format, fps, out, frames) {
   requireBinary('ffmpeg');
-  const encoder = pngPipeEncoder(encoderArgs(format, fps, out), out, 'MOGRAPH_ENCODE');
-  try {
-    for await (const frame of frames) await encoder.write(frame);
-  } catch (error) {
-    encoder.end().catch(() => {});
-    throw error;
-  }
-  return encoder.end();
+  return writeAtomic(out, async partial => {
+    const encoder = pngPipeEncoder(encoderArgs(format, fps, partial), out, 'MOGRAPH_ENCODE');
+    try {
+      for await (const frame of frames) await encoder.write(frame);
+    } catch (error) {
+      await encoder.end().catch(() => {});
+      throw error;
+    }
+    await encoder.end();
+  });
+}
+
+/**
+ * The local files a graphic's params point at (a logo: an absolute path or a file:// URL to a
+ * file that exists), as { path, size, sha256 }, sorted. The same name with new bytes is a new
+ * render; a missing path or any other string is not a stamp.
+ */
+export function assetStamps(params) {
+  const found = new Set();
+  const walk = value => {
+    if (typeof value === 'string') {
+      let file = null;
+      if (/^file:\/\//i.test(value)) { try { file = fileURLToPath(value); } catch { file = null; } }
+      else if (path.isAbsolute(value)) file = value;
+      if (file) { try { if (fs.statSync(file).isFile()) found.add(path.resolve(file)); } catch { /* not a file: no stamp */ } }
+    } else if (Array.isArray(value)) value.forEach(walk);
+    else if (value && typeof value === 'object') Object.values(value).forEach(walk);
+  };
+  walk(params);
+  return [...found].sort().map(file => {
+    const bytes = fs.readFileSync(file);
+    return { path: file, size: bytes.length, sha256: crypto.createHash('sha256').update(bytes).digest('hex') };
+  });
 }
 
 export function fingerprint(template, params, profile) {
   const templateHash = crypto.createHash('sha256').update(fs.readFileSync(templatePath(template))).digest('hex');
   const runtimeHash = crypto.createHash('sha256').update(fs.readFileSync(path.join(MOGRAPH_DIR, 'runtime.js'))).digest('hex');
+  const assets = assetStamps(params);
   return crypto.createHash('sha256').update(JSON.stringify({
     template, templateHash, runtimeHash, params, tokens: profile.tokens, zones: profile.safeZones, canvas: profile.canvas,
+    ...(assets.length ? { assets } : {}),
   })).digest('hex').slice(0, 16);
+}
+
+/**
+ * Where a render of graphic `id` lives: `<dir>/<id>-<fingerprint>` (the format adds the
+ * extension). A re-render with new params is a new file, so the one the draft uses is never
+ * overwritten before the transaction that replaces it.
+ */
+export const renderOut = (dir, id, print) => path.join(dir, `${id}-${print}`);
+
+/**
+ * The render cache, written the moment a render succeeds and before anything is placed:
+ * `<dir>/.render/<id>.json`. A build that fails on a later graphic keeps the earlier ones.
+ */
+export const renderCacheFile = (dir, id) => path.join(dir, '.render', `${id}.json`);
+
+export function writeRenderCache(dir, id, rendered) {
+  const file = renderCacheFile(dir, id);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const { fingerprint: print, format, file: media, box, meta } = rendered;
+  fs.writeFileSync(file, `${JSON.stringify({ version: 1, id, fingerprint: print, format, file: media, box, meta }, null, 2)}\n`);
+  return file;
+}
+
+export function readRenderCache(dir, id) {
+  try { return JSON.parse(fs.readFileSync(renderCacheFile(dir, id), 'utf8')); } catch { return null; }
 }
 
 /**
@@ -211,9 +281,12 @@ export async function probeMograph({ template, params = {}, profile = loadProfil
 
 /**
  * Render one graphic. Returns { file, format, box, meta, fingerprint, frames }.
- * `out` is the path without extension; the extension follows the format.
+ * `out` is the path without extension; the extension follows the format. `checkBox(box, meta)`
+ * runs once the page has measured the crop and before any frame is shot or encoded: a refusal
+ * there (the safe zones) costs a page load, not a render, and writes nothing.
  */
-export async function renderMograph({ template, params = {}, out, format = 'prores', scale = 1, profile = loadProfile(), fps } = {}) {
+export async function renderMograph({ template, params = {}, out, format = 'prores', scale = 1, profile = loadProfile(), fps,
+  checkBox = null } = {}) {
   if (!FORMATS.includes(format)) fail('MOGRAPH_FORMAT', `format must be one of ${FORMATS.join(', ')}`);
   if (!out) fail('MOGRAPH_OUT', 'renderMograph needs an output path');
   fs.mkdirSync(path.dirname(out), { recursive: true });
@@ -224,12 +297,14 @@ export async function renderMograph({ template, params = {}, out, format = 'pror
     if (format === 'png-still' && meta.motion === 'rich') {
       fail('MOGRAPH_FORMAT', `${template} animates more than a pop or slide; render it as prores.`);
     }
+    if (checkBox) await checkBox(box, meta);
     const rate = meta.fps;
     let file;
     let frames = 1;
     if (format === 'png-still') {
       file = `${out}.png`;
-      fs.writeFileSync(file, await shoot(page, box, meta.still));
+      const still = await shoot(page, box, meta.still);
+      await writeAtomic(file, async partial => fs.writeFileSync(partial, still));
     } else {
       file = `${out}.${format === 'prores' ? 'mov' : 'webm'}`;
       const times = frameTimes(meta.duration, rate);
@@ -301,4 +376,4 @@ export async function previewSheet({ template, params = {}, times = null, out, b
   }
 }
 
-export { placementFor, safeZoneViolations } from './mograph-geometry.mjs';
+export { placementFor, safeZoneAdvice, safeZoneText, safeZoneViolations } from './mograph-geometry.mjs';
