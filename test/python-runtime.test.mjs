@@ -283,8 +283,8 @@ test('preflight reports the interpreter the commands will actually spawn', () =>
   const rows = preflightPython({
     env: {}, refresh: true, probe, imports: stubImports({ 'python3.12': { has: RUNTIME_IMPORTS } }),
   });
-  assert.equal(rows.length, 2);
-  assert.ok(rows.every(row => row.ok));
+  assert.equal(rows.length, 3);
+  assert.ok(rows.slice(0, 2).every(row => row.ok));
   assert.equal(rows[0].interpreter, 'python3.12');
   assert.match(rows[0].detail, /3\.12\.4/);
 
@@ -298,8 +298,51 @@ test('preflight reports the interpreter the commands will actually spawn', () =>
 
   // No interpreter at all: two failing rows, both actionable, neither a stack trace.
   const none = preflightPython({ env: {}, refresh: true, probe: stubProbe({}), imports: stubImports({}) });
-  assert.equal(none.length, 2);
-  assert.ok(none.every(row => row.ok === false && row.fix));
+  assert.equal(none.length, 3);
+  assert.ok(none.slice(0, 2).every(row => row.ok === false && row.fix));
+  assert.equal(none[2].name, 'Caption generation');
+  assert.equal(none[2].blocking, false);
+});
+
+test('caption generation needs one ASR module in the interpreter it spawns, never as a blocker', () => {
+  // The worker imports mlx_whisper and faster_whisper lazily, after mixing the narration.
+  // preflight said "ready" with neither importable; `uv tool install mlx-whisper` alone does
+  // not put it in the interpreter capcutctl resolves.
+  const probe = stubProbe({ 'python3': { version: [3, 12, 0] } });
+  const base = ['numpy', 'PIL', 'pysubs2'];
+  const options = has => ({ env: {}, refresh: true, probe, imports: stubImports({ 'python3': { has } }) });
+
+  assert.throws(() => pythonForTool('caption_generate.py', options(base)), error => {
+    assert.equal(error.code, 'PYTHON_MISSING_DEPENDENCY');
+    assert.equal(error.exitCode, 2);
+    assert.deepEqual(error.details.missing, ['mlx_whisper', 'faster_whisper']);
+    assert.match(error.details.fix, /mlx-whisper/);
+    assert.match(error.details.fix, /"python3" -m pip install mlx-whisper/);
+    assert.match(error.details.fix, /uv tool install/);
+    return true;
+  });
+  assert.doesNotThrow(() => pythonForTool('caption_generate.py', options([...base, 'mlx_whisper'])),
+    'mlx_whisper alone is enough');
+  assert.doesNotThrow(() => pythonForTool('caption_generate.py', options([...base, 'faster_whisper'])),
+    'faster_whisper alone is enough');
+  // A hard import still wins the message: it names the module, not the ASR group.
+  assert.throws(() => pythonForTool('caption_generate.py', options(['numpy', 'PIL', 'mlx_whisper'])),
+    error => error.code === 'PYTHON_MISSING_DEPENDENCY' && error.details.missing.join() === 'pysubs2');
+
+  const row = preflightPython(options([...RUNTIME_IMPORTS, 'pysubs2']))
+    .find(r => r.name === 'Caption generation');
+  assert.equal(row.ok, false);
+  assert.equal(row.blocking, false);
+  assert.match(row.detail, /captions --cues/);
+  assert.match(row.fix, /mlx-whisper/);
+  const ready = preflightPython(options([...RUNTIME_IMPORTS, 'pysubs2', 'faster_whisper']))
+    .find(r => r.name === 'Caption generation');
+  assert.equal(ready.ok, true);
+  assert.equal(ready.blocking, false);
+  const noSubs = preflightPython(options([...RUNTIME_IMPORTS, 'mlx_whisper']))
+    .find(r => r.name === 'Caption generation');
+  assert.equal(noSubs.ok, false);
+  assert.match(noSubs.fix, /pip install pysubs2/);
 });
 
 test('the real interpreter on this machine satisfies the contract preflight reports', () => {

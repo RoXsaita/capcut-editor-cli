@@ -633,6 +633,19 @@ export function shq(value) {
 }
 
 /**
+ * The first build never writes captions, so its gate always FAILs on `captions` and the exit
+ * code 1 reads like a broken build. When that is the ONLY failure (and there is no caption
+ * layer, not a double one), say the next command instead of leaving the agent to guess.
+ * The exit code stays 1: the draft is not ready to post until the captions are on it.
+ */
+export function buildNextHint(gate, project) {
+  if (!gate || gate.verdict !== 'FAIL' || !Array.isArray(gate.checks)) return null;
+  const failing = gate.checks.filter(c => !c.ok && c.level === 'FAIL');
+  if (failing.length !== 1 || failing[0].id !== 'captions' || !/^no captions\b/.test(String(failing[0].message || ''))) return null;
+  return `next: capcutctl captions --project ${shq(project ?? 'NAME')}`;
+}
+
+/**
  * Where command output goes. A test that wants to read it must set this rather than
  * monkeypatching `process.stdout.write`: under Node 20's test runner that hook also carries the
  * runner's OWN binary reporting protocol, so a test capturing it got the protocol bytes mixed
@@ -2206,7 +2219,8 @@ export async function main(argv, dependencies = {}) {
   }
   if (command === 'build') {
     if (!args.edit) throw new CapcutError('build needs --edit edit.json (see the capcut-editing skill for the format).', { code: 'PLAN_MISSING', exitCode: 2 });
-    const { readEditPlan, runBuild } = await import('./build.mjs');
+    // `dependencies.build` stands in for the build pipeline in tests of this output.
+    const { readEditPlan, runBuild } = dependencies.build || await import('./build.mjs');
     const plan = readEditPlan(args.edit);
     if (!args.dryRun) assertCapcutClosed({ forceRunning: Boolean(args.forceRunning) });
     const result = await runBuild(projectDir, plan, { dryRun: Boolean(args.dryRun), force: Boolean(args.force),
@@ -2218,7 +2232,8 @@ export async function main(argv, dependencies = {}) {
     // A skipped stage is named before the dump, where it cannot scroll past unread.
     const skips = (result.skipped || []).map(s => `\nSKIPPED ${s.stage}${s.code ? ` (${s.code})` : ''}: ${s.reason}`).join('');
     const stages = result.stages ? `\n${JSON.stringify(result.stages, null, 2)}` : '';
-    return print(`${head}${skips}${stages}\n${gateText(result.gate)}`);
+    const next = buildNextHint(result.gate, args.project);
+    return print(`${head}${skips}${stages}\n${gateText(result.gate)}${next ? `\n${next}` : ''}`);
   }
   if (command === 'mograph') {
     const sub = args._[1];

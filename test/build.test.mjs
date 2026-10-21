@@ -223,3 +223,45 @@ test('shots re-apply after a restore to before them, without stacking', async ()
   assert.equal((await runBuild(dir, plan, { forceRunning: true, force: true })).stages.shots.applied, 1);
   assert.equal(brolls(), 1);
 });
+
+test('a first build that fails only on captions names the next command and still exits 1', async t => {
+  const { main, setOutput, buildNextHint } = await import('../src/cli.mjs');
+  const dir = buildProject();
+  const edit = path.join(path.dirname(dir), 'edit.json');
+  fs.writeFileSync(edit, JSON.stringify({ version: 1, logos: false, layout: false, camera: { stress: false },
+    sound: { seams: false, loudness: false }, endcard: {} }));
+  let stdout = '';
+  t.after(setOutput(chunk => { stdout += String(chunk); return true; }));
+  const previous = process.exitCode;
+  t.after(() => { process.exitCode = previous; });
+
+  // The real fixture fails more than captions (it is a static full face): no hint, still 1.
+  await main(['build', '--project', dir, '--edit', edit, '--force-running']);
+  assert.equal(process.exitCode, 1);
+  assert.match(stdout, /FAIL captions/);
+  assert.doesNotMatch(stdout, /^next:/m, 'other failures are real: no "just add captions" hint');
+
+  // The same build with every other check passing: captions is the only thing left.
+  const real = await runBuild(dir, normalizePlan(JSON.parse(fs.readFileSync(edit, 'utf8'))), { forceRunning: true });
+  const onlyCaptions = { ...real.gate, verdict: 'FAIL',
+    checks: real.gate.checks.map(c => (c.id === 'captions' ? c : { ...c, ok: true })) };
+  assert.ok(onlyCaptions.checks.some(c => c.id === 'captions' && !c.ok && /^no captions/.test(c.message)));
+  const stub = { readEditPlan: file => JSON.parse(fs.readFileSync(file, 'utf8')),
+    runBuild: async () => ({ hash: 'stub', gate: onlyCaptions }) };
+  stdout = '';
+  process.exitCode = undefined;
+  await main(['build', '--project', dir, '--edit', edit, '--force-running'], { build: stub });
+  assert.equal(process.exitCode, 1, 'the draft is not ready to post: the exit code does not change');
+  assert.match(stdout, new RegExp(`^next: capcutctl captions --project '${dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'$`, 'm'));
+
+  stdout = '';
+  await main(['build', '--project', dir, '--edit', edit, '--force-running', '--json'], { build: stub });
+  assert.doesNotMatch(stdout, /next:/, '--json output is unchanged');
+
+  // Double captions is a different failure with its own fix.
+  const doubled = { ...onlyCaptions, checks: onlyCaptions.checks.map(c => (c.id === 'captions'
+    ? { ...c, message: '2 caption layers (a, b): double captions — keep one' } : c)) };
+  assert.equal(buildNextHint(doubled, 'P'), null);
+  assert.equal(buildNextHint({ ...onlyCaptions, verdict: 'PASS' }, 'P'), null);
+  assert.equal(buildNextHint(onlyCaptions, 'Plain'), 'next: capcutctl captions --project Plain');
+});

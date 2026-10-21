@@ -34,7 +34,7 @@ import { opMographPlace, opMographPrune, isFollowEnding } from './mograph-place.
 import { opAnimation } from './animations.mjs';
 import { opVariantHook } from './variant.mjs';
 import { isPreframed } from './origin.mjs';
-import { userDir } from './profile.mjs';
+import { profileValue as readProfileValue, userDir } from './profile.mjs';
 import { preflightPython } from './python.mjs';
 import { LEDGER_RELATIVE, clampOverruns, nextLedger, readLedgerFile, readMetaRecord, restoreMeta } from './repair.mjs';
 
@@ -1548,6 +1548,88 @@ export function preflightMographBrowser() {
   return { ok: false, detail: 'Playwright not found; mograph graphics cannot render' };
 }
 
+/**
+ * The studio background: the profile's clear room plate and, when the profile names one, the
+ * pipeline that composites it. All informational — an unset plate is a choice (the room is
+ * left as shot), and a broken pipeline only matters to the next A-roll that runs it. Nothing
+ * here installs or downloads anything; readers are injected so tests never touch a real profile.
+ */
+export function preflightBackground({
+  profileValue = readProfileValue,
+  exists = file => fs.existsSync(file),
+  isFile = file => { try { return fs.statSync(file).isFile(); } catch { return false; } },
+  commandRunner = (command, args) => runPreflightCommand(command, args),
+  interpreter = null,
+} = {}) {
+  const rows = [];
+  const row = (name, ok, detail, fix = null) => rows.push({ name, ok: Boolean(ok), detail, fix });
+  const value = key => profileValue(`brand.background.${key}`, null);
+  let plate;
+  try {
+    plate = value('plate');
+  } catch (error) {
+    row('background plate', false, `could not read the profile: ${error.message}`,
+      'fix the profile (`capcutctl profile show`), then retry');
+    return rows;
+  }
+  if (!plate) {
+    row('background plate', true, 'no brand.background.plate in the profile: the room is left as shot');
+  } else {
+    const file = expandHome(String(plate));
+    if (!exists(file)) {
+      row('background plate', false, `brand.background.plate does not exist: ${file}`,
+        'point brand.background.plate at the clear room image, or remove it to leave the room as shot');
+    } else if (!isFile(file)) {
+      row('background plate', false, `brand.background.plate is not a file: ${file}`,
+        'point brand.background.plate at an image file, not a folder');
+    } else {
+      row('background plate', true, file);
+    }
+  }
+
+  const pipeline = value('pipeline');
+  if (pipeline) {
+    const file = expandHome(String(pipeline));
+    row('background pipeline', exists(file), exists(file) ? file : `brand.background.pipeline does not exist: ${file}`,
+      exists(file) ? null : 'restore the background pipeline, or remove brand.background.pipeline from the profile');
+  }
+
+  const listOf = raw => (Array.isArray(raw) ? raw : raw ? [raw] : []).map(String).filter(Boolean);
+  const requires = listOf(value('requires'));
+  if (requires.length) {
+    const python = value('python') ? expandHome(String(value('python'))) : interpreter;
+    const bad = requires.filter(name => !/^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/.test(name));
+    if (bad.length) {
+      row('background pipeline imports', false, `not module names: ${bad.join(', ')}`,
+        'list import names in brand.background.requires (for example torch)');
+    } else if (!python) {
+      row('background pipeline imports', false, 'no interpreter to check: set brand.background.python',
+        'set brand.background.python to the interpreter the pipeline runs under');
+    } else {
+      let probe;
+      try { probe = commandRunner(python, ['-c', `import ${requires.join(', ')}`]); }
+      catch (error) { probe = { ok: false, detail: `could not start (${error.code || error.message})` }; }
+      row('background pipeline imports', probe?.ok,
+        probe?.ok ? `${python} imports ${requires.join(', ')}` : `${python} cannot import ${requires.join(', ')}: ${probe?.detail || 'probe failed'}`,
+        probe?.ok ? null : `install ${requires.join(', ')} into ${python} (preflight installs nothing)`);
+    }
+  } else if (value('python')) {
+    const python = expandHome(String(value('python')));
+    row('background pipeline imports', exists(python), exists(python) ? `${python} (no brand.background.requires to check)`
+      : `brand.background.python does not exist: ${python}`,
+    exists(python) ? null : 'point brand.background.python at the pipeline interpreter');
+  }
+
+  const weights = listOf(value('weights')).map(expandHome);
+  if (weights.length) {
+    const missing = weights.filter(file => !exists(file));
+    row('background pipeline weights', !missing.length,
+      missing.length ? `missing: ${missing.join(', ')}` : `${weights.length} weight file(s) present`,
+      missing.length ? 'download the model weights the pipeline names, or fix brand.background.weights' : null);
+  }
+  return rows;
+}
+
 export function preflight({
   root = DEFAULT_ROOT,
   binaryCheck = name => hasBinary(name, { refresh: true }),
@@ -1557,6 +1639,7 @@ export function preflight({
   pythonCheck = preflightPython,
   minimumFreeBytes = process.env.CAPCUTCTL_MIN_FREE_BYTES || PREFLIGHT_MIN_FREE_BYTES,
   mographCheck = preflightMographBrowser,
+  backgroundCheck = preflightBackground,
 } = {}) {
   const checks = [];
   const add = (name, ok, detail, fix = null, { blocking = true, ...extra } = {}) => checks.push({
@@ -1667,6 +1750,15 @@ export function preflight({
   // OCR is deliberately non-blocking: frame QA remains useful without `--ocr`; the command
   // itself reports the same build instruction when a user requests OCR specifically.
   add('OCR tooling', ocr.ok, ocr.detail, ocr.fix, { blocking: false });
+
+  // The room plate and its pipeline: reported, never blocking (an unset plate is a choice).
+  let backgroundRows;
+  try {
+    backgroundRows = backgroundCheck({ commandRunner: command, interpreter: resolvedInterpreter });
+  } catch (error) {
+    backgroundRows = [{ name: 'background plate', ok: false, detail: `could not check: ${error.message}` }];
+  }
+  for (const { name, ok, detail, fix } of backgroundRows || []) add(name, ok, detail, fix, { blocking: false });
 
   const assets = ['suheilai-rect-indigo-1080x1920 (2).png', 'suheilai-circle-white-1080x1920.png'];
   for (const basename of assets) {
@@ -3249,14 +3341,32 @@ export function createSnapshot(projectDir, label = 'snapshot') {
       ...(!fs.existsSync(buildState) ? [BUILD_STATE_RELATIVE] : [])
     ]
   };
+  // A draft keeps ~6 byte-identical mirrors (root + timeline draft_info, the backups), so a
+  // snapshot hardlinks every later copy to the first one it wrote: same layout, same manifest,
+  // a fraction of the disk. Only files written into THIS snapshot are link targets, never a live
+  // project file, and snapshot files are never rewritten in place.
+  const written = new Map();
   for (const file of snapshotFiles(projectDir)) {
     const relative = path.relative(projectDir, file);
     const destination = path.join(root, relative);
     fs.mkdirSync(path.dirname(destination), { recursive: true });
     // One read: the copy and its digest are the same bytes, even if CapCut writes mid-snapshot.
     const bytes = fs.readFileSync(file);
-    fs.writeFileSync(destination, bytes);
-    manifest.files.push({ relative, sha256: sha256(bytes) });
+    const digest = sha256(bytes);
+    // A reused folder (same label within a millisecond) may already hold a linked file:
+    // writing through it would change its twin, so replace the name, never the inode.
+    fs.rmSync(destination, { force: true });
+    let linked = false;
+    if (written.has(digest)) {
+      // EXDEV, EPERM, ENOTSUP, EMLINK, or a network volume's own refusal: a plain copy is
+      // always a correct snapshot, so any link failure falls back to writing the bytes.
+      try { fs.linkSync(written.get(digest), destination); linked = true; } catch { /* write below */ }
+    }
+    if (!linked) {
+      fs.writeFileSync(destination, bytes);
+      if (!written.has(digest)) written.set(digest, destination);
+    }
+    manifest.files.push({ relative, sha256: digest });
   }
   fs.writeFileSync(path.join(root, 'manifest.json'), stableJson(manifest));
   return root;

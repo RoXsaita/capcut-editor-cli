@@ -1379,6 +1379,9 @@ test('a failing rescue restore still runs the journal and reports both errors', 
   const snapFile = path.join(snapshot, 'draft_info.json');
   const broken = readJson(snapFile);
   broken.tracks[0].segments[0].material_id = 'MISSING';
+  // Snapshot mirrors are hardlinked: replace the name, or the edit lands in every twin too
+  // (which restore's checksum then refuses, as it should).
+  fs.rmSync(snapFile);
   fs.writeFileSync(snapFile, stableJson(broken));
   const manifest = readJson(path.join(snapshot, 'manifest.json'));
   manifest.files.find(item => item.relative === 'draft_info.json').sha256 = sha256(fs.readFileSync(snapFile));
@@ -1624,4 +1627,54 @@ test('capcutctl split --dry-run changes nothing', async t => {
   const content = after.tracks.find(track => track.name === 'content');
   assert.equal(content.segments.length, 3);
   assert.deepEqual(content.segments.map(s => s.target_timerange.start), [0, 2_000_000, 4_000_000]);
+});
+
+test('a snapshot hardlinks identical mirrors and still restores, recovers metadata and diffs', async () => {
+  const { readMetaRecord, LEDGER_RELATIVE } = await import('../src/repair.mjs');
+  const { summarizeProject } = await import('../src/diff.mjs');
+  const fx = fixture({ drift: false });
+  // capcutctl metadata CapCut strips on save: the snapshot is where readMetaRecord finds it.
+  for (const dir of [fx.project, fx.timelineDir]) {
+    const doc = readJson(path.join(dir, 'draft_info.json'));
+    doc.materials.videos[0].capcutctl_origin = 'generated';
+    for (const name of LIVE_FILE_NAMES) fs.writeFileSync(path.join(dir, name), stableJson(doc));
+  }
+  const applied = applySpec(fx.project, { version: 1, name: 'volume',
+    operations: [{ op: 'segment.patch', selector: { id: 'SEGMENT-ONE' }, set: { volume: 0.5 } }] }, { forceRunning: true });
+  const after = createSnapshot(fx.project, 'after');
+
+  for (const snapshot of [applied.snapshot, after]) {
+    for (const group of [snapshot, path.join(snapshot, 'Timelines', 'TIMELINE-ONE')]) {
+      const [first, ...rest] = LIVE_FILE_NAMES.map(name => fs.statSync(path.join(group, name)));
+      assert.ok(first.nlink >= LIVE_FILE_NAMES.length, `${group}: mirrors share one inode`);
+      for (const stat of rest) assert.equal(stat.ino, first.ino);
+    }
+    // Distinct documents stay distinct files.
+    assert.notEqual(fs.statSync(path.join(snapshot, 'draft_info.json')).ino,
+      fs.statSync(path.join(snapshot, 'Timelines', 'TIMELINE-ONE', 'draft_info.json')).ino);
+    const manifest = readJson(path.join(snapshot, 'manifest.json'));
+    for (const item of manifest.files) {
+      assert.equal(sha256(fs.readFileSync(path.join(snapshot, item.relative))), item.sha256);
+    }
+  }
+  for (const name of LIVE_FILE_NAMES) {
+    assert.equal(fs.statSync(path.join(fx.project, name)).nlink, 1, 'live project files are never link targets');
+  }
+  // diff --snapshot reads a linked snapshot like any other.
+  assert.deepEqual(summarizeProject(after), summarizeProject(fx.project));
+
+  fs.rmSync(path.join(fx.project, LEDGER_RELATIVE), { force: true });
+  for (const dir of [fx.project, fx.timelineDir]) {
+    const doc = readJson(path.join(dir, 'draft_info.json'));
+    delete doc.materials.videos[0].capcutctl_origin;
+    for (const name of LIVE_FILE_NAMES) fs.writeFileSync(path.join(dir, name), stableJson(doc));
+  }
+  assert.equal(readMetaRecord(fx.project).materials['VIDEO-ONE']?.fields.capcutctl_origin, 'generated');
+
+  restoreProjectSnapshot(fx.project, applied.snapshot, { forceRunning: true });
+  assert.equal(readJson(path.join(fx.project, 'draft_info.json')).tracks[0].segments[0].volume, 1);
+  assert.equal(readJson(path.join(fx.timelineDir, 'template-2.tmp')).tracks[0].segments[0].volume, 1);
+  // Restoring rewrote the live files; the snapshot's linked copies are untouched.
+  assert.equal(readJson(path.join(applied.snapshot, 'draft_info.json.bak')).tracks[0].segments[0].volume, 1);
+  assert.equal(readJson(path.join(after, 'template-2.tmp')).tracks[0].segments[0].volume, 0.5);
 });
