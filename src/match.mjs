@@ -19,6 +19,7 @@ import { lintBroll, momentsFromSidecar, isBrollSegment } from './broll-lint.mjs'
 import { peakUpscale, UPSCALE_REFUSE } from './crispness.mjs';
 import { sourceToTimeline } from './signature.mjs';
 import { loadTranscript } from './stress.mjs';
+import { principalTrack } from './polish.mjs';
 import { pythonForTool } from './python.mjs';
 
 const r3 = n => Math.round(n * 1000) / 1000;
@@ -706,21 +707,24 @@ export function loadBoxesAtTimes(media, times, { cacheDir } = {}) {
   }
 }
 
-function principalMediaPath(doc, projectDir) {
-  try {
-    const videos = new Map((doc.materials?.videos || []).map(material => [material.id, material]));
-    for (const track of doc.tracks || []) {
-      if (track.type !== 'video' || track.flag === 0) continue;
-      for (const segment of track.segments || []) {
-        const material = videos.get(segment.material_id);
-        if (!material?.path) continue;
-        if (material.type && material.type !== 'video') continue;
-        if (isBrollSegment(segment, material)) continue;
-        return resolveMediaPath(material.path, projectDir) || material.path;
-      }
+/** The talking head's media and material: the principal track, never a screen recording. */
+function principalMedia(doc, projectDir) {
+  const videos = new Map((doc.materials?.videos || []).map(material => [material.id, material]));
+  let tracks;
+  try { tracks = [principalTrack(doc).track]; } catch {
+    // No gapless principal: the first non-B-roll video, as before.
+    tracks = (doc.tracks || []).filter(track => track.type === 'video' && track.flag !== 0);
+  }
+  for (const track of tracks) {
+    for (const segment of track.segments || []) {
+      const material = videos.get(segment.material_id);
+      if (!material?.path) continue;
+      if (material.type && material.type !== 'video') continue;
+      if (isBrollSegment(segment, material)) continue;
+      return { path: resolveMediaPath(material.path, projectDir) || material.path, material };
     }
-  } catch { /* no principal */ }
-  return null;
+  }
+  return { path: null, material: null };
 }
 
 /**
@@ -739,8 +743,10 @@ export function loadMatchInputs({
       clicks: clicks || [],
     };
   }
-  const facePath = face || (doc ? principalMediaPath(doc, projectDir) : null);
-  const loadedTranscript = loadTranscript(facePath, { cacheDir, transcript, words });
+  const principal = !face && doc ? principalMedia(doc, projectDir) : { path: null, material: null };
+  const facePath = face || principal.path;
+  const loadedTranscript = loadTranscript(facePath, { cacheDir, transcript, words,
+    material: principal.material, projectDir });
   if (!loadedTranscript) {
     throw new CapcutError(
       'match needs a Whisper transcript for the talking head. Pass --face FILE or inject words.',

@@ -28,7 +28,8 @@ import {
   CapcutError, stableJson, applySpec, loadProject, loadWorkingDoc, readJson, resolveMediaPath, allSegments, BUILD_STATE_RELATIVE,
   repairProject, restoreProjectSnapshot,
 } from './core.mjs';
-import { findWordsFile, resolveAnchors } from './anchors.mjs';
+import { findWords, resolveAnchors } from './anchors.mjs';
+import { shiftTranscript } from './video-index.mjs';
 import { layoutAt } from './mograph-place.mjs';
 import { safeZoneViolations } from './mograph-geometry.mjs';
 import { loadProfile, applyStyle } from './profile.mjs';
@@ -140,18 +141,18 @@ function templateMotion(id, templates) {
 }
 
 /** Brands heard in the cut: art → native logo pop; no art → brand-chip graphic (when that template exists). */
-async function planLogos(plan, doc, wordsFile, templates) {
+async function planLogos(plan, doc, wordsFile, templates, wordsOffset = 0) {
   if (!plan.logos) return { logos: [], chips: [] };
   const sig = await import('./signature.mjs');
   const mapper = sig.sourceToTimeline(doc);
   let hits = [];
   if (plan.logos === 'auto') {
     if (!wordsFile) return { logos: [], chips: [], skipped: 'no word-level transcript for brand detection' };
-    hits = sig.detectBrands(readJson(wordsFile), mapper);
+    hits = sig.detectBrands(shiftTranscript(readJson(wordsFile), wordsOffset), mapper);
   } else if (Array.isArray(plan.logos)) {
     const brands = sig.brandPresets().brands;
     const anchored = resolveAnchors(plan.logos.map((l, i) => ({ ...l, id: l.brand || l.name || `logo-${i + 1}` })),
-      { doc, wordsFile });
+      { doc, wordsFile, wordsOffset });
     hits = anchored.map(l => ({ brand: l.brand || l.name || path.basename(l.logo || '').replace(/\.[^.]+$/, ''),
       at: l.at, logo: l.logo ? path.resolve(l.logo) : brands[l.brand]?.logo || null }));
     const noTime = hits.filter(h => h.at == null);
@@ -245,7 +246,7 @@ function writeSidecars(graphics) {
  * What would refuse later, found before the first write: the music brief / Gemini key and the
  * speech index the duck keys from. A real build throws; a dry run reports it in its stages.
  */
-async function preflight(projectDir, plan, doc, profile, wordsFile, dryRun) {
+async function preflight(projectDir, plan, doc, profile, wordsOps, dryRun) {
   const found = {};
   if (plan.sound.music) {
     const { musicPreflight } = await import('./music.mjs');
@@ -261,7 +262,7 @@ async function preflight(projectDir, plan, doc, profile, wordsFile, dryRun) {
   }
   if (plan.sound.music && plan.sound.duck && profile.sound.duck) {
     const { speechSpans } = await import('./duck.mjs');
-    try { speechSpans(doc, wordsFile ? { wordsFile } : {}, { projectDir }); }
+    try { speechSpans(doc, wordsOps, { projectDir }); }
     catch (error) {
       if (!dryRun) throw error;
       found.duck = { code: error.code || null, error: `${error.code || 'DUCK_FAILED'}: ${firstLine(error)}` };
@@ -291,7 +292,12 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
     ({ doc } = loadWorkingDoc(projectDir));
   }
   principalTrack(doc);                                     // refuses a project with no talking head
-  const wordsFile = plan.words || findWordsFile(doc);
+  // The face's transcript, and how far into its indexed original the face file starts (a
+  // derived face: denoised, re-encoded). Every reader below gets the offset with the file.
+  const wordsIndex = plan.words ? { file: plan.words, offset: 0 } : findWords(doc, null, { projectDir });
+  const wordsFile = wordsIndex.file;
+  const wordsOffset = Number(wordsIndex.offset) || 0;
+  const wordsOps = wordsFile ? { wordsFile, ...(wordsOffset ? { wordsOffset } : {}) } : {};
   const templateHashes = Object.fromEntries(templates.map(t => [t.id, mograph.fingerprint(t.id, {}, profile)]));
   if (plan.scenes.length) {
     const { listScenes, sceneFingerprint } = await import('./mograph-scene.mjs');
@@ -318,7 +324,7 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
     stages.reason = 'build outputs missing (restore?)';
   }
 
-  const found = await preflight(projectDir, plan, doc, profile, wordsFile, dryRun);
+  const found = await preflight(projectDir, plan, doc, profile, wordsOps, dryRun);
   if (found.duck) stages.duck = found.duck;
 
   // From the first committed stage on, a throw puts the draft back to before the build.
@@ -369,7 +375,7 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
     if (plan.camera.reframe) cameraOps.push({ op: 'reframe', auto: true });
     if (plan.camera.cursor) cameraOps.push({ op: 'cursor', auto: true });
     if (plan.camera.stress) {
-      const stressOp = { op: 'zoom.stress', ease: profile.camera.ease, ...(wordsFile ? { wordsFile } : {}) };
+      const stressOp = { op: 'zoom.stress', ease: profile.camera.ease, ...wordsOps };
       try {
         applySpec(projectDir, { version: 1, name: 'build-stress-check', operations: [stressOp] }, { ...txn('check'), dryRun: true });
         cameraOps.push(stressOp);
@@ -385,9 +391,9 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
 
     // ---- graphics -----------------------------------------------------------------------------
     failedStage = 'build-graphics';
-    logoPlan = await planLogos(plan, doc, wordsFile, templates);
+    logoPlan = await planLogos(plan, doc, wordsFile, templates, wordsOffset);
     const wanted = [...plan.graphics, ...logoPlan.chips];
-    const anchored = resolveAnchors(wanted, { doc, wordsFile });
+    const anchored = resolveAnchors(wanted, { doc, wordsFile, wordsOffset });
     const lead = profile.tokens.frames.lead / profile.canvas.fps;
     const graphics = anchored.map(g => {
       // Anchored graphics lead their word by the profile's lead frames (the anchor already
@@ -399,7 +405,7 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
       const format = g.format || (templateMotion(g.template, templates) === 'rich' ? 'prores' : 'png-still');
       return { ...g, at: r3(at), params, format };
     });
-    const sceneItems = resolveAnchors(plan.scenes, { doc, wordsFile })
+    const sceneItems = resolveAnchors(plan.scenes, { doc, wordsFile, wordsOffset })
       .map(g => ({ ...g, at: r3(Math.max(0, g.say ? g.at : Number(g.at) + Number(g.offset || 0))) }));
     rendered = [
       ...(await renderGraphics(projectDir, graphics, { dryRun, profile })),
@@ -508,7 +514,7 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
     // Loudness may lower the music (never raise it); the duck then keys from that level.
     if (plan.sound.loudness) soundOps.push({ op: 'loudness', target: profile.sound.loudnessTarget, peak: profile.sound.peak });
     if (plan.sound.music && !dryRun && plan.sound.duck && profile.sound.duck) {
-      soundOps.push({ op: 'music', duck: true, ...(wordsFile ? { wordsFile } : {}) });
+      soundOps.push({ op: 'music', duck: true, ...wordsOps });
     }
     if (soundOps.length) {
       try {

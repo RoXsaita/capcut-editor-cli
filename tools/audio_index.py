@@ -223,6 +223,37 @@ class AudioIndex:
         return "".join(out)
 
 
+def snap_word_starts(idx, words, max_lead=0.7, min_gap=0.05, lead=1/30, min_dur=0.08):
+    """Move Whisper word starts that sit in silence to just before the sound begins.
+
+    Whisper stretches a word's start back into the pause before it, so a one-word caption
+    shows before the word is said. When at least ``min_gap`` of silence follows a start and
+    sound begins within ``max_lead``, the start moves to ``onset - lead`` (never earlier than
+    it was, never closer than ``min_dur`` to the word's end). The original start is kept as
+    ``start_whisper``. Mutates ``words`` in place and returns how many moved.
+    """
+    moved = 0
+    for word in words:
+        try:
+            start, end = float(word["start"]), float(word["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (math.isfinite(start) and math.isfinite(end)) or end <= start:
+            continue
+        if idx.at(start) >= SOFT or idx.head_silence(start, cap=max_lead) < min_gap:
+            continue
+        onset = idx.onset_after(start, cap=max_lead)
+        if onset is None:
+            continue
+        snapped = max(start, onset - lead)
+        if snapped <= start + 1e-9 or snapped > end - min_dur:
+            continue
+        word.setdefault("start_whisper", start)
+        word["start"] = round(snapped, 3)
+        moved += 1
+    return moved
+
+
 def _span_fields(span):
     """Accept the original triples plus dict/metadata-rich spans from the A-roll builder."""
     if isinstance(span, dict):

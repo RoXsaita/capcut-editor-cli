@@ -22,7 +22,7 @@ import { opPunch } from './punch.mjs';
 import { opStressZoom } from './stress.mjs';
 import { opSignature } from './signature.mjs';
 import { opMotion } from './motion.mjs';
-import { opCaptions, opCaptionsRestyle } from './captions.mjs';
+import { opCaptions, opCaptionsReposition, opCaptionsRestyle } from './captions.mjs';
 import {
   opClipAdd, opReplaceMedia, opScaleKeyframe,
   opClipShift, opClipTrim, opClipFade, opLocalizeAll
@@ -2160,7 +2160,7 @@ function opMaskPatch(doc, op) {
 
 export const LOCAL_MEDIA_DIR = path.join('Resources', 'CapcutctlMedia');
 
-const sanitizeName = s => String(s || '').replace(/[^a-zA-Z0-9._-]/g, '_') || 'media';
+export const sanitizeName = s => String(s || '').replace(/[^a-zA-Z0-9._-]/g, '_') || 'media';
 
 export function isLocalMedia(projectDir, mediaPath) {
   if (!projectDir || typeof mediaPath !== 'string' || !mediaPath.trim()) return false;
@@ -3188,6 +3188,7 @@ export function applyOperations(doc, operations, context) {
     else if (op.op === 'motion') result = opMotion(doc, op, context);
     else if (op.op === 'captions') result = opCaptions(doc, op, context);
     else if (op.op === 'captions-restyle') result = opCaptionsRestyle(doc, op, context);
+    else if (op.op === 'captions-reposition') result = opCaptionsReposition(doc, op, context);
     else if (op.op === 'clip.add') result = opClipAdd(doc, op, context);
     else if (op.op === 'replace.media') result = opReplaceMedia(doc, op, context);
     else if (op.op === 'media.localize') result = opLocalizeAll(doc, op, context);
@@ -3935,13 +3936,24 @@ export function applySpec(projectDir, spec, options = {}) {
   })), {
     ...options,
     label: options.label || spec.name || 'apply',
-    extraWrites: () => {
+    extraWrites: ({ working } = {}) => {
       const state = shared?.preserved;
-      if (!state?.file || !state.created || (!state.next && state.contentEnd == null)) return [];
-      const created = clone(state.created);
-      if (state.next) created.preserved = state.next;
-      if (state.contentEnd != null) created.contentEnd = state.contentEnd;
-      return [{ file: state.file, data: stableJson(created) }];
+      if (state?.file && state.created && (state.next || state.contentEnd != null)) {
+        const created = clone(state.created);
+        if (state.next) created.preserved = state.next;
+        if (state.contentEnd != null) created.contentEnd = state.contentEnd;
+        return [{ file: state.file, data: stableJson(created) }];
+      }
+      // created.contentEnd is a snapshot readers fall back on. Any edit can move the end of the
+      // edit (a recut, a CTA moved last, a new ender), so keep it live whenever a parked range
+      // makes it matter. Written only when it differs, so a no-op stays a no-op.
+      const created = createdMetadata(projectDir);
+      if (!created?.preserved) return [];
+      const group = (working || []).find(g => g.name?.startsWith('timeline:')) || working?.[0];
+      if (!group?.doc) return [];
+      const live = contentEndUs(group.doc, projectDir);
+      if (!(live > 0) || created.contentEnd === live) return [];
+      return [{ file: path.join(projectDir, SIDECAR_RELATIVE), data: stableJson({ ...created, contentEnd: live }) }];
     },
   });
   return tx;

@@ -1,9 +1,9 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { allSegments, resolveMediaPath } from './core.mjs';
 import { principalTrack } from './polish.mjs';
 import { sourceToTimeline } from './signature.mjs';
+import { findIndexForMaterial, shiftTranscript } from './video-index.mjs';
 
 export const BROLL_TOO_SHORT = 0.8;
 export const BROLL_IN_MOTION_SCORE = 0.5;
@@ -179,25 +179,22 @@ function transcriptWords(data) {
   return words;
 }
 
-function loadWhisperCache(mediaPath) {
-  if (!mediaPath) return null;
+/**
+ * The talking head's cached transcript, through the shared index: the exact stem (a bare
+ * `startsWith` let `facecam.whisper` answer for face.mp4) and a token that matches the file.
+ */
+function loadWhisperCache(principal, projectDir) {
+  if (!principal?.path) return null;
   // A synthetic or missing path must not pick up an unrelated home-directory transcript.
-  if (!fs.existsSync(mediaPath)) return null;
-  const cache = path.join(os.homedir(), 'Downloads', '.video-index');
-  const stem = path.parse(mediaPath).name;
-  let files = [];
+  if (!fs.existsSync(principal.path)) return null;
+  const hit = findIndexForMaterial(principal.material, projectDir, 'whisper');
+  if (!hit.file) return null;
   try {
-    files = fs.readdirSync(cache).filter(name => name.includes('.whisper') && name.startsWith(stem) && name.endsWith('.json'));
+    const data = JSON.parse(fs.readFileSync(hit.file, 'utf8'));
+    return Array.isArray(data?.segments) ? shiftTranscript(data, hit.offset) : null;
   } catch {
     return null;
   }
-  for (const name of files.sort()) {
-    try {
-      const data = JSON.parse(fs.readFileSync(path.join(cache, name), 'utf8'));
-      if (Array.isArray(data?.segments)) return data;
-    } catch { /* unreadable */ }
-  }
-  return null;
 }
 
 function principalMedia(doc, projectDir) {
@@ -205,8 +202,8 @@ function principalMedia(doc, projectDir) {
     const { track } = principalTrack(doc);
     const seg = (track.segments || []).find(s => s.material_id);
     const material = (doc.materials?.videos || []).find(m => m.id === seg?.material_id);
-    if (isBrollSegment(seg, material)) return null;
-    return resolveMediaPath(material?.path, projectDir);
+    if (!material || isBrollSegment(seg, material)) return null;
+    return { path: resolveMediaPath(material.path, projectDir), material };
   } catch {
     return null;
   }
@@ -254,7 +251,7 @@ export function lintProjectBroll(doc, { projectDir = null, moments, words } = {}
   }
   if (resolvedWords === undefined) {
     const media = principalMedia(doc, projectDir);
-    const transcript = loadWhisperCache(media);
+    const transcript = loadWhisperCache(media, projectDir);
     if (transcript) {
       const map = sourceToTimeline(doc);
       resolvedWords = transcriptWords(transcript).flatMap(word => {

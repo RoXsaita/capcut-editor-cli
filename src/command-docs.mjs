@@ -80,7 +80,7 @@ export const COMMAND_DOCS = Object.freeze({
   endcard: doc('graphics', 'The CTA card on the talking head near the end.', 'capcutctl endcard --project NAME --text Follow --dry-run', true),
   ending: doc('graphics', 'Append a repeatable 3-second avatar/follow ending using private profile data, or render it alone.', 'capcutctl ending --project NAME --dry-run', true),
   wrap: doc('graphics', 'Logos from what is said + the endcard in one pass.', 'capcutctl wrap --project NAME --plan', true),
-  captions: doc('graphics', 'Word-by-word native captions, one style for Arabic and English alike; --restyle fixes an existing track.', 'capcutctl captions --project NAME --dry-run', true),
+  captions: doc('graphics', 'Word-by-word native captions in one style; --replace redoes them, --restyle the look, --reposition the places.', 'capcutctl captions --project NAME --dry-run', true),
   motion: doc('graphics', 'EXPERIMENTAL native text/logo recipes; prefer mograph.', 'capcutctl motion list', true),
   animate: doc('graphics', 'Native CapCut intro/outro animation on a clip.', 'capcutctl animate --project NAME --segments ID --intro fade-in --dry-run', true),
 

@@ -36,13 +36,15 @@ export function planDenoise(doc,op={},context={}) {
     const source=resolveMediaPath(m?.path,context.projectDir)||m?.path;
     if(!source||m.type!=='video') fail('denoise requires the original talking-head video with embedded audio.');
     if(path.basename(path.dirname(source))==='CapcutctlDerived' && /^denoise-[a-f0-9]{20}\.mp4$/.test(path.basename(source))) {skipped.push({id:s.id,reason:'already-denoised'});continue;}
-    if(!sources.has(source))sources.set(source,{source,ids:[],width:m.width,height:m.height,duration:m.duration/1e6});
+    if(!sources.has(source))sources.set(source,{source,material:m,ids:[],width:m.width,height:m.height,duration:m.duration/1e6});
     sources.get(source).ids.push(s.id);
   }
   if(sources.size>1&&(op.energy||op.transcript||op.words||op.wordsFile))fail('Explicit speech indexes require a single source take.');
   const proposed=[];
   for(const row of sources.values()) {
-    const measurement=pauseFloor(loadEnergy10(row.source,op),loadTranscript(row.source,op));
+    const lookup={...op,material:row.material,projectDir:context.projectDir};
+    const measurement=pauseFloor(loadEnergy10(row.source,lookup),loadTranscript(row.source,lookup));
+    delete row.material;
     Object.assign(row,measurement);
     if(row.pauseFloorDb<=-55){skipped.push({...row,reason:'already-quiet'});continue;}
     if(!(row.duration>0)||!Number.isFinite(row.duration))fail('Source duration is missing; cannot preserve the complete take.');

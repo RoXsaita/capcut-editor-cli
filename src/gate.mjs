@@ -17,7 +17,7 @@ import { allSegments, contentEndUs, maxSegmentEndUs, resolveMediaPath } from './
 import { projectAlphaLeaks } from './alpha.mjs';
 import { blurredBackgrounds, captionStyleDrift } from './house-rules.mjs';
 import { coldOpen, cutPoints, pictureChanges, principalTrack } from './polish.mjs';
-import { isCaptionTrack } from './captions.mjs';
+import { captionContext, captionPlacement, isCaptionTrack } from './captions.mjs';
 import { firstPictureProof, finishScorecard } from './finish.mjs';
 import { safeZoneViolations } from './mograph-geometry.mjs';
 import { loadProfile } from './profile.mjs';
@@ -130,26 +130,14 @@ function maxGap(times, from, to) {
  * with the face below the seam: the caption rides the seam, never inside the face half.
  */
 export function captionsOnFace(doc) {
-  let principal = null;
-  try { principal = principalTrack(doc); } catch { return []; }
-  const faces = principal.track.segments || [];
-  // Only a CLI-marked scene is known to cover the face; a transparent overlay (a slab) is not.
-  const videos = new Map((doc.materials?.videos || []).map(m => [m.id, m]));
-  const fullFrame = t => allSegments(doc).some(({ segment }) => videos.get(segment.material_id)?.capcutctl_mograph?.scene
-    && startOf(segment) <= t && t < endOf(segment));
+  const context = captionContext(doc);
+  if (!context) return [];
   const out = [];
   for (const { track, segment } of allSegments(doc)) {
     if (!(track.name || '').startsWith('captions:')) continue;
-    const t = (startOf(segment) + endOf(segment)) / 2;
-    const face = faces.find(f => startOf(f) <= t && t < endOf(f));
-    if (!face || fullFrame(t)) continue;
-    const ty = face.clip?.transform?.y ?? 0, sc = face.clip?.scale?.y ?? 1;
-    const cy = 960 - (segment.clip?.transform?.y ?? 0) * 960;   // caption centre, px from the top
-    let band;
-    if (ty <= -0.2) band = [990, 1920];
-    else if (ty >= 0.2) band = [0, 930];
-    else { const top = 960 - ty * 960 - 960 * sc; band = [top + 0.10 * 1920 * sc, top + 0.75 * 1920 * sc]; }
-    if (cy > band[0] && cy < band[1]) out.push({ t: r2(startOf(segment)), y: segment.clip?.transform?.y ?? 0, layout: ty <= -0.2 ? 'split' : ty >= 0.2 ? 'split-top' : 'full' });
+    const place = captionPlacement(doc, segment, context);
+    if (!place || place.covered || !place.onFace) continue;
+    out.push({ t: r2(startOf(segment)), y: place.y, layout: place.layout });
   }
   return out;
 }
@@ -297,7 +285,7 @@ export function gateReport(doc, { projectDir = null, profile = loadProfile() } =
   const chipClash = graphics.filter(g => g.template === 'brand-chip' && logos.some(t => Math.abs(t - g.t) <= d.brandChipLogoGap));
   const onFace = captionsOnFace(doc).filter(c => c.t < end);
   add('caption-face', 'FAIL', !onFace.length, onFace.length
-    ? `${onFace.length} caption(s) on the face, first at ${onFace.slice(0, 4).map(c => `${c.t}s (${c.layout}, y=${c.y})`).join(', ')}: full face → position 20, split → the seam (50)`
+    ? `${onFace.length} caption(s) on the face, first at ${onFace.slice(0, 4).map(c => `${c.t}s (${c.layout}, y=${c.y})`).join(', ')}: full face → position 20, split → the seam (50) — capcutctl captions --reposition --project NAME`
     : 'captions clear of the face');
   const snaps = openingSnaps(doc).filter(x => x.t < end);
   add('opening-snap', 'FAIL', !snaps.length, snaps.length

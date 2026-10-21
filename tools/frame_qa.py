@@ -1500,14 +1500,37 @@ def _segment_seconds(segment):
     return start, max(0.0, duration), start + max(0.0, duration)
 
 
+CONTENT_RANGE_ENV = "CAPCUTCTL_CONTENT_RANGE_US"
+CONTENT_END_AGREEMENT_S = 0.05
+
+
+def _content_range_override(parked_start, draft_end):
+    """The edit range Node computed (``start,end`` in microseconds), clamped, or None."""
+    raw = os.environ.get(CONTENT_RANGE_ENV)
+    if not raw:
+        return None
+    try:
+        start_us, end_us = (float(part) for part in raw.split(","))
+    except ValueError:
+        return None
+    if not (math.isfinite(start_us) and math.isfinite(end_us)) or end_us <= 0:
+        return None
+    start, end = max(0.0, start_us / 1_000_000), end_us / 1_000_000
+    if parked_start is not None:
+        start, end = min(start, parked_start), min(end, parked_start)
+    if draft_end > 0:
+        end = min(end, draft_end)
+    return (start, max(start, end)) if end > 0 else None
+
+
 def content_edit_range(project_dir, tl):
     """Return the real ``(start, end)`` edit range, excluding parked template clips.
 
-    ``new`` records both ``contentEnd`` and the parked parts-bin window in
-    ``.capcutctl/created.json``.  The sidecar is authoritative because
-    ``draft.duration`` intentionally includes the parked template. For older
-    projects without ``contentEnd``, the maximum eligible segment end before the
-    parked start is used as the fallback.
+    Node owns the range: ``preview``, ``qa --project`` and ``xray --project`` pass the live
+    ``contentEndUs`` in ``CAPCUTCTL_CONTENT_RANGE_US`` and it wins. Run standalone, the
+    maximum eligible segment end before the parked start is primary. ``created.json``'s
+    ``contentEnd`` is a write-time snapshot that goes stale on every later edit (cutting the
+    CTA, or rendering dead parked material), so it is used only when it agrees with the scan.
     """
     created = _read_created(project_dir)
     preserved = created.get("preserved") or {}
@@ -1516,9 +1539,11 @@ def content_edit_range(project_dir, tl):
         parked_start = _draft_seconds(preserved.get("start"))
         if parked_start <= 0:
             parked_start = None
+    draft_end = _draft_seconds(tl.get("duration"))
+    override = _content_range_override(parked_start, draft_end)
+    if override is not None:
+        return override
 
-    recorded_end = created.get("contentEnd")
-    end = _draft_seconds(recorded_end) if recorded_end is not None else 0.0
     eligible_ends = []
     starts = []
     for track in tl.get("tracks") or []:
@@ -1533,13 +1558,15 @@ def content_edit_range(project_dir, tl):
                 eligible_ends.append(min(segment_end, parked_start)
                                      if parked_start is not None else segment_end)
 
-    # The first eligible segment is often a short intro or an overlay. Do not let its end
-    # truncate a legacy project; calculate the maximum first, then apply the parked and draft
-    # clamps below.
-    if recorded_end is None or end <= 0:
-        end = max(eligible_ends, default=0.0)
+    # The first eligible segment is often a short intro or an overlay. Take the maximum, then
+    # apply the parked and draft clamps below.
+    end = max(eligible_ends, default=0.0)
+    recorded_end = created.get("contentEnd")
+    if recorded_end is not None:
+        recorded = _draft_seconds(recorded_end)
+        if recorded > 0 and abs(recorded - end) <= CONTENT_END_AGREEMENT_S:
+            end = recorded
 
-    draft_end = _draft_seconds(tl.get("duration"))
     if parked_start is not None:
         end = min(end, parked_start)
     if end <= 0:

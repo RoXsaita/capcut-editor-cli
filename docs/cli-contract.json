@@ -158,14 +158,17 @@
     },
     "captions": {
       "group": "graphics",
-      "summary": "Word-by-word native captions, one style for Arabic and English alike; --restyle fixes an existing track.",
+      "summary": "Word-by-word native captions in one style; --replace redoes them, --restyle the look, --reposition the places.",
       "example": "capcutctl captions --project NAME --dry-run",
       "options": [
+        "--clamp",
         "--cues",
         "--dry-run",
         "--lang",
         "--name",
         "--project",
+        "--replace",
+        "--reposition",
         "--restyle",
         "--script",
         "--track"

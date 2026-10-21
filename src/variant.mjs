@@ -271,6 +271,16 @@ export async function runVariant(projectDir, { hook, name = null, opening = null
       fs.writeFileSync(metaFile, stableJson({ ...readJson(metaFile), draft_name: target, draft_fold_path: dest,
         draft_root_path: root, draft_id: draftId, tm_draft_create: now, tm_draft_modified: now, tm_draft_removed: 0 }));
     }
+    // The new opening moves the end of the edit; the copied contentEnd describes the original.
+    // Drop it here and the variant transaction records the live value (with a parked range).
+    const createdFile = path.join(dest, '.capcutctl', 'created.json');
+    if (fs.existsSync(createdFile)) {
+      const created = readJson(createdFile);
+      if (created && typeof created === 'object' && 'contentEnd' in created) {
+        delete created.contentEnd;
+        fs.writeFileSync(createdFile, stableJson(created));
+      }
+    }
     const tx = applySpec(dest, { version: 1, name: 'variant', operations: [op] }, { forceRunning: true, label: `variant-${hook.id}` });
     const durationUs = loadProject(dest).groups[0].doc.duration || 0;
     const registration = registerDraft(root, dest, target, draftId, durationUs);

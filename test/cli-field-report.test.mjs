@@ -20,6 +20,8 @@ import {
 } from '../src/cli.mjs';
 import { resetPythonCache, resolvePython } from '../src/python.mjs';
 import { writeCliProject } from './helpers/cli-project.mjs';
+import { buildProject } from './helpers/polish-project.mjs';
+import { applySpec } from '../src/core.mjs';
 
 const stableJson = value => `${JSON.stringify(value, null, 2)}\n`;
 
@@ -375,5 +377,49 @@ test('Python tools call back into THIS capcutctl, and cut forwards --root and --
     assert.ok(call.args.includes('--force-running'));
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test('preview with no --to, and qa --project, forward the live content range to Python', async () => {
+  const project = buildProject();
+  const temp = path.dirname(project);
+  const log = path.join(temp, 'env.json');
+  const fakePython = path.join(temp, 'python3');
+  writeFakePython(fakePython, [
+    "fs.writeFileSync(process.env.CAPCUT_TEST_ARG_LOG, JSON.stringify({ args, range: process.env.CAPCUTCTL_CONTENT_RANGE_US ?? null }));",
+  ]);
+  // A stale snapshot in created.json must not be what Python sees.
+  fs.mkdirSync(path.join(project, '.capcutctl'), { recursive: true });
+  fs.writeFileSync(path.join(project, '.capcutctl', 'created.json'), JSON.stringify({ contentEnd: 5_000_000 }));
+  const bin = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'bin', 'capcutctl.mjs');
+  const env = { ...process.env, CAPCUTCTL_PYTHON: fakePython, CAPCUT_TEST_ARG_LOG: log };
+  try {
+    let run = spawnSync(process.execPath, [bin, 'preview', '--project', project, '--out', path.join(temp, 'p.mp4')], { encoding: 'utf8', env });
+    assert.equal(run.status, 0, run.stderr || run.stdout);
+    let seen = JSON.parse(fs.readFileSync(log, 'utf8'));
+    assert.equal(seen.range, '0,8000000');
+    assert.ok(!seen.args.includes('--to'));
+    run = spawnSync(process.execPath, [bin, 'qa', `--project=${project}`, '--times', '1'], { encoding: 'utf8', env });
+    assert.equal(run.status, 0, run.stderr || run.stdout);
+    seen = JSON.parse(fs.readFileSync(log, 'utf8'));
+    assert.equal(seen.range, '0,8000000');
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test('an apply refreshes a stale created.contentEnd when a parked range exists, and a rerun writes nothing', () => {
+  const project = buildProject();
+  const file = path.join(project, '.capcutctl', 'created.json');
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ contentEnd: 5_000_000, preserved: { start: 20_000_000, end: 30_000_000 } }));
+    const op = { op: 'segment.patch', selector: { id: 'A' }, set: { volume: 0.9 } };
+    applySpec(project, { version: 1, operations: [op] }, { forceRunning: true });
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).contentEnd, 8_000_000);
+    const again = applySpec(project, { version: 1, operations: [op] }, { forceRunning: true });
+    assert.equal(again.committed, false);
+  } finally {
+    fs.rmSync(path.dirname(project), { recursive: true, force: true });
   }
 });

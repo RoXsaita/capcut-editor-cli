@@ -9,8 +9,11 @@ import { pythonForTool } from './python.mjs';
 import {
   CapcutError,
   DEFAULT_ROOT,
+  allSegments,
   applySpec,
   assertCapcutClosed,
+  contentEndUs,
+  createdMetadata,
   createSnapshot,
   doctor,
   inspectProject,
@@ -18,6 +21,7 @@ import {
   loadProject,
   loadWorkingDoc,
   preflight,
+  preservedRange,
   listProjects,
   capcutStatus,
   closeCapcut,
@@ -287,12 +291,22 @@ Usage:
                                 logo.reveal: the measured 0.13s pop with its pop cue. --glow is the
                                 halo pop; --motion RECIPE (experimental native recipe) is opt-in.
   capcutctl captions            --project NAME_OR_PATH [--cues FILE.json] [--script FILE.txt]
-                                [--track NAME|N] [--name ID] [--lang ar] [--restyle] [--dry-run]
+                                [--track NAME|N] [--name ID] [--lang ar] [--replace] [--restyle]
+                                [--reposition] [--clamp] [--dry-run]
                                 generate Staging-style word cues from edited narration; insert editable text layers
                                 --cues imports existing timeline-time cues; --dry-run without cues prints a plan
                                 no paid caption service; native visual parity remains experimental
                                 --restyle puts every existing caption word in the one house style (Changa
                                 ExtraBold, size 28, white, black stroke); text, timing and position are kept
+                                --replace swaps every existing caption layer (captions:*, SRT, CapCut
+                                auto-captions) for the new words in one transaction; without it a second
+                                caption layer refuses with CAPTION_CONFLICT. Redo captions with --replace,
+                                not restore
+                                --reposition re-derives positions after a layout change: only words on the
+                                face move (split → the seam, 50; full face → 20, or the highest of 5–19 that
+                                clears a punched-in face); keyframed words and words under a scene stay.
+                                --clamp also trims a word that straddles a layout cut to the side holding
+                                ≥70% of it (≥80ms left); without it such words are reported
   capcutctl motion list         list native recipes, accepted inputs, and limitations; no project needed
   capcutctl motion [RECIPE]    --project NAME_OR_PATH --text TEXT|--asset FILE|--logo FILE [--name ID]
                                 [--at S] [--duration S] [--scale N] [--x N] [--y N] [--color HEX] [--accent HEX]
@@ -496,6 +510,7 @@ export const BOOLEAN_FLAGS = Object.freeze(new Set([
   'generated', 'allowEphemeral', 'measure', 'apply', 'native', 'noCache', 'noGrade',
   'glow', 'plain', 'clear', 'reset', 'overwrite', 'ease', 'noEase', 'easePosition', 'stress', 'allowBoost', 'peakOnly', 'values',
   'faceDetail', 'replaceExisting', 'replace', 'record', 'allowUnsafe', 'markdown', 'brief', 'check', 'restyle',
+  'reposition', 'clamp',
   'resetRounds', 'noReview', 'noGate', 'fix', 'all',
 ]));
 
@@ -724,7 +739,9 @@ async function loadWorking(projectDir, { withRestored = false } = {}) {
 const r3 = n => Math.round(n * 1000) / 1000;
 const sigRules = sig => sig.sigPresets().rules;
 
-const findWhisperCache = async (doc, principalIndex = null) => (await import('./anchors.mjs')).findWordsFile(doc, principalIndex);
+/** The face's cached transcript: { file, offset } (offset: seconds into the indexed original). */
+const findWhisperCache = async (doc, principalIndex = null, projectDir = null) =>
+  (await import('./anchors.mjs')).findWords(doc, principalIndex, { projectDir });
 
 async function trackIndex(projectDir, spec) {
   if (spec == null || spec === '') return null;
@@ -939,9 +956,47 @@ export function toolEnv(extra = {}) {
   };
 }
 
-function runPython(interpreter, script, args) {
+/**
+ * The edit range a Python reader must use, as `CAPCUTCTL_CONTENT_RANGE_US=start,end`. Node is
+ * the only source of it: created.json's `contentEnd` is a write-time snapshot, so a preview
+ * read from it cut the CTA after a later edit, or rendered dead parked material.
+ */
+export function contentRangeEnv(projectDir) {
+  try {
+    const doc = loadWorkingDoc(projectDir).doc;
+    const end = contentEndUs(doc, projectDir);
+    if (!(end > 0)) return {};
+    const parked = preservedRange(projectDir);
+    const recorded = Number(createdMetadata(projectDir)?.contentStart);
+    let start = Number.isFinite(recorded) ? recorded : Infinity;
+    if (!Number.isFinite(recorded)) {
+      for (const { track, segment } of allSegments(doc)) {
+        const tt = segment.target_timerange;
+        if (track.type !== 'video' || !(tt?.duration > 0)) continue;
+        if (parked && tt.start >= parked.start) continue;
+        start = Math.min(start, tt.start);
+      }
+    }
+    if (!Number.isFinite(start)) start = 0;
+    return { CAPCUTCTL_CONTENT_RANGE_US: `${Math.max(0, Math.min(start, end))},${end}` };
+  } catch {
+    return {};                                   // no readable project: the tool reports it
+  }
+}
+
+/** A value flag in a raw argv (`--flag X` or `--flag=X`), or null. */
+function rawValueArg(argv, flag) {
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === flag) return argv[i + 1] ?? null;
+    if (argv[i].startsWith(`${flag}=`)) return argv[i].slice(flag.length + 1);
+  }
+  return null;
+}
+const rawProjectArg = argv => rawValueArg(argv, '--project');
+
+function runPython(interpreter, script, args, env = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(interpreter, [script, ...args], { stdio: 'inherit', env: toolEnv() });
+    const child = spawn(interpreter, [script, ...args], { stdio: 'inherit', env: toolEnv(env) });
     const forward = signal => { if (child.exitCode == null && child.signalCode == null) child.kill(signal); };
     const onInt = () => forward('SIGINT');
     const onTerm = () => forward('SIGTERM');
@@ -1123,8 +1178,16 @@ export async function main(argv, dependencies = {}) {
     // The argv goes in because some requirements are flag-triggered: find.py only imports
     // frame_qa, and so only needs NumPy and Pillow, when --strip asks for a contact sheet.
     const python = pythonForTool(tool, { argv: argv.slice(1) });
+    // qa and X-ray read the edit range off the draft; hand them the live one.
+    let rangeEnv = {};
+    const projectArg = (command === 'qa' || command === 'xray') ? rawProjectArg(argv) : null;
+    if (projectArg && !argv.includes('--help') && !argv.includes('-h')) {
+      const rawRoot = rawValueArg(argv, '--root');
+      try { rangeEnv = contentRangeEnv(resolveProject(projectArg, rawRoot ? path.resolve(rawRoot) : DEFAULT_ROOT)); }
+      catch { rangeEnv = {}; }
+    }
     let status;
-    try { status = await runPython(python.executable, script, argv.slice(1)); }
+    try { status = await runPython(python.executable, script, argv.slice(1), rangeEnv); }
     catch (error) { throw new CapcutError(`could not run ${script}: ${error.message}`, { exitCode: 2 }); }
     process.exitCode = status;
     return;
@@ -1512,12 +1575,13 @@ export async function main(argv, dependencies = {}) {
     }
     const hook = args.hooks ? readHook(path.resolve(args.hooks), args.hook ?? null)
       : normalizeHook({ src: String(args.src), id: args.hook });
-    const { findWordsFile, loadWords } = await import('./anchors.mjs');
-    let wordsFile = args.words ? path.resolve(args.words) : null;
-    if (!wordsFile) try { wordsFile = findWordsFile(await loadWorking(projectDir)); } catch { wordsFile = null; }
+    const { findWords, loadWords } = await import('./anchors.mjs');
+    const { shiftWords } = await import('./video-index.mjs');
+    let words = { file: args.words ? path.resolve(args.words) : null, offset: 0 };
+    if (!words.file) try { words = findWords(await loadWorking(projectDir), null, { projectDir }); } catch { words = { file: null, offset: 0 }; }
     const result = await runVariant(projectDir, {
       hook, name: args.name || null, opening: args.opening != null ? Number(args.opening) : null,
-      words: wordsFile ? loadWords(wordsFile) : null, language: args.lang || 'ar',
+      words: words.file ? shiftWords(loadWords(words.file), Number(words.offset) || 0) : null, language: args.lang || 'ar',
       dryRun: Boolean(args.dryRun), forceRunning: Boolean(args.forceRunning), gate: !args.noGate,
     });
     if (result.gate?.verdict === 'FAIL') process.exitCode = 1;
@@ -1778,14 +1842,16 @@ export async function main(argv, dependencies = {}) {
       // and map it through the cut to a timeline `at`. --track names the screen clip's lane,
       // not the face, so the principal is found the usual way.
       const doc = await loadWorking(projectDir);
-      const wordsFile = args.words ? path.resolve(String(args.words)) : await findWhisperCache(doc, null);
-      if (!wordsFile) {
+      const words = args.words ? { file: path.resolve(String(args.words)), offset: 0 } : await findWhisperCache(doc, null, projectDir);
+      if (!words.file) {
         throw new CapcutError('punch --word found no word-level transcript for this project; '
-          + 'pass --words FILE (<stem>.whisper-*.json) or --at T.', { code: 'PUNCH_NO_TRANSCRIPT', exitCode: 2 });
+          + 'pass --words FILE (<stem>.whisper-*.json) or --at T.'
+          + (words.reason ? ` (${words.reason})` : ''), { code: 'PUNCH_NO_TRANSCRIPT', exitCode: 2 });
       }
       const { loadWords } = await import('./anchors.mjs');
+      const { shiftWords } = await import('./video-index.mjs');
       const { wordTimelineAt } = await import('./punch.mjs');
-      punchAt = wordTimelineAt(doc, loadWords(wordsFile), String(args.word));
+      punchAt = wordTimelineAt(doc, shiftWords(loadWords(words.file), Number(words.offset) || 0), String(args.word));
     }
     const spec = { version: 1, name: 'punch', operations: [{
       op: 'punch',
@@ -1947,13 +2013,15 @@ export async function main(argv, dependencies = {}) {
         const doc = await loadWorking(projectDir);
         const principal = await trackIndex(projectDir, args.track);
         const mapper = sig.sourceToTimeline(doc, principal);
-        const wordsFile = args.words ? path.resolve(args.words) : await findWhisperCache(doc, principal);
-        if (!wordsFile) {
+        const words = args.words ? { file: path.resolve(args.words), offset: 0 } : await findWhisperCache(doc, principal, projectDir);
+        if (!words.file) {
           throw new CapcutError('no word-level transcript for this project, so a logo cannot be '
-            + 'timed automatically. Pass --at SECONDS, or --words <stem>.whisper-*.json.',
+            + 'timed automatically. Pass --at SECONDS, or --words <stem>.whisper-*.json.'
+            + (words.reason ? ` (${words.reason})` : ''),
             { exitCode: 2 });
         }
-        const tr = readJson(wordsFile);
+        const { shiftTranscript } = await import('./video-index.mjs');
+        const tr = shiftTranscript(readJson(words.file), Number(words.offset) || 0);
         if (!Array.isArray(tr.segments)) {
           throw new CapcutError('--words wants a Whisper transcript with segments[].words, not an '
             + '.aroll.json.', { exitCode: 2 });
@@ -2074,9 +2142,11 @@ export async function main(argv, dependencies = {}) {
       if (args.transcript === true) {
         throw new CapcutError('wrap takes --words FILE (a word-level transcript json), not a bare --transcript.', { exitCode: 2 });
       }
-      const wordsFile = args.words ? path.resolve(args.words) : await findWhisperCache(doc, await trackIndex(projectDir, args.track));
-      if (wordsFile) {
-        const tr = readJson(wordsFile);
+      const words = args.words ? { file: path.resolve(args.words), offset: 0 }
+        : await findWhisperCache(doc, await trackIndex(projectDir, args.track), projectDir);
+      if (words.file) {
+        const { shiftTranscript } = await import('./video-index.mjs');
+        const tr = shiftTranscript(readJson(words.file), Number(words.offset) || 0);
         if (!Array.isArray(tr.segments)) {
           throw new CapcutError(
             'wrap --words wants a Whisper transcript with segments[].words, not an .aroll.json. '
@@ -2162,7 +2232,7 @@ export async function main(argv, dependencies = {}) {
       if (args.say) {
         const { resolveAnchors } = await import('./anchors.mjs');
         const [hit] = resolveAnchors([{ id: args.id || args.template || args.scene, say: args.say, occurrence: num(args, 'occurrence', { min: 1, int: true, def: 1 }) }],
-          { doc, wordsFile: args.words ? path.resolve(args.words) : null });
+          { doc, projectDir, wordsFile: args.words ? path.resolve(args.words) : null });
         at = Math.max(0, hit.at - profile.tokens.frames.lead / profile.canvas.fps);
         anchor = hit.anchor;
       }
@@ -2656,7 +2726,7 @@ export async function main(argv, dependencies = {}) {
     if (args.noGrade) previewArgs.push('--no-grade');
     const python = pythonForTool('frame_qa.py', { argv: previewArgs });
     let status;
-    try { status = await runPython(python.executable, script, previewArgs); }
+    try { status = await runPython(python.executable, script, previewArgs, contentRangeEnv(projectDir)); }
     catch (error) { throw new CapcutError(`could not run ${script}: ${error.message}`, { exitCode: 2 }); }
     process.exitCode = status;
     return;
@@ -2682,6 +2752,8 @@ export async function main(argv, dependencies = {}) {
   }
   if (command === 'captions') {
     if (args.restyle) return print(applySpec(projectDir, {version:1, name:'captions-restyle', operations:[{op:'captions-restyle'}]}, options), true);
+    if (args.reposition) return print(applySpec(projectDir, {version:1, name:'captions-reposition',
+      operations:[{op:'captions-reposition', ...(args.clamp ? {clamp:true} : {})}]}, options), true);
     const { runCaptions } = await import('./captions-run.mjs');
     return print(await runCaptions(projectDir,args,options),true);
   }

@@ -295,6 +295,44 @@ class PreviewAndSamplingTests(unittest.TestCase):
             frame_qa.resolve_preview_range(str(self.project), self.tl, 21, 24), (21.0, 24.0)
         )
 
+    def _created(self, **fields):
+        (self.project / ".capcutctl" / "created.json").write_text(json.dumps(fields))
+
+    def _content(self, end, extra=()):
+        tl = json.loads(json.dumps(self.tl))
+        tl["tracks"] = [{"type": "video", "flag": 0, "segments": []},
+                        {"type": "video", "name": "content", "flag": 2, "segments": [
+                            segment("s0", 0, end), *extra]}]
+        tl["duration"] = 100_000_000
+        return tl
+
+    def test_stale_short_content_end_never_cuts_the_ending(self):
+        self._created(contentEnd=54_533_000, preserved={"start": 80_000_000, "end": 90_000_000})
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(frame_qa.CONTENT_RANGE_ENV, None)
+            self.assertEqual(frame_qa.content_edit_range(str(self.project), self._content(56.9)), (0.0, 56.9))
+
+    def test_stale_long_content_end_never_renders_dead_parked_time(self):
+        self._created(contentEnd=78_100_000, preserved={"start": 80_000_000, "end": 90_000_000})
+        tl = self._content(45, extra=[segment("park", 80, 10, desc="template parts bin")])
+        os.environ.pop(frame_qa.CONTENT_RANGE_ENV, None)
+        self.assertEqual(frame_qa.content_edit_range(str(self.project), tl), (0.0, 45.0))
+
+    def test_recorded_content_end_is_kept_when_it_agrees_with_the_scan(self):
+        self._created(contentEnd=44_980_000, preserved={"start": 80_000_000, "end": 90_000_000})
+        os.environ.pop(frame_qa.CONTENT_RANGE_ENV, None)
+        self.assertEqual(frame_qa.content_edit_range(str(self.project), self._content(45)), (0.0, 44.98))
+
+    def test_node_content_range_env_wins_and_is_clamped(self):
+        self._created(contentEnd=78_100_000, preserved={"start": 80_000_000, "end": 90_000_000})
+        tl = self._content(45)
+        with patch.dict(os.environ, {frame_qa.CONTENT_RANGE_ENV: "0,47250000"}):
+            self.assertEqual(frame_qa.content_edit_range(str(self.project), tl), (0.0, 47.25))
+        with patch.dict(os.environ, {frame_qa.CONTENT_RANGE_ENV: "1000000,95000000"}):
+            self.assertEqual(frame_qa.content_edit_range(str(self.project), tl), (1.0, 80.0))
+        with patch.dict(os.environ, {frame_qa.CONTENT_RANGE_ENV: "garbage"}):
+            self.assertEqual(frame_qa.content_edit_range(str(self.project), tl), (0.0, 45.0))
+
     def test_legacy_preview_range_uses_maximum_eligible_segment_end(self):
         legacy = json.loads(json.dumps(self.tl))
         legacy["tracks"][2]["segments"].append(segment("late-scene", 9, 3))

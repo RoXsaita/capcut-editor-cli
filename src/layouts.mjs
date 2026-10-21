@@ -707,7 +707,9 @@ const round3 = v => Math.round(v * 1000) / 1000;
 const ORIGINAL_PATH_KEYS = [
   'original_path', 'originalPath', 'original_source', 'originalSource',
   'source_path', 'sourcePath', 'source_file', 'sourceFile', 'origin_path', 'originPath',
-  'media_path', 'mediaPath', 'file_path', 'filePath', 'file_Path'
+  'media_path', 'mediaPath', 'file_path', 'filePath', 'file_Path',
+  // A derived file (denoise, blur) has no transcript of its own; its original does.
+  'derived_from_path',
 ];
 const TRANSCRIPT_PATH_KEYS = [
   'transcript_path', 'transcriptPath', 'whisper_path', 'whisperPath',
