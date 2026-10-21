@@ -608,5 +608,9 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
       profile: profileFile ? path.resolve(profileFile) : null, style: plan.style || null };
     fs.writeFileSync(stateFile, stableJson(next));
   }
-  return { dryRun, hash, stages, skipped, gate };
+  // Layout ops that could not lay a room plate (no brand.background.plate) say so; the summary
+  // carries it so a card over black is named before the gate's card-background check.
+  const { specWarnings } = await import('./layouts.mjs');
+  const warnings = [...new Set(Object.values(stages).flatMap(stage => specWarnings(stage)))];
+  return { dryRun, hash, stages, skipped, gate, ...(warnings.length ? { warnings } : {}) };
 }

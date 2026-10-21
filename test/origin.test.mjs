@@ -260,3 +260,43 @@ test('a generated asset bundled with the package is not ephemeral media, even fr
   assert.equal(raises(() => origin.assertOrigin({ file: stray, width: 256, height: 256, generated: true,
     projectDir: '/durable/project' })).code, 'EPHEMERAL_MEDIA');
 });
+
+test('layout.screen makes the recording its own material, not a copy of the face', () => {
+  // The new material used to be cloned from the face: it inherited the face's "derived"
+  // provenance (doctor then blamed the screen recording for the face's lost original), its crop
+  // and its beauty/matting passes.
+  const p = project();
+  const file = path.join(p.dir, 'draft_info.json');
+  const mutate = target => {
+    const doc = readJson(target);
+    const face = doc.materials.videos.find(m => m.id === 'VIDEO');
+    Object.assign(face, {
+      capcutctl_origin: 'derived', derived_from_path: path.join(p.temp, 'gone-original.mp4'),
+      crop: { upper_left_x: 0.1, upper_left_y: 0.1, upper_right_x: 0.9, upper_right_y: 0.1,
+        lower_left_x: 0.1, lower_left_y: 0.9, lower_right_x: 0.9, lower_right_y: 0.9 },
+      crop_scale: 1.4, crop_ratio: '9:16', matting: { flag: 1 }, beauty_face_preset_infos: [{ id: 'x' }],
+    });
+    fs.writeFileSync(target, stableJson(doc));
+  };
+  mutate(file);
+  mutate(path.join(p.dir, 'Timelines', 'TIMELINE-ONE', 'draft_info.json'));
+  applySpec(p.dir, { version: 1, operations: [{
+    op: 'layout.screen', media: p.broll, at: 1, duration: 2,
+    width: 720, height: 1050, mediaDuration: 60_000_000, track: 'screen',
+  }] }, { forceRunning: true });
+  const doc = readJson(file);
+  const recording = doc.tracks.flatMap(t => t.segments).find(s => s.desc === 'layout:screen-recording');
+  const material = doc.materials.videos.find(m => m.id === recording.material_id);
+  assert.equal(material.capcutctl_origin, 'capture');
+  assert.equal(material.derived_from_path, undefined);
+  assert.deepEqual(material.crop, { upper_left_x: 0, upper_left_y: 0, upper_right_x: 1, upper_right_y: 0,
+    lower_left_x: 0, lower_left_y: 1, lower_right_x: 1, lower_right_y: 1 });
+  assert.equal(material.crop_scale, 1);
+  assert.equal(material.crop_ratio, 'free');
+  assert.equal(material.matting, undefined);
+  assert.equal(material.beauty_face_preset_infos, undefined);
+  const map = readJson(path.join(p.dir, '.capcutctl', 'media-map.json'));
+  assert.equal(map.materials[material.id].origin, 'capture');
+  const lost = doctor(p.dir, { checkFiles: false }).issues.filter(i => i.code === 'MEDIA_ORIGIN_LOST');
+  assert.deepEqual(lost.map(i => i.id), ['VIDEO'], 'only the face lost its original');
+});

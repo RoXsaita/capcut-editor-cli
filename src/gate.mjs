@@ -21,6 +21,7 @@ import { captionContext, captionPlacement, isCaptionTrack } from './captions.mjs
 import { firstPictureProof, finishScorecard } from './finish.mjs';
 import { safeZoneViolations } from './mograph-geometry.mjs';
 import { loadProfile } from './profile.mjs';
+import { findCircleScenes } from './layouts.mjs';
 
 const S = us => (us || 0) / 1e6;
 const r2 = n => Math.round(n * 100) / 100;
@@ -147,6 +148,50 @@ export function captionsOnFace(doc) {
  * show the wrong crop. A deliberate punch lands later in the shot; a snap inside the opening
  * 0.6s is a framing bug (a real edit, 2026-10-04: every terminal shot opened mis-cropped).
  */
+/**
+ * Screen cards and circle scenes with nothing behind them. A card or circle leaves most of the
+ * canvas to whatever is below it; under a screen card the face is hidden, so without the room
+ * plate (layout:screen-blur / layout:background-blur on a lower track) that is black. A visible
+ * principal clip under it also fills the frame, and a frame scaled to the whole canvas leaves
+ * nothing to fill. Spans are covered by the union of what is below, so plates cut at A-roll
+ * seams still count.
+ */
+export function cardsOverBlack(doc) {
+  const PLATES = new Set(['layout:screen-blur', 'layout:background-blur']);
+  let principalIndex = -1;
+  try { principalIndex = principalTrack(doc).index; } catch { /* no principal track */ }
+  const rows = allSegments(doc).filter(({ track }) => track.type === 'video');
+  const visible = s => Number(s.clip?.alpha ?? 1) > 0 && s.screen_layout_hidden !== true;
+  const covered = (trackIndex, range) => {
+    const start = range.start, stop = range.start + range.duration;
+    const under = rows.filter(({ segment: s, trackIndex: i }) => i < trackIndex
+      && (PLATES.has(s.desc) || (i === principalIndex && visible(s))))
+      .map(({ segment: s }) => [s.target_timerange.start, s.target_timerange.start + s.target_timerange.duration])
+      .sort((a, b) => a[0] - b[0]);
+    let reach = start;
+    for (const [a, b] of under) {
+      if (a > reach + 20000) break;
+      reach = Math.max(reach, b);
+      if (reach >= stop - 20000) return true;
+    }
+    return reach >= stop - 20000;
+  };
+  const out = [];
+  for (const { segment, trackIndex } of rows) {
+    if (segment.desc !== 'layout:screen-frame') continue;
+    if ((segment.clip?.scale?.x ?? 1) >= 1 && (segment.clip?.scale?.y ?? 1) >= 1) continue;
+    if (!covered(trackIndex, segment.target_timerange)) {
+      out.push({ kind: 'screen card', t: r2(startOf(segment)), end: r2(endOf(segment)) });
+    }
+  }
+  for (const scene of findCircleScenes(doc)) {
+    if (!covered(scene.trackIndex, scene.range)) {
+      out.push({ kind: 'circle', t: r2(S(scene.range.start)), end: r2(S(scene.range.start + scene.range.duration)) });
+    }
+  }
+  return out.sort((a, b) => a.t - b.t);
+}
+
 export function openingSnaps(doc, { within = 0.6, snap = 0.15 } = {}) {
   const out = [];
   for (const { track, segment } of allSegments(doc)) {
@@ -293,8 +338,14 @@ export function gateReport(doc, { projectDir = null, profile = loadProfile() } =
     : 'shots open on their final framing');
   const blurred = blurredBackgrounds(doc).filter(b => b.t < end);
   add('clear-background', 'FAIL', !blurred.length, blurred.length
-    ? `${blurred.length} blurred background(s) at ${blurred.slice(0, 4).map(b => `${b.t}s (${b.kind})`).join(', ')}: never a blurred background — capcutctl layout background --project NAME swaps in the clear room plate${blurred.some(b => b.kind === 'canvas') ? '; set Background to None in CapCut for canvas blurs' : ''}`
+    ? `${blurred.length} blurred background(s) at ${blurred.slice(0, 4).map(b => `${b.t}s (${b.kind})`).join(', ')}: never a blurred background — capcutctl layout background --project NAME swaps in the clear room plate`
     : 'no blurred backgrounds');
+  const bare = cardsOverBlack(doc).filter(c => c.t < end);
+  add('card-background', 'FAIL', !bare.length, bare.length
+    ? `${bare.length} card(s)/circle(s) over black at ${bare.slice(0, 4).map(c => `${c.t}–${c.end}s (${c.kind})`).join(', ')}: `
+      + 'nothing under them but the canvas — set brand.background.plate in your profile, then capcutctl layout background '
+      + '--project NAME (circles) or --at SECONDS (a card)'
+    : 'every card and circle has the room plate under it');
   const drift = captionStyleDrift(doc);
   add('caption-style', 'FAIL', !drift.off.length, drift.off.length
     ? `${drift.off.length} caption word(s) not in the house caption style, first ${drift.off.slice(0, 4).map(w => `"${w.text}"@${w.t}s`).join(', ')}: every word takes ${drift.house} — capcutctl captions --restyle --project NAME`

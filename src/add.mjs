@@ -8,7 +8,7 @@ import {
   segmentsReferencing, privateMaterial,
 } from './core.mjs';
 import { insertOverlayTrack, renumberTracks, recordMediaProvenance, sourceTakeId } from './layouts.mjs';
-import { assertOrigin, stampOrigin } from './origin.mjs';
+import { assertOrigin, neutralVideoMaterial, stampOrigin } from './origin.mjs';
 import { rescaleKeyframes } from './pace.mjs';
 import { principalTrack } from './polish.mjs';
 import { applyFreeCurve } from './easing.mjs';
@@ -300,7 +300,7 @@ function ensureMaterial(doc, op, context) {
   const existing = (doc.materials?.videos || []).find(m => m.path === mediaPath && m.type === kind);
   if (existing && !op.forceNewMaterial) return existing;
   const tpl = (doc.materials?.videos || []).find(m => m.type === 'video') || { type: 'video', crop_scale: 1 };
-  const material = clone(tpl);
+  const material = neutralVideoMaterial(tpl);
   material.id = op.materialId || mint(`mat:${path.basename(mediaPath)}`);
   material.path = mediaPath;
   material.material_name = path.basename(mediaPath);
@@ -748,7 +748,7 @@ export function cameraValue(segment, property, atUs, fallback) {
   return a.values[0] + (end.values[0] - a.values[0]) * (atUs - a.time_offset) / (end.time_offset - a.time_offset);
 }
 
-const CAMERA_PROPERTIES = new Set(['KFTypeScaleX', 'KFTypeScaleY', 'KFTypePositionX', 'KFTypePositionY']);
+export const CAMERA_PROPERTIES = new Set(['KFTypeScaleX', 'KFTypeScaleY', 'KFTypePositionX', 'KFTypePositionY', 'KFTypeRotation']);
 const linkedScale = s => s.uniform_scale?.on ?? ((s.clip?.scale?.x ?? 1) === (s.clip?.scale?.y ?? 1));
 
 /**

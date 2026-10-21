@@ -2104,16 +2104,21 @@ function ensureMaterialArray(doc, kind) {
  * internally consistent, so doctor passed and the drift was invisible — the same failure the
  * op-level __seed was introduced to stop, just one level down.
  */
-function cloneExtraRefs(doc, template, segmentId, seed) {
+export function cloneExtraRefs(doc, template, segmentId, seed, { key = null } = {}) {
   const index = materialIndex(doc);
   const refs = [];
   for (const [i, oldId] of (template.extra_material_refs || []).entries()) {
     const indexed = index.get(oldId);
     if (!indexed) continue;
     const copied = clone(indexed.value);
-    copied.id = seededId(seed, `extra:${i}:${oldId}:${segmentId}`);
+    copied.id = seededId(seed, key ? key(i, oldId) : `extra:${i}:${oldId}:${segmentId}`);
     if (copied.bind_segment_id === template.id || copied.bind_segment_id === '') copied.bind_segment_id = segmentId;
-    ensureMaterialArray(doc, indexed.kind).push(copied);
+    // A seeded id that already exists is this same copy from an earlier run: reuse it rather
+    // than push a second material with one id (CONFLICTING_MATERIAL_ID).
+    if (!index.has(copied.id)) {
+      ensureMaterialArray(doc, indexed.kind).push(copied);
+      index.set(copied.id, { kind: indexed.kind, value: copied });
+    }
     refs.push(copied.id);
   }
   return refs;

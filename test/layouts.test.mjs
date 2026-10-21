@@ -4,7 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { applySpec, readJson, stableJson } from '../src/core.mjs';
+import { applySpec, readJson, stableJson, validateDocument } from '../src/core.mjs';
+import { opScaleKeyframe } from '../src/add.mjs';
+import { buildScreenLayoutSpec } from '../src/cli.mjs';
+import { gateReport } from '../src/gate.mjs';
 import {
   brollFocus,
   buildLayoutSpec,
@@ -14,7 +17,8 @@ import {
   opLayoutApply,
   opLayoutBroll,
   opLayoutScreen,
-  presets
+  presets,
+  screenFrameClip
 } from '../src/layouts.mjs';
 
 /** A two-document project with one plain full-frame subject segment. */
@@ -479,7 +483,9 @@ test('layout broll refuses an unframed landscape/window capture and names layout
   addLandscapeBroll(doc);
   assert.throws(
     () => opLayoutBroll(doc, { selector: { id: 'LANDSCAPE-SEGMENT' }, row: 540 }),
-    error => error.code === 'BROLL_NEEDS_SCREEN_LAYOUT' && /layout screen/.test(error.message)
+    // landscape → the native crop with the scale that fills the half; portrait windows → layout screen
+    error => error.code === 'BROLL_NEEDS_SCREEN_LAYOUT' && /--scale 1\.58/.test(error.message)
+      && /portrait window capture: use layout screen/.test(error.message)
   );
 });
 
@@ -575,6 +581,10 @@ test('layout screen source-times the pip and lays the clear room plate across A-
   principal.source_timerange = { start: 2_000_000, duration: 2_500_000 };
   const second = structuredClone(principal);
   second.id = 'SUBJECT-2';
+  // Each A-roll clip owns its mask and its end transition, as CapCut writes them.
+  doc.materials.common_mask.push({ id: 'NATIVE-MASK-2', resource_type: 'line', config: { centerY: 0.4 } });
+  doc.materials.transitions.push({ id: 'NATIVE-TRANSITION-2', type: 'transition', duration: 200000 });
+  second.extra_material_refs = ['NATIVE-MASK-2', 'NATIVE-TRANSITION-2'];
   second.target_timerange = { start: 2_500_000, duration: 2_500_000 };
   second.source_timerange = { start: 4_500_000, duration: 2_500_000 };
   doc.tracks.find(track => track.id === 'T1').segments.push(second);
@@ -612,10 +622,20 @@ test('layout screen source-times the pip and lays the clear room plate across A-
   ]);
   for (const segment of principalPieces) {
     assert.equal(segment.volume, 1);
-    assert.deepEqual(segment.extra_material_refs, ['NATIVE-MASK', 'NATIVE-TRANSITION']);
     assert.deepEqual(segment.keyframe_refs, ['NATIVE-REF']);
     assert.ok(segment.common_keyframes.some(group => group.property_type === 'KFTypePositionX'));
   }
+  // Every piece has a private mask (a shared one was deleted under its sibling on a layout
+  // switch) and only the last piece of each clip keeps that clip's end transition.
+  const maskOf = segment => segment.extra_material_refs.find(id => doc.materials.common_mask.some(m => m.id === id));
+  const pieceMasks = principalPieces.map(maskOf);
+  assert.ok(pieceMasks.every(Boolean));
+  assert.equal(new Set(pieceMasks).size, 4, 'distinct private mask ids');
+  assert.deepEqual([pieceMasks[0], pieceMasks[2]], ['NATIVE-MASK', 'NATIVE-MASK-2'], 'the first piece keeps the original refs');
+  const transitionsOf = segment => segment.extra_material_refs.filter(id => doc.materials.transitions.some(m => m.id === id));
+  assert.deepEqual(principalPieces.map(transitionsOf), [[], ['NATIVE-TRANSITION'], [], ['NATIVE-TRANSITION-2']]);
+  assert.deepEqual(principalPieces.map(segment => segment.screen_layout_parent_id),
+    ['SUBJECT', 'SUBJECT', 'SUBJECT-2', 'SUBJECT-2']);
 }));
 
 test('twelve sequential screen shots reuse readable base lanes and layout switch restores one principal piece', () => withPlate(() => {
@@ -932,4 +952,291 @@ test('layout.screen runs transactionally across root and timeline mirrors and re
   assert.equal(second.committed, false);
   assert.equal(stableJson(rootDoc(f)), rootBefore);
   assert.equal(stableJson(activeDoc(f)), activeBefore);
+});
+
+// ---- review B3: subject safety, screen frame, blur repair, framing guards ----------------------
+
+const ids = doc => doc.tracks.flatMap(track => track.segments || []).map(segment => segment.id);
+const findSeg = (doc, id) => doc.tracks.flatMap(track => track.segments || []).find(segment => segment.id === id);
+
+test('layout.apply never deletes its own subject, whatever the desc, and never tags it layout:*', () => {
+  for (const name of Object.keys(presets().layouts)) {
+    const f = fixture();
+    const doc = activeDoc(f);
+    subjectOf(doc).desc = '';
+    opLayoutApply(doc, { layout: name, selector: { id: 'SUBJECT' }, __seed: `EMPTY-${name}` });
+    const subject = subjectOf(doc);
+    assert.ok(subject, `${name}: the subject survives an empty desc`);
+    assert.ok(!String(subject.desc || '').startsWith('layout:'), `${name}: desc stays the editor's, got ${subject.desc}`);
+    assert.equal(subject.capcutctl_layout, name);
+    // a second run (the old tag would now be on the subject) still keeps it
+    opLayoutApply(doc, { layout: name, selector: { id: 'SUBJECT' }, __seed: `EMPTY-${name}` });
+    assert.ok(subjectOf(doc), `${name}: re-running keeps the subject`);
+  }
+  const f = fixture();
+  const doc = activeDoc(f);
+  subjectOf(doc).desc = 'layout:circle';   // what an older version wrote
+  opLayoutApply(doc, { layout: 'split-screen', selector: { id: 'SUBJECT' }, __seed: 'OLD-TAG' });
+  assert.ok(subjectOf(doc), 'an old layout:circle tag no longer makes the subject a plate');
+  assert.equal(subjectOf(doc).desc, '');
+  assert.ok(doc.tracks.flatMap(t => t.segments).some(s => s.desc === 'layout:seam-bar'));
+});
+
+test('layout auto with an empty face desc and B-roll below keeps the face and adds the seam bar', () => {
+  const f = fixture();
+  const mutate = dir => {
+    const doc = readJson(path.join(dir, 'draft_info.json'));
+    doc.tracks.flatMap(t => t.segments).find(s => s.id === 'SUBJECT').desc = '';
+    doc.materials.videos.push({ id: 'BROLL', type: 'video', path: path.join(f.temp, 'face.mp4'), duration: 10_000_000, width: 1080, height: 1920 });
+    doc.tracks.splice(1, 0, { id: 'T-BROLL', type: 'video', flag: 2, attribute: 0, name: 'broll', segments: [{
+      id: 'BROLL-SEG', material_id: 'BROLL', extra_material_refs: [], enable_video_mask: false, speed: 1, volume: 0,
+      render_index: 1, desc: 'shot', source_timerange: { start: 0, duration: 5_000_000 },
+      target_timerange: { start: 0, duration: 5_000_000 },
+      clip: { scale: { x: 1, y: 1 }, transform: { x: 0, y: 0 }, rotation: 0, alpha: 1 } }] });
+    writeDoc(dir, doc);
+  };
+  mutate(f.project); mutate(f.timelineDir);
+  const spec = buildLayoutSpec(f.project, 'auto', {});
+  assert.deepEqual(spec.operations.map(o => [o.layout, o.selector.id]), [['split-screen', 'SUBJECT']]);
+  applySpec(f.project, spec, { forceRunning: true });
+  for (const doc of [activeDoc(f), rootDoc(f)]) {
+    assert.ok(subjectOf(doc), 'the face survives layout auto');
+    assert.ok(findSeg(doc, 'BROLL-SEG'), 'the B-roll under it survives');
+    assert.equal(doc.tracks.flatMap(t => t.segments).filter(s => s.desc === 'layout:seam-bar').length, 1);
+  }
+});
+
+test('full-face over a whole screen span hides the recording (alpha 0) and layout screen shows it again', () => {
+  const f = fixture();
+  addScreenRecording(f);
+  const doc = activeDoc(f);
+  opLayoutScreen(doc, { selector: { id: 'RECORDING' }, pipSelector: { id: 'SUBJECT' }, __seed: 'HIDE' });
+  opLayoutApply(doc, { layout: 'full-face', selector: { id: 'SUBJECT' }, __seed: 'HIDE-SWITCH' });
+  const recording = findSeg(doc, 'RECORDING');
+  assert.ok(recording, 'the recording is kept, not deleted');
+  assert.equal(recording.clip.alpha, 0, 'and hidden, so the face is full frame');
+  assert.equal(subjectOf(doc).clip.alpha, 1);
+  assert.equal(screenLayers(doc).length, 0);
+  opLayoutScreen(doc, { selector: { id: 'RECORDING' }, pipSelector: { id: 'SUBJECT' }, __seed: 'HIDE' });
+  const again = findSeg(doc, 'RECORDING');
+  assert.notEqual(again.clip.alpha, 0, 'layout screen shows the recording again');
+  assert.equal(again.screen_layout_recording_hidden, undefined);
+});
+
+test('switching layout clears the old camera keys but keeps alpha, and the same layout keeps them', () => {
+  for (const name of ['circle', 'split-screen']) {
+    const f = fixture();
+    const doc = activeDoc(f);
+    opScaleKeyframe(doc, { selector: { id: 'SUBJECT' }, at: 1, ramp: 0.25, hold: 1, __seed: 'PUSH' });
+    const alpha = { property_type: 'KFTypeAlpha', keyframe_list: [{ time_offset: 2_000_000, values: [1] }] };
+    subjectOf(doc).common_keyframes.push(alpha);
+    assert.ok(subjectOf(doc).common_keyframes.some(k => k.property_type === 'KFTypeScaleX'));
+    const result = opLayoutApply(doc, { layout: name, selector: { id: 'SUBJECT' }, __seed: 'SWITCH' });
+    assert.ok(result.clearedCameraKeys > 0);
+    assert.ok(!subjectOf(doc).common_keyframes.some(k => k.property_type === 'KFTypeScaleX'), `${name}: no stale scale`);
+    assert.deepEqual(subjectOf(doc).common_keyframes, [alpha], `${name}: alpha survives`);
+  }
+  const f = fixture();
+  const doc = activeDoc(f);
+  opLayoutApply(doc, { layout: 'split-screen', selector: { id: 'SUBJECT' }, __seed: 'SPLIT' });
+  opScaleKeyframe(doc, { selector: { id: 'SUBJECT' }, at: 1, focus: [400, 1200, 600, 400], hold: 1, __seed: 'FOCUS' });
+  const keys = structuredClone(subjectOf(doc).common_keyframes);
+  assert.ok(keys.length);
+  const again = opLayoutApply(doc, { layout: 'split-screen', selector: { id: 'SUBJECT' }, __seed: 'SPLIT' });
+  assert.equal(again.clearedCameraKeys, 0);
+  assert.deepEqual(subjectOf(doc).common_keyframes, keys, 'the same layout keeps a deliberate move');
+});
+
+test('the indigo frame is sized from the recording, and a landscape capture is refused', () => {
+  const preset = presets().screenRecording.frame.clip;
+  assert.deepEqual(screenFrameClip(720, 1050), preset, 'the measured rl2 window keeps the preset bytes');
+  const tall = screenFrameClip(1440, 1998);
+  assert.ok(Math.abs(tall.scale.y - 0.7515) < 1e-3, `1440x1998 y ${tall.scale.y}`);
+  assert.ok(Math.abs(tall.scale.x - 1.05) < 1e-9);
+  const phone = screenFrameClip(576, 1024);
+  assert.ok(Math.abs(phone.scale.y - 0.9271) < 1e-3, `576x1024 y ${phone.scale.y}`);
+  assert.ok(Math.abs(phone.scale.x - 1.05) < 1e-9);
+
+  const f = fixture();
+  addScreenRecording(f);
+  const doc = activeDoc(f);
+  Object.assign(doc.materials.videos.find(m => m.id === 'SCREEN'), { width: 1440, height: 1998 });
+  opLayoutScreen(doc, { selector: { id: 'RECORDING' }, pipSelector: { id: 'SUBJECT' }, __seed: 'TALL' });
+  const frame = screenLayers(doc).find(s => s.desc === 'layout:screen-frame');
+  assert.ok(Math.abs(frame.clip.scale.y - 0.7515) < 1e-3);
+
+  const wide = fixture();
+  addScreenRecording(wide);
+  const wideDoc = activeDoc(wide);
+  Object.assign(wideDoc.materials.videos.find(m => m.id === 'SCREEN'), { width: 3456, height: 1998 });
+  const before = stableJson(wideDoc);
+  assert.throws(() => opLayoutScreen(wideDoc, { selector: { id: 'RECORDING' }, pipSelector: { id: 'SUBJECT' } }),
+    error => error.code === 'SCREEN_NEEDS_PORTRAIT_WINDOW' && /layout broll/.test(error.message));
+  assert.equal(stableJson(wideDoc), before, 'refused before any change');
+  const media = path.join(wide.temp, 'wide.mp4');
+  fs.writeFileSync(media, 'wide');
+  assert.throws(() => opLayoutScreen(activeDoc(wide), { media, at: 0, duration: 1, width: 3456, height: 1998,
+    mediaDuration: 2_000_000, localize: false }, { projectDir: wide.project }), { code: 'SCREEN_NEEDS_PORTRAIT_WINDOW' });
+  assert.throws(() => buildScreenLayoutSpec({ media, at: 0, duration: 1, width: 3456, height: 1998 }),
+    { code: 'SCREEN_NEEDS_PORTRAIT_WINDOW' });
+});
+
+test('layout broll guards an explicit scale against the blank band too', () => {
+  assert.throws(() => brollFocus({ sourceWidth: 1920, sourceHeight: 1050, row: 525, scale: 1.2 }),
+    error => error.code === 'BROLL_TOO_SHORT' && /1\.62/.test(error.message));
+  const snapped = brollFocus({ sourceWidth: 1920, sourceHeight: 1050, row: 525, scale: 1.62 });
+  assert.equal(snapped.snapped, true);
+  assert.ok(Math.abs(snapped.scale - 1.6254) < 1e-3, `snapped to ${snapped.scale}`);
+  const exact = brollFocus({ sourceWidth: 1920, sourceHeight: 1050, row: 525, scale: 1.627 });
+  assert.ok(exact.window[0] >= 0 && exact.window[1] <= 1050, `window ${exact.window}`);
+  assert.throws(() => brollFocus({ sourceWidth: 1920, sourceHeight: 1050, row: 525 }),
+    error => error.code === 'BROLL_NEEDS_SCREEN_LAYOUT' && /--scale 1\.62/.test(error.message));
+
+  const f = fixture();
+  const doc = activeDoc(f);
+  addLandscapeBroll(doc);
+  assert.throws(() => opLayoutBroll(doc, { selector: { id: 'LANDSCAPE-SEGMENT' }, row: 540, crop: { top: 0 } }),
+    { code: 'BROLL_NEEDS_SCREEN_LAYOUT' }, 'a crop alone frames nothing, so the guard stays on');
+});
+
+function blurFixture(f, segments, effects, extra = {}) {
+  fs.writeFileSync(path.join(f.temp, 'still.png'), 'png');
+  const mutate = dir => {
+    const doc = readJson(path.join(dir, 'draft_info.json'));
+    const subject = doc.tracks.flatMap(t => t.segments).find(s => s.id === 'SUBJECT');
+    doc.materials.videos.push(
+      { id: 'BROLL', type: 'video', path: path.join(f.temp, 'face.mp4'), duration: 20_000_000, width: 1080, height: 1920 },
+      { id: 'STILL', type: 'photo', path: path.join(f.temp, 'still.png'), duration: 10_800_000_000, width: 1080, height: 1920 });
+    (doc.materials.video_effects ||= []).push(...structuredClone(effects));
+    if (extra.canvases) doc.materials.canvases = structuredClone(extra.canvases);
+    doc.tracks.push({ id: 'T-EXTRA', type: 'video', flag: 2, attribute: 0, name: '',
+      segments: segments.map(s => ({ ...structuredClone(subject), ...structuredClone(s) })) });
+    writeDoc(dir, doc);
+  };
+  mutate(f.project); mutate(f.timelineDir);
+}
+
+test('blur repair matches the effect by id, repairs canvas blurs and stills, and spares brand graphics', () => withPlate(() => {
+  const f = fixture();
+  blurFixture(f, [
+    { id: 'LOCAL-BLUR', material_id: 'BROLL', desc: 'shot', extra_material_refs: ['B2'],
+      target_timerange: { start: 0, duration: 1_000_000 } },
+    { id: 'RES-BLUR', material_id: 'BROLL', desc: 'shot', extra_material_refs: ['B3'],
+      target_timerange: { start: 1_000_000, duration: 1_000_000 } },
+    { id: 'STILL-BLUR', material_id: 'STILL', desc: 'photo', extra_material_refs: ['B4'],
+      target_timerange: { start: 2_000_000, duration: 1_000_000 } },
+    { id: 'LOGO', material_id: 'STILL', desc: 'sig:logo', extra_material_refs: ['B5'],
+      target_timerange: { start: 3_000_000, duration: 1_000_000 } },
+  ], [
+    { id: 'B2', name: '模糊', type: 'video_effect', effect_id: '7399464929830423813' },
+    { id: 'B3', name: '', type: 'video_effect', resource_id: '7399464929830423813' },
+    { id: 'B4', name: 'Blur', type: 'video_effect' },
+    { id: 'B5', name: 'Blur', type: 'video_effect' },
+  ]);
+  // CapCut's own Background → Blur fill on the face
+  const canvas = dir => {
+    const doc = readJson(path.join(dir, 'draft_info.json'));
+    doc.materials.canvases = [{ id: 'C1', type: 'canvas_blur', blur: 0.375, color: '', image: '', album_image: '', image_id: '', image_name: '' }];
+    doc.tracks.flatMap(t => t.segments).find(s => s.id === 'SUBJECT').extra_material_refs = ['C1'];
+    writeDoc(dir, doc);
+  };
+  canvas(f.project); canvas(f.timelineDir);
+
+  const found = blurredBackgrounds(activeDoc(f)).map(b => [b.kind, b.id]).sort();
+  assert.deepEqual(found, [['blurred-media', 'STILL-BLUR'], ['blurred-video', 'LOCAL-BLUR'], ['blurred-video', 'RES-BLUR'], ['canvas', 'SUBJECT']]);
+
+  const result = applySpec(f.project, buildLayoutSpec(f.project, 'background', {}), { forceRunning: true });
+  const op = result.result[0].operations[0];
+  assert.equal(op.unblurred.canvases, 1);
+  assert.ok(op.changed >= 4);
+  for (const doc of [activeDoc(f), rootDoc(f)]) {
+    assert.deepEqual(blurredBackgrounds(doc), []);
+    for (const id of ['LOCAL-BLUR', 'RES-BLUR', 'STILL-BLUR']) assert.deepEqual(findSeg(doc, id).extra_material_refs, [], id);
+    assert.deepEqual(findSeg(doc, 'LOGO').extra_material_refs, ['B5'], 'the logo reveal blurs on purpose');
+    assert.deepEqual(doc.materials.video_effects.map(e => e.id), ['B5'], 'orphaned blurs go, by id as well as name');
+    assert.deepEqual(subjectOf(doc).extra_material_refs, ['C1'], 'the canvas ref is kept');
+    const c1 = doc.materials.canvases.find(c => c.id === 'C1');
+    assert.equal(c1.type, 'canvas_color');
+    assert.equal(c1.blur, 0);
+  }
+}));
+
+test('the gate passes clear-background after layout background', () => withPlate(() => {
+  const f = fixture();
+  blurFixture(f, [{ id: 'LOCAL-BLUR', material_id: 'BROLL', desc: 'shot', extra_material_refs: ['B2'],
+    target_timerange: { start: 0, duration: 1_000_000 } }],
+    [{ id: 'B2', name: '模糊', type: 'video_effect', effect_id: '7399464929830423813' }]);
+  const check = doc => gateReport(doc, { projectDir: f.project }).checks.find(c => c.id === 'clear-background');
+  assert.equal(check(activeDoc(f)).ok, false);
+  assert.doesNotMatch(check(activeDoc(f)).message, /in CapCut/);
+  applySpec(f.project, buildLayoutSpec(f.project, 'background', {}), { forceRunning: true });
+  assert.equal(check(activeDoc(f)).ok, true);
+}));
+
+test('face pieces and pips own their extras, so a later switch cannot orphan a sibling', () => withPlate(() => {
+  const f = fixture();
+  addScreenRecording(f);
+  const doc = activeDoc(f);
+  doc.materials.speeds.push({ id: 'NATIVE-SPEED', type: 'speed', mode: 0, speed: 1, curve_speed: null });
+  doc.materials.common_mask.push({ id: 'NATIVE-MASK', resource_type: 'line', config: { centerY: 0.4 } });
+  subjectOf(doc).extra_material_refs = ['NATIVE-SPEED', 'NATIVE-MASK'];
+  subjectOf(doc).enable_video_mask = false;
+  const recording = findSeg(doc, 'RECORDING');
+  recording.target_timerange = { start: 1_000_000, duration: 2_000_000 };
+  recording.source_timerange = { start: 0, duration: 2_000_000 };
+  const op = { selector: { id: 'RECORDING' }, pipSelector: { id: 'SUBJECT' }, __seed: 'PRIVATE' };
+  opLayoutScreen(doc, op, { projectDir: f.project });
+  const count = d => Object.fromEntries(Object.entries(d.materials).filter(([, v]) => Array.isArray(v)).map(([k, v]) => [k, v.length]));
+  const counts = count(doc);
+  opLayoutScreen(doc, op, { projectDir: f.project });
+  assert.deepEqual(count(doc), counts, 'a rerun keeps material counts stable');
+
+  const pieces = doc.tracks.find(t => t.id === 'T1').segments;
+  assert.equal(pieces.length, 3);
+  const masksBefore = pieces.slice(0, 2).map(p => structuredClone(doc.materials.common_mask.find(m => p.extra_material_refs.includes(m.id))));
+  opLayoutApply(doc, { layout: 'full-face', selector: { id: pieces[2].id }, __seed: 'TAIL' });
+  const issues = validateDocument(doc, { checkFiles: false });
+  assert.ok(!issues.some(i => i.code === 'MISSING_EXTRA_REF'), JSON.stringify(issues.filter(i => i.code === 'MISSING_EXTRA_REF')));
+  assert.ok(!issues.some(i => i.code === 'SHARED_SEGMENT_EXTRA' && i.kind === 'speeds'), 'no speed shared');
+  const masksAfter = pieces.slice(0, 2).map(p => doc.materials.common_mask.find(m => p.extra_material_refs.includes(m.id)));
+  assert.deepEqual(masksAfter, masksBefore, 'sibling masks unchanged');
+  const speedUsers = new Map();
+  for (const segment of doc.tracks.flatMap(t => t.segments)) {
+    for (const ref of segment.extra_material_refs || []) {
+      if (doc.materials.speeds.some(s => s.id === ref)) speedUsers.set(ref, (speedUsers.get(ref) || 0) + 1);
+    }
+  }
+  assert.ok([...speedUsers.values()].every(n => n === 1), `speed ids shared: ${JSON.stringify([...speedUsers])}`);
+}));
+
+test('with no room plate, layout screen and layout background warn; with one they do not', () => {
+  for (const plate of [false, true]) withPlate(() => {
+    const f = fixture();
+    addScreenRecording(f);
+    const doc = activeDoc(f);
+    const screen = opLayoutScreen(doc, { selector: { id: 'RECORDING' }, pipSelector: { id: 'SUBJECT' }, __seed: 'WARN' }, { projectDir: f.project });
+    const g = fixture();
+    applySpec(g.project, buildLayoutSpec(g.project, 'circle', { segments: ['SUBJECT'] }), { forceRunning: true });
+    const result = applySpec(g.project, buildLayoutSpec(g.project, 'background', {}), { forceRunning: true });
+    const background = result.result[0].operations[0];
+    if (plate) {
+      assert.equal(screen.warnings, undefined);
+      assert.equal(background.warnings, undefined);
+    } else {
+      assert.match(screen.warnings[0], /no room plate \(brand\.background\.plate is not set\): 1 span\(s\) over black/);
+      assert.match(background.warnings[0], /no room plate .*: 1 span\(s\) over black/);
+    }
+  }, { plate });
+});
+
+test('the gate fails a screen card with nothing under it and passes it over the room plate', () => {
+  for (const plate of [false, true]) withPlate(() => {
+    const f = fixture();
+    addScreenRecording(f);
+    const doc = activeDoc(f);
+    opLayoutScreen(doc, { selector: { id: 'RECORDING' }, pipSelector: { id: 'SUBJECT' }, __seed: 'CARD' }, { projectDir: f.project });
+    const check = gateReport(doc, { projectDir: f.project }).checks.find(c => c.id === 'card-background');
+    assert.equal(check.ok, plate, check.message);
+    if (!plate) assert.match(check.message, /0–5s \(screen card\).*brand\.background\.plate/);
+  }, { plate });
 });

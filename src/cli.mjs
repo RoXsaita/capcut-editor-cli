@@ -813,6 +813,13 @@ export function buildScreenLayoutSpec({
   if (mediaDuration != null && (!Number.isFinite(Number(mediaDuration)) || Number(mediaDuration) <= 0)) {
     throw new CapcutError('layout screen has an invalid media duration.', { code: 'BAD_MEDIA_DURATION', exitCode: 2 });
   }
+  if (width != null && height != null && Number(width) / Number(height) > 1) {
+    // The indigo card is for portrait window captures; the op refuses too, this is earlier.
+    throw new CapcutError(`layout screen: ${width}x${height} is a landscape capture; the indigo card is for portrait `
+      + 'window captures (rl2 720x1050). Frame a landscape capture natively in the split instead: '
+      + 'capcutctl layout broll --at SECONDS --track N --row R --scale S.',
+      { code: 'SCREEN_NEEDS_PORTRAIT_WINDOW', exitCode: 2, details: { width: Number(width), height: Number(height) } });
+  }
   if (mediaDuration != null && src + srcDur > Number(mediaDuration) / 1e6 + 1e-6) {
     throw new CapcutError('layout screen source window exceeds the probed media duration.', {
       code: 'BAD_SOURCE_WINDOW', exitCode: 2,
@@ -2512,7 +2519,9 @@ export async function main(argv, dependencies = {}) {
         localize: !args.noLocalize,
       });
       if (args.plan) return print(spec, true);
-      return print(applySpec(projectDir, spec, options), true);
+      const result = applySpec(projectDir, spec, options);
+      for (const line of layoutsMod.specWarnings(result)) process.stderr.write(`warning: ${line}\n`);
+      return print(result, true);
     }
     const spec = buildLayoutSpec(projectDir, name, {
       segments: args.segments ? String(args.segments).split(',').map(s => s.trim()).filter(Boolean) : null,
@@ -2525,7 +2534,9 @@ export async function main(argv, dependencies = {}) {
     if (name === 'auto' && !(spec.operations || []).length) {
       return print({ changed: 0, note: 'every principal clip already has the layout its B-roll implies.', audit: spec.__audit }, true);
     }
-    return print(applySpec(projectDir, spec, options), true);
+    const result = applySpec(projectDir, spec, options);
+    for (const line of layoutsMod.specWarnings(result)) process.stderr.write(`warning: ${line}\n`);
+    return print(result, true);
   }
   if (command === 'add') {
     if (!args.media) throw new CapcutError('add requires --media FILE.', { exitCode: 2 });

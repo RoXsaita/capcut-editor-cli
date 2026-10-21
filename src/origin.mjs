@@ -182,3 +182,25 @@ export function stampOrigin(material, note) {
   if (note.preframed) material.capcutctl_preframed = true;
   return material;
 }
+
+/**
+ * A video material template stripped of everything that belongs to the clip it was copied
+ * from. New materials are cloned from the project's first video (the face) to keep CapCut's
+ * field set, and that copied the face's provenance (a screen recording "derived" from the face's
+ * original, doctor then reporting MEDIA_ORIGIN_LOST against the wrong file), its crop and its
+ * beauty/matting/stabilisation passes onto unrelated footage.
+ */
+export function neutralVideoMaterial(template) {
+  const material = structuredClone(template || { type: 'video' });
+  for (const key of Object.keys(material)) {
+    if (key.startsWith('capcutctl_') || key.startsWith('derived_from_') || key.startsWith('beauty_')) delete material[key];
+  }
+  for (const key of ['original_path', 'source_path', 'source_take_id', 'matting', 'video_algorithm', 'stable']) delete material[key];
+  material.crop = {
+    upper_left_x: 0, upper_left_y: 0, upper_right_x: 1, upper_right_y: 0,
+    lower_left_x: 0, lower_left_y: 1, lower_right_x: 1, lower_right_y: 1,
+  };
+  material.crop_scale = 1;
+  material.crop_ratio = 'free';
+  return material;
+}
