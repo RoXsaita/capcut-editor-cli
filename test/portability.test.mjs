@@ -296,6 +296,39 @@ test('new --blank works on a machine with no CapCut drafts at all', async () => 
   assert.deepEqual(empties, [], 'no stray empty overlay lane');
 });
 
+test('add works on a fresh new --blank project, modelled on the bundled skeleton', async () => {
+  // A blank project has no video segment to clone, so the first `add` died NO_TEMPLATE, and
+  // the material fell back to a two-key stub CapCut does not recognise as media.
+  const { createProject } = await import('../src/create.mjs');
+  const { applySpec, readJson, validateDocument } = await import('../src/core.mjs');
+
+  const root = tmpDir('capcutctl-blank-add-');
+  const created = createProject('fresh', { root, blank: true, forceRunning: true });
+  const still = path.join(root, 'card.png');
+  fs.writeFileSync(still, 'png-bytes');
+  applySpec(created.project, { version: 1, name: 'add', operations: [{
+    op: 'clip.add', media: still, at: 0, duration: 3, track: 'content', volume: 0,
+    width: 1080, height: 1920, mediaDuration: 10_800_000_000,
+  }] }, { forceRunning: true });
+
+  const skeleton = loadPreset('blank-draft').videoMaterialTemplate;
+  const doc = readJson(path.join(created.project, 'draft_info.json'));
+  assert.equal(doc.tracks[0].segments.length, 0, 'the main/cover track stays empty');
+  const placed = doc.tracks.filter(t => (t.segments || []).length);
+  assert.equal(placed.length, 1);
+  assert.equal(placed[0].flag, 2, 'the clip landed on an overlay track');
+  assert.equal(placed[0].segments.length, 1);
+  const material = doc.materials.videos.find(m => m.id === placed[0].segments[0].material_id);
+  assert.equal(material.width, 1080);
+  assert.equal(material.height, 1920);
+  // Everything but what neutralVideoMaterial deliberately strips (origin, beauty, matting).
+  const stripped = /^(capcutctl_|derived_from_|beauty_)|^(original_path|source_path|source_take_id|matting|video_algorithm|stable)$/;
+  for (const key of Object.keys(skeleton).filter(k => !stripped.test(k))) {
+    assert.ok(key in material, `material keeps the skeleton key ${key}`);
+  }
+  assert.deepEqual(validateDocument(doc, { checkFiles: false, projectDir: created.project }), []);
+});
+
 test('the bundled draft skeleton carries no trace of the project it was harvested from', () => {
   const raw = fs.readFileSync(presetFile('blank-draft'), 'utf8');
   assert.equal(raw.match(/\/Users\//g), null, 'no home directory');

@@ -36,9 +36,22 @@ const LOOK_KINDS = new Set([
 let SEED = null;
 const mint = key => seededId(SEED, key);
 
+/**
+ * A fresh `new --blank` project has no video segment at all, so the bundled skeleton's
+ * harvested templates stand in (the same ones `new --blank --media` builds its scenes from).
+ * Without them the first `add` on a blank project died NO_TEMPLATE.
+ */
+function blankTemplate(key) {
+  try { return loadPreset('blank-draft')?.[key] || null; } catch { return null; }
+}
+
 function pickSegmentTemplate(doc) {
   const all = (doc.tracks || []).filter(t => t.type === 'video').flatMap(t => t.segments || []);
-  if (!all.length) throw new CapcutError('clip.add: project has no video segment to model on.', { code: 'NO_TEMPLATE', exitCode: 2 });
+  if (!all.length) {
+    const skeleton = blankTemplate('segmentTemplate');
+    if (skeleton) return clone(skeleton);
+    throw new CapcutError('clip.add: project has no video segment to model on.', { code: 'NO_TEMPLATE', exitCode: 2 });
+  }
   const kind = new Map();
   for (const [k, v] of Object.entries(doc.materials || {})) {
     if (Array.isArray(v)) for (const m of v) if (m?.id) kind.set(m.id, k);
@@ -299,7 +312,8 @@ function ensureMaterial(doc, op, context) {
   const kind = STILL_EXT.test(mediaPath) ? 'photo' : 'video';
   const existing = (doc.materials?.videos || []).find(m => m.path === mediaPath && m.type === kind);
   if (existing && !op.forceNewMaterial) return existing;
-  const tpl = (doc.materials?.videos || []).find(m => m.type === 'video') || { type: 'video', crop_scale: 1 };
+  const tpl = (doc.materials?.videos || []).find(m => m.type === 'video')
+    || blankTemplate('videoMaterialTemplate') || { type: 'video', crop_scale: 1 };
   const material = neutralVideoMaterial(tpl);
   material.id = op.materialId || mint(`mat:${path.basename(mediaPath)}`);
   material.path = mediaPath;

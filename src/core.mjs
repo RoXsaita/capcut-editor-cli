@@ -2233,7 +2233,12 @@ function opSegmentRemove(doc, op) {
   if (!requireMatches(found, op, 'segments')) return { changed: 0, skipped: true };
   const selected = op.all ? found : found.slice(0, 1);
   const refIds = new Set();
-  for (const entry of selected) for (const ref of entry.segment.extra_material_refs || []) refIds.add(ref);
+  for (const entry of selected) {
+    for (const ref of entry.segment.extra_material_refs || []) refIds.add(ref);
+    // The main material too: a removed caption left its text material behind for good.
+    // removeUnreferencedMaterials keeps it while any other segment still points at it.
+    if (entry.segment.material_id) refIds.add(entry.segment.material_id);
+  }
   for (const track of doc.tracks || []) {
     track.segments = (track.segments || []).filter(segment => !selected.some(entry => entry.segment === segment));
   }
@@ -2327,12 +2332,89 @@ function fileHash(file) {
  * every material already pointing there played the wrong footage. Size stays the cheap
  * gate; the hash is the answer. Only reached on a name collision, which is rare.
  */
-function sameContents(a, b) {
+function sameContents(a, b, hash = fileHash) {
   if (fs.statSync(a).size !== fs.statSync(b).size) return false;
-  return fileHash(a) === fileHash(b);
+  return hash(a) === hash(b);
 }
 
-export function localizeMedia(projectDir, source, fileName, { dryRun = false } = {}) {
+/**
+ * Sources already proven identical to a destination, keyed by real source path and destination,
+ * with both files' size and mtime at the time. Every op that localizes re-checked a collision by
+ * hashing both sides — a multi-GB take hashed twice per command — though nothing had changed.
+ * A match on all four stats skips the hash; any change (a re-recorded take) falls back to it.
+ */
+const LOCALIZED = new Map();
+const statStamp = file => { const s = fs.statSync(file); return `${s.size}:${s.mtimeMs}`; };
+function localizedKey(source, destination) {
+  let real = source;
+  try { real = fs.realpathSync.native(source); } catch { /* the stat below decides */ }
+  return `${real}\0${destination}`;
+}
+function rememberLocalized(source, destination) {
+  try { LOCALIZED.set(localizedKey(source, destination), `${statStamp(source)}|${statStamp(destination)}`); } catch { /* not cached */ }
+}
+function knownLocalized(source, destination) {
+  const stamp = LOCALIZED.get(localizedKey(source, destination));
+  if (!stamp) return false;
+  try { return stamp === `${statStamp(source)}|${statStamp(destination)}`; } catch { return false; }
+}
+
+/** Below this, a plain copy costs less than spawning `cp`. */
+export const CLONE_MIN_BYTES = 1 << 20;
+
+/**
+ * Copy `src` to `dst`, which must not exist (EEXIST otherwise, like COPYFILE_EXCL), as an APFS
+ * clone where the volume allows one. Node's COPYFILE_FICLONE does NOT clone on macOS — measured:
+ * a 300 MB file through copyFileSync or cpSync with FICLONE took 300 MB of disk, `/bin/cp -c`
+ * took none — so every "instant" stage, variant and localize was a full copy of the take.
+ * `cp -c` uses clonefile(2); any failure (another volume, an old cp) falls back to a real copy.
+ * Files under CLONE_MIN_BYTES are copied directly: spawning `cp` costs more than the bytes.
+ */
+export function cloneOrCopy(src, dst, { platform = process.platform, exec = execFileSync } = {}) {
+  if (fs.existsSync(dst)) {
+    throw Object.assign(new Error(`EEXIST: file already exists, copy '${src}' -> '${dst}'`), { code: 'EEXIST', path: dst });
+  }
+  if (platform === 'darwin' && fs.statSync(src).size >= CLONE_MIN_BYTES) {
+    try {
+      exec('/bin/cp', ['-c', '-n', src, dst], { stdio: 'ignore' });
+      if (fs.existsSync(dst) && fs.statSync(dst).size === fs.statSync(src).size) return 'clone';
+    } catch { /* fall back below */ }
+    try { fs.rmSync(dst, { force: true }); } catch { /* the copy below reports it */ }
+  }
+  fs.copyFileSync(src, dst, fs.constants.COPYFILE_EXCL);
+  return 'copy';
+}
+
+/**
+ * Copy a folder file by file, cloning anything big. `filter(rel)` sees posix paths relative to
+ * `from` and skips a whole subtree when it says no. Symlinks are re-created as links, or with
+ * `followSymlinks` copied as what they point at (a dangling one throws).
+ */
+export function copyTree(from, to, { filter = null, preserveTimestamps = false, followSymlinks = false } = {}) {
+  const walk = rel => {
+    const src = rel ? path.join(from, rel) : from;
+    const dst = rel ? path.join(to, rel) : to;
+    const link = fs.lstatSync(src);
+    if (link.isSymbolicLink() && !followSymlinks) {
+      fs.symlinkSync(fs.readlinkSync(src), dst);
+      return;
+    }
+    const stat = fs.statSync(src);
+    if (stat.isDirectory()) {
+      fs.mkdirSync(dst, { recursive: true });
+      for (const name of fs.readdirSync(src)) {
+        const child = rel ? `${rel}/${name}` : name;
+        if (!filter || filter(child)) walk(child);
+      }
+      return;
+    }
+    cloneOrCopy(src, dst);
+    if (preserveTimestamps) fs.utimesSync(dst, stat.atime, stat.mtime);
+  };
+  walk('');
+}
+
+export function localizeMedia(projectDir, source, fileName, { dryRun = false, hash = fileHash } = {}) {
   source = path.resolve(source);
   if (!fs.existsSync(source)) throw new CapcutError(`Source media does not exist: ${source}`, { code: 'MISSING_SOURCE' });
   const mediaDir = managedFile(projectDir, LOCAL_MEDIA_DIR);
@@ -2349,13 +2431,18 @@ export function localizeMedia(projectDir, source, fileName, { dryRun = false } =
   const tag = crypto.createHash('sha1').update(source).digest('hex').slice(0, 8);
   const ext = path.extname(base);
   for (let n = 1; fs.existsSync(destination); n++) {
-    if (sameContents(source, destination)) return destination;
+    if (knownLocalized(source, destination)) return destination;
+    if (sameContents(source, destination, hash)) {
+      rememberLocalized(source, destination);
+      return destination;
+    }
     safe = `${parent}__${path.basename(base, ext)}__${tag}${n > 1 ? `_${n}` : ''}${ext}`;
     destination = managedFile(projectDir, path.join(LOCAL_MEDIA_DIR, safe));
   }
   if (!dryRun) {
     fs.mkdirSync(mediaDir, { recursive: true });
-    fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
+    cloneOrCopy(source, destination);
+    rememberLocalized(source, destination);
   }
   // The rl2 trace sidecar is not copied here: the material-level operations (clip.add,
   // replace.media, layout.screen) record it through layouts.recordMediaProvenance, keyed by
@@ -2961,7 +3048,11 @@ function recutSetSpeed(doc, segment, speed) {
   }
 }
 
-function recutFilterRebaseKeyframes(segment, oldSource, newSource, keepSource = null) {
+/**
+ * Keep the source-time keyframes that fall inside `keepSource` and rebase them onto
+ * `newSource`. Exported for ripple, which partitions one clip's keys between its two halves.
+ */
+export function recutFilterRebaseKeyframes(segment, oldSource, newSource, keepSource = null) {
   segment.keyframe_refs = clone(segment.keyframe_refs || []);
   if (!oldSource || !newSource || !(oldSource.duration > 0)) {
     segment.common_keyframes = clone(segment.common_keyframes || []);
@@ -4008,7 +4099,7 @@ export function commitProjectFiles(projectDir, { writes = [], removes = [] } = {
       fs.mkdirSync(path.dirname(write.file), { recursive: true });
       const temp = `${write.file}.capcutctl-${transactionId}.tmp`;
       staged.push({ file: write.file, temp });
-      if (write.source) fs.copyFileSync(write.source, temp, fs.constants.COPYFILE_FICLONE);
+      if (write.source) cloneOrCopy(write.source, temp);
       else {
         const fd = fs.openSync(temp, 'wx');
         try { fs.writeFileSync(fd, write.data); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }

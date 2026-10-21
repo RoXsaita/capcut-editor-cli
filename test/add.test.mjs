@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { applySpec, doctor, isLocalMedia, localizeMedia, readJson, stableJson } from '../src/core.mjs';
+import { applySpec, cloneOrCopy, CLONE_MIN_BYTES, doctor, isLocalMedia, localizeMedia, readJson, stableJson } from '../src/core.mjs';
 import { opClipAdd, opClipFade, opLocalizeAll, opReplaceMedia, parkPresetLeftover } from '../src/add.mjs';
 import { tmpDir } from './helpers/tmp.mjs';
 
@@ -105,6 +105,52 @@ test('localize copies two screen.mp4 takes under unique parent-prefixed names', 
   assert.match(paths[1], /Resources\/CapcutctlMedia\/Google-Chrome-20260829-124818__screen\.mp4$/);
   assert.equal(fs.readFileSync(paths[0], 'utf8'), 'hermes-bytes-xxxxxxxxxxxxxxx');
   assert.equal(fs.readFileSync(paths[1], 'utf8'), 'chrome-bytes');
+});
+
+test('localize hashes a colliding take once, and again only when the take changes', () => {
+  const f = fixture();
+  const dir = path.join(f.temp, 'Take-20261019-101010');
+  fs.mkdirSync(dir);
+  const take = path.join(dir, 'screen.mp4');
+  fs.writeFileSync(take, 'take-bytes-one');
+  let hashed = 0;
+  const hash = file => { hashed++; return fs.readFileSync(file).toString('hex'); };
+  // The destination is already there (an earlier session localized it): the first look must hash.
+  const destination = localizeMedia(f.project, take, undefined, { dryRun: true });
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  fs.copyFileSync(take, destination);
+  for (let i = 0; i < 3; i++) assert.equal(localizeMedia(f.project, take, undefined, { hash }), destination);
+  assert.equal(hashed, 2, 'one comparison (both sides), then the stats answer');
+
+  // Re-recorded in place: same size, new bytes, newer mtime.
+  fs.writeFileSync(take, 'take-bytes-two');
+  const later = new Date(Date.now() + 60_000);
+  fs.utimesSync(take, later, later);
+  const moved = localizeMedia(f.project, take, undefined, { hash });
+  assert.equal(hashed, 4, 'the changed take is hashed again');
+  assert.notEqual(moved, destination);
+  assert.match(path.basename(moved), /__screen__[0-9a-f]{8}\.mp4$/);
+  assert.equal(fs.readFileSync(moved, 'utf8'), 'take-bytes-two');
+  assert.equal(fs.readFileSync(destination, 'utf8'), 'take-bytes-one', 'the earlier take is never overwritten');
+});
+
+test('cloneOrCopy clones on macOS, falls back to a copy when cp fails, and never overwrites', () => {
+  const dir = tmpDir('capcutctl-clone-');
+  const src = path.join(dir, 'big.bin');
+  const bytes = Buffer.alloc(CLONE_MIN_BYTES + 17);
+  for (let i = 0; i < bytes.length; i += 4096) bytes[i] = i % 251;
+  fs.writeFileSync(src, bytes);
+  if (process.platform === 'darwin') {
+    const via = cloneOrCopy(src, path.join(dir, 'clone.bin'));
+    assert.equal(via, 'clone');
+    assert.ok(fs.readFileSync(path.join(dir, 'clone.bin')).equals(bytes));
+  }
+  let tried = 0;
+  const failing = () => { tried++; throw new Error('cp: clonefile failed'); };
+  assert.equal(cloneOrCopy(src, path.join(dir, 'copy.bin'), { platform: 'darwin', exec: failing }), 'copy');
+  assert.equal(tried, 1);
+  assert.ok(fs.readFileSync(path.join(dir, 'copy.bin')).equals(bytes));
+  assert.throws(() => cloneOrCopy(src, path.join(dir, 'copy.bin')), error => error.code === 'EEXIST');
 });
 
 test('media.localize relinks every outside video into the project', () => {

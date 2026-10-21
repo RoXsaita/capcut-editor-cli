@@ -5,8 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { readJson, stableJson, PRESET_PARK_GAP_US } from '../src/core.mjs';
+import { createSnapshot, readJson, stableJson, PRESET_PARK_GAP_US } from '../src/core.mjs';
 import { createProject, parseScenes, probeMedia, removeProject, STILL_DURATION_US } from '../src/create.mjs';
+import { startStage } from '../src/stage.mjs';
 import { tmpDir } from './helpers/tmp.mjs';
 
 /**
@@ -304,6 +305,63 @@ test('--canvas and --fps are applied, not discarded', () => {
   assert.equal(doc.canvas_config.height, 1080);
   assert.equal(doc.fps, 24);
   assert.equal(r.canvas.width, 1920);
+});
+
+function walkText(dir) {
+  const out = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const file = path.join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...walkText(file));
+    else if (/\.(json|bak|tmp)$/.test(entry.name)) out.push(file);
+  }
+  return out;
+}
+
+test('new --from copies a real edit: its own media, its sidecars, its content end — and no history', () => {
+  const { root, media } = templateLibrary();
+  const alpha = createProject('Alpha', opts({ root, blank: true, media, scenes: '0:5' })).project;
+  const mapFile = path.join(alpha, '.capcutctl', 'media-map.json');
+  if (!fs.existsSync(mapFile)) {
+    fs.writeFileSync(mapFile, stableJson({ version: 1, materials: { X: { localized_path: path.join(alpha, 'Resources', 'x.mp4') } } }));
+  }
+  createSnapshot(alpha, 'alpha-edit');
+  fs.writeFileSync(path.join(alpha, '.capcutctl', 'build.json'), stableJson({ hash: 'done' }));
+
+  const beta = createProject('Beta', opts({ root, from: 'Alpha' })).project;
+  for (const file of walkText(beta)) {
+    assert.ok(!fs.readFileSync(file, 'utf8').includes(alpha + '/') && !fs.readFileSync(file, 'utf8').includes(alpha + '"'),
+      `${path.relative(beta, file)} still points into the source draft`);
+  }
+  const doc = activeDoc(beta);
+  const paths = doc.materials.videos.map(m => m.path).filter(Boolean);
+  assert.ok(paths.length);
+  for (const p of paths) assert.ok(p.startsWith(path.join(beta, 'Resources') + path.sep), p);
+  assert.ok(fs.existsSync(path.join(beta, '.capcutctl', 'media-map.json')), 'the media map is carried');
+  assert.equal(fs.existsSync(path.join(beta, '.capcutctl', 'history')), false, 'the source history is not');
+  assert.equal(fs.existsSync(path.join(beta, '.capcutctl', 'build.json')), false, 'nor its build state');
+  const created = readJson(path.join(beta, '.capcutctl', 'created.json'));
+  assert.equal(created.contentEnd, 5_000_000);
+  assert.equal(created.contentTrack, 1);
+  assert.equal(created.template, 'Alpha');
+
+  fs.rmSync(alpha, { recursive: true, force: true });
+  for (const p of paths) assert.ok(fs.existsSync(p), `${p} survives deleting the source`);
+});
+
+test('a default new copies nothing from the template\'s .capcutctl', () => {
+  const { root } = templateLibrary();
+  fs.mkdirSync(path.join(root, 'Preset 3', '.capcutctl', 'history', 'x'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'Preset 3', '.capcutctl', 'media-map.json'), '{}');
+  const r = createProject('demo', opts({ root }));
+  assert.deepEqual(fs.readdirSync(path.join(r.project, '.capcutctl')), ['created.json']);
+});
+
+test('new --from refuses a source with an active stage', () => {
+  const { root, media } = templateLibrary();
+  const alpha = createProject('Alpha', opts({ root, blank: true, media, scenes: '0:5' })).project;
+  startStage(alpha, { root: tmpDir('capcutctl-new-stage-'), repair: false });
+  assert.throws(() => createProject('Beta', opts({ root, from: 'Alpha' })), error => error.code === 'STAGE_ACTIVE');
+  assert.equal(fs.existsSync(path.join(root, 'Beta')), false);
 });
 
 test('--new-timeline-id is refused rather than silently ignored', () => {

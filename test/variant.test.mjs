@@ -7,6 +7,8 @@ import test from 'node:test';
 
 import { applySpec, doctor, readJson, stableJson } from '../src/core.mjs';
 import { normalizeHook, readHook, runVariant } from '../src/variant.mjs';
+import { registerDraft, unregisterDraft } from '../src/create.mjs';
+import { resetProfileCache, userProfilePath } from '../src/profile.mjs';
 import { buildProject } from './helpers/polish-project.mjs';
 
 // Every write is tested as if CapCut were open (npm test sets CAPCUTCTL_ASSUME_RUNNING=1).
@@ -192,6 +194,43 @@ test('a music bed that starts a beat in still runs from where it was when a shor
   assert.equal(s.MUSIC.target_timerange.start, 133_333);
   assert.equal(s.MUSIC.target_timerange.start + s.MUSIC.target_timerange.duration, doc.duration);
   assert.equal(doctor(made.project).errors, 0);
+});
+
+test('a variant that fails leaves no folder and no library entry behind', async () => {
+  const fx = signedOff();
+  const store = () => readJson(path.join(fx.root, 'root_meta_info.json')).all_draft_store.map(e => e.draft_fold_path);
+  const dest = path.join(fx.root, 'Launch hook-b');
+
+  // A broken profile refuses before anything is copied or registered.
+  const profileFile = userProfilePath();
+  const saved = fs.existsSync(profileFile) ? fs.readFileSync(profileFile) : null;
+  fs.mkdirSync(path.dirname(profileFile), { recursive: true });
+  fs.writeFileSync(profileFile, '{ not json');
+  resetProfileCache();
+  try {
+    await assert.rejects(runVariant(fx.project, { hook: readHook(fx.hooks, 'b'), processProbe: CLOSED }),
+      error => error.code === 'PROFILE_INVALID');
+  } finally {
+    if (saved) fs.writeFileSync(profileFile, saved);
+    else fs.rmSync(profileFile, { force: true });
+    resetProfileCache();
+  }
+  assert.equal(fs.existsSync(dest), false);
+  assert.ok(!store().includes(dest));
+
+  // A gate that throws AFTER the copy was registered unregisters it on the way out.
+  await assert.rejects(runVariant(fx.project, { hook: readHook(fx.hooks, 'b'), processProbe: CLOSED, profile: {} }));
+  assert.equal(fs.existsSync(dest), false);
+  assert.deepEqual(store(), [fx.project], 'only the original stays registered');
+});
+
+test('unregisterDraft removes exactly that draft\'s entry', () => {
+  const fx = signedOff();
+  const other = path.join(fx.root, 'Other');
+  registerDraft(fx.root, other, 'Other', 'ID-OTHER', 1_000_000);
+  assert.deepEqual(unregisterDraft(fx.root, other), { unregistered: 1 });
+  assert.deepEqual(readJson(path.join(fx.root, 'root_meta_info.json')).all_draft_store.map(e => e.draft_fold_path), [fx.project]);
+  assert.deepEqual(unregisterDraft(fx.root, other), { unregistered: 0 });
 });
 
 test('variant refuses an --opening that is not a cut, and a hook past the end of the take', async () => {
