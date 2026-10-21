@@ -1240,3 +1240,35 @@ test('the gate fails a screen card with nothing under it and passes it over the 
     if (!plate) assert.match(check.message, /0–5s \(screen card\).*brand\.background\.plate/);
   }, { plate });
 });
+
+test('scenes picks the keyed transcript whose token matches the take, never the first by name', () => {
+  const f = fixture();
+  const original = path.join(f.temp, 'Shared', 'face.mp4');
+  fs.mkdirSync(path.dirname(original), { recursive: true });
+  fs.writeFileSync(original, 'this take is twenty-nine bytes');
+  const cache = path.join(path.dirname(original), '.video-index');
+  fs.mkdirSync(cache, { recursive: true });
+  const size = fs.statSync(original).size;
+  // Another take also named face.mp4 sorts first; its token cannot match this file.
+  fs.writeFileSync(path.join(cache, 'face.whisper-turbo.aaaa1111.json'), JSON.stringify({
+    _token: { size: size + 7 }, segments: [{ start: 1, end: 4, text: 'the other take' }] }));
+  const mine = path.join(cache, 'face.whisper-turbo.bbbb2222.json');
+  fs.writeFileSync(mine, JSON.stringify({
+    _token: { size }, segments: [{ start: 1, end: 4, text: 'this take' }] }));
+
+  const doc = activeDoc(f);
+  const material = doc.materials.videos.find(m => m.id === 'VIDEO');
+  material.path = original;
+  writeDoc(f.timelineDir, doc);
+  const row = describeScenes(f.project, null, true).find(r => r.id === 'SUBJECT');
+  assert.equal(row.says, 'this take');
+  assert.equal(row.transcriptPath, mine);
+
+  // With the source gone there is nothing to tell the two keyed caches apart: refuse, say why.
+  fs.rmSync(original);
+  fs.writeFileSync(path.join(cache, 'face.whisper-turbo.aaaa1111.json'), JSON.stringify({
+    _token: { size }, segments: [{ start: 1, end: 4, text: 'the other take' }] }));
+  const gone = describeScenes(f.project, null, true).find(r => r.id === 'SUBJECT');
+  assert.equal(gone.transcriptStatus, 'missing');
+  assert.match(gone.transcriptNote, /another take/);
+});

@@ -73,6 +73,16 @@ function tokenVerdict(token, media) {
 }
 
 /**
+ * How an index payload relates to `media`: 'match' | 'mismatch' | 'legacy' (no token), or
+ * 'unverified' when it carries a token but there is no media on disk to check it against.
+ */
+export function indexVerdict(data, media) {
+  const token = tokenOf(data);
+  if (!media) return token && Number.isFinite(Number(token.size)) ? 'unverified' : 'legacy';
+  return tokenVerdict(token, media);
+}
+
+/**
  * The index file of `kind` ('whisper' | 'energy10') for one media path:
  * { file, legacy } when found, { file: null, reason } when not.
  */

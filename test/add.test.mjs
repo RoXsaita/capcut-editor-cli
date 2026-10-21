@@ -432,6 +432,31 @@ test('trim keeps the talking head at 1x: another length refuses, a slip or --ret
   assert.equal(doctor(f.project).errors, 0);
 });
 
+test('trim --retime on a mid-track face clip refuses: no gap or overlap on the talking-head track', () => {
+  const f = fixture();
+  for (const dir of [f.project, f.timelineDir]) {
+    for (const name of ['draft_info.json', 'draft_info.json.bak', 'template-2.tmp']) {
+      const file = path.join(dir, name);
+      if (!fs.existsSync(file)) continue;
+      const doc = readJson(file);
+      const face = doc.tracks.find(t => t.name === 'content').segments;
+      face.push({ ...structuredClone(face[0]), id: 'SUBJECT-2', desc: 'scene 2',
+        source_timerange: { start: 10_000_000, duration: 5_000_000 }, target_timerange: { start: 5_000_000, duration: 5_000_000 } });
+      fs.writeFileSync(file, stableJson(doc));
+    }
+  }
+  const draft = path.join(f.project, 'draft_info.json');
+  const before = fs.readFileSync(draft, 'utf8');
+  const retime = src => ({ version: 1, operations: [{ op: 'clip.trim', selector: { id: 'SUBJECT' }, src, retime: true }] });
+  assert.throws(() => applySpec(f.project, retime([0, 4]), { forceRunning: true }),
+    err => err.code === 'PRINCIPAL_TRACK' && /SUBJECT-2/.test(err.message) && /a gap/.test(err.message));
+  assert.equal(fs.readFileSync(draft, 'utf8'), before, 'a refused retime leaves the draft untouched');
+  // The last face clip may still change length: nothing follows it.
+  applySpec(f.project, { version: 1, operations: [{ op: 'clip.trim', selector: { id: 'SUBJECT-2' }, src: [10, 16], retime: true }] }, { forceRunning: true });
+  const last = readJson(draft).tracks.find(t => t.name === 'content').segments.find(s => s.id === 'SUBJECT-2');
+  assert.equal(last.target_timerange.duration, 6_000_000);
+});
+
 test('trim --retime refuses to grow a clip over its neighbour', () => {
   const f = fixture();
   applySpec(f.project, { version: 1, operations: [addOp(f), addOp(f, { at: 4, desc: 'second' })] }, { forceRunning: true });

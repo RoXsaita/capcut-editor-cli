@@ -183,7 +183,8 @@ Usage:
   capcutctl trim --project NAME --at S --track NAME|N | --segments ID  --src IN-OUT (source seconds) | --start S --dur S [--retime]
                       — the new source window plays in the same slot, so speed follows. The talking-head
                         track stays 1x: a window of another length refuses (PRINCIPAL_TRACK); recut with
-                        cut --keep, or --retime to keep the speed and resize the clip on the timeline.
+                        cut --keep, or --retime to keep the speed and resize the clip on the timeline
+                        (on the talking-head track only its last clip: mid-track that leaves a gap).
   capcutctl shift --project NAME --at S --track NAME|N | --segments ID  --by SECONDS
   capcutctl split --project NAME --at S --segments ID | --track NAME|N [--dry-run]
                       — cut one clip in two at timeline second S (snapped to the frame grid). The
@@ -2243,7 +2244,8 @@ export async function main(argv, dependencies = {}) {
     if (result.gate?.verdict === 'FAIL') process.exitCode = 1;
     if (args.json) return print(result, true);
     const { gateText } = await import('./gate.mjs');
-    const head = result.upToDate ? `build: up to date (${result.hash})` : `build: ${result.dryRun ? 'dry run' : 'applied'} (${result.hash})`;
+    const head = result.upToDate ? `build: up to date (${result.hash})${result.note ? `\nNOTE ${result.note}` : ''}`
+      : `build: ${result.dryRun ? 'dry run' : 'applied'} (${result.hash})`;
     // A skipped stage is named before the dump, where it cannot scroll past unread.
     const skips = (result.skipped || []).map(s => `\nSKIPPED ${s.stage}${s.code ? ` (${s.code})` : ''}: ${s.reason}`).join('');
     const stages = result.stages ? `\n${JSON.stringify(result.stages, null, 2)}` : '';

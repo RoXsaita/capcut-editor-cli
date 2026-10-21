@@ -172,3 +172,19 @@ test('a removed segment takes its main material with it, unless another segment 
 test('ripple refuses an empty or reversed range', () => {
   assert.throws(() => opRipple(doc(), { from: 5, to: 5 }), /to > from/);
 });
+
+test('ripple split moves the end transition to the tail: no transition at the mid-take cut', () => {
+  const d = spanning();
+  d.materials.transitions = [{ id: 'T1', type: 'transition', name: 'Pull in', duration: 400_000 }];
+  d.tracks[0].segments[0].extra_material_refs.push('T1');
+  opRipple(d, { from: 2, to: 3 });
+  const [head, tail] = d.tracks[0].segments;
+  const transitionIds = new Set(d.materials.transitions.map(m => m.id));
+  assert.deepEqual(head.extra_material_refs.filter(r => transitionIds.has(r)), [], 'the head ends at the ripple cut: no transition');
+  const tailTransitions = tail.extra_material_refs.filter(r => transitionIds.has(r));
+  assert.equal(tailTransitions.length, 1, 'the tail keeps the transition at the original boundary');
+  assert.notEqual(tailTransitions[0], 'T1');
+  // The head's original transition is pruned once nothing points at it; the speed stays private.
+  assert.deepEqual(d.materials.transitions.map(m => m.id), tailTransitions);
+  assert.notEqual(speedOf(d, tail).id, speedOf(d, head).id);
+});

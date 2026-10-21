@@ -39,7 +39,9 @@ for (const script of PY_SCRIPTS) {
     const python = resolvePython().executable;
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-pyhome-'));
     try {
-      execFileSync(python, [fileURLToPath(new URL(script, import.meta.url))],
+      // -I: isolated, so a suite reaches tools/ through its own sys.path line, never the cwd
+      // or a PYTHONPATH that happens to be set.
+      execFileSync(python, ['-I', fileURLToPath(new URL(script, import.meta.url))],
         { stdio: 'pipe', env: { ...process.env, HOME: home } });
     } finally {
       fs.rmSync(home, { recursive: true, force: true });

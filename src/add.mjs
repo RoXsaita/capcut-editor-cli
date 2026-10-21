@@ -1066,6 +1066,22 @@ export function opClipTrim(doc, op) {
       + 'Faces stay 1x: recut with cut --keep, or --retime.',
       { code: 'PRINCIPAL_TRACK', exitCode: 2 });
   }
+  // --retime resizes the slot without moving what follows: on the talking-head track that
+  // leaves a gap (shorter) or an overlap (longer) before the next face clip. Only the last
+  // clip there may change length; mid-track, ripple or recut instead.
+  if (op.retime && principal && principal === entry.track && Math.abs(targetDur - tt.duration) > frameUs) {
+    const end = tt.start + tt.duration;
+    const next = (entry.track.segments || []).filter(s => s !== entry.segment && s.target_timerange
+      && s.target_timerange.start >= end - frameUs).sort((a, b) => a.target_timerange.start - b.target_timerange.start)[0];
+    if (next) {
+      throw new CapcutError(
+        `clip.trim --retime: ${entry.segment.id} is on the talking-head track and ${next.id} follows it at `
+        + `${r3(S(next.target_timerange.start))}s; ${targetDur < tt.duration ? 'a shorter' : 'a longer'} slot would leave `
+        + `${targetDur < tt.duration ? 'a gap' : 'an overlap'} on the face track. `
+        + 'Recut with cut --keep, or ripple --from/--to to remove time on every track.',
+        { code: 'PRINCIPAL_TRACK', exitCode: 2 });
+    }
+  }
   if (op.retime) assertNoOverlap(entry.track, tt.start, targetDur, entry.segment.id, 'clip.trim');
   entry.segment.source_timerange = { start: srcStart, duration: srcDur };
   if (op.retime) {

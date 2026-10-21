@@ -87,7 +87,7 @@ export function opRipple(doc, op, context = {}) {
         rows.headTrimmed.push(label);
       } else if (st && tt.duration > 0 && (track.type === 'video' || (track.type === 'audio' && !isBed(track, seg)))) {
         // Spans the whole range, and its tail is words or picture: split around the range.
-        keep.push(seg, splitAround(doc, seg, a, b, seed));
+        keep.push(seg, splitAround(doc, seg, a, b, seed, refIds));
         rows.split.push(label);
         continue;
       } else {
@@ -116,9 +116,10 @@ function forget(seg, refIds) {
 /**
  * Cut `seg` around [a, b): it keeps [start, a) and a new tail plays [b, end) from a. Both halves
  * keep the clip's speed; the tail gets private copies of every extra (speed, mask, fade...),
- * and the source-time keyframes are partitioned between the two windows.
+ * the transition at the clip's end moves to the tail alone, and the source-time keyframes are
+ * partitioned between the two windows.
  */
-function splitAround(doc, seg, a, b, seed) {
+function splitAround(doc, seg, a, b, seed, refIds) {
   const tt = seg.target_timerange, st = seg.source_timerange;
   const start = tt.start, end = tt.start + tt.duration;
   const speed = st.duration / tt.duration;
@@ -146,6 +147,13 @@ function splitAround(doc, seg, a, b, seed) {
 
   // The cut is mid-clip: no fade or outro at the head's new end, no fade-in or intro at the tail's start.
   const index = materialIndex(doc);
+  // A transition plays at its clip's END: that boundary now belongs to the tail (which carries
+  // its own copy), so the head drops it, or a second one would play at the mid-take cut.
+  seg.extra_material_refs = (seg.extra_material_refs || []).filter(ref => {
+    if (index.get(ref)?.kind !== 'transitions') return true;
+    refIds.add(ref);
+    return false;
+  });
   for (const ref of tail.extra_material_refs) {
     const hit = index.get(ref);
     if (!hit) continue;

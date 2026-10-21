@@ -8,6 +8,7 @@ import { setSpeed } from './pace.mjs';
 import { profileValue } from './profile.mjs';
 import { blurredBackgrounds, isBlurEffect } from './house-rules.mjs';
 import { CAMERA_PROPERTIES } from './add.mjs';
+import { indexVerdict } from './video-index.mjs';
 import { isBrollSegment } from './broll-lint.mjs';
 import { execFileSync } from 'node:child_process';
 import {
@@ -1038,15 +1039,40 @@ function transcriptStems(sourcePaths) {
   return stems;
 }
 
-function transcriptFileInDirectory(directory, stems) {
+/**
+ * How one whisper cache relates to the media it may describe. Keyed caches
+ * (`<stem>.whisper-<slug>.<key>.json`) carry the source token, so two takes both named
+ * face.mp4 can share a cache dir: a token is checked against every source on disk, never
+ * trusted by name. An unreadable file stays a candidate so the caller can report it.
+ */
+function whisperVerdict(file, media) {
+  let data;
+  try { data = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return 'legacy'; }
+  if (!media.length) return indexVerdict(data, null);
+  const verdicts = media.map(source => indexVerdict(data, source));
+  if (verdicts.includes('match')) return 'match';
+  return verdicts.includes('legacy') ? 'legacy' : 'mismatch';
+}
+
+function transcriptFileInDirectory(directory, stems, media = [], ambiguous = []) {
   if (!directory || !fs.existsSync(directory)) return null;
   let names;
   try { names = fs.readdirSync(directory).sort(); } catch { return null; }
   for (const stem of stems) {
-    const whisper = names.find(name => name.startsWith(`${stem}.whisper`));
-    if (whisper) return path.join(directory, whisper);
-    const legacy = names.find(name => name === `${stem}_transcript_ar.json`);
-    if (legacy) return path.join(directory, legacy);
+    const legacy = [], unverified = [];
+    for (const name of names.filter(n => n.startsWith(`${stem}.whisper`))) {
+      const file = path.join(directory, name);
+      const verdict = whisperVerdict(file, media);
+      if (verdict === 'match') return file;
+      if (verdict === 'legacy') legacy.push(file);
+      else if (verdict === 'unverified') unverified.push(file);
+    }
+    // Several keyed caches and no media to tell them apart: refuse rather than guess a take.
+    if (unverified.length > 1) { ambiguous.push(...unverified); continue; }
+    if (unverified.length) return unverified[0];
+    if (legacy.length) return legacy[0];
+    const old = names.find(name => name === `${stem}_transcript_ar.json`);
+    if (old) return path.join(directory, old);
   }
   return null;
 }
@@ -1084,12 +1110,14 @@ function transcriptCandidates(mediaPath, projectDir, material) {
   addDirectory(path.join(os.homedir(), 'Downloads', '.video-index'));
 
   const stems = transcriptStems(sources);
+  const media = sources.filter(file => { try { return fs.statSync(file).isFile(); } catch { return false; } });
   const files = [...direct.filter(file => fs.existsSync(file))];
+  const ambiguous = [];
   for (const directory of directories) {
-    const file = transcriptFileInDirectory(directory, stems);
+    const file = transcriptFileInDirectory(directory, stems, media, ambiguous);
     if (file && !files.includes(file)) files.push(file);
   }
-  return { files, sources, directories, stems };
+  return { files, sources, directories, stems, ambiguous };
 }
 
 function transcriptPayloadSegments(payload) {
@@ -1122,9 +1150,12 @@ export function resolveTranscript(mediaPath, projectDir = null, material = null)
   if (!lookup.files.length) {
     const source = lookup.sources[0] || mediaPath;
     const where = lookup.directories.length ? ` Searched: ${lookup.directories.join(', ')}.` : '';
+    const unsure = lookup.ambiguous.length
+      ? ` Refused ${lookup.ambiguous.length} keyed caches that could belong to another take with the same name (the source is not on disk to check): ${lookup.ambiguous.map(f => path.basename(f)).join(', ')}.`
+      : '';
     return {
       status: 'missing', segments: [], source, path: null,
-      note: `No transcript cache found for ${path.basename(source)}.${where}`
+      note: `No transcript cache found for ${path.basename(source)}.${where}${unsure}`
     };
   }
   let invalid = null;

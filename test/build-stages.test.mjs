@@ -298,3 +298,46 @@ test('build.json records the profile file and style for the export gate', async 
   assert.equal(state.profile, profile);
   assert.equal(state.style, 'tutorial');
 });
+
+// ---- hand edits and declared pauses ------------------------------------------------------------
+
+test('an unchanged plan keeps a build output he deleted by hand: named, not silently re-placed', async t => {
+  isolate(t);
+  const dir = buildProject();
+  const plan = quiet({ endcard: {} });
+  await runBuild(dir, plan, RUN);
+  const outputs = readJson(path.join(dir, '.capcutctl', 'build.json')).outputs;
+  assert.ok(outputs.length >= 2, `need two outputs to delete one, got ${outputs.length}`);
+  const [gone] = outputs;
+  for (const base of [dir, path.join(dir, 'Timelines', 'TIMELINE-ONE')]) {
+    const doc = readJson(path.join(base, 'draft_info.json'));
+    for (const tr of doc.tracks) tr.segments = (tr.segments || []).filter(s => s.id !== gone);
+    for (const name of ['draft_info.json', 'draft_info.json.bak', 'template-2.tmp']) fs.writeFileSync(path.join(base, name), stableJson(doc));
+  }
+  const again = await runBuild(dir, plan, RUN);
+  assert.equal(again.upToDate, true);
+  assert.deepEqual(again.missingOutputs, [gone]);
+  assert.match(again.note, /--force/);
+  assert.ok(!docOf(dir).tracks.flatMap(tr => tr.segments || []).some(s => s.id === gone), 'his deletion stands');
+});
+
+test('edit.json "pauses" reach the build gate, and declaring one does not rebuild', async t => {
+  isolate(t);
+  assert.throws(() => normalizePlan({ version: 1, pauses: ['4.1'] }), /pauses must be a list of timeline seconds/);
+  const dir = buildProject();
+  // The helper's face: source 0–4 then 10–14, a seam at timeline 4. 0.2s tail + 0.3s head is dead air.
+  const media = path.join(path.dirname(dir), 'face.mp4');
+  const cache = path.join(process.env.HOME, 'Downloads', '.video-index');
+  fs.mkdirSync(cache, { recursive: true });
+  const db = Array.from({ length: 3000 }, (_, i) => ((i >= 380 && i < 400) || (i >= 1000 && i < 1030) ? -60 : -20));
+  fs.writeFileSync(path.join(cache, 'face.energy10.json'), JSON.stringify({ _token: { size: fs.statSync(media).size }, bin: 0.01, db }));
+  const seam = result => result.gate.checks.find(c => c.id === 'seam-silence');
+
+  const plain = await runBuild(dir, quiet({}), RUN);
+  assert.equal(seam(plain).level, 'FAIL');
+  const paused = await runBuild(dir, quiet({ pauses: [4.1] }), RUN);
+  assert.equal(paused.upToDate, true, 'a pause changes only what the gate allows');
+  assert.equal(seam(paused).ok, true);
+  const fresh = await runBuild(dir, quiet({ pauses: [4.1] }), { ...RUN, force: true });
+  assert.equal(seam(fresh).ok, true, 'and the full build gate sees it too');
+});

@@ -61,7 +61,7 @@ function workingDoc(projectDir) {
 export function normalizePlan(raw, { baseDir = process.cwd() } = {}) {
   if (!raw || typeof raw !== 'object') fail('PLAN_INVALID', 'edit plan must be a JSON object');
   if (raw.version !== EDIT_PLAN_VERSION) fail('PLAN_VERSION', `edit plan version must be ${EDIT_PLAN_VERSION}`);
-  const known = new Set(['version', 'profile', 'style', 'words', 'shots', 'layout', 'camera', 'graphics', 'scenes', 'logos', 'endcard', 'ending', 'sound', 'notes']);
+  const known = new Set(['version', 'profile', 'style', 'words', 'shots', 'layout', 'camera', 'graphics', 'scenes', 'logos', 'endcard', 'ending', 'sound', 'notes', 'pauses']);
   const unknown = Object.keys(raw).filter(k => !known.has(k));
   if (unknown.length) fail('PLAN_INVALID', `unknown edit plan keys: ${unknown.join(', ')}`);
   const abs = file => (file ? path.resolve(baseDir, String(file).replace(/^~(?=$|\/)/, process.env.HOME || '~')) : null);
@@ -91,6 +91,12 @@ export function normalizePlan(raw, { baseDir = process.cwd() } = {}) {
     if (bad.length) fail('PLAN_INVALID', `unknown ending keys: ${bad.join(', ')}`);
     ending = { ...ending, ...(ending.frame ? { frame: abs(ending.frame) } : {}) };
   }
+  // Deliberate pauses (timeline seconds) the seam-silence and speech-gap gates allow.
+  if (raw.pauses !== undefined && (!Array.isArray(raw.pauses)
+    || raw.pauses.some(p => typeof p !== 'number' || !Number.isFinite(p) || p < 0))) {
+    fail('PLAN_INVALID', 'pauses must be a list of timeline seconds, e.g. [12.3, 40]');
+  }
+  const pauses = raw.pauses || [];
   const sound = { seams: 'motivated', music: false, duck: true, loudness: true, ...(raw.sound || {}) };
   if (sound.music && typeof sound.music === 'object' && sound.music.file) sound.music = { ...sound.music, file: abs(sound.music.file) };
   return {
@@ -107,6 +113,7 @@ export function normalizePlan(raw, { baseDir = process.cwd() } = {}) {
     endcard: raw.endcard === undefined ? null : raw.endcard,
     ending,
     sound,
+    ...(pauses.length ? { pauses } : {}),
   };
 }
 
@@ -131,8 +138,10 @@ function principalSignature(doc, projectDir = null) {
 function planHash(plan, profile, doc, wordsFile, templateHashes, projectDir = null, assets = []) {
   let wordsStamp = null;
   if (wordsFile && fs.existsSync(wordsFile)) { const st = fs.statSync(wordsFile); wordsStamp = `${st.size}:${st.mtimeMs}`; }
+  // Declared pauses only change what the gate allows: adding one must not rebuild the edit.
+  const { pauses: _pauses, ...hashed } = plan;
   return crypto.createHash('sha256').update(JSON.stringify({
-    plan, profile, principal: principalSignature(doc, projectDir), wordsStamp, templateHashes,
+    plan: hashed, profile, principal: principalSignature(doc, projectDir), wordsStamp, templateHashes,
     ...(assets.length ? { assets } : {}),
   })).digest('hex').slice(0, 24);
 }
@@ -343,13 +352,19 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
   const startIds = segmentIds(doc);
   const previousOutputs = Array.isArray(state.outputs) ? state.outputs : [];
   // The hash covers the plan and the principal cut, not the overlays build placed. A restore
-  // that removed them left the hash matching, and "up to date" sat on an empty draft.
-  const outputsPresent = previousOutputs.every(id => startIds.has(id));
+  // that removed them left the hash matching, and "up to date" sat on an empty draft: when
+  // EVERY output is gone, rebuild. When only some are, the creator deleted them in CapCut;
+  // a rebuild would put them back and re-run sound (resetting hand-set levels), so keep his
+  // edit, name what is gone, and leave re-placing it to --force.
+  const missingOutputs = previousOutputs.filter(id => !startIds.has(id));
+  const outputsGone = previousOutputs.length > 0 && missingOutputs.length === previousOutputs.length;
   if (!force && !dryRun && state.hash === hash) {
-    if (outputsPresent) {
-      const gate = gateReport(doc, { projectDir, profile });
+    if (!outputsGone) {
+      const gate = gateReport(doc, { projectDir, profile, ...(plan.pauses?.length ? { pauses: plan.pauses } : {}) });
       if (Array.isArray(state.skipped)) foldBuildStages(gate, state.skipped);
       return { upToDate: true, hash, gate, skipped: Array.isArray(state.skipped) ? state.skipped : [],
+        ...(missingOutputs.length ? { missingOutputs,
+          note: `${missingOutputs.length} of ${previousOutputs.length} build-placed segments are gone from the draft (removed in CapCut?) and stay removed; \`build --force\` re-places them and re-runs sound and loudness.` } : {}),
         ...(stages.repaired ? { repaired: stages.repaired } : {}) };
     }
     stages.reason = 'build outputs missing (restore?)';
@@ -586,7 +601,7 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
   }
 
   // ---- gate -----------------------------------------------------------------------------------
-  const gate = gateReport(doc, { projectDir, profile });
+  const gate = gateReport(doc, { projectDir, profile, ...(plan.pauses?.length ? { pauses: plan.pauses } : {}) });
   foldBuildStages(gate, skipped);
   if (dryRun) noteRestoredMeta(gate, restored);
   if (!dryRun) {

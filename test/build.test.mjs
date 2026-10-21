@@ -183,7 +183,8 @@ test('build rebuilds when its recorded outputs are gone even if the hash still m
   assert.equal(state.hash, undefined);
   assert.equal(state.shots, 'kept-shots-key');
 
-  // A hash that matches but outputs that are gone (deleted by hand) also rebuilds.
+  // A hash that matches but EVERY output gone (a restore that did not carry build.json) also
+  // rebuilds; only some gone is a hand edit and is kept (build-stages.test.mjs).
   const rebuilt = await runBuild(dir, plan, { forceRunning: true });
   assert.notEqual(rebuilt.upToDate, true);
   const outputs = readJson(stateFile).outputs;
