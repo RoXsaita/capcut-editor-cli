@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { sourceToTimeline, detectBrands, talkingHeadScenes, opSignature, imageSize, logoScaleFor, sigPresets } from '../src/signature.mjs';
+import { tmpDir } from './helpers/tmp.mjs';
 
 const US = s => Math.round(s * 1e6);
 
@@ -204,7 +205,7 @@ test('imageSize reads PNG IHDR', () => {
 });
 
 test('imageSize rejects truncated WebP dimension headers without throwing', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcut-webp-test-'));
+  const dir = tmpDir('capcut-webp-test-');
   try {
     const file = path.join(dir, 'truncated.webp');
     for (const kind of ['VP8X', 'VP8 ']) {
@@ -266,7 +267,7 @@ test('a missing logo asset is an error, not a silent skip', () => {
 });
 
 test('missing per-machine signature sound is skipped and reported', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcut-signature-sfx-test-'));
+  const dir = tmpDir('capcut-signature-sfx-test-');
   const previous = process.env.CAPCUTCTL_PRESET_DIR;
   try {
     const preset = JSON.parse(fs.readFileSync(new URL('../presets/signature.json', import.meta.url), 'utf8'));
@@ -287,7 +288,7 @@ test('missing per-machine signature sound is skipped and reported', () => {
 });
 
 test('signature reuses project audio with placeholder and relative paths', () => {
-  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcut-signature-local-sfx-'));
+  const projectDir = tmpDir('capcut-signature-local-sfx-');
   try {
     fs.mkdirSync(path.join(projectDir, 'Resources'));
     fs.writeFileSync(path.join(projectDir, 'Resources', 'local.mp3'), 'sfx-fixture-bytes');
@@ -461,7 +462,7 @@ test('clearLogos takes the pops, their cue, their materials and the empty sig- t
 test('a logo past the end of the edit writes no material and copies no file', () => {
   const f = path.join(os.tmpdir(), 'capcutctl-logo-late.png');
   fs.writeFileSync(f, PNG_1x1);
-  const project = fs.mkdtempSync(path.join(os.tmpdir(), 'sig-late-logo-'));
+  const project = tmpDir('sig-late-logo-');
   const d = doc();
   const videosBefore = d.materials.videos.length;
   const r = opSignature(d, { logos: [{ brand: 'grok', at: 19.9, logo: f }], noSfx: true }, { projectDir: project });

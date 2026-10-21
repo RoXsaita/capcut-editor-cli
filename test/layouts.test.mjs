@@ -22,8 +22,9 @@ import {
 import { execFileSync } from 'node:child_process';
 import { loadProfile } from '../src/profile.mjs';
 import { blurredBackgrounds } from '../src/house-rules.mjs';
+import { tmpDir } from './helpers/tmp.mjs';
 function withPlate(fn, { plate = true } = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-plate-'));
+  const dir = tmpDir('capcutctl-plate-');
   const before = process.env.CAPCUTCTL_PRESET_DIR;
   const file = path.join(dir, 'room.png');
   // format=rgb24 in the graph: a yuv420p lavfi source rounds the odd 167 down to 166 (ffmpeg 6.x)
@@ -52,7 +53,7 @@ const assertClearPlate = (doc, plate) => {
 };
 
 function fixture() {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-layout-'));
+  const temp = tmpDir('capcutctl-layout-');
   const project = path.join(temp, 'Layout Project');
   const timelineId = 'TIMELINE-ONE';
   const media = path.join(temp, 'face.mp4');

@@ -6,9 +6,10 @@ import test from 'node:test';
 
 import { stableJson } from '../src/core.mjs';
 import { defaultSources, harvestDrafts, writeHarvest } from '../src/harvest.mjs';
+import { tmpDir } from './helpers/tmp.mjs';
 
 test('harvest catalogues transitions, fades and a Position+Scale block from a fake draft root', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-harvest-'));
+  const root = tmpDir('capcutctl-harvest-');
   const project = path.join(root, 'IKEA Refund');
   fs.mkdirSync(project, { recursive: true });
   const doc = {
@@ -57,7 +58,7 @@ const minimal = (transition) => ({
 });
 
 test('catalogue counts names that coincide with Object prototype properties', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-harvest-names-'));
+  const root = tmpDir('capcutctl-harvest-names-');
   for (const name of ['__proto__', 'constructor', 'toString']) {
     fs.mkdirSync(path.join(root, name));
     fs.writeFileSync(path.join(root, name, 'draft_info.json'), stableJson(minimal(name)));
@@ -68,7 +69,7 @@ test('catalogue counts names that coincide with Object prototype properties', ()
 });
 
 test('one unparseable draft is skipped, not fatal — every other draft still catalogues', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-harvest-bad-'));
+  const root = tmpDir('capcutctl-harvest-bad-');
   for (const [name, body] of [['Bad Draft', '{ this is not json'],
                               ['IKEA Refund', stableJson(minimal('Pull In'))]]) {
     fs.mkdirSync(path.join(root, name), { recursive: true });
@@ -81,7 +82,7 @@ test('one unparseable draft is skipped, not fatal — every other draft still ca
 });
 
 test('a corrupt draft under Timelines/ is skipped too — the loader picks it by mtime', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-harvest-tl-'));
+  const root = tmpDir('capcutctl-harvest-tl-');
   const project = path.join(root, 'IKEA Refund');
   fs.mkdirSync(path.join(project, 'Timelines', 'TL'), { recursive: true });
   fs.writeFileSync(path.join(project, 'draft_info.json'), stableJson(minimal('Pull In')));
@@ -96,7 +97,7 @@ test('a corrupt draft under Timelines/ is skipped too — the loader picks it by
 });
 
 test('the default source list walks the drafts root, so a brand new draft is visible', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-harvest-scan-'));
+  const root = tmpDir('capcutctl-harvest-scan-');
   for (const name of ['Zulu Draft', 'IKEA Refund', 'Alpha Draft']) fs.mkdirSync(path.join(root, name));
   fs.writeFileSync(path.join(root, 'loose.txt'), 'not a draft');
   // the five known names sort first as a preference, then everything else alphabetically
@@ -105,7 +106,7 @@ test('the default source list walks the drafts root, so a brand new draft is vis
 });
 
 test('harvest catalogues a real FreeCurveInOut block alongside the Line one', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-harvest-ease-'));
+  const root = tmpDir('capcutctl-harvest-ease-');
   const kf = (type, curve) => ({ property_type: type, keyframe_list: [
     { time_offset: 0, values: [0], curveType: curve, left_control: { x: 0, y: 0 }, right_control: { x: 0.3, y: 0 } },
     { time_offset: 1_000_000, values: [1], curveType: curve, left_control: { x: 0.7, y: 1 }, right_control: { x: 1, y: 1 } }

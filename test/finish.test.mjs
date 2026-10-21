@@ -10,6 +10,7 @@ import { renderTimeline } from '../src/timeline.mjs';
 import { beatOffset, musicPrompt, detectBeats, opMusic } from '../src/music.mjs';
 import { assertFirstPictureProof, finishScorecard, finishText } from '../src/finish.mjs';
 import { parseArgs } from '../src/cli.mjs';
+import { tmpDir } from './helpers/tmp.mjs';
 
 const US = s => Math.round(s * 1e6);
 const seg = (start, dur, extra = {}) => ({
@@ -200,7 +201,7 @@ test('finish scorecard flags same-screen cuts', () => {
 });
 
 test('finish scorecard and music prompt use contentEnd instead of the parked draft tail', () => {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-finish-duration-'));
+  const temp = tmpDir('capcutctl-finish-duration-');
   const sidecar = path.join(temp, '.capcutctl', 'created.json');
   fs.mkdirSync(path.dirname(sidecar), { recursive: true });
   fs.writeFileSync(sidecar, JSON.stringify({
@@ -271,7 +272,7 @@ test('beatOffset with empty inputs is zero', () => {
 });
 
 test('detectBeats finds periodic pulses in a synthetic wav', { skip: !commandExists('ffmpeg') }, () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'beats-'));
+  const dir = tmpDir('beats-');
   const wav = path.join(dir, 'clicks.wav');
   execFileSync('ffmpeg', [
     '-y', '-f', 'lavfi',
@@ -284,7 +285,7 @@ test('detectBeats finds periodic pulses in a synthetic wav', { skip: !commandExi
 });
 
 test('opMusic places a local file on finish-music and is idempotent', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'music-'));
+  const dir = tmpDir('music-');
   const mp3 = path.join(dir, 'bed.mp3');
   // tiny silent mp3-like file is enough if we pass duration; skip probe
   fs.writeFileSync(mp3, Buffer.alloc(64));
@@ -306,7 +307,7 @@ test('opMusic places a local file on finish-music and is idempotent', () => {
 });
 
 test('opMusic localizes the bed and drops Hyperpop library identity', () => {
-  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'music-proj-'));
+  const projectDir = tmpDir('music-proj-');
   const mp3 = path.join(projectDir, '.capcutctl', 'music.mp3');
   fs.mkdirSync(path.dirname(mp3), { recursive: true });
   fs.writeFileSync(mp3, Buffer.alloc(64));
@@ -323,7 +324,7 @@ test('opMusic localizes the bed and drops Hyperpop library identity', () => {
 });
 
 test('opMusic ends the bed at the endcard, not the draft tail', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'music-'));
+  const dir = tmpDir('music-');
   const mp3 = path.join(dir, 'bed.mp3');
   fs.writeFileSync(mp3, Buffer.alloc(64));
   const d = grokLike();
@@ -338,7 +339,7 @@ test('opMusic ends the bed at the endcard, not the draft tail', () => {
 });
 
 test('opMusic ignores a mid-timeline sig:endcard and uses the CTA near contentEnd', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'music-'));
+  const dir = tmpDir('music-');
   const mp3 = path.join(dir, 'bed.mp3');
   fs.writeFileSync(mp3, Buffer.alloc(64));
   const d = grokLike();

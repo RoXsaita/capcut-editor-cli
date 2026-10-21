@@ -7,6 +7,7 @@ import test from 'node:test';
 
 import { readJson, stableJson, PRESET_PARK_GAP_US } from '../src/core.mjs';
 import { createProject, parseScenes, probeMedia, removeProject, STILL_DURATION_US } from '../src/create.mjs';
+import { tmpDir } from './helpers/tmp.mjs';
 
 /**
  * A stand-in for "Preset 3": an endcard sitting late on the timeline whose backdrop
@@ -14,7 +15,7 @@ import { createProject, parseScenes, probeMedia, removeProject, STILL_DURATION_U
  * scene when the template segment was cloned wholesale.
  */
 function templateLibrary() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-new-'));
+  const root = tmpDir('capcutctl-new-');
   const project = path.join(root, 'Preset 3');
   const timelineId = 'TPL-TIMELINE';
   const doc = {
@@ -311,7 +312,7 @@ test('--new-timeline-id is refused rather than silently ignored', () => {
 });
 
 test('probeMedia reports a still upright and with CapCut photo duration', { skip: !hasFfmpeg() }, () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'still-'));
+  const dir = tmpDir('still-');
   const plain = path.join(dir, 'plain.png');
   execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'color=c=red:s=40x30', '-frames:v', '1', plain]);
   assert.deepEqual(probeMedia(plain), { width: 40, height: 30, duration: STILL_DURATION_US, still: true });

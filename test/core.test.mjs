@@ -38,6 +38,7 @@ import {
   unsetPath,
   waitForCapcutClosed
 } from '../src/core.mjs';
+import { tmpDir } from './helpers/tmp.mjs';
 
 test('patch and unset reject prototype traversal', () => {
   for (const key of ['__proto__', 'constructor', 'prototype']) {
@@ -65,7 +66,7 @@ test('validation reports malformed document collections without throwing', () =>
 });
 
 function fixture({ missingMedia = false, drift = true } = {}) {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-test-'));
+  const temp = tmpDir('capcutctl-test-');
   const project = path.join(temp, 'Fixture Project');
   const timelineId = 'TIMELINE-ONE';
   const timelineDir = path.join(project, 'Timelines', timelineId);
@@ -326,6 +327,7 @@ test('history lists snapshots and manual restore preserves a rescue point', () =
 
 test('writes refuse to race CapCut unless explicitly forced', () => {
   const fx = fixture({ drift: false });
+  const previous = process.env.CAPCUTCTL_ASSUME_RUNNING;
   process.env.CAPCUTCTL_ASSUME_RUNNING = '1';
   try {
     assert.throws(
@@ -335,11 +337,16 @@ test('writes refuse to race CapCut unless explicitly forced', () => {
     const forced = syncMirrors(fx.project, { forceRunning: true, dryRun: true });
     assert.equal(forced.committed, false);
   } finally {
-    delete process.env.CAPCUTCTL_ASSUME_RUNNING;
+    if (previous == null) delete process.env.CAPCUTCTL_ASSUME_RUNNING;
+    else process.env.CAPCUTCTL_ASSUME_RUNNING = previous;
   }
 });
 
-test('CapCut probe errors are unknown and only verified no-match is closed', () => {
+test('CapCut probe errors are unknown and only verified no-match is closed', t => {
+  // This tests the probe itself, so the suite-wide CAPCUTCTL_ASSUME_RUNNING must not answer for it.
+  const previous = process.env.CAPCUTCTL_ASSUME_RUNNING;
+  delete process.env.CAPCUTCTL_ASSUME_RUNNING;
+  t.after(() => { if (previous != null) process.env.CAPCUTCTL_ASSUME_RUNNING = previous; });
   const failed = capcutProcess({
     spawn: () => ({ status: 2, stdout: '', stderr: 'permission denied' }),
   });
@@ -378,11 +385,15 @@ test('transactions lock before loading and serialize concurrent writers', async 
   const coreUrl = new URL('../src/core.mjs', import.meta.url).href;
   const childCode = `
     import { executeTransaction } from ${JSON.stringify(coreUrl)};
-    import { spawnSync } from 'node:child_process';
+    import fs from 'node:fs';
     try {
       executeTransaction(${JSON.stringify(fx.project)}, groups => {
         for (const group of groups) group.doc.concurrentWrites = (group.doc.concurrentWrites || 0) + 1;
-        spawnSync('sleep', ['0.35'], { stdio: 'ignore' });
+        // The first writer holds the lock until the parent has watched the second one refuse.
+        const release = process.env.RELEASE_FILE;
+        const tick = new Int32Array(new SharedArrayBuffer(4));
+        const deadline = Date.now() + 15_000;
+        while (release && !fs.existsSync(release) && Date.now() < deadline) Atomics.wait(tick, 0, 0, 10);
         return { changed: true };
       }, { processProbe: () => ({ running: false, verified: true, pids: [] }), backup: false });
     } catch (error) {
@@ -390,8 +401,10 @@ test('transactions lock before loading and serialize concurrent writers', async 
       process.exitCode = error.code === 'LOCKED' ? 4 : 1;
     }
   `;
+  const releaseFile = path.join(path.dirname(fx.project), 'release-first-writer');
   const first = spawn(process.execPath, ['--input-type=module', '--eval', childCode], {
     cwd: path.dirname(path.dirname(new URL(import.meta.url).pathname)),
+    env: { ...process.env, RELEASE_FILE: releaseFile },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const lockFile = path.join(fx.project, '.capcutctl', 'write.lock');
@@ -411,7 +424,10 @@ test('transactions lock before loading and serialize concurrent writers', async 
     child.once('error', reject);
     child.once('close', code => resolve({ code, stderr }));
   });
-  const [firstResult, secondResult] = await Promise.all([wait(first), wait(second)]);
+  const firstDone = wait(first);
+  const secondResult = await wait(second);
+  fs.writeFileSync(releaseFile, '');
+  const firstResult = await firstDone;
   assert.equal(firstResult.code, 0, firstResult.stderr);
   assert.equal(secondResult.code, 4, secondResult.stderr);
   for (const dir of [fx.project, fx.timelineDir]) {
@@ -1422,7 +1438,7 @@ test('applySpec refuses a NaN before the JSON clone turns it into null', async (
   // JSON has no NaN: clone() wrote `volume: NaN` as `volume: null`, and every validator after
   // the clone saw null, not a bad number. The backstop runs on the caller's spec.
   const { writeCliProject, projectFingerprint } = await import('./helpers/cli-project.mjs');
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-nan-'));
+  const temp = tmpDir('capcutctl-nan-');
   try {
     const media = path.join(temp, 'face.mp4');
     fs.writeFileSync(media, 'fixture media');
@@ -1440,7 +1456,7 @@ test('applySpec refuses a NaN before the JSON clone turns it into null', async (
 
 test('doctor reports a null volume, fade or keyframe value as an error', async () => {
   const { writeCliProject } = await import('./helpers/cli-project.mjs');
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-null-volume-'));
+  const temp = tmpDir('capcutctl-null-volume-');
   try {
     const media = path.join(temp, 'face.mp4');
     fs.writeFileSync(media, 'fixture media');
@@ -1603,7 +1619,7 @@ test('capcutctl split --dry-run changes nothing', async t => {
   assert.equal(fs.readFileSync(file, 'utf8'), before);
   assert.match(stdout, /rightId/);
   stdout = '';
-  await main(['split', '--project', project, '--segments', 'A', '--at', '2', '--json']);
+  await main(['split', '--project', project, '--segments', 'A', '--at', '2', '--json', '--force-running']);
   const after = JSON.parse(fs.readFileSync(file, 'utf8'));
   const content = after.tracks.find(track => track.name === 'content');
   assert.equal(content.segments.length, 3);

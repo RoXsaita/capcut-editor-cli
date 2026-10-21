@@ -14,6 +14,9 @@ import { launch, loadPlaywright } from '../src/mograph.mjs';
 import { normalizePlan, runBuild } from '../src/build.mjs';
 import { buildProject } from './helpers/polish-project.mjs';
 
+// Every write is tested as if CapCut were open (npm test sets CAPCUTCTL_ASSUME_RUNNING=1).
+const apply = (dir, spec) => applySpec(dir, spec, { forceRunning: true });
+
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAACXBIWXMAAAABAAAAAQBPJcTWAAAAEklEQVR4nGMUafrKwMDAwgAGABHbAZE1ep4/AAAAAElFTkSuQmCC', 'base64');
 const working = dir => readJson(path.join(dir, 'draft_info.json'));
 const input = (t, override = {}) => {
@@ -62,7 +65,7 @@ test('ending appends once, preserves the picture, survives build pruning and adv
   const picture = structuredClone(before.tracks.find(t => t.name === 'content').segments);
   const op = planEnding(before, dir, 'fingerprint', file);
   assert.equal(op.at, 8, 'uses picture end, ignoring the declared ten-second tail');
-  applySpec(dir, { version: 1, operations: [op] });
+  apply(dir, { version: 1, operations: [op] });
   let doc = working(dir);
   assert.equal(contentEndUs(doc, dir), 11_000_000);
   assert.deepEqual(endingCard(doc, 11), { t: 8, end: 11, desc: 'mograph:follow-ender' });
@@ -70,9 +73,9 @@ test('ending appends once, preserves the picture, survives build pruning and adv
   const first = fs.readFileSync(path.join(dir, 'draft_info.json'), 'utf8');
   const rerun = planEnding(doc, dir, 'fingerprint', file);
   assert.equal(rerun.at, 8);
-  applySpec(dir, { version: 1, operations: [rerun] });
+  apply(dir, { version: 1, operations: [rerun] });
   assert.equal(fs.readFileSync(path.join(dir, 'draft_info.json'), 'utf8'), first);
-  applySpec(dir, { version: 1, operations: [{ op: 'mograph.prune', keep: [] }] });
+  apply(dir, { version: 1, operations: [{ op: 'mograph.prune', keep: [] }] });
   doc = working(dir);
   assert.equal(doc.tracks.flatMap(t => t.segments || []).filter(s => s.desc === 'mograph:follow-ender').length, 1);
   const timeline = readJson(path.join(dir, 'Timelines', doc.id, 'draft_info.json'));

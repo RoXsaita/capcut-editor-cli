@@ -46,11 +46,15 @@ with a plain `--model` name; see [SETUP.md](SETUP.md). Generated music needs
 
 ## What CI runs
 
-Every PR, on Ubuntu, Node 20 and 24 — exactly the stages of `scripts/check.sh --strict`:
+Every PR, on Ubuntu, Node 20 and 24. `scripts/check.sh` mirrors the CI gates (`--strict` requires all of them):
 
-- `npm run check` and `npm test`
+- `npm run check` and `npm test` (no skips allowed; `npm test` runs the suite through
+  `test/run.mjs` under a temp HOME, an allowlisted environment and
+  `CAPCUTCTL_ASSUME_RUNNING=1`, so a write without `forceRunning` fails everywhere)
 - a supported Python resolves (the `pyproject.toml` floor), `tools/` compiles
-- `python tools/aroll.py --selftest` and `python tools/frame_qa.py --selftest`
+- the A-roll, frame QA, Claude timeline redaction and X-ray self-tests, and the watcher
+  privacy tests
+- the caption engine tests, with the optional `.[captions]` extra installed
 - Ruff, Vulture, ShellCheck
 - the Vision OCR helper is a macOS-only stage and is a no-op on the Ubuntu runner
 
@@ -63,6 +67,12 @@ That is the merge gate. The Codex review on PRs is advisory. See
 expands the tilde. CapCut effect/music cache IDs are machine-local; a new Mac
 must download the same effects and re-harvest. If you add a path, keep the `~/`
 form and a test that does not require the file to exist on the runner.
+
+No draft titles either: a CapCut project name, a video title or a session title is
+someone's private work, so fixtures and docs use made-up names. The repository is
+public, and `test/tree-privacy.test.mjs` fails on a real home path, a personal
+address, a Claude session link or a share-tracking parameter; put personal terms
+you want it to catch in the gitignored `scripts/.privacy-denylist`.
 
 `presets/harvest.json` is a dump of *your* drafts root. It is gitignored on
 purpose. Never add it back.

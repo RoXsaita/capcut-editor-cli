@@ -90,8 +90,19 @@ export async function loadPlaywright() {
 // bit-exact, so a screenshot could catch tiles from before the seek and blur() differed run to run.
 const LAUNCH_ARGS = ['--font-render-hinting=none', '--disable-lcd-text', '--disable-gpu-rasterization'];
 
+/** Whether Playwright's own Chromium was downloaded (`npx playwright install chromium`). */
+function hasBundledChromium(playwright) {
+  try { const file = playwright.chromium.executablePath(); return Boolean(file) && fs.existsSync(file); } catch { return false; }
+}
+
 export async function launch(playwright) {
   const executablePath = process.env.CAPCUTCTL_CHROMIUM || undefined;
+  // A failed launch leaves its temp profile and artifacts directories behind, so a Mac that
+  // never downloaded Playwright's Chromium goes straight to installed Chrome instead of
+  // failing first on every render.
+  if (!executablePath && process.platform === 'darwin' && !hasBundledChromium(playwright)) {
+    return playwright.chromium.launch({ channel: 'chrome', args: LAUNCH_ARGS });
+  }
   try {
     return await playwright.chromium.launch({ executablePath, args: LAUNCH_ARGS });
   } catch (error) {

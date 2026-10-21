@@ -9,6 +9,9 @@ import { applySpec, doctor, readJson, stableJson } from '../src/core.mjs';
 import { normalizeHook, readHook, runVariant } from '../src/variant.mjs';
 import { buildProject } from './helpers/polish-project.mjs';
 
+// Every write is tested as if CapCut were open (npm test sets CAPCUTCTL_ASSUME_RUNNING=1).
+const apply = (dir, spec) => applySpec(dir, spec, { forceRunning: true });
+
 const CLOSED = () => ({ running: false, verified: true, pids: [] });
 const MIRRORS = ['draft_info.json', 'draft_info.json.bak', 'template-2.tmp'];
 
@@ -205,14 +208,14 @@ test('re-placing a graphic keeps the levels its picture and pop already have (re
   fs.writeFileSync(mov, 'prores-bytes');
   const place = extra => ({ version: 1, operations: [{ op: 'mograph.place', id: 'kw-1', template: 'keyword-super', format: 'prores',
     file: mov, at: 2, duration: 1.5, box: { x: 205, y: 1212, w: 582, h: 188 }, sfx: 'pop', fingerprint: 'abc', ...extra }] });
-  applySpec(dir, place());
+  apply(dir, place());
   const owned = () => readJson(path.join(dir, 'draft_info.json')).tracks.flatMap(t => t.segments).filter(s => /^mograph:(sfx:)?kw-1$/.test(s.desc));
   const pop = owned().find(s => s.desc === 'mograph:sfx:kw-1');
   assert.ok(pop, 'the fixture palette resolves the pop');
-  applySpec(dir, { version: 1, operations: [{ op: 'segment.patch', selector: { id: pop.id }, set: { volume: 0.3 } }] });
-  applySpec(dir, place({ fingerprint: 'typo-fixed' }));
+  apply(dir, { version: 1, operations: [{ op: 'segment.patch', selector: { id: pop.id }, set: { volume: 0.3 } }] });
+  apply(dir, place({ fingerprint: 'typo-fixed' }));
   assert.equal(owned().find(s => s.desc === 'mograph:sfx:kw-1').volume, 0.3);
-  applySpec(dir, place({ fingerprint: 'reset', resetLevels: true }));
+  apply(dir, place({ fingerprint: 'reset', resetLevels: true }));
   assert.notEqual(owned().find(s => s.desc === 'mograph:sfx:kw-1').volume, 0.3, 'resetLevels opts back into the palette level');
 });
 

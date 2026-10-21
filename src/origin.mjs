@@ -28,8 +28,12 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { CapcutError } from './core.mjs';
+
+/** This package's own install directory: bundled assets (cursor art) live under it. */
+const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url));
 
 /** Directories whose contents are deleted out from under the project. */
 function ephemeralRoots() {
@@ -133,7 +137,11 @@ export function assertOrigin({
     }
   }
 
-  if (found.ephemeral && !allowEphemeral) {
+  // A generated asset this package ships (the cursor art) is not someone's recording: its
+  // origin is the package, and it is the same bytes in every install. A checkout or an npx
+  // cache under /tmp or a scratchpad does not make it ephemeral media.
+  const bundled = generated && found.path != null && under(found.path, canonical(PACKAGE_ROOT));
+  if (found.ephemeral && !allowEphemeral && !bundled) {
     throw new CapcutError(
       `${label}: ${name} lives in a temporary directory (${found.path}).\n`
       + 'The bytes would be copied into the project, but the recorded origin would point at a path\n'

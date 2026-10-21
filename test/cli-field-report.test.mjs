@@ -302,8 +302,10 @@ test('bootstrap version works and failed JSON preflight remains branchable by ex
 
 test('status preserves unknown process state and rejects ignored arguments', () => {
   const cli = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'bin', 'capcutctl.mjs');
+  // Without pgrep on PATH the probe cannot answer; ASSUME_RUNNING would answer for it.
+  const { CAPCUTCTL_ASSUME_RUNNING: _assumed, ...env } = process.env;
   const unknown = spawnSync(process.execPath, [cli, 'status', '--json'], {
-    encoding: 'utf8', env: { ...process.env, PATH: '' },
+    encoding: 'utf8', env: { ...env, PATH: '' },
   });
   assert.equal(unknown.status, 3, unknown.stderr || unknown.stdout);
   const payload = JSON.parse(unknown.stdout);

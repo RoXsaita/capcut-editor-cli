@@ -7,9 +7,10 @@ import test from 'node:test';
 
 import { applySpec, doctor, isLocalMedia, localizeMedia, readJson, stableJson } from '../src/core.mjs';
 import { opClipAdd, opClipFade, opLocalizeAll, opReplaceMedia, parkPresetLeftover } from '../src/add.mjs';
+import { tmpDir } from './helpers/tmp.mjs';
 
 function fixture({ duration = 10_000_000, endcard = false, extraTracks = [] } = {}) {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-add-'));
+  const temp = tmpDir('capcutctl-add-');
   const project = path.join(temp, 'Add Project');
   const timelineId = 'TIMELINE-ONE';
   const media = path.join(temp, 'face.mp4');
@@ -656,7 +657,7 @@ test('replace-media and trim refuse upfront instead of rolling the transaction b
 
 /** A project dir carrying only the sidecar the park reads. */
 function parked({ start, end }) {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-park-'));
+  const temp = tmpDir('capcutctl-park-');
   fs.mkdirSync(path.join(temp, '.capcutctl'), { recursive: true });
   fs.writeFileSync(path.join(temp, '.capcutctl', 'created.json'),
     JSON.stringify({ preserved: { start, end } }));
@@ -693,7 +694,7 @@ test('localizing does not copy an un-relinked sibling back over the relink', () 
   // CapCut repeats material ids. The pass that makes the duplicates agree picked its winner
   // by `duration > 0` alone, so a sibling still pointing at a file that no longer exists —
   // the very condition localize is run to fix — overwrote the path just localized.
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-loc-'));
+  const temp = tmpDir('capcutctl-loc-');
   const project = path.join(temp, 'Project');
   fs.mkdirSync(project, { recursive: true });
   const take = path.join(temp, 'take-a');
@@ -718,7 +719,7 @@ test('two different takes with the same name and the same size get different fil
   // Byte size alone decided whether a colliding destination could be reused, and the copy
   // went ahead either way — so the second take silently overwrote the first and every
   // material already pointing there played the wrong footage.
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-collide-'));
+  const temp = tmpDir('capcutctl-collide-');
   const project = path.join(temp, 'Project');
   fs.mkdirSync(project, { recursive: true });
   const make = (root, bytes) => {

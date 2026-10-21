@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { detectBrands, spreadOverlapping, opSignature, sigPresets } from '../src/signature.mjs';
 import { validateDocument } from '../src/core.mjs';
+import { tmpDir } from './helpers/tmp.mjs';
 
 const US = s => Math.round(s * 1e6);
 const rules = () => sigPresets().rules;
@@ -38,7 +39,7 @@ function baseDoc() {
 }
 
 test('detectBrands: two brands sharing one artwork file yield one logo', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sig-'));
+  const dir = tmpDir('sig-');
   const shared = tmpLogo(dir, 'shared.png');
   const transcript = { segments: [{ start: 0, words: [
     { start: 1.0, word: 'chatgpt' }, { start: 1.4, word: 'hermes' }] }] };
@@ -54,7 +55,7 @@ test('detectBrands: two brands sharing one artwork file yield one logo', () => {
 });
 
 test('spreadOverlapping: marks on screen together are laid out side by side, in frame', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sig-'));
+  const dir = tmpDir('sig-');
   const logos = [
     { brand: 'a', at: 4.0, logo: tmpLogo(dir, 'a.png') },
     { brand: 'b', at: 4.6, logo: tmpLogo(dir, 'b.png') },
@@ -67,7 +68,7 @@ test('spreadOverlapping: marks on screen together are laid out side by side, in 
 });
 
 test('spreadOverlapping: marks that never share the screen keep the house position', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sig-'));
+  const dir = tmpDir('sig-');
   const logos = [
     { brand: 'a', at: 1.0, logo: tmpLogo(dir, 'a.png') },
     { brand: 'b', at: 20.0, logo: tmpLogo(dir, 'b.png') },
@@ -77,7 +78,7 @@ test('spreadOverlapping: marks that never share the screen keep the house positi
 });
 
 test('glow reveal: underlay track sits BELOW the core mark and carries the effects', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sig-'));
+  const dir = tmpDir('sig-');
   const doc = baseDoc();
   opSignature(doc, { op: 'signature', glow: true, noSfx: true,
                      logos: [{ brand: 'x', at: 4, logo: tmpLogo(dir, 'x.png') }] }, {});
@@ -102,7 +103,7 @@ test('glow reveal: underlay track sits BELOW the core mark and carries the effec
 });
 
 test('glow reveal: base clip values are the resting state, not the first keyframe', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sig-'));
+  const dir = tmpDir('sig-');
   const doc = baseDoc();
   opSignature(doc, { op: 'signature', glow: true, noSfx: true,
                      logos: [{ brand: 'x', at: 4, logo: tmpLogo(dir, 'x.png') }] }, {});
@@ -115,7 +116,7 @@ test('glow reveal: base clip values are the resting state, not the first keyfram
 });
 
 test('glow reveal: re-running sweeps the previous run\'s materials, not just its segments', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sig-'));
+  const dir = tmpDir('sig-');
   const doc = baseDoc();
   const op = () => ({ op: 'signature', glow: true, noSfx: true,
                       logos: [{ brand: 'x', at: 4, logo: tmpLogo(dir, 'x.png') }] });
@@ -143,8 +144,8 @@ test('glow reveal: re-running sweeps the previous run\'s materials, not just its
 });
 
 test('doctor flags media outside the draft, deduped by path', () => {
-  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'proj-'));
-  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'elsewhere-'));
+  const projectDir = tmpDir('proj-');
+  const outside = tmpDir('elsewhere-');
   const stray = tmpLogo(outside, 'stray.png');
   const doc = baseDoc();
   // three material records for one file — CapCut's own shape
@@ -175,7 +176,7 @@ function logoPlan(projectDir, extra) {
 }
 
 function scratchProject() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'logoproj-'));
+  const dir = tmpDir('logoproj-');
   const doc = baseDoc();
   fs.mkdirSync(path.join(dir, 'Timelines', 'TL'), { recursive: true });
   const withId = { ...doc, id: 'TL' };
@@ -187,7 +188,7 @@ function scratchProject() {
 }
 
 test('logo places artwork given by path, with no brand registered anywhere', () => {
-  const art = fs.mkdtempSync(path.join(os.tmpdir(), 'art-'));
+  const art = tmpDir('art-');
   const file = tmpLogo(art, 'totally-unregistered.png');
   const plan = logoPlan(scratchProject(), ['--logo', file, '--at', '4.4']);
   assert.equal(plan.logos.length, 1);
@@ -198,7 +199,7 @@ test('logo places artwork given by path, with no brand registered anywhere', () 
 });
 
 test('logo takes several paths with a time each, and lays them out side by side', () => {
-  const art = fs.mkdtempSync(path.join(os.tmpdir(), 'art-'));
+  const art = tmpDir('art-');
   const a = tmpLogo(art, 'a.png');
   const b = tmpLogo(art, 'b.png');
   const plan = logoPlan(scratchProject(), ['--logo', `${a},${b}`, '--at', '4.0,4.6']);
@@ -207,7 +208,7 @@ test('logo takes several paths with a time each, and lays them out side by side'
 });
 
 test('logo expands a folder of marks and shrinks the row to fit the frame', () => {
-  const art = fs.mkdtempSync(path.join(os.tmpdir(), 'art-'));
+  const art = tmpDir('art-');
   for (const n of ['1.png', '2.png', '3.png', '4.png', '5.png', 'notes.txt']) {
     fs.writeFileSync(path.join(art, n), n.endsWith('.png') ? PNG : 'ignore me');
   }
@@ -221,7 +222,7 @@ test('logo expands a folder of marks and shrinks the row to fit the frame', () =
 });
 
 test('logo --name overrides the filename', () => {
-  const art = fs.mkdtempSync(path.join(os.tmpdir(), 'art-'));
+  const art = tmpDir('art-');
   const plan = logoPlan(scratchProject(),
     ['--logo', tmpLogo(art, 'ugly-export-final-v3.png'), '--name', 'Acme', '--at', '2']);
   assert.equal(plan.logos[0].brand, 'Acme');
@@ -233,7 +234,7 @@ test('logo refuses artwork that is not there, by path', () => {
 });
 
 test('logo refuses a time count that does not match the marks', () => {
-  const art = fs.mkdtempSync(path.join(os.tmpdir(), 'art-'));
+  const art = tmpDir('art-');
   const a = tmpLogo(art, 'a.png');
   const b = tmpLogo(art, 'b.png');
   assert.throws(() => logoPlan(scratchProject(), ['--logo', `${a},${b}`, '--at', '1,2,3']),

@@ -65,7 +65,7 @@ export function opDenoise(doc,op={},context={}) {
     renderDerived(row.output,['-i',row.source,'-map','0:v:0','-map','0:a:0','-c:v','copy','-af',row.filter,
       '-c:a','aac','-b:a','192k','-movflags','+faststart'],context,row);
     for(const id of row.ids)opReplaceMedia(doc,{selector:{id},path:row.output,derivedFrom:row.source,derivedOffset:0,
-      width:row.width,height:row.height,__seed:op.__seed},context);
+      width:row.width,height:row.height,allowEphemeral:op.allowEphemeral===true,__seed:op.__seed},context);
   }
   const after=context.dryRun?null:op.measurements?.after??analyzeAudio(voiceDoc(),context.projectDir).mix;
   return {changed:plan.sources.reduce((n,r)=>n+r.ids.length,0),...plan,beforeVoice:before,afterVoice:after,

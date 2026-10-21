@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { pathToFileURL } from 'node:url';
 
 import { applySpec, doctor, readJson, stableJson } from '../src/core.mjs';
 import { assertOrigin, isEphemeralPath, isPreframed } from '../src/origin.mjs';
@@ -232,4 +233,30 @@ test('layout.screen obeys the same contract — it is the verb that replaces the
     width: 1080, height: 960, mediaDuration: 60_000_000, track: 'screen',
   }] }, { forceRunning: true }));
   assert.equal(error.code, 'PREFRAMED_MEDIA');
+});
+
+test('a generated asset bundled with the package is not ephemeral media, even from a temp checkout', async t => {
+  // A checkout or npx cache under /tmp or a scratchpad put the cursor art "in a temporary
+  // directory", so every cursor op refused with EPHEMERAL_MEDIA there. The exemption is narrow:
+  // generated, and inside this package's own root.
+  const pkg = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-pkg-'));
+  t.after(() => fs.rmSync(pkg, { recursive: true, force: true }));
+  for (const dir of ['src', 'presets']) fs.cpSync(new URL(`../${dir}`, import.meta.url), path.join(pkg, dir), { recursive: true });
+  fs.mkdirSync(path.join(pkg, 'assets'));
+  const art = path.join(pkg, 'assets', 'cursor-halo.png');
+  fs.copyFileSync(new URL('../assets/cursor-halo.png', import.meta.url), art);
+  const origin = await import(pathToFileURL(path.join(pkg, 'src', 'origin.mjs')).href);
+
+  assert.equal(origin.isEphemeralPath(art), true);
+  const note = origin.assertOrigin({ file: art, width: 256, height: 256, generated: true, projectDir: '/durable/project' });
+  assert.equal(note.kind, 'generated');
+  // Not generated: still a capture in a temp directory.
+  assert.equal(raises(() => origin.assertOrigin({ file: art, width: 256, height: 256, projectDir: '/durable/project' })).code,
+    'EPHEMERAL_MEDIA');
+  // Generated but outside the package: still refused.
+  const stray = path.join(path.dirname(pkg), `${path.basename(pkg)}-stray.png`);
+  fs.copyFileSync(art, stray);
+  t.after(() => fs.rmSync(stray, { force: true }));
+  assert.equal(raises(() => origin.assertOrigin({ file: stray, width: 256, height: 256, generated: true,
+    projectDir: '/durable/project' })).code, 'EPHEMERAL_MEDIA');
 });

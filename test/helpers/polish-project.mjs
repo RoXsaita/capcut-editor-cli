@@ -3,13 +3,14 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { stableJson } from '../../src/core.mjs';
+import { tmpDir } from './tmp.mjs';
 
 /**
  * A minimal draft with a cut principal track, which is all `polish` needs to have work to do:
  * two adjacent clips give it one seam to put a transition and a woosh on.
  */
 export function buildProject() {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-polish-'));
+  const temp = tmpDir('capcutctl-polish-');
   const project = path.join(temp, 'Polish Project');
   const timelineId = 'TIMELINE-ONE';
   const media = path.join(temp, 'face.mp4');

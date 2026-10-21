@@ -7,6 +7,7 @@ import test from 'node:test';
 import {
   BUNDLED_ASSET_DIR, assetSearchRoots, loadPreset, preflight, presetFile, hasBinary,
 } from '../src/core.mjs';
+import { tmpDir } from './helpers/tmp.mjs';
 
 /**
  * These guard the answer to "someone clones this and it works".
@@ -31,7 +32,7 @@ test('the overlays the built-in layouts need ship with the package', () => {
 
 test('the bundle is searched before any home directory, and after an explicit override', () => {
   const previous = process.env.CAPCUTCTL_ASSET_DIR;
-  const mine = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-assets-'));
+  const mine = tmpDir('capcutctl-assets-');
   try {
     process.env.CAPCUTCTL_ASSET_DIR = mine;
     const roots = assetSearchRoots(['~/Downloads/Media/Images/2026']);
@@ -48,7 +49,7 @@ test('the bundle is searched before any home directory, and after an explicit ov
 
 test('binary discovery uses PATH directly instead of requiring an external which command', () => {
   const previous = process.env.PATH;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-path-'));
+  const dir = tmpDir('capcutctl-path-');
   const binary = path.join(dir, 'fixture-tool');
   try {
     fs.writeFileSync(binary, '#!/bin/sh\nexit 0\n');
@@ -64,7 +65,7 @@ test('binary discovery uses PATH directly instead of requiring an external which
 
 test('CAPCUTCTL_PRESET_DIR overrides one preset and falls back for the rest', () => {
   const previous = process.env.CAPCUTCTL_PRESET_DIR;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-presets-'));
+  const dir = tmpDir('capcutctl-presets-');
   try {
     fs.writeFileSync(path.join(dir, 'sfx.json'), JSON.stringify({ audioTemplates: {}, transitionTemplates: {} }));
     process.env.CAPCUTCTL_PRESET_DIR = dir;
@@ -115,7 +116,7 @@ test('preflight names every environment problem and the command that fixes it', 
 });
 
 test('preflight exercises the toolchain and reports writable disk capacity', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-preflight-'));
+  const root = tmpDir('capcutctl-preflight-');
   const calls = [];
   const binaries = new Set(['ffmpeg', 'ffprobe', 'mlx_whisper', 'python3', 'swiftc']);
   // The declared runtime, stubbed: preflight must probe whatever this resolves to, and the
@@ -160,7 +161,7 @@ test('preflight exercises the toolchain and reports writable disk capacity', () 
 });
 
 test('preflight fails closed when a probe hangs or the drafts volume is full', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-preflight-fail-'));
+  const root = tmpDir('capcutctl-preflight-fail-');
   const report = preflight({
     root,
     binaryCheck: () => true,
@@ -183,7 +184,7 @@ test('preflight fails closed when a probe hangs or the drafts volume is full', (
 });
 
 test('preflight requires the declared Python runtime even when mlx_whisper itself is runnable', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-preflight-python-'));
+  const root = tmpDir('capcutctl-preflight-python-');
   const report = preflight({
     root,
     binaryCheck: name => name !== 'python3',
@@ -203,8 +204,8 @@ test('preflight requires the declared Python runtime even when mlx_whisper itsel
 
 test('preflight reports malformed presets instead of aborting the diagnostic', () => {
   const previous = process.env.CAPCUTCTL_PRESET_DIR;
-  const presets = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-broken-presets-'));
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-preflight-root-'));
+  const presets = tmpDir('capcutctl-broken-presets-');
+  const root = tmpDir('capcutctl-preflight-root-');
   try {
     fs.writeFileSync(path.join(presets, 'layouts.json'), '{broken');
     fs.writeFileSync(path.join(presets, 'sfx.json'), '{broken');
@@ -234,7 +235,7 @@ test('polish skips sounds this machine does not have instead of writing broken r
   // "Transaction failed validation with 12 error(s)" — a valid project refusing to be polished
   // because of someone else's ~/Library. Now the sounds that are missing are skipped and named.
   const previous = process.env.CAPCUTCTL_PRESET_DIR;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-absent-sfx-'));
+  const dir = tmpDir('capcutctl-absent-sfx-');
   try {
     const palette = JSON.parse(fs.readFileSync(path.join(BUNDLED_ASSET_DIR, '..', 'presets', 'sfx.json'), 'utf8'));
     for (const kind of ['audioTemplates', 'transitionTemplates']) {
@@ -273,7 +274,7 @@ test('new --blank works on a machine with no CapCut drafts at all', async () => 
   const { createProject } = await import('../src/create.mjs');
   const { readJson } = await import('../src/core.mjs');
 
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-empty-root-'));
+  const root = tmpDir('capcutctl-empty-root-');
   const media = path.join(root, 'face.mp4');
   fs.writeFileSync(media, 'face-bytes');
 

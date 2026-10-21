@@ -12,6 +12,9 @@ import { classifyLoudnessRole } from '../src/loudness.mjs';
 import { main, setOutput } from '../src/cli.mjs';
 import { buildProject } from './helpers/polish-project.mjs';
 
+// Every write is tested as if CapCut were open (npm test sets CAPCUTCTL_ASSUME_RUNNING=1).
+const apply = (dir, spec) => applySpec(dir, spec, { forceRunning: true });
+
 const US = s => Math.round(s * 1e6);
 
 function blank() {
@@ -77,7 +80,7 @@ test('sfx --file localizes the WAV as a sound with no library identity', () => {
   applySpec(project, spec([{ at: 1 }, { at: 3, dur: 2 }]), { dryRun: true });
   assert.ok(!fs.existsSync(mediaDir) || !fs.readdirSync(mediaDir).some(n => n.startsWith('sfx-')), 'dry run copies nothing');
 
-  applySpec(project, spec([{ at: 1 }, { at: 3, dur: 2 }]));
+  apply(project, spec([{ at: 1 }, { at: 3, dur: 2 }]));
   let doc = readJson(path.join(project, 'draft_info.json'));
   const mats = doc.materials.audios.filter(m => m.name === 'whoosh.wav');
   assert.equal(mats.length, 1);
@@ -96,7 +99,7 @@ test('sfx --file localizes the WAV as a sound with no library identity', () => {
     assert.equal(classifyLoudnessRole(t, s, mat), 'sfx');
   }
 
-  applySpec(project, spec([{ at: 6 }]));
+  apply(project, spec([{ at: 6 }]));
   doc = readJson(path.join(project, 'draft_info.json'));
   assert.equal(doc.materials.audios.filter(m => m.name === 'whoosh.wav').length, 1, 'a rerun reuses the material');
   assert.equal(doc.tracks.flatMap(t => t.segments).filter(s => s.material_id === mat.id).length, 3);

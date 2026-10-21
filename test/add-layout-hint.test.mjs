@@ -7,6 +7,7 @@ import test from 'node:test';
 import { main, parseArgs, setOutput, shq } from '../src/cli.mjs';
 import { buildLayoutSpec } from '../src/layouts.mjs';
 import { writeCliProject } from './helpers/cli-project.mjs';
+import { tmpDir } from './helpers/tmp.mjs';
 
 /** Split a POSIX command line the way a shell would, for the single-quoting shq() emits. */
 function shellWords(line) {
@@ -32,7 +33,7 @@ function shellWords(line) {
 test('the next step `add` prints can be pasted as is', async t => {
   // It used to omit --row (so `layout broll` refused it) and leave a project name with a
   // space unquoted (so a shell split it into two words).
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-add-hint-'));
+  const temp = tmpDir('capcutctl-add-hint-');
   t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
   const face = path.join(temp, 'face.mp4');
   const screen = path.join(temp, 'screen.mp4');

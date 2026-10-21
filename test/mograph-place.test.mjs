@@ -15,6 +15,9 @@ import { loadProfile } from '../src/profile.mjs';
 import { buildProject } from './helpers/polish-project.mjs';
 import { stubMograph } from './helpers/mograph-stub.mjs';
 
+// Every write is tested as if CapCut were open (npm test sets CAPCUTCTL_ASSUME_RUNNING=1).
+const apply = (dir, spec) => applySpec(dir, spec, { forceRunning: true });
+
 const PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
   'base64');
@@ -57,7 +60,7 @@ test('safe zones flag the platform UI bands', () => {
 test('mograph.place puts a generated clip on a top lane with exact geometry, and replaces itself', () => {
   const { dir } = project();
   const mov = path.join(dir, 'mograph', 'kw.mov');
-  applySpec(dir, { version: 1, operations: [place({ file: mov })] });
+  apply(dir, { version: 1, operations: [place({ file: mov })] });
   let d = doc(dir);
   const lanes = d.tracks.filter(t => /^mograph-\d+$/.test(t.name || ''));
   assert.equal(lanes.length, 1);
@@ -73,7 +76,7 @@ test('mograph.place puts a generated clip on a top lane with exact geometry, and
   assert.equal(material.width, 582);
 
   // Placing the same id again replaces it; the root and timeline mirrors stay in step.
-  applySpec(dir, { version: 1, operations: [place({ file: mov, at: 3 })] });
+  apply(dir, { version: 1, operations: [place({ file: mov, at: 3 })] });
   d = doc(dir);
   const all = d.tracks.flatMap(t => t.segments || []).filter(s => s.desc === 'mograph:kw-1');
   assert.equal(all.length, 1);
@@ -84,7 +87,7 @@ test('mograph.place puts a generated clip on a top lane with exact geometry, and
 
 test('overlapping graphics open a second lane; a png-still becomes an eased native photo clip', () => {
   const { dir, mov, png } = project();
-  applySpec(dir, { version: 1, operations: [
+  apply(dir, { version: 1, operations: [
     place({ file: mov }),
     place({ id: 'chip-1', template: 'brand-chip', format: 'png-still', file: png, at: 2.5, duration: 2, box: { x: 300, y: 1200, w: 400, h: 120 } }),
   ] });
@@ -99,15 +102,15 @@ test('overlapping graphics open a second lane; a png-still becomes an eased nati
 
 test('an unchanged placement is byte-identical on re-apply (stable ids)', () => {
   const { dir, mov } = project();
-  applySpec(dir, { version: 1, operations: [place({ file: mov })] });
+  apply(dir, { version: 1, operations: [place({ file: mov })] });
   const first = fs.readFileSync(path.join(dir, 'draft_info.json'), 'utf8');
-  applySpec(dir, { version: 1, operations: [place({ file: mov })] });
+  apply(dir, { version: 1, operations: [place({ file: mov })] });
   assert.equal(fs.readFileSync(path.join(dir, 'draft_info.json'), 'utf8'), first);
 });
 
 test('webm is refused for placement', () => {
   const { dir, mov } = project();
-  assert.throws(() => applySpec(dir, { version: 1, operations: [place({ file: mov, format: 'webm' })] }), /cannot be placed/);
+  assert.throws(() => apply(dir, { version: 1, operations: [place({ file: mov, format: 'webm' })] }), /cannot be placed/);
 });
 
 test('safeZoneAdvice gives the overlap in px and the smallest move that clears every zone', () => {

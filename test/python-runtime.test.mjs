@@ -22,11 +22,28 @@ import {
   resolvePython,
 } from '../src/python.mjs';
 
-for (const script of ['find-index.py', 'change-index.py', 'find-accurate-frames.py',
-  'frame-qa-accuracy.py']) {
+// Every standalone Python regression script in test/ runs here, each under its own HOME so a
+// cache one writes cannot satisfy the next. A hard-coded list left five of them (A-roll and
+// audio-index) unrun for weeks. test_caption_generate.py needs the optional [captions] extra
+// and has its own CI step and check.sh stage.
+const PY_SCRIPTS = fs.readdirSync(fileURLToPath(new URL('.', import.meta.url)))
+  .filter(name => name.endsWith('.py') && name !== 'test_caption_generate.py')
+  .sort();
+
+test('the Python regression scripts are discovered', () => {
+  assert.ok(PY_SCRIPTS.length > 0, 'no test/*.py found; the listing below would pass vacuously');
+});
+
+for (const script of PY_SCRIPTS) {
   test(`${script} media regressions`, () => {
     const python = resolvePython().executable;
-    execFileSync(python, [fileURLToPath(new URL(script, import.meta.url))], { stdio: 'pipe' });
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-pyhome-'));
+    try {
+      execFileSync(python, [fileURLToPath(new URL(script, import.meta.url))],
+        { stdio: 'pipe', env: { ...process.env, HOME: home } });
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 }
 

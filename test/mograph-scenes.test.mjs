@@ -17,6 +17,9 @@ import { loadProfile } from '../src/profile.mjs';
 import { CUE_KINDS, synthesize } from '../mograph/scenes/sound.mjs';
 import { buildProject } from './helpers/polish-project.mjs';
 
+// Every write is tested as if CapCut were open (npm test sets CAPCUTCTL_ASSUME_RUNNING=1).
+const apply = (dir, spec) => applySpec(dir, spec, { forceRunning: true });
+
 const profile = loadProfile();
 const BEAT = 60 / profile.tokens.scene.bpm;
 
@@ -360,7 +363,7 @@ test('a placed scene is full-canvas, keeps its own sound, and the gate neither f
   fs.mkdirSync(path.join(dir, 'mograph'), { recursive: true });
   const mov = path.join(dir, 'mograph', 'ws.mov');
   fs.writeFileSync(mov, 'prores-bytes');
-  applySpec(dir, { version: 1, operations: [{ op: 'mograph.place', id: 'ws-1', template: 'scene:word-slam', format: 'prores',
+  apply(dir, { version: 1, operations: [{ op: 'mograph.place', id: 'ws-1', template: 'scene:word-slam', format: 'prores',
     file: mov, at: 2, duration: 2.5, box: { x: 0, y: 0, w: 1080, h: 1920 }, sfx: null, clipVolume: 1, fingerprint: 'f' }] });
   const doc = readJson(path.join(dir, 'draft_info.json'));
   const seg = doc.tracks.flatMap(tr => tr.segments || []).find(s => s.desc === 'mograph:ws-1');

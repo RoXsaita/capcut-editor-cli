@@ -78,7 +78,7 @@ export function opBlurBroll(doc,op,context={}) {
   rescaleKeyframes(s,st.start,st.duration,0,s.target_timerange.duration);
   s.source_timerange={start:0,duration:s.target_timerange.duration};
   opReplaceMedia(doc,{selector:{id:s.id},path:plan.output,derivedFrom:plan.source,derivedOffset:plan.start,
-    width:plan.width,height:plan.height,mediaDuration:s.target_timerange.duration,__seed:op.__seed},context);
+    width:plan.width,height:plan.height,mediaDuration:s.target_timerange.duration,allowEphemeral:op.allowEphemeral===true,__seed:op.__seed},context);
   setSpeed(doc,s,1,{sourceStart:0});
   return {changed:1,...plan,playbackSpeed:1};
 }

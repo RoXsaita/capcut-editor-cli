@@ -35,3 +35,6 @@ outputs/
 # inside the clone under Logos/ must stay out of the repository.
 Logos/
 tools/vision/face
+
+# Personal terms for test/tree-privacy.test.mjs (a login, draft titles). Local only.
+scripts/.privacy-denylist

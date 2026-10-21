@@ -82,8 +82,9 @@ paid transcription API. Native UI acceptance currently targets macOS CapCut.
 - Staging's bounded sparse typo-correction prompt and validation, when a model
   hook is configured. IDs, timings, and positions are not rewritten by that hook.
 - Arabic stays in logical Unicode order; NFC, diacritic/digit normalization,
-  mixed-Latin font fallback, white fill, and one black glyph outline. No box,
-  shadow, glow, yellow karaoke, or uppercase conversion.
+  Latin words in the same Changa ExtraBold (no fallback font), white fill, and
+  one black glyph outline. No box, shadow, glow, yellow karaoke, or uppercase
+  conversion.
 - Staging's half-open render windows, so adjacent text clips do not overlap.
 - Native split-screen shots use 50% from bottom; full-face shots use 20%.
   For one untouched, canvas-sized imported master, Staging's real shot detector
