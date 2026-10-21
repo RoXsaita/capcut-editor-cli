@@ -486,7 +486,9 @@ CapCut remains subject to CapCut's terms and to the laws that apply to you.
 `export` uses CapCut's real renderer through native accessibility controls and keyboard
 actions; it is not headless. CapCut must be open on Home or in the requested project; from
 Home it waits for the project cards and scrolls the page until the exact title is on
-screen (`EXPORT_PROJECT_NOT_ON_HOME` if no card has it). Swift, macOS
+screen (`EXPORT_PROJECT_NOT_ON_HOME` if no card has it; check the CapCut draft name).
+Before each scroll and the card click it checks that CapCut is under the pointer and
+stops with `EXPORT_POINT_OCCLUDED`, naming the window in the way, if not. Swift, macOS
 Accessibility/Automation permission, and brief app focus are required. The command uses
 the current native export settings, verifies the project, stages a unique MP4 in CapCut's
 configured export folder, checks duration and decoding, then publishes the requested file.

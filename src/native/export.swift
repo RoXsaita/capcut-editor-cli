@@ -88,19 +88,70 @@ func homeState() -> (card: AXUIElement?, layout: [CGRect]) {
     let card = cards.first { rect($0).map { $0.contains(point) && window.contains($0) } == true }
     return (card, layout)
 }
+// What is under a screen point, only when it belongs to CapCut. A floating panel from
+// another app (a recorder's guided-take or alarm panel, say) would take the wheel or the
+// click, and the frontmost-app guard cannot see it. Returns the owner's name otherwise.
+func capcutHit(_ p: CGPoint) -> (element: AXUIElement?, owner: String) {
+    let system = AXUIElementCreateSystemWide()
+    AXUIElementSetMessagingTimeout(system, 2)
+    var hit: AXUIElement?
+    guard AXUIElementCopyElementAtPosition(system, Float(p.x), Float(p.y), &hit) == .success, let h = hit else { return (nil, "nothing readable") }
+    var pid: pid_t = 0
+    guard AXUIElementGetPid(h, &pid) == .success else { return (nil, "nothing readable") }
+    if pid == app.processIdentifier { return (h, "CapCut") }
+    return (nil, NSRunningApplication(processIdentifier: pid)?.localizedName ?? "pid \(pid)")
+}
+func occluded(_ p: CGPoint, _ owner: String, over: String = "CapCut") -> Never {
+    fail("EXPORT_POINT_OCCLUDED: \(owner) is over \(over) at (\(Int(p.x)), \(Int(p.y))); move it and retry")
+}
 // Home is one long Qt page and only the cards on screen are in the accessibility tree.
-// A wheel over a card does not move it; a wheel over the page body does. Qt routes the
-// wheel by hover, so move the pointer there first.
-func scrollHome(_ pixels: Int32) {
+// A wheel over a card does not move it; a wheel over the page body does. Once the grid
+// fills the window a fixed point lands on a card, so aim at the page outside the cards:
+// the fixed point that worked by hand while it is clear of every card, then the margin
+// right of the last column, then a gap between rows.
+func wheelPoints(_ layout: [CGRect], _ w: CGRect) -> [CGPoint] {
+    var points = [CGPoint(x: w.minX + w.width * 0.55, y: w.minY + w.height * 0.85)]
+    if let right = layout.map(\.maxX).max(), w.maxX - right >= 24 {
+        points.append(CGPoint(x: (right + w.maxX) / 2, y: w.minY + w.height * 0.85))
+    }
+    let rows = layout.sorted { $0.minY < $1.minY }
+    for (a, b) in zip(rows, rows.dropFirst()) where b.minY - a.maxY >= 8 && a.maxY > w.minY && b.minY < w.maxY {
+        points.append(CGPoint(x: w.midX, y: (a.maxY + b.minY) / 2)); break
+    }
+    return points.filter { p in w.contains(p) && !layout.contains { $0.insetBy(dx: -2, dy: -2).contains(p) } }
+}
+// Qt routes the wheel by hover, so move the pointer there first. `attempt` picks a later
+// point when the first one did not move the page.
+func scrollHome(_ pixels: Int32, _ layout: [CGRect], attempt: Int = 0) {
     guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.lemon.lvoverseas" else { fail("EXPORT_FOCUS_LOST: retry when CapCut can keep focus briefly") }
     guard let w = homeWindow() else { fail("EXPORT_HOME_GEOMETRY") }
-    let p = CGPoint(x: w.minX + w.width * 0.55, y: w.minY + w.height * 0.85)
+    let candidates = wheelPoints(layout, w)
+    guard !candidates.isEmpty else { fail("EXPORT_HOME_GEOMETRY: no page area outside the cards to scroll") }
+    let p = candidates[attempt % candidates.count]
+    let (hit, owner) = capcutHit(p)
+    if hit == nil { occluded(p, owner) }
     CGWarpMouseCursorPosition(p)
     CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left)!.post(tap: .cghidEventTap)
     Thread.sleep(forTimeInterval: 0.15)
     let wheel = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: pixels, wheel2: 0, wheel3: 0)!
     wheel.location = p; wheel.post(tap: .cghidEventTap)
     Thread.sleep(forTimeInterval: 0.6)
+}
+// The card is clicked at its centre (as click() does) only when that point is the card
+// itself or something inside it, never a CapCut sheet or another app's window above it.
+func clickCard(_ card: AXUIElement) {
+    guard let r = rect(card) else { fail("EXPORT_CONTROL_GEOMETRY") }
+    let p = CGPoint(x: r.midX, y: r.midY)
+    let (hit, owner) = capcutHit(p)
+    guard var e = hit else { occluded(p, owner) }
+    var inside = rect(e).map { r.insetBy(dx: -1, dy: -1).contains($0) } ?? false
+    for _ in 0..<12 where !inside {
+        if CFEqual(e, card) { inside = true; break }
+        guard let parent = attr(e, kAXParentAttribute) else { break }
+        e = parent as! AXUIElement
+    }
+    if !inside { occluded(p, "another CapCut element (" + text(hit!, kAXRoleAttribute) + ")", over: "the project card") }
+    click(card)
 }
 if find(target) == nil {
     if find("ExportDialog") != nil { keyboard("tell application \"System Events\" to key code 53") }
@@ -115,23 +166,34 @@ if homeCards().isEmpty { fail("EXPORT_HOME_UNAVAILABLE: no project cards on CapC
 var state = homeState()
 if state.card == nil { Thread.sleep(forTimeInterval: 1); state = homeState() }
 // Older projects sit below the first row: page down, then back up, checking each step.
+// A card already cut off by the window edge means the page has more to show.
+let overflowed = homeWindow().map { w in state.layout.contains { $0.maxY > w.maxY + 1 || $0.minY < w.minY - 1 } } ?? false
 var moved = false
 for pixels: Int32 in [-240, 240] where state.card == nil {
     var still = 0
     for _ in 0..<60 {
         let before = state.layout
-        scrollHome(pixels)
+        scrollHome(pixels, before)
         state = homeState()
         if state.card != nil { break }
+        if state.layout == before {
+            // Before calling it the end of the page, try the wheel at another point.
+            scrollHome(pixels, before, attempt: 1)
+            state = homeState()
+            if state.card != nil { break }
+        }
         if state.layout != before { moved = true }
         still = state.layout == before ? still + 1 : 0
         if still >= 2 { break }
     }
 }
 let found = state.card
-if found == nil && !moved { fail("EXPORT_HOME_SCROLL_STUCK: CapCut Home did not move under the scroll wheel while looking for " + project) }
-guard let card = found else { fail("EXPORT_PROJECT_NOT_ON_HOME: " + project + " has no card on CapCut Home after scrolling") }
-click(card)
+if found == nil && !moved {
+    if overflowed { fail("EXPORT_HOME_SCROLL_STUCK: CapCut Home has more cards but did not move under the scroll wheel while looking for " + target) }
+    fail("EXPORT_PROJECT_NOT_ON_HOME: no card titled " + target + "; Home did not scroll (a short library that fits on one screen, or the wheel did not reach the page). Check the CapCut draft name first")
+}
+guard let card = found else { fail("EXPORT_PROJECT_NOT_ON_HOME: no card titled " + target + " on CapCut Home after scrolling") }
+clickCard(card)
 _ = waitFor("MainWindowTitleBarExportBtn")
 if find("ExportDialog") == nil {
     _ = waitFor("MainWindowTitleBarExportBtn")
