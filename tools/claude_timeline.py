@@ -9,7 +9,10 @@ and a vt to seek to, instead of hand-searching a 100-minute recording.
     python3 claude_timeline.py --take screen-20261017-184430 [--grep TEXT] [--session NAME]
                                [--kind prompt,reply] [--from VT] [--to VT] [--limit N]
 
-Always writes <take>/claude-timeline.jsonl (every row, not just the filtered ones).
+Always writes <take>/claude-timeline.jsonl (every row, not just the filtered ones). Each row
+carries `file` and `file_t`: the video file holding that vt and the time to seek in it. A take
+the recorder restarted (session.json video_segments) is several files on one vt clock, so there
+vt is not a seek time; a row in a restart gap has `gap: true` and no file.
 
 Clock. rl2 stamps events on the host clock; vt = host - session.json clock.first_frame_host.
 session.json has no sub-second wall time and created_wall can be stamped long after the start
@@ -35,6 +38,9 @@ import re
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import rl2_take
 
 RECORDINGS = os.path.expanduser("~/Desktop/Screen Recordings")
 PROJECTS = os.path.expanduser("~/.claude/projects")
@@ -286,6 +292,32 @@ def fmt_vt(v):
     return f"{v // 3600:d}:{v % 3600 // 60:02d}:{v % 60:02d}" if v >= 3600 else f"{v // 60:d}:{v % 60:02d}"
 
 
+def place_rows(rows, parts):
+    """Give each row the video file that holds its vt and the time to seek in that file.
+
+    A restarted take (session.json video_segments) is several files on one vt clock, so vt
+    is a seek time only in a one-part take. A row in a restart gap is in no file: file is ""
+    and gap is true.
+    """
+    for r in rows:
+        at = rl2_take.locate(parts, r["vt"])
+        r["file"], r["file_t"], r["gap"] = (at[0], round(at[1], 2), False) if at else ("", None, True)
+    return rows
+
+
+def row_line(r, multi=False):
+    """One printed row; a multi-part take gets the part column (file and file time)."""
+    snip = one_line(r["text"])
+    snip = snip[:SNIP] + ("…" if len(snip) > SNIP else "")
+    mark = "*" if r["on_screen"] else " "
+    part = ""
+    if multi:
+        part = " {:<18.18} {:>8} ".format("(gap)" if r.get("gap") else r.get("file", ""),
+                                          "" if r.get("file_t") is None else f"{r['file_t']:.1f}")
+    return (f"{r['vt']:8.1f} {fmt_vt(r['vt']):>7} {r['wall']}{part} {mark} {r['session']:<30.30} {r['kind']:<6} {snip}"
+            + ("  [redacted]" if r["redacted"] else ""))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--take", required=True, help="take folder name (in ~/Desktop/Screen Recordings) or path")
@@ -330,6 +362,10 @@ def main():
         r["redacted"] = red
         r["take"] = os.path.basename(take)
 
+    parts = rl2_take.parts(take)
+    place_rows(rows, parts)
+    multi = len(parts) > 1
+
     with open(os.path.join(take, OUT), "w") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
@@ -345,12 +381,12 @@ def main():
 
     print(f"# {os.path.basename(take)}  wall0={wall0.astimezone().strftime('%H:%M:%S')}  duration={fmt_vt(dur)}"
           f"  rows={len(rows)}  matched={len(sel)}  -> {OUT}", file=sys.stderr)
+    if multi:
+        # vt is not a seek time here: seek the row's file at its file_t.
+        print(f"# restarted take, {rl2_take.listing(parts)}; seek <file> at file_t, never vt",
+              file=sys.stderr)
     for r in sel[:a.limit]:
-        snip = one_line(r["text"])
-        snip = snip[:SNIP] + ("…" if len(snip) > SNIP else "")
-        mark = "*" if r["on_screen"] else " "
-        print(f"{r['vt']:8.1f} {fmt_vt(r['vt']):>7} {r['wall']} {mark} {r['session']:<30.30} {r['kind']:<6} {snip}"
-              + ("  [redacted]" if r["redacted"] else ""))
+        print(row_line(r, multi))
     if len(sel) > a.limit:
         print(f"# … {len(sel) - a.limit} more (raise --limit, or narrow with --grep/--session/--from/--to)", file=sys.stderr)
 

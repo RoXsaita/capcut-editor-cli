@@ -2,6 +2,7 @@
 """Regression coverage for A-roll cache identity, duplicate safety, and FPS contracts."""
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -105,6 +106,57 @@ class ArollCacheFindingsTest(unittest.TestCase):
             self.assertEqual(before["mtime_ns"], after["mtime_ns"])
             self.assertNotEqual(before["content_hash"], after["content_hash"])
             self.assertFalse(index_is_current(index, media))
+
+    def test_touched_or_copied_media_keeps_its_index_and_same_named_takes_keep_their_transcripts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            media = root / "take.mp4"
+            media.write_bytes(b"A" * 8192)
+            index = root / "take.aroll.json"
+            index.write_text(json.dumps({
+                "version": AROLL_INDEX_VERSION, "media": str(media), "source_token": media_token(media),
+            }))
+            stat = media.stat()
+            os.utime(media, ns=(stat.st_atime_ns, stat.st_mtime_ns + 3_000_000_000))
+            self.assertTrue(index_is_current(index, media), "a touch does not change the source")
+            copy = root / "proj" / "Downloads__take.mp4"
+            copy.parent.mkdir()
+            shutil.copy2(media, copy)
+            self.assertTrue(index_is_current(index, copy), "a copy has the same bytes")
+
+            first, second = root / "one" / "face.wav", root / "two" / "face.wav"
+            first.parent.mkdir()
+            second.parent.mkdir()
+            first.write_bytes(b"first take")
+            second.write_bytes(b"second take")
+            cache = root / "cache"
+            cache.mkdir()
+            legacy = cache / "face.whisper-tiny.json"
+            legacy.write_text(json.dumps({"_token": media_token(first), "_settings": {"language": "ar", "model": "tiny"},
+                                          "segments": [], "language": "legacy-first"}))
+            calls = []
+
+            def fake_transcribe(path, **options):
+                calls.append(path)
+                return {"segments": [], "language": Path(path).parent.name}
+
+            whisper = SimpleNamespace(load_model=lambda _model: SimpleNamespace(transcribe=fake_transcribe))
+            with patch.dict(sys.modules, {"whisper": whisper}), patch("aroll.shutil.which", return_value=None):
+                self.assertEqual(transcribe(str(first), "ar", "tiny", str(cache))["language"], "legacy-first")
+                self.assertEqual(transcribe(str(second), "ar", "tiny", str(cache))["language"], "two")
+                self.assertEqual(transcribe(str(second), "ar", "tiny", str(cache))["language"], "two")
+            self.assertEqual(calls, [str(second)])
+            self.assertEqual(json.loads(legacy.read_text())["language"], "legacy-first",
+                             "the legacy unkeyed transcript is never overwritten")
+            keyed = list(cache.glob("face.whisper-tiny.*.json"))
+            self.assertEqual(len(keyed), 2, "the legacy hit is migrated to its keyed name")
+            stat = first.stat()
+            os.utime(first, ns=(stat.st_atime_ns, stat.st_mtime_ns + 9_000_000_000))
+            with patch.dict(sys.modules, {"whisper": whisper}), patch("aroll.shutil.which", return_value=None):
+                self.assertEqual(transcribe(str(first), "ar", "tiny", str(cache))["language"], "legacy-first")
+            self.assertEqual(calls, [str(second)], "a touched original is still a cache hit")
+            stamps = [json.loads(path.read_text())["_token"] for path in cache.glob("face.whisper-tiny.*.json")]
+            self.assertIn(media_token(first), stamps, "and its keyed file carries the current stamp")
 
     def test_arabic_prefix_chain_is_review_only_and_all_beats_are_retained(self):
         beats = [

@@ -957,6 +957,19 @@ export function toolEnv(extra = {}) {
 }
 
 /**
+ * The spoken-CTA role patterns `cut` checks (profile `ending.ctaPatterns`), as the JSON array
+ * aroll.py reads from CAPCUTCTL_CTA_PATTERNS. A profile that cannot be read costs the CTA
+ * warning, never the cut, so this returns no variable rather than throwing.
+ */
+export function ctaPatternEnv() {
+  let patterns;
+  try { patterns = profileValue('ending.ctaPatterns', []); } catch { return {}; }
+  if (!Array.isArray(patterns)) return {};
+  const strings = patterns.filter(value => typeof value === 'string' && value);
+  return strings.length ? { CAPCUTCTL_CTA_PATTERNS: JSON.stringify(strings) } : {};
+}
+
+/**
  * The edit range a Python reader must use, as `CAPCUTCTL_CONTENT_RANGE_US=start,end`. Node is
  * the only source of it: created.json's `contentEnd` is a write-time snapshot, so a preview
  * read from it cut the CTA after a later edit, or rendered dead parked material.
@@ -1121,7 +1134,7 @@ async function runInPlaceCut(args, root, apply = applySpec) {
   const script = path.join(HERE, '..', 'tools', 'aroll.py');
   const forwarded = buildArrollArgs(args, media);
   const python = pythonForTool('aroll.py');
-  const run = spawnSync(python.executable, [script, ...forwarded], { stdio: 'inherit', env: toolEnv({ CAPCUTCTL_IN_PLACE_CUT: '1' }) });
+  const run = spawnSync(python.executable, [script, ...forwarded], { stdio: 'inherit', env: toolEnv({ CAPCUTCTL_IN_PLACE_CUT: '1', ...ctaPatternEnv() }) });
   if (run.error) throw new CapcutError(`could not run ${script}: ${run.error.message}`, { exitCode: 2 });
   if ((run.status ?? 1) !== 0) { process.exitCode = run.status ?? 1; return null; }
 
@@ -1179,7 +1192,7 @@ export async function main(argv, dependencies = {}) {
     // frame_qa, and so only needs NumPy and Pillow, when --strip asks for a contact sheet.
     const python = pythonForTool(tool, { argv: argv.slice(1) });
     // qa and X-ray read the edit range off the draft; hand them the live one.
-    let rangeEnv = {};
+    let rangeEnv = command === 'cut' ? ctaPatternEnv() : {};
     const projectArg = (command === 'qa' || command === 'xray') ? rawProjectArg(argv) : null;
     if (projectArg && !argv.includes('--help') && !argv.includes('-h')) {
       const rawRoot = rawValueArg(argv, '--root');

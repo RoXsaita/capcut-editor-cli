@@ -10,6 +10,7 @@ import {
   buildCutRecutSpec,
   buildScreenLayoutSpec,
   buildArrollArgs,
+  ctaPatternEnv,
   hasEditorialDecision,
   isInPlaceCut,
   main,
@@ -422,4 +423,12 @@ test('an apply refreshes a stale created.contentEnd when a parked range exists, 
   } finally {
     fs.rmSync(path.dirname(project), { recursive: true, force: true });
   }
+});
+
+test('cut forwards the profile CTA role patterns to aroll.py as one JSON env var', () => {
+  const env = ctaPatternEnv();
+  const patterns = JSON.parse(env.CAPCUTCTL_CTA_PATTERNS);
+  assert.ok(Array.isArray(patterns) && patterns.length > 0);
+  assert.ok(patterns.every(value => typeof value === 'string'));
+  assert.ok(patterns.some(value => new RegExp(value, 'i').test('follow for more')));
 });

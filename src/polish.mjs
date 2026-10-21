@@ -7,6 +7,7 @@ import {
 import { carryLevels, snapshotLevels } from './levels.mjs';
 import { hasClipAnimations } from './animations.mjs';
 import { resolveClip } from './add.mjs';
+import { partForMedia, takeParts, vtInPart } from './rl2-take.mjs';
 import { readMetaRecord } from './repair.mjs';
 import { detachLibraryIdentity, localizeAudioFile, probeAudioDuration } from './local-audio.mjs';
 
@@ -935,10 +936,25 @@ export function loadSession(dir) {
   return {
     dir,
     session,
+    parts: takeParts(dir, session),
     sourceTakeId: sessionTakeId(session),
     events: readNdjson(path.join(dir, 'trace.ndjson')),
     frames: readNdjson(path.join(dir, 'frames.ndjson')),
   };
+}
+
+/**
+ * Map one take-wide vt onto the timeline through the windows cut from the file that holds it.
+ * A restarted take is several files on one vt clock; each B-roll window's source time is its
+ * own file's clock, so the vt moves to that part's file time first. One-part takes map as before.
+ */
+export function mapTakeVt(windows, parts, vt) {
+  if (!parts || parts.length <= 1) return mapVtToTimeline(windows, vt);
+  for (const w of windows) {
+    const t = vtInPart(parts, partForMedia(parts, w.path), vt);
+    if (t != null && t >= w.srcIn && t < w.srcOut) return r2(w.tgtIn + (t - w.srcIn) / w.speed);
+  }
+  return null;
 }
 
 function sessionTakeId(session) {
@@ -1007,7 +1023,7 @@ export function planInteractions(doc, { projectDir = null, minGap = 0.15 } = {})
   const cues = [];
   for (const dir of findRl2Sessions(projectDir, doc)) {
     const loaded = loadSession(dir);
-    const { session, events, frames } = loaded;
+    const { session, events, frames, parts } = loaded;
     const sessionWindows = windowsForSession(windows, loaded);
     if (!sessionWindows.length) continue;
     for (const ev of events) {
@@ -1018,7 +1034,7 @@ export function planInteractions(doc, { projectDir = null, minGap = 0.15 } = {})
       if (kind === 'click' && ev.in_capture === false) continue;
       const vt = eventVt(ev, session, frames);
       if (!Number.isFinite(vt)) continue;
-      const t = mapVtToTimeline(sessionWindows, vt);
+      const t = mapTakeVt(sessionWindows, parts, vt);
       if (t == null) continue;
       if (US(t) >= boundaryUs) continue;
       let dur = 0.3;

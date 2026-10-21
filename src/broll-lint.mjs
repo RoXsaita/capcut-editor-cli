@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { allSegments, resolveMediaPath } from './core.mjs';
 import { principalTrack } from './polish.mjs';
+import { partForMedia, takeParts, vtInPart } from './rl2-take.mjs';
 import { sourceToTimeline } from './signature.mjs';
 import { findIndexForMaterial, shiftTranscript } from './video-index.mjs';
 
@@ -147,10 +148,16 @@ export function momentsFromSidecar(mediaPath, projectDir = null, { minScore = BR
   const dir = sidecarDir(mediaPath, projectDir);
   if (!dir) return null;
   const rows = readNdjson(path.join(dir, 'change.ndjson'));
+  // A restarted take: only this media's part, on its own file clock; gap rows are dropped.
+  const parts = takeParts(dir);
+  const part = partForMedia(parts, mediaPath);
+  if (!part) return null;
   const marks = [];
   for (const row of rows) {
     if (typeof row.score !== 'number' || typeof row.vt !== 'number' || row.score < minScore) continue;
-    marks.push({ at: row.vt, score: row.score });
+    const at = vtInPart(parts, part, row.vt);
+    if (at == null) continue;
+    marks.push({ at, score: row.score });
   }
   if (!marks.length) return [];
   marks.sort((a, b) => a.at - b.at);

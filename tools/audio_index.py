@@ -72,6 +72,44 @@ def source_token(media):
     }
 
 
+def _token_hash(token):
+    if not isinstance(token, dict):
+        return None
+    value = token.get("content_hash", token.get("fingerprint"))
+    return value if isinstance(value, str) and value else None
+
+
+def same_source(stored, current):
+    """Whether a cache stamped with `stored` describes the media whose token is `current`.
+
+    The evidence is the bytes: the same size and the same content hash. inode and mtime are
+    not compared. A copy (a project's `Downloads__take.mp4`, a relink) has neither, and a
+    touched original keeps its bytes; both are the same source. A same-path, same-size
+    overwrite changes the content hash and is not.
+    """
+    if not isinstance(stored, dict) or not isinstance(current, dict):
+        return False
+    digest = _token_hash(stored)
+    if digest is None or digest != _token_hash(current):
+        return False
+    try:
+        return int(stored.get("size")) == int(current.get("size"))
+    except (TypeError, ValueError):
+        return False
+
+
+def source_key(token):
+    """The short content key in a cache file name: `<stem>.<kind>.<key>.json`.
+
+    Two takes both named screen.mp4 get two files instead of overwriting one, and a copy of a
+    take finds the original's file by this key without reading any JSON.
+    """
+    digest = _token_hash(token)
+    if digest is None:
+        raise ValueError("source token has no content hash")
+    return digest[:16]
+
+
 def _write_json_atomic(path, value):
     """Publish a cache record only after its complete JSON has been written."""
     parent = os.path.dirname(os.path.abspath(path)) or "."
@@ -128,17 +166,29 @@ class AudioIndex:
         cd = os.path.abspath(os.path.expanduser(cache_dir))
         os.makedirs(cd, exist_ok=True)
         stem = os.path.basename(media).rsplit(".", 1)[0]
-        key = os.path.join(cd, stem + f".energy{bin_ms}.json")
         token = AudioIndex._token(media)
-        if not force and os.path.exists(key):
+        # `<stem>.energy10.<key>.json`: the kind marker stays right after the stem so the
+        # `${stem}.energy10` prefix readers in src/video-index.mjs still match. The legacy
+        # `<stem>.energy10.json` is read when its token matches and is never overwritten:
+        # it may belong to another take of the same name.
+        key = os.path.join(cd, stem + f".energy{bin_ms}.{source_key(token)}.json")
+        legacy = os.path.join(cd, stem + f".energy{bin_ms}.json")
+        for candidate in ([] if force else [key, legacy]):
+            if not os.path.exists(candidate):
+                continue
             try:
-                d = json.loads(Path(key).read_text(encoding="utf-8"))
+                d = json.loads(Path(candidate).read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError, TypeError):
                 d = None
-            if (isinstance(d, dict) and d.get("version") == ENERGY_INDEX_VERSION and d.get("token") == token
+            if (isinstance(d, dict) and d.get("version") == ENERGY_INDEX_VERSION and same_source(d.get("token"), token)
                     and isinstance(d.get("db"), list) and d["db"]
                     and all(isinstance(value, (int, float)) and math.isfinite(value) for value in d["db"])
                     and isinstance(d.get("bin"), (int, float)) and math.isfinite(d["bin"]) and d["bin"] > 0):
+                if candidate != key or d.get("token") != token:
+                    # Same bytes, newer stamp (a touched original, or a legacy file): write the
+                    # keyed file with the current token so the Node readers, which still check
+                    # mtime on the same inode, accept it too. The legacy file is left alone.
+                    _write_json_atomic(key, {**d, "token": token})
                 return AudioIndex(d["db"], d["bin"], media, token=token)
 
         wav = media
@@ -164,7 +214,7 @@ class AudioIndex:
 
         idx.path = media
         idx.token = token
-        if source_token(media) != token:
+        if not same_source(token, source_token(media)):
             raise RuntimeError("media changed while its energy index was being built; rerun indexing")
         _write_json_atomic(key, {"version": ENERGY_INDEX_VERSION, "bin": idx.bin, "db": idx.db, "token": token})
         return idx
@@ -356,6 +406,12 @@ def lint(idx, spans, fps=30.0, first_word_starts=None, loud_threshold=SOFT):
             shown = str(word.get("word") or "first word").strip()
             f.append(f"{lbl} IN FIRST_WORD_CLIPPED  {a:.3f} starts "
                      f"{a - float(word['start']):.3f}s after trusted {shown!r} at {float(word['start']):.3f}")
+        # --- IN inside sound: a later clip that starts loud, with no quiet frame before it,
+        # was cut mid-word (a recovery or snap that landed inside continuous speech). The
+        # first clip is exempt: the video starting on speech is not a splice.
+        if i > 0 and idx.at(a) >= loud_threshold and idx.tail_silence(a) < frame:
+            f.append(f"{lbl} IN LOUD_BOUNDARY  {a:.3f}  boundary is loud ({idx.at(a):.0f}dB) "
+                     f"with no quiet frame before it; this IN cuts into a word")
         # --- first clip: a lead-in is desirable, only an excessive one is a fault
         if i == 0 and idx.head_silence(a) > 0.60:
             f.append(f"{lbl} IN  {a:.3f}  {idx.head_silence(a):.2f}s before the video starts")

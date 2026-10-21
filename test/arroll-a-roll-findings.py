@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Focused A-roll regression tests; run directly with Python 3.11+."""
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -20,6 +22,8 @@ from aroll import (
     audio_ramp_operations,
     capcutctl_cmd,
     cmd_cut,
+    cta_findings,
+    cta_patterns,
     group_duplicates,
     load_review,
     snap,
@@ -30,7 +34,7 @@ from aroll import (
     suggested_keep,
     trustworthy_word_start,
 )
-from audio_index import AudioIndex, source_token
+from audio_index import AudioIndex, lint, source_token
 
 
 def beat(identifier, text, take, start, end, **extra):
@@ -464,6 +468,112 @@ class ArollFindingsTest(unittest.TestCase):
                     patch("aroll.subprocess.run") as run:
                 self.assertEqual(cmd_cut(args), 1)
             run.assert_not_called()
+
+    def test_in_recovery_needs_a_quiet_frame_in_continuous_speech(self):
+        # Continuous speech 1.0-3.0s. P ends where W starts; beat 1 starts on X at 2.0.
+        def index(dip=False):
+            db = [-70.0] * 400
+            for sample in range(100, 300):
+                db[sample] = -20.0
+            if dip:
+                for sample in range(157, 161):      # 1.57-1.61: holds the 1.6s frame
+                    db[sample] = -50.0               # quiet (< SOFT) yet not hard silence
+            return AudioIndex(db, 0.01)
+
+        data = {
+            "source_duration": 4.0,
+            "words": [
+                {"text": "P", "start": 1.05, "end": 1.58, "segment": 0},
+                {"text": "W", "start": 1.60, "end": 1.98, "segment": 0},
+                {"text": "X", "start": 2.00, "end": 2.90, "segment": 0},
+            ],
+            "beats": [beat(0, "earlier", 0, 0.0, 0.5), beat(1, "X", 0, 2.0, 2.95)],
+        }
+        with self.assertRaisesRegex(ValueError, "quiet"):
+            apply_outward_recoveries(index(), [dict(data["beats"][1])], {1: {"in": 0.45}}, data, fps=30)
+
+        picked = [dict(data["beats"][1])]
+        apply_outward_recoveries(index(dip=True), picked, {1: {"in": 0.45}}, data, fps=30)
+        self.assertLessEqual(picked[0]["src_in"], 1.6 + 1e-9)
+        self.assertGreaterEqual(picked[0]["src_in"], 1.57 - 1e-9)
+        self.assertEqual(picked[0]["first_word"], "W")
+
+        findings = lint(index(), [("b0", 0.0, 0.5), ("b1", 1.4667, 2.95)])
+        self.assertTrue(any(f.startswith("b1 IN LOUD_BOUNDARY") for f in findings), findings)
+        clean = lint(index(dip=True), [("b0", 0.0, 0.5), ("b1", 1.6, 2.95)])
+        self.assertFalse(any("IN LOUD_BOUNDARY" in f for f in clean), clean)
+        first = lint(index(), [("b1", 1.4667, 2.95)])
+        self.assertFalse(any("IN LOUD_BOUNDARY" in f for f in first), "the opening clip is not a splice")
+
+    def test_snap_does_not_build_a_beat_out_of_the_next_utterance(self):
+        db = [-70.0] * 800
+        for sample in list(range(200, 230)) + list(range(400, 600)):
+            db[sample] = -20.0
+        idx = AudioIndex(db, 0.01)
+        self.assertIsNone(snap(idx, 2.0, 2.3, floor=2.35))
+        self.assertIsNone(snap(idx, 2.0, 2.3, floor=2.30))
+        src_in, _ = snap(idx, 4.0, 6.0, floor=2.35)
+        self.assertAlmostEqual(src_in, 3.9333333333, places=6)
+
+        early = [-70.0] * 400
+        for sample in range(220, 260):
+            early[sample] = -20.0
+        self.assertIsNotNone(snap(AudioIndex(early, 0.01), 2.0, 2.3),
+                             "an early Whisper end still keeps its beat")
+
+    def test_cta_dropped_and_not_last_warn_without_refusing(self):
+        patterns = cta_patterns(env={"CAPCUTCTL_CTA_PATTERNS": json.dumps(
+            ["\\bتابع(?:و|وا|وني|ونا|ني)\\b", "\\bfollow\\b"])})
+        beats = [
+            beat(0, "شرح طويل لكل الخطوات", 0, 0, 4),
+            beat(1, "تابعوني لتعرفوا اكتر", 0, 4, 6),
+            beat(2, "خطوة اخيرة مهمة", 0, 6, 8),
+        ]
+        dropped = cta_findings(beats, [0, 2], patterns)
+        self.assertEqual(dropped["beats"], [1])
+        self.assertTrue(any(f.startswith("CTA_DROPPED  b1") for f in dropped["findings"]), dropped)
+
+        not_last = cta_findings(beats, [0, 1, 2], patterns)
+        self.assertEqual([f.split()[0] for f in not_last["findings"]], ["CTA_NOT_LAST"])
+
+        self.assertEqual(cta_findings(beats, [0, 2, 1], patterns)["findings"], [])
+        self.assertEqual(cta_findings(beats, [0, 2], [])["findings"], [])
+
+        retry = beats + [beat(3, "تابعوني لتعرفوا اكتر", 1, 20, 22)]
+        self.assertEqual(cta_findings(retry, [0, 2, 3], patterns)["findings"], [],
+                         "the kept retry of the CTA covers the dropped attempt")
+        self.assertEqual(cta_patterns(env={"CAPCUTCTL_CTA_PATTERNS": '["("]'}), [])
+
+    def test_cmd_cut_writes_plan_cta_and_still_builds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            media = root / "face.mp4"
+            media.write_bytes(b"fixture media")
+            token = source_token(media)
+            index = root / "face.aroll.json"
+            plan = root / "face.plan.json"
+            index.write_text(json.dumps({
+                "version": 6, "media": str(media), "source_token": token, "fps": 30.0,
+                "source_duration": 4.0,
+                "beats": [beat(0, "follow for more", 0, 0.0, 1.0), beat(1, "the tutorial", 0, 2.0, 3.0)],
+                "default_keep": [0, 1],
+            }))
+            args = Namespace(
+                index=str(index), keep="0,1", drop=None, order="0,1", trim_beat=None,
+                review=None, no_repair=True, force=False, project=None, into=None,
+                dry_run=True, plan=str(plan), fps=None,
+            )
+            idx = AudioIndex([-20.0] * 100 + [-70.0] * 100 + [-20.0] * 100 + [-70.0] * 100, 0.01)
+            output = io.StringIO()
+            with patch.object(__import__("aroll").AudioIndex, "build_or_load", return_value=idx), \
+                    patch.dict("os.environ", {"CAPCUTCTL_CTA_PATTERNS": json.dumps(["\\bfollow\\b"])}), \
+                    contextlib.redirect_stdout(output):
+                self.assertEqual(cmd_cut(args), 0)
+            resolved = json.loads(plan.read_text())
+            self.assertEqual(resolved["cta"]["beats"], [0])
+            self.assertTrue(resolved["cta"]["findings"][0].startswith("CTA_NOT_LAST"))
+            self.assertNotIn("CTA_NOT_LAST", " ".join(resolved["lint"]))
+            self.assertIn("! CTA CTA_NOT_LAST", output.getvalue())
 
 
 class CapcutctlCallbackTests(unittest.TestCase):

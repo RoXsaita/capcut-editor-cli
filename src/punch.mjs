@@ -7,6 +7,7 @@ import { maskVisibleRow, opScaleKeyframe, resolveClip } from './add.mjs';
 import { peakUpscale, UPSCALE_REFUSE } from './crispness.mjs';
 import { momentsFromSidecar } from './broll-lint.mjs';
 import { pythonForTool } from './python.mjs';
+import { partForMedia, takeParts, vtInPart } from './rl2-take.mjs';
 import { normalise, sourceToTimeline } from './signature.mjs';
 
 const US = s => Math.round(s * 1e6);
@@ -397,10 +398,15 @@ export function loadClicks(mediaPath, projectDir = null) {
   catch { /* optional */ }
   const frames = readNdjson(path.join(dir, 'change.ndjson'))
     .filter(row => Number.isFinite(row.vt) && Number.isFinite(row.host));
+  // A restarted take is several files on one vt clock: keep this media's part only, on its
+  // own file clock. A one-part take passes vt through untouched.
+  const parts = takeParts(dir, session);
+  const part = partForMedia(parts, mediaPath);
+  if (!part) return [];
   const clicks = [];
   for (const event of readNdjson(path.join(dir, 'trace.ndjson'))) {
     if (event?.type !== 'click' || event.in_capture === false) continue;
-    const vt = eventVt(event, session, frames);
+    const vt = vtInPart(parts, part, eventVt(event, session, frames));
     if (!Number.isFinite(vt)) continue;
     clicks.push({ ...event, vt });
   }

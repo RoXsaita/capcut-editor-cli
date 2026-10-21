@@ -12,7 +12,9 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 import change_index  # noqa: E402
+import claude_timeline  # noqa: E402
 import find  # noqa: E402
+import rl2_take  # noqa: E402
 
 
 def write_take(directory, frames, trace=(), session=None):
@@ -166,6 +168,99 @@ class FocusTests(unittest.TestCase):
             {"type": "session_end", "host": 190.0, "frames": 10},
         ])
         self.assertEqual(index.focus, [])
+
+
+    def test_trace_is_prefiltered_to_focus_rows_before_any_json_is_parsed(self):
+        """A trace runs to hundreds of MB of pointer rows; focus needs a handful of rows."""
+        trace = [
+            {"type": "focus_change", "host": 100.0, "app": "Chrome"},
+            {"type": "pointer", "host": 101.0, "samples": [{"x": i, "y": i} for i in range(400)]},
+            {"type": "pointer", "host": 102.0, "note": "focus_change", "samples": []},
+            {"type": "focus_change", "host": 130.0, "app": "Hermes"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            take = write_take(Path(tmp) / "take", [(0.0, 0.0), (100.0, 0.0)], trace=trace)
+            with open(take / "trace.ndjson", "a", encoding="utf-8") as handle:
+                handle.write('{"type": "focus_change", "host": 150.0, "app": "Fin')
+            unfiltered = change_index._focus_of(
+                change_index._read_ndjson(take / "trace.ndjson"),
+                {"clock": {"first_frame_host": 100.0}}, 100.0)
+            parsed = []
+            real_loads = change_index.json.loads
+
+            def counting(line, *args, **kwargs):
+                parsed.append(line)
+                return real_loads(line, *args, **kwargs)
+
+            media = take / "screen.mp4"
+            media.write_bytes(b"")
+            with patch.object(change_index.json, "loads", side_effect=counting):
+                index, reason = change_index.load(media, 100.0)
+            self.assertIsNone(reason)
+            self.assertEqual(index.focus, unfiltered)
+            self.assertEqual([(s.start, s.end, s.app) for s in index.focus],
+                             [(0.0, 30.0, "Chrome"), (30.0, 100.0, "Hermes")])
+            trace_lines = [line for line in parsed if isinstance(line, bytes) and b"host" in line]
+            self.assertEqual(len(trace_lines), 4, "only lines containing the needle are parsed")
+            self.assertTrue(all(b"focus_change" in line for line in trace_lines))
+
+
+TWO_PARTS = {"clock": {"first_frame_host": 100.0}, "video_segments": [
+    {"file": "screen.mp4", "start_vt": 0.0, "end_vt": 10.0, "frames": 300},
+    {"file": "screen-part02.mp4", "start_vt": 12.0, "end_vt": 20.0, "frames": 240},
+]}
+
+
+class MultiPartTakeTests(unittest.TestCase):
+    def test_locate_maps_vt_into_its_part_and_refuses_the_gap(self):
+        parts = [rl2_take.Part("screen.mp4", 0.0, 2390.0), rl2_take.Part("screen-part02.mp4", 2400.06, None)]
+        file, at = rl2_take.locate(parts, 2410)
+        self.assertEqual(file, "screen-part02.mp4")
+        self.assertAlmostEqual(at, 9.94, places=6)
+        self.assertIsNone(rl2_take.locate(parts, 2395.0))
+        self.assertEqual(rl2_take.locate(rl2_take.parts("missing-take"), 42.0), ("screen.mp4", 42.0))
+        self.assertEqual(rl2_take.part_for_media(parts, "take__screen-part02.mp4").file, "screen-part02.mp4")
+        self.assertIsNone(rl2_take.part_for_media(parts, "other.mp4"))
+
+    def test_change_index_reads_one_part_on_its_own_clock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            take = write_take(Path(tmp) / "take",
+                              [(0.0, 0.0), (5.0, 9.0), (10.0, 0.0), (11.0, 9.0), (12.0, 0.0),
+                               (15.0, 9.0), (20.0, 0.0)],
+                              trace=[{"type": "focus_change", "host": 100.0, "app": "Chrome"},
+                                     {"type": "focus_change", "host": 116.0, "app": "Hermes"}],
+                              session=TWO_PARTS)
+            part2 = take / "screen-part02.mp4"
+            part2.write_bytes(b"")
+            index, reason = change_index.load(part2, 8.0)
+            self.assertIsNone(reason)
+            self.assertEqual([round(m.start, 2) for m in index.moments], [3.0])
+            self.assertEqual([(s.start, s.end, s.app) for s in index.focus],
+                             [(0.0, 4.0, "Chrome"), (4.0, 8.0, "Hermes")])
+
+            part1 = take / "screen.mp4"
+            part1.write_bytes(b"")
+            index, reason = change_index.load(part1, 10.0)
+            self.assertIsNone(reason, "part 1 is not refused as a trimmed copy")
+            self.assertEqual([round(m.start, 2) for m in index.moments], [5.0])
+
+            stranger = take / "screen-part09.mp4"
+            stranger.write_bytes(b"")
+            index, reason = change_index.load(stranger, 8.0)
+            self.assertIsNone(index)
+            self.assertIn("not one of", reason)
+
+    def test_claude_timeline_rows_carry_the_file_and_its_seek_time(self):
+        parts = rl2_take.parts("unused", TWO_PARTS)
+        rows = [{"vt": vt, "wall": "12:00:00", "session": "s", "kind": "prompt", "text": "hi",
+                 "on_screen": False, "redacted": False} for vt in (5.0, 11.0, 15.5)]
+        claude_timeline.place_rows(rows, parts)
+        self.assertEqual([(r["file"], r["file_t"], r["gap"]) for r in rows],
+                         [("screen.mp4", 5.0, False), ("", None, True), ("screen-part02.mp4", 3.5, False)])
+        self.assertIn("screen-part02.mp4", claude_timeline.row_line(rows[2], multi=True))
+        self.assertIn("(gap)", claude_timeline.row_line(rows[1], multi=True))
+        self.assertNotIn("screen.mp4", claude_timeline.row_line(rows[0], multi=False),
+                         "a one-part take prints the same columns as before")
 
 
 class SnapTests(unittest.TestCase):
