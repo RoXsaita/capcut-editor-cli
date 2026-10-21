@@ -41,7 +41,8 @@ refuse while CapCut is open, and take `--dry-run` (resolve, validate, report, wr
 | `remove` **T** | Remove a clip. | `capcutctl remove --project NAME --at 5 --track broll --dry-run` |
 | `replace-media` **T** | Relink a clip to another file, keeping its keyframes. | `capcutctl replace-media --project NAME --file new.mp4 --at 5 --track broll --dry-run` |
 | `shift` **T** | Move a clip in time. | `capcutctl shift --project NAME --at 5 --track broll --by 0.2 --dry-run` |
-| `trim` **T** | Change a clip's source window. | `capcutctl trim --project NAME --at 5 --track broll --src 90-94 --dry-run` |
+| `split` **T** | Cut one clip in two at a timeline second; the left half keeps the id, the output names both. | `capcutctl split --project NAME --segments ID --at 5.2 --dry-run` |
+| `trim` **T** | Change a clip's source window (source seconds); the talking head stays 1x unless --retime. | `capcutctl trim --project NAME --at 5 --track broll --src 90-94 --dry-run` |
 | `verify-shots` | Blind before/action/after check of placed shots; CONTRADICTED blocks. | `capcutctl verify-shots --project NAME --shots shots.json` |
 | `volume` **T** | Set a clip's volume. | `capcutctl volume --project NAME --at 5 --track broll --level 0 --dry-run` |
 
@@ -68,7 +69,7 @@ refuse while CapCut is open, and take `--dry-run` (resolve, validate, report, wr
 | `cursor` **T** | Editable halo or polished spring pointer and click ripples from recorded telemetry. | `capcutctl cursor --project NAME --auto --style polished --plan` |
 | `keyframe` **T** | Eased camera move: --to scale or --focus a source rectangle. | `capcutctl keyframe --project NAME --segments ID --at 12 --to 1.3 --hold 1.2 --plan` |
 | `pace` **T** | Speed as arithmetic: compress waiting B-roll, never the face. | `capcutctl pace --project NAME` |
-| `punch` **T** | Eased push onto a named on-screen element (OCR locates it). | `capcutctl punch --project NAME --on Publish --segment ID --dry-run` |
+| `punch` **T** | Eased push onto a named on-screen element (OCR locates it), timed by --at or by the --word he says. | `capcutctl punch --project NAME --on Publish --word "hit publish" --dry-run` |
 | `ramp` **T** | Split a B-roll clip at its result: ramp the wait, land the result at 1x. | `capcutctl ramp --project NAME --segment ID --speed 20 --dry-run` |
 | `screen-motion` **T** | Sparse native eased zooms and connected pans across screen targets. | `capcutctl screen-motion --project NAME --segment ID --regions regions.json --plan` |
 | `zoom` **T** | Face pushes on stressed words (--stress), or at explicit times. | `capcutctl zoom --project NAME --stress --plan` |
@@ -79,13 +80,13 @@ refuse while CapCut is open, and take `--dry-run` (resolve, validate, report, wr
 |---|---|---|
 | `animate` **T** | Native CapCut intro/outro animation on a clip. | `capcutctl animate --project NAME --segments ID --intro fade-in --dry-run` |
 | `brands` | Known brands, spoken aliases, and which have artwork. | `capcutctl brands` |
-| `captions` **T** | Word-by-word native captions, one style for Arabic and English alike; --restyle fixes an existing track. | `capcutctl captions --project NAME --dry-run` |
+| `captions` **T** | Word-by-word native captions in one style; --replace redoes them, --restyle the look, --reposition the places. | `capcutctl captions --project NAME --dry-run` |
 | `endcard` **T** | The CTA card on the talking head near the end. | `capcutctl endcard --project NAME --text Follow --dry-run` |
 | `ending` **T** | Append a repeatable 3-second avatar/follow ending using private profile data, or render it alone. | `capcutctl ending --project NAME --dry-run` |
 | `logo` **T** | Brand mark pop with its cue, timed off the transcript or --at. | `capcutctl logo --project NAME --auto --plan` |
 | `mograph` add\|list\|preview\|render\|rerender\|scene-preview\|scene-render\|scenes **T** | Rendered HTML/JS motion graphics: list, preview, render, add on a word, rerender. | `capcutctl mograph add --project NAME --template keyword-super --params '{"text":"أسرع"}' --say "أسرع" --dry-run` |
 | `motion` **T** | EXPERIMENTAL native text/logo recipes; prefer mograph. | `capcutctl motion list` |
-| `sfx` **T** | Place a named palette sound at explicit times: typing under a typed command, a click on the real Enter. | `capcutctl sfx --project NAME --sound typing --cues 8.03:2.8:2,31.1:1.2:10 --volume 0.5 --dry-run` |
+| `sfx` **T** | Place a palette sound or your own audio --file (whoosh, click, voice patch) at set times; overlaps take the next lane. | `capcutctl sfx --project NAME --sound typing --cues 8.03:2.8:2,31.1:1.2:10 --volume 0.5 --dry-run` |
 | `wrap` **T** | Logos from what is said + the endcard in one pass. | `capcutctl wrap --project NAME --plan` |
 
 ## Seams, music and mix
@@ -146,24 +147,24 @@ refuse while CapCut is open, and take `--dry-run` (resolve, validate, report, wr
 
 Every option each command accepts, from `capcutctl contract`.
 
-- `add`: `--allow-ephemeral` `--at` `--cover` `--derived-from` `--derived-offset` `--desc` `--dry-run` `--dur` `--generated` `--height` `--media` `--media-duration` `--no-localize` `--project` `--src` `--src-dur` `--track` `--volume` `--width`
+- `add`: `--allow-ephemeral` `--at` `--cover` `--derived-from` `--derived-offset` `--desc` `--dry-run` `--dur` `--generated` `--height` `--layer` `--media` `--media-duration` `--no-localize` `--project` `--src` `--src-dur` `--track` `--volume` `--width`
 - `alpha`: `--check` `--dry-run` `--force` `--force-running` `--project`
 - `animate`: `--at` `--dry-run` `--intro` `--intro-dur` `--outro` `--outro-dur` `--plan` `--project` `--replace-existing` `--segments` `--track`
 - `apply`: `--dry-run` `--force-running` `--no-backup` `--project` `--spec`
 - `blur-broll`: `--dry-run` `--plan` `--project` `--segment`
 - `build`: `--dry-run` `--edit` `--force` `--json` `--project`
-- `captions`: `--cues` `--dry-run` `--lang` `--name` `--project` `--restyle` `--script` `--track`
-- `check-export`: `--json` `--media` `--peak` `--project` `--sheet` `--target` `--times`
+- `captions`: `--clamp` `--cues` `--dry-run` `--lang` `--name` `--project` `--replace` `--reposition` `--restyle` `--script` `--track`
+- `check-export`: `--json` `--media` `--peak` `--project` `--sheet` `--target`
 - `close`: `--json` `--timeout`
 - `contract`: `--json` `--markdown`
 - `cursor`: `--auto` `--dry-run` `--plan` `--project` `--segment` `--size` `--style`
-- `cut`: `--drop` `--dry-run` `--force` `--fps` `--in-place` `--into` `--keep` `--lang` `--model` `--no-repair` `--order` `--project` `--recover-beat` `--reindex` `--review` `--selftest` `--trim-beat`
+- `cut`: `--drop` `--dry-run` `--force` `--force-running` `--fps` `--in-place` `--into` `--keep` `--lang` `--model` `--no-repair` `--order` `--project` `--recover-beat` `--reindex` `--review` `--root` `--selftest` `--trim-beat`
 - `denoise`: `--dry-run` `--plan` `--project`
 - `diff`: `--against` `--allow` `--project` `--snapshot`
 - `doctor`: `--dry-run` `--fix` `--force-running` `--json` `--no-backup` `--project` `--root`
 - `endcard`: `--at` `--dry-run` `--hold` `--no-sfx` `--project` `--scale` `--text`
 - `ending`: `--dry-run` `--frame` `--no-sfx` `--out` `--profile` `--project`
-- `export`: `--grid` `--no-gate` `--no-review` `--out` `--overwrite` `--pause` `--project` `--review-model` `--script` `--times` `--xray`
+- `export`: `--grid` `--no-gate` `--no-review` `--out` `--overwrite` `--pause` `--profile` `--project` `--review-model` `--script` `--style` `--times` `--xray`
 - `export-grid`: `--media` `--out` `--times`
 - `fade`: `--at` `--dry-run` `--in` `--out` `--plan` `--project` `--segments` `--track`
 - `find`: `--boxes` `--context` `--focus` `--kind` `--media` `--min-score` `--moments` `--refresh` `--region` `--says` `--settle` `--shows` `--strip`
@@ -178,7 +179,7 @@ Every option each command accepts, from `capcutctl contract`.
 - `layout`: `--at` `--dry-run` `--dur` `--height` `--include-template` `--media` `--media-duration` `--no-localize` `--no-overlay` `--no-seam` `--plan` `--project` `--row` `--scale` `--segments` `--src` `--src-dur` `--track` `--width`
 - `localize`: `--dry-run` `--project`
 - `logo`: `--at` `--auto` `--brand` `--dry-run` `--glow` `--hold` `--logo` `--motion` `--name` `--no-sfx` `--plain` `--plan` `--pos` `--project` `--scale` `--track` `--words`
-- `loudness`: `--allow-boost` `--dry-run` `--measure` `--peak` `--plan` `--project` `--segments` `--target`
+- `loudness`: `--allow-boost` `--dry-run` `--measure` `--peak` `--peak-only` `--plan` `--project` `--segments` `--target`
 - `match`: `--apply` `--dry-run` `--face` `--json` `--min-margin` `--out` `--project` `--screen` `--shots`
 - `mograph`: `--allow-unsafe` `--at` `--background` `--dry-run` `--format` `--id` `--no-sfx` `--occurrence` `--out` `--params` `--params-file` `--project` `--samples` `--say` `--scale` `--scene` `--template` `--times` `--words` `--workers`
 - `motion`: `--accent` `--asset` `--at` `--color` `--dry-run` `--duration` `--logo` `--name` `--project` `--scale` `--text` `--x` `--y`
@@ -189,34 +190,35 @@ Every option each command accepts, from `capcutctl contract`.
 - `pace`: `--at` `--auto` `--cover` `--dry-run` `--max` `--min-gap` `--project` `--speed` `--track`
 - `polish`: `--dry-run` `--lead` `--motivated` `--no-interactions` `--no-sfx` `--no-transitions` `--project` `--track`
 - `preflight`: `--json` `--root`
-- `preview`: `--fps` `--from` `--native` `--no-cache` `--no-grade` `--out` `--project` `--resolution` `--to`
+- `preview`: `--fps` `--from` `--max-minutes` `--native` `--no-cache` `--no-grade` `--out` `--project` `--resolution` `--to`
 - `profile`: `--dry-run` `--force` `--json` `--profile`
 - `projects`: `--json` `--root`
-- `punch`: `--at` `--dry-run` `--ease` `--ease-position` `--hold` `--kind` `--no-ease` `--on` `--plan` `--project` `--ramp` `--segment` `--track` `--word` `--zoom`
-- `qa`: `--allow-missing` `--at-broll` `--at-cuts` `--at-scenes` `--cut-window` `--expect` `--fps` `--from` `--guide` `--label` `--languages` `--native` `--no-cache` `--no-grade` `--ocr` `--out` `--preview` `--project` `--rects-only` `--resolution` `--selftest` `--sheet` `--times` `--to` `--width` `--z`
-- `ramp`: `--at` `--dry-run` `--project` `--result-at` `--segment` `--settle` `--speed` `--track`
+- `punch`: `--at` `--dry-run` `--ease` `--ease-position` `--hold` `--kind` `--no-ease` `--on` `--plan` `--project` `--ramp` `--segment` `--segments` `--track` `--word` `--words` `--zoom`
+- `qa`: `--allow-missing` `--at-broll` `--at-cuts` `--at-scenes` `--cut-window` `--expect` `--fps` `--from` `--guide` `--label` `--languages` `--max-minutes` `--native` `--no-cache` `--no-grade` `--ocr` `--out` `--preview` `--project` `--rects-only` `--resolution` `--selftest` `--sheet` `--times` `--to` `--width` `--z`
+- `ramp`: `--at` `--dry-run` `--project` `--reach-back` `--reach-forward` `--result-at` `--segment` `--settle` `--speed` `--track`
 - `reference`: `--build-threshold` `--cut-threshold` `--json` `--media` `--overwrite` `--profile` `--profile-out` `--project` `--sheet`
 - `reframe`: `--auto` `--dry-run` `--plan` `--project` `--segment`
 - `remove`: `--at` `--dry-run` `--project` `--segments` `--track`
-- `replace-media`: `--allow-ephemeral` `--at` `--derived-from` `--derived-offset` `--dry-run` `--file` `--generated` `--height` `--media` `--media-duration` `--no-localize` `--project` `--retime` `--segments` `--track` `--width`
+- `replace-media`: `--all` `--allow-ephemeral` `--at` `--derived-from` `--derived-offset` `--dry-run` `--file` `--generated` `--height` `--media` `--media-duration` `--no-localize` `--project` `--retime` `--segments` `--track` `--width`
 - `restore`: `--dry-run` `--force-running` `--no-backup` `--project` `--snapshot`
-- `review`: `--fps` `--id` `--out` `--project` `--width`
+- `review`: `--fps` `--id` `--max-minutes` `--out` `--project` `--width`
 - `review-video`: `--decide` `--issue` `--json` `--media` `--model` `--project` `--reason` `--reset-rounds` `--script` `--speech` `--verdict`
 - `ripple`: `--dry-run` `--from` `--project` `--to`
 - `rm`: `--dry-run` `--force-running` `--project`
 - `scenes`: `--name` `--project` `--track` `--transcript`
 - `screen-motion`: `--connect-gap` `--dry-run` `--glide` `--plan` `--project` `--regions` `--replace` `--segment` `--zoom-in` `--zoom-out`
-- `sfx`: `--cues` `--dry-run` `--project` `--sound` `--track` `--volume`
+- `sfx`: `--cues` `--dry-run` `--fade-in` `--fade-out` `--file` `--lead` `--project` `--sound` `--track` `--volume`
 - `shift`: `--at` `--by` `--dry-run` `--project` `--segments` `--track`
 - `snapshot`: `--label` `--project`
-- `stage`: `--dry-run` `--fix` `--force-running` `--no-backup` `--project`
+- `split`: `--at` `--dry-run` `--project` `--segments` `--track`
+- `stage`: `--dry-run` `--force-running` `--no-backup` `--project`
 - `status`: `--json` `--timeout` `--wait-for-close`
 - `sync`: `--dry-run` `--force-running` `--no-backup` `--project`
 - `timeline`: `--json` `--project` `--width`
-- `trim`: `--at` `--dry-run` `--dur` `--project` `--segments` `--src` `--start` `--track`
+- `trim`: `--at` `--dry-run` `--dur` `--project` `--retime` `--segments` `--src` `--start` `--track`
 - `variant`: `--dry-run` `--force-running` `--hook` `--hooks` `--json` `--lang` `--name` `--no-gate` `--opening` `--project` `--src` `--words`
 - `verify-shots`: `--json` `--out` `--project` `--shots`
 - `volume`: `--at` `--dry-run` `--level` `--project` `--segments` `--track`
-- `wrap`: `--dry-run` `--glow` `--no-ease` `--no-sfx` `--no-zoom` `--only` `--plan` `--project` `--stress` `--text` `--track` `--words` `--zoom-at`
+- `wrap`: `--dry-run` `--glow` `--no-ease` `--no-sfx` `--no-zoom` `--only` `--plan` `--project` `--text` `--track` `--words` `--zoom-at`
 - `xray`: `--crop` `--frame` `--frames` `--from` `--jev` `--json` `--lang` `--no-text` `--out` `--per-family` `--project` `--rounds` `--seed` `--speech` `--t` `--to` `--xray`
 - `zoom`: `--at` `--auto` `--dry-run` `--ease` `--hold` `--min-length` `--no-ease` `--plan` `--project` `--stress` `--to` `--track` `--words`
