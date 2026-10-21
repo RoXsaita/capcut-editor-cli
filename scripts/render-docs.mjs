@@ -59,7 +59,11 @@ export function render() {
   };
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// Compare real paths: argv[1] is the path as typed, import.meta.url is already resolved, so
+// a symlinked clone (or /tmp against /private/tmp on macOS) would otherwise skip the CLI
+// silently, and --check would pass on stale docs.
+const realpath = file => { try { return fs.realpathSync(file); } catch { return file; } };
+if (process.argv[1] && realpath(process.argv[1]) === realpath(fileURLToPath(import.meta.url))) {
   const check = process.argv.includes('--check');
   const stale = [];
   for (const [file, text] of Object.entries(render())) {
