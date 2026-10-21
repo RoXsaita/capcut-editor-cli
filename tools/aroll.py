@@ -37,7 +37,17 @@ from itertools import pairwise
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from audio_index import SIL, SOFT, AudioIndex, _write_json_atomic, lint, loud_out_finding, source_token
+from audio_index import (
+    SIL,
+    SOFT,
+    AudioIndex,
+    _write_json_atomic,
+    lint,
+    loud_out_finding,
+    same_source,
+    source_key,
+    source_token,
+)
 
 FPS = 30.0
 FRAME = 1.0 / FPS
@@ -54,6 +64,7 @@ WORD_START_HARD_SILENCE = 0.30
 WORD_START_LOOKBACK = 0.80
 WORD_START_MIN_CONFIDENCE = 0.50
 FIRST_WORD_CLIP_TOLERANCE = 0.5 * FRAME
+ONSET_SLACK = 0.10       # an onset this far past a segment's Whisper end is a different utterance
 
 
 # ---------------------------------------------------------------- helpers
@@ -95,7 +106,7 @@ def index_is_current(path, media=None):
         if not source or not os.path.isfile(source):
             return False
         token = data.get("source_token", data.get("media_token", data.get("token")))
-        return data.get("version", 1) >= AROLL_INDEX_VERSION and token == media_token(source)
+        return data.get("version", 1) >= AROLL_INDEX_VERSION and same_source(token, media_token(source))
     except (OSError, json.JSONDecodeError, AttributeError, TypeError, ValueError):
         return False
 
@@ -125,17 +136,30 @@ def transcribe(media, lang, model, cache_dir, force=False):
     the openai-whisper package if a plain model name is given or mlx is unavailable.
     """
     slug = re.sub(r"[^a-zA-Z0-9._-]", "-", model)
-    cache = os.path.join(cache_dir, os.path.basename(media).rsplit(".", 1)[0] + f".whisper-{slug}.json")
+    stem = os.path.basename(media).rsplit(".", 1)[0]
     token = media_token(media)
+    # `<stem>.whisper-<slug>.<key>.json`, the content key after the kind marker so every
+    # `${stem}.whisper` prefix reader still matches. Two takes named face.mp4 no longer
+    # overwrite one transcript. The legacy unkeyed name is read when its token matches and
+    # is never written: it may hold the other take's words.
+    cache = os.path.join(cache_dir, f"{stem}.whisper-{slug}.{source_key(token)}.json")
+    legacy = os.path.join(cache_dir, f"{stem}.whisper-{slug}.json")
     settings = {"language": lang, "model": model}
-    if not force and os.path.exists(cache):
+    for candidate in ([] if force else [cache, legacy]):
+        if not os.path.exists(candidate):
+            continue
         try:
-            d = json.loads(Path(cache).read_text(encoding="utf-8"))
+            d = json.loads(Path(candidate).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, TypeError):
             d = None
-        if (isinstance(d, dict) and d.get("_token") == token
+        if (isinstance(d, dict) and same_source(d.get("_token"), token)
                 and d.get("_settings") == settings and isinstance(d.get("segments"), list)):
             print(f"  transcript: cached ({model})", file=sys.stderr)
+            if candidate != cache or d.get("_token") != token:
+                # Re-stamp under the keyed name (never the legacy one), so a legacy hit is
+                # migrated and readers keyed on this media's own token accept it.
+                d = {**d, "_token": token}
+                _write_json_atomic(cache, d)
             return d
 
     mlx = shutil.which("mlx_whisper")
@@ -158,7 +182,7 @@ def transcribe(media, lang, model, cache_dir, force=False):
             media, language=lang, word_timestamps=True, verbose=False,
             condition_on_previous_text=False,      # stops one hallucination poisoning the rest
         )
-    if media_token(media) != token:
+    if not same_source(token, media_token(media)):
         raise SystemExit("media changed while it was being transcribed; rerun indexing")
     result["_token"] = token
     result["_settings"] = settings
@@ -333,6 +357,12 @@ def snap(idx, a, b, floor=0.0, word_start=None, word_start_trustworthy=False, fp
     """
     on = idx.onset_after(max(floor, a - 0.30))
     if on is None:
+        return None
+    # The previous beat's OUT already covers this segment's speech, so the onset found is
+    # the NEXT utterance. Building a beat from it would carry this segment's text over words
+    # it never contains. A Whisper end a little early still keeps its beat: the onset only
+    # has to land before b plus a small slack.
+    if floor >= b or on >= b + ONSET_SLACK:
         return None
     src_in = max(floor, 0.0, on - LEAD_FRAMES / float(fps))
     if word_start_trustworthy:
@@ -700,7 +730,7 @@ def cmd_index(args):
 
     raw = sum(b["dur"] for b in beats)
     token = media_token(media)
-    if idx.token is not None and token != idx.token:
+    if idx.token is not None and not same_source(idx.token, token):
         raise SystemExit("media changed while its A-roll index was being built; rerun indexing")
     out = {
         "version": AROLL_INDEX_VERSION, "media": media, "fps": fps,
@@ -1251,19 +1281,28 @@ def apply_outward_recoveries(idx, picked, recoveries, data, fps=FPS):
                                      "no complete word-level transcript evidence in the search window")
                 evidence = []
                 resolved = None
+                loud_only = False
                 for word in reversed(candidates):
                     evidence.insert(0, word)
                     lower = max(limit, word["start"] - 0.30)
                     onset = idx.onset_after(lower)
                     if onset is None or onset > word["start"] + 0.10:
                         continue
-                    candidate = quantise(max(0.0, onset - LEAD_FRAMES / float(fps)), fps=fps)
+                    # In continuous speech the onset search starts inside the previous word,
+                    # so onset-minus-lead lands in that word. The IN needs a quiet frame of its
+                    # own before the evidenced word; without one, try the next earlier word.
+                    quiet = _quiet_frame_between(idx, lower, word["start"], fps)
+                    if quiet is None:
+                        loud_only = True
+                        continue
+                    candidate = quantise(max(0.0, quiet, onset - LEAD_FRAMES / float(fps)), fps=fps)
                     if candidate < base_in - 0.5 * frame and _continuous_source(idx, onset, base_in):
                         resolved = candidate
                         break
                 if resolved is None:
                     _refuse_recovery(beat["id"], side, amount,
-                                     "candidate is separated by silence or has no acoustic onset")
+                                     "no quiet acoustic IN boundary before the evidenced word" if loud_only
+                                     else "candidate is separated by silence or has no acoustic onset")
                 if resolved > min(word["start"] for word in evidence) + 0.5 * frame:
                     _refuse_recovery(beat["id"], side, amount, "resolved IN would clip the protected first word")
                 reason = _overlap_reason(beat, picked, indexed_beats, resolved, base_in, fps)
@@ -1296,6 +1335,113 @@ def source_overlap_findings(picked, fps=FPS):
         if overlap > tolerance:
             findings.append(f"b{left['id']}->b{right['id']} OVERLAP {overlap:.3f}s of source is used twice")
     return findings
+
+
+def seam_repeat_findings(words, clips, k=6, min_n=2, pad=0.35):
+    """A phrase said on both sides of a splice: the retry kept its first words twice.
+
+    For each pair of adjacent final clips, the last `k` transcript tokens around the outgoing
+    OUT are compared with the first `k` around the incoming IN, and the longest shared run of
+    at least `min_n` tokens is reported. `pad` widens each side a little because Whisper's
+    word edges drift. A word instance seen by both sides (the clips are source neighbours)
+    belongs to the outgoing side only, so a clean source-adjacent seam never matches itself.
+    Coalesced continuous spans are one clip here, so their internal joins are never compared.
+    """
+    rows = []
+    for position, word in enumerate(words or []):
+        start, end = _number(word.get("start")), _number(word.get("end"))
+        if start is None or end is None:
+            continue
+        for token in _tokens(word.get("text") or word.get("word") or ""):
+            rows.append((start, end, position, token))
+    if not rows:
+        return []
+    findings = []
+    for left, right in pairwise(clips):
+        out_at, in_at = float(left["src_out"]), float(right["src_in"])
+        tail = [row for row in rows if row[0] < out_at + pad and row[1] > float(left["src_in"])][-k:]
+        seen = {row[2] for row in tail}
+        head = [row for row in rows if row[1] > in_at - pad and row[0] < float(right["src_out"])
+                and row[2] not in seen][:k]
+        if len(tail) < min_n or len(head) < min_n:
+            continue
+        a, b = [row[3] for row in tail], [row[3] for row in head]
+        match = SequenceMatcher(None, a, b, autojunk=False).find_longest_match(0, len(a), 0, len(b))
+        if match.size >= min_n:
+            phrase = " ".join(a[match.a:match.a + match.size])
+            findings.append(f"b{left['id']}->b{right['id']} SEAM_REPEAT  {phrase!r} is said on both "
+                            "sides of the splice; trim one side or keep the other attempt")
+    return findings
+
+
+CTA_PATTERNS_ENV = "CAPCUTCTL_CTA_PATTERNS"
+
+
+def cta_patterns(values=None, env=None):
+    """Compile the CTA role patterns `capcutctl cut` forwards from the profile (ending.ctaPatterns).
+
+    They come as a JSON array in CAPCUTCTL_CTA_PATTERNS, or as `values`. A bad pattern is
+    reported and skipped: the CTA check only ever warns, so it must never stop a cut.
+    """
+    raw = list(values or [])
+    if not raw:
+        text = (os.environ if env is None else env).get(CTA_PATTERNS_ENV) or ""
+        if text.strip():
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = []
+                print(f"warning: {CTA_PATTERNS_ENV} is not a JSON array; CTA check skipped", file=sys.stderr)
+            raw = [item for item in parsed if isinstance(item, str)] if isinstance(parsed, list) else []
+    compiled = []
+    for pattern in raw:
+        try:
+            compiled.append(re.compile(pattern, re.I))
+        except re.error as error:
+            print(f"warning: CTA pattern {pattern!r} is not a valid regex ({error}); skipped", file=sys.stderr)
+    return compiled
+
+
+def _is_cta(beat, patterns):
+    text = beat.get("text") or ""
+    folded = norm(text)
+    return any(pattern.search(folded) or pattern.search(text) for pattern in patterns)
+
+
+def cta_findings(beats, order, patterns):
+    """Warn when a spoken CTA is dropped, or kept but not last. Never a refusal.
+
+    `beats` are every indexed beat; `order` is the final kept timeline order. A dropped CTA
+    beat is fine when a kept attempt of the same line (same duplicate group, or similar text)
+    also reads as a CTA: that is the retry winning, not the CTA going missing.
+    """
+    if not patterns:
+        return {"beats": [], "findings": []}
+    by_id = {beat["id"]: beat for beat in beats}
+    cta_ids = [beat["id"] for beat in beats if _is_cta(beat, patterns)]
+    kept = [beat_id for beat_id in order if beat_id in by_id]
+    kept_set = set(kept)
+    findings = []
+    for beat_id in cta_ids:
+        if beat_id in kept_set:
+            continue
+        beat = by_id[beat_id]
+        covered = any(
+            other_id in cta_ids and (
+                (beat.get("dupe_group") is not None and by_id[other_id].get("dupe_group") == beat.get("dupe_group"))
+                or _text_relation(beat, by_id[other_id]) is not None)
+            for other_id in kept)
+        if not covered:
+            findings.append(f"CTA_DROPPED  b{beat_id} {beat.get('text', '')!r} reads as the CTA but is not kept")
+    kept_cta = [beat_id for beat_id in kept if beat_id in cta_ids]
+    if kept_cta:
+        first = kept.index(kept_cta[0])
+        after = [beat_id for beat_id in kept[first:] if beat_id not in cta_ids]
+        if after:
+            findings.append(f"CTA_NOT_LAST  b{kept_cta[0]} is followed by "
+                            + ",".join(f"b{beat_id}" for beat_id in after)
+                            + "; the CTA belongs at the end")
+    return {"beats": cta_ids, "findings": findings}
 
 
 def _merge_text(parts):
@@ -1377,6 +1523,35 @@ def coalesce_continuous(idx, picked, boundaries=None):
 
 def _shell_command(parts):
     return " ".join(shlex.quote(str(part)) for part in parts)
+
+
+IN_PLACE_MARKER = "CAPCUTCTL_IN_PLACE_CUT"
+
+
+def capcutctl_cmd(*argv, root=None, force_running=False):
+    """The capcutctl that launched this tool, not whichever one PATH finds first.
+
+    `capcutctl cut` passes its own node and bin through the environment. Spawning bare
+    `capcutctl` could run another checkout's CLI against the project this one just cut.
+    """
+    node, binary = os.environ.get("CAPCUTCTL_NODE"), os.environ.get("CAPCUTCTL_BIN")
+    cmd = [node, binary] if node and binary else ["capcutctl"]
+    cmd += [str(part) for part in argv]
+    if root:
+        cmd += ["--root", str(root)]
+    if force_running:
+        cmd.append("--force-running")
+    return cmd
+
+
+def _run_capcutctl(cmd):
+    """Run a capcutctl child; a missing executable is a named failure, not a traceback."""
+    try:
+        return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    except FileNotFoundError:
+        print(f"error: could not run {cmd[0]!r}: not found. Run this through `capcutctl cut`, "
+              "or put capcutctl on PATH.", file=sys.stderr, flush=True)
+        return subprocess.CompletedProcess(cmd, 127, stdout="")
 
 
 def repair(idx, picked, fps=FPS):
@@ -1507,7 +1682,8 @@ def cut_handoff(destination, timeline, mode="plan", track="content", frames=AUDI
     }
 
 
-def apply_audio_ramps(destination, timeline, dry_run=False, track="content", frames=AUDIO_RAMP_FRAMES, fps=FPS):
+def apply_audio_ramps(destination, timeline, dry_run=False, track="content", frames=AUDIO_RAMP_FRAMES, fps=FPS,
+                      root=None, force_running=False):
     """Apply all native fades in one transactional capcutctl spec, then remove the temp file."""
     spec = {"version": 1, "name": "aroll-audio-ramps", "operations":
             audio_ramp_operations(timeline, track=track, frames=frames, fps=fps)}
@@ -1516,13 +1692,14 @@ def apply_audio_ramps(destination, timeline, dry_run=False, track="content", fra
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", encoding="utf-8", delete=False) as handle:
             json.dump(spec, handle, ensure_ascii=False, indent=1)
             spec_path = handle.name
-        cmd = ["capcutctl", "apply", "--project", str(destination), "--spec", spec_path]
+        cmd = capcutctl_cmd("apply", "--project", str(destination), "--spec", spec_path,
+                            root=root, force_running=force_running)
         if dry_run:
             cmd.append("--dry-run")
         display = list(cmd)
         display[display.index("--spec") + 1] = "<aroll-audio-ramps>"
         print("\n$ " + _shell_command(display))
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        result = _run_capcutctl(cmd)
         output = getattr(result, "stdout", "") or ""
         if output:
             print(output, end="" if output.endswith("\n") else "\n")
@@ -1543,7 +1720,7 @@ def cmd_cut(args):
         except (KeyError, OSError, TypeError, ValueError):
             print("A-roll index source is missing or unreadable", file=sys.stderr)
             return 2
-        if stored_token != current_token:
+        if not same_source(stored_token, current_token):
             print("A-roll index is stale for the current media; re-index before cutting",
                   file=sys.stderr)
             return 2
@@ -1606,10 +1783,17 @@ def cmd_cut(args):
     findings = lint(idx, spans, fps=fps, first_word_starts=first_words)
     overlap_findings = source_overlap_findings(clips, fps=fps)
     findings.extend(overlap_findings)
+    findings.extend(seam_repeat_findings(data.get("words"), clips))
+    cta = cta_findings(data["beats"], order, cta_patterns())
 
     # pack the timeline with no gaps — this is the dead-space removal
     timeline, cursor = [], 0.0
+    index_words = {"words": data.get("words") or []}
     for clip in clips:
+        # Boundaries moved since indexing (trim, recovery, repair). Read the words the final
+        # window actually holds, so the table he reads back is what the clip says.
+        text = (words_in(index_words, clip["src_in"], clip["src_out"]) if index_words["words"] else "") \
+            or clip["text"]
         dur = quantise(clip["src_out"] - clip["src_in"], fps=fps)
         tl_in = quantise(cursor, fps=fps)
         tl_out = quantise(tl_in + dur, fps=fps)
@@ -1617,7 +1801,7 @@ def cmd_cut(args):
                          "tl_in": round(tl_in, 6), "tl_out": round(tl_out, 6),
                          "src_in": round(clip["src_in"], 6), "src_out": round(clip["src_out"], 6),
                          "src_dur": round(dur, 6), "dur": round(dur, 6),
-                         "text": clip["text"],
+                         "text": text,
                          **({"continuity": clip["continuity"]} if clip["continuity"] else {})})
         cursor = tl_out
 
@@ -1641,6 +1825,7 @@ def cmd_cut(args):
             "kept": keep, "order": order, "editorial": editorial,
             "adjustments": adjustments, "recoveries": recoveries,
             "repairs": repairs,
+            "cta": cta,
             "timeline": timeline,
             "duration": round(cursor, 6), "lint": findings, "blocking_lint": blocking_findings,
             "scenes": scenes, "handoff": cut_handoff(destination, timeline, mode=handoff_mode, fps=fps)}
@@ -1696,6 +1881,8 @@ def cmd_cut(args):
     print(f"\nseam lint: {'CLEAN' if not findings else str(len(findings)) + ' findings'}")
     for f in findings:
         print("  ! " + f)
+    for f in cta["findings"]:
+        print("  ! CTA " + f)
     print(f"wrote {plan_path}")
 
     if destination:
@@ -1713,12 +1900,14 @@ def cmd_cut(args):
                   flush=True)
             return 1
         if getattr(args, "project", None):
-            cmd = ["capcutctl", "new", "--project", args.project,
-                   "--media", data["media"], "--scenes", scenes]
+            root = getattr(args, "root", None)
+            force_running = getattr(args, "force_running", False)
+            cmd = capcutctl_cmd("new", "--project", args.project, "--media", data["media"], "--scenes", scenes,
+                                root=root, force_running=force_running)
             if getattr(args, "dry_run", False):
                 cmd.append("--dry-run")
             print("\n$ " + _shell_command(cmd))
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            result = _run_capcutctl(cmd)
             output = getattr(result, "stdout", "") or ""
             if output:
                 print(output, end="" if output.endswith("\n") else "\n")
@@ -1728,8 +1917,11 @@ def cmd_cut(args):
             # transaction so root and active-timeline mirrors receive the same extras.
             if getattr(args, "dry_run", False):
                 return 0
-            return apply_audio_ramps(args.project, timeline, track="content", fps=fps)
-        return apply_audio_ramps(args.into, timeline, dry_run=getattr(args, "dry_run", False), track="content", fps=fps)
+            return apply_audio_ramps(args.project, timeline, track="content", fps=fps,
+                                     root=root, force_running=force_running)
+        return apply_audio_ramps(args.into, timeline, dry_run=getattr(args, "dry_run", False), track="content", fps=fps,
+                                 root=getattr(args, "root", None),
+                                 force_running=getattr(args, "force_running", False))
     return 0
 
 
@@ -1803,6 +1995,21 @@ def cmd_selftest(args):
     check("lint reports no-onset rather than crashing",
           any("no onset" in f for f in findings))
 
+    repeat_words = [{"text": t, "start": a, "end": b} for t, a, b in (
+        ("open", 0.2, 0.5), ("the", 0.5, 0.7), ("app", 0.7, 0.95),
+        ("the", 3.0, 3.2), ("app", 3.2, 3.5), ("now", 3.5, 3.9))]
+    repeat_clips = [{"id": 0, "src_in": 0.0, "src_out": 1.0}, {"id": 1, "src_in": 2.98, "src_out": 4.0}]
+    check("a phrase repeated across a splice is SEAM_REPEAT",
+          len(seam_repeat_findings(repeat_words, repeat_clips)) == 1)
+    check("one shared word across a splice is not a repeat",
+          seam_repeat_findings(repeat_words[:3] + repeat_words[4:], repeat_clips) == [])
+    cta_beats = [{"id": 0, "text": "the tutorial"}, {"id": 1, "text": "follow for more"}]
+    follow = cta_patterns([r"\bfollow\b"])
+    check("a dropped CTA warns", cta_findings(cta_beats, [0], follow)["findings"][0].startswith("CTA_DROPPED"))
+    check("a CTA that is not last warns",
+          cta_findings(cta_beats, [1, 0], follow)["findings"][0].startswith("CTA_NOT_LAST"))
+    check("a CTA kept last is clean", cta_findings(cta_beats, [0, 1], follow)["findings"] == [])
+
     print("selftest:", "all passed" if all(ok) else "FAILURES")
     return 0 if all(ok) else 1
 
@@ -1835,8 +2042,19 @@ def main():
     ap.add_argument("--no-repair", action="store_true", help="do not auto-fix seam faults")
     ap.add_argument("--force", action="store_true", help="build despite seam findings")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--root", default=None, help="CapCut drafts folder, forwarded to capcutctl")
+    ap.add_argument("--force-running", action="store_true",
+                    help="forwarded to capcutctl: write even while CapCut is open")
     ap.add_argument("--selftest", action="store_true", help="check the pure logic")
     args = ap.parse_args()
+
+    # The in-place recut is `capcutctl cut VIDEO --into PROJECT`: Node maps every anchored
+    # B-roll, layout and SFX through one transaction. Reaching this script with --into any
+    # other way (`--into=P` slipping past the router) only laid audio fades on the target's
+    # content track at the new cut's times, over the old cut. Refuse that path outright.
+    if args.into is not None and os.environ.get(IN_PLACE_MARKER) != "1":
+        ap.error("--into/--in-place must go through `capcutctl cut VIDEO --into PROJECT` "
+                 "(the transactional recut); nothing was applied")
 
     if args.selftest:
         sys.exit(cmd_selftest(args))

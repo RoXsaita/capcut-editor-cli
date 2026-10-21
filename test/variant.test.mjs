@@ -7,7 +7,12 @@ import test from 'node:test';
 
 import { applySpec, doctor, readJson, stableJson } from '../src/core.mjs';
 import { normalizeHook, readHook, runVariant } from '../src/variant.mjs';
+import { registerDraft, unregisterDraft } from '../src/create.mjs';
+import { resetProfileCache, userProfilePath } from '../src/profile.mjs';
 import { buildProject } from './helpers/polish-project.mjs';
+
+// Every write is tested as if CapCut were open (npm test sets CAPCUTCTL_ASSUME_RUNNING=1).
+const apply = (dir, spec) => applySpec(dir, spec, { forceRunning: true });
 
 const CLOSED = () => ({ running: false, verified: true, pids: [] });
 const MIRRORS = ['draft_info.json', 'draft_info.json.bak', 'template-2.tmp'];
@@ -191,6 +196,43 @@ test('a music bed that starts a beat in still runs from where it was when a shor
   assert.equal(doctor(made.project).errors, 0);
 });
 
+test('a variant that fails leaves no folder and no library entry behind', async () => {
+  const fx = signedOff();
+  const store = () => readJson(path.join(fx.root, 'root_meta_info.json')).all_draft_store.map(e => e.draft_fold_path);
+  const dest = path.join(fx.root, 'Launch hook-b');
+
+  // A broken profile refuses before anything is copied or registered.
+  const profileFile = userProfilePath();
+  const saved = fs.existsSync(profileFile) ? fs.readFileSync(profileFile) : null;
+  fs.mkdirSync(path.dirname(profileFile), { recursive: true });
+  fs.writeFileSync(profileFile, '{ not json');
+  resetProfileCache();
+  try {
+    await assert.rejects(runVariant(fx.project, { hook: readHook(fx.hooks, 'b'), processProbe: CLOSED }),
+      error => error.code === 'PROFILE_INVALID');
+  } finally {
+    if (saved) fs.writeFileSync(profileFile, saved);
+    else fs.rmSync(profileFile, { force: true });
+    resetProfileCache();
+  }
+  assert.equal(fs.existsSync(dest), false);
+  assert.ok(!store().includes(dest));
+
+  // A gate that throws AFTER the copy was registered unregisters it on the way out.
+  await assert.rejects(runVariant(fx.project, { hook: readHook(fx.hooks, 'b'), processProbe: CLOSED, profile: {} }));
+  assert.equal(fs.existsSync(dest), false);
+  assert.deepEqual(store(), [fx.project], 'only the original stays registered');
+});
+
+test('unregisterDraft removes exactly that draft\'s entry', () => {
+  const fx = signedOff();
+  const other = path.join(fx.root, 'Other');
+  registerDraft(fx.root, other, 'Other', 'ID-OTHER', 1_000_000);
+  assert.deepEqual(unregisterDraft(fx.root, other), { unregistered: 1 });
+  assert.deepEqual(readJson(path.join(fx.root, 'root_meta_info.json')).all_draft_store.map(e => e.draft_fold_path), [fx.project]);
+  assert.deepEqual(unregisterDraft(fx.root, other), { unregistered: 0 });
+});
+
 test('variant refuses an --opening that is not a cut, and a hook past the end of the take', async () => {
   const fx = signedOff();
   await assert.rejects(runVariant(fx.project, { hook: { id: 'x', in: 1, out: 3 }, opening: 2.5, dryRun: true }),
@@ -205,14 +247,14 @@ test('re-placing a graphic keeps the levels its picture and pop already have (re
   fs.writeFileSync(mov, 'prores-bytes');
   const place = extra => ({ version: 1, operations: [{ op: 'mograph.place', id: 'kw-1', template: 'keyword-super', format: 'prores',
     file: mov, at: 2, duration: 1.5, box: { x: 205, y: 1212, w: 582, h: 188 }, sfx: 'pop', fingerprint: 'abc', ...extra }] });
-  applySpec(dir, place());
+  apply(dir, place());
   const owned = () => readJson(path.join(dir, 'draft_info.json')).tracks.flatMap(t => t.segments).filter(s => /^mograph:(sfx:)?kw-1$/.test(s.desc));
   const pop = owned().find(s => s.desc === 'mograph:sfx:kw-1');
   assert.ok(pop, 'the fixture palette resolves the pop');
-  applySpec(dir, { version: 1, operations: [{ op: 'segment.patch', selector: { id: pop.id }, set: { volume: 0.3 } }] });
-  applySpec(dir, place({ fingerprint: 'typo-fixed' }));
+  apply(dir, { version: 1, operations: [{ op: 'segment.patch', selector: { id: pop.id }, set: { volume: 0.3 } }] });
+  apply(dir, place({ fingerprint: 'typo-fixed' }));
   assert.equal(owned().find(s => s.desc === 'mograph:sfx:kw-1').volume, 0.3);
-  applySpec(dir, place({ fingerprint: 'reset', resetLevels: true }));
+  apply(dir, place({ fingerprint: 'reset', resetLevels: true }));
   assert.notEqual(owned().find(s => s.desc === 'mograph:sfx:kw-1').volume, 0.3, 'resetLevels opts back into the palette level');
 });
 

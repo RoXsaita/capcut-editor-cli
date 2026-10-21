@@ -3,14 +3,18 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { principalTrack } from './polish.mjs';
-import { assertOrigin } from './origin.mjs';
+import { assertOrigin, neutralVideoMaterial, stampOrigin } from './origin.mjs';
 import { setSpeed } from './pace.mjs';
 import { profileValue } from './profile.mjs';
-import { blurredBackgrounds } from './house-rules.mjs';
+import { blurredBackgrounds, isBlurEffect } from './house-rules.mjs';
+import { CAMERA_PROPERTIES } from './add.mjs';
+import { indexVerdict } from './video-index.mjs';
+import { isBrollSegment } from './broll-lint.mjs';
 import { execFileSync } from 'node:child_process';
 import {
   CapcutError, clone, seededId, allSegments, selectSegments, loadProject, loadPreset,
-  expandHome, localizeMedia, stableJson, assetSearchRoots, preservedRange
+  expandHome, localizeMedia, stableJson, assetSearchRoots, preservedRange,
+  cloneExtraRefs, removeUnreferencedMaterials
 } from './core.mjs';
 
 /**
@@ -22,6 +26,17 @@ import {
 let SEED = null;
 const mint = key => seededId(SEED, key);
 
+/**
+ * Private copies of `refs` (a template segment's extras) for a new segment cut from it: speed,
+ * mask, canvas and the rest each get their own seeded id, so editing one piece's speed or mask
+ * never edits its siblings'. Ids are a function of (seed, new id, position), so a rerun reuses
+ * them instead of pushing duplicates.
+ */
+function cloneExtrasFor(doc, template, newId, refs = template.extra_material_refs || []) {
+  return cloneExtraRefs(doc, { id: template.id, extra_material_refs: refs }, newId, SEED,
+    { key: position => `screen:extra:${newId}:${position}` });
+}
+
 export function presets() {
   return loadPreset('layouts');
 }
@@ -31,6 +46,42 @@ export function screenRecordingFrame() {
   const g = presets().screenRecording;
   if (!g?.frame?.clip) throw new CapcutError('layouts.json is missing screenRecording.frame', { code: 'MISSING_PRESET' });
   return g;
+}
+
+/**
+ * The indigo frame for a recording of this size. CapCut fits the recording inside the canvas
+ * and the preset scales it to 0.8, so the card is (w,h)*k0*0.8 on screen; the frame keeps the
+ * preset's measured margins around it (pixelGeometry: indigoFrame minus screen). The preset's
+ * own bytes are kept for the rl2 720x1050 window it was measured on.
+ */
+export function screenFrameClip(width, height, canvas = [1080, 1920]) {
+  const screen = screenRecordingFrame();
+  const w = Number(width), h = Number(height);
+  const [W, H] = canvas.map(Number);
+  if (!(w > 0 && h > 0 && W > 0 && H > 0)) return clone(screen.frame.clip);
+  if (Math.abs((w / h) / (screen.source.width / screen.source.height) - 1) <= 0.005) return clone(screen.frame.clip);
+  const k0 = Math.min(W / w, H / h);
+  const dispW = w * k0 * screen.recording.clip.scale.x;
+  const dispH = h * k0 * screen.recording.clip.scale.y;
+  const g = screen.pixelGeometry;
+  const clip = clone(screen.frame.clip);
+  clip.scale = {
+    x: (dispW + (g.indigoFrame.width - g.screen.width)) / W,
+    y: (dispH + (g.indigoFrame.height - g.screen.height)) / H,
+  };
+  return clip;
+}
+
+/** The card is for portrait window captures; a landscape one floats in it with bands. */
+export function assertPortraitWindow(width, height, label = 'layout screen') {
+  const w = Number(width), h = Number(height);
+  if (w > 0 && h > 0 && w / h > 1) {
+    throw new CapcutError(
+      `${label}: ${w}x${h} is a landscape capture; the indigo card is for portrait window captures `
+      + '(rl2 720x1050). Frame a landscape capture natively in the split instead: '
+      + 'capcutctl layout broll --at SECONDS --track N --row R --scale S.',
+      { code: 'SCREEN_NEEDS_PORTRAIT_WINDOW', exitCode: 2, details: { width: w, height: h } });
+  }
 }
 
 // Wrapped, not aliased: core.mjs imports this module, so the binding is still
@@ -419,8 +470,6 @@ function overlayTrackFor(doc, subjectTrackIndex, range, role, asset) {
   return { track, index: at, created: true };
 }
 
-const LAYOUT_DESC = name => `layout:${name}`;
-
 export function opLayoutApply(doc, op, context = {}) {
   SEED = op.__seed || null;
   const config = presets();
@@ -441,17 +490,33 @@ export function opLayoutApply(doc, op, context = {}) {
   }
   const targets = op.all ? found : found.slice(0, 1);
   const overlays = [];
+  let clearedCameraKeys = 0;
+  const masks = new Set((doc.materials?.common_mask || []).map(m => m.id));
   for (const entry of targets) {
     const subject = entry.segment;
     restoreScreenHiddenPrincipal(subject);
+    // The old layout's camera keys are absolute values for ITS framing: a split-screen push
+    // replayed on a circle renders the face ~5x too large. Alpha and volume keys are not
+    // framing and stay. Re-applying the same layout keeps a deliberate focus move.
+    const prev = currentLook(doc, subject, masks);
+    if (prev !== op.layout && (subject.common_keyframes || []).length) {
+      const before = subject.common_keyframes.length;
+      subject.common_keyframes = subject.common_keyframes.filter(group => !CAMERA_PROPERTIES.has(group.property_type));
+      clearedCameraKeys += before - subject.common_keyframes.length;
+    }
     subject.clip = clone(layout.subject.clip);
     subject.uniform_scale = { on: true, value: 1.0 };
-    subject.desc = subject.desc && subject.desc.startsWith('layout:') ? LAYOUT_DESC(op.layout) : (subject.desc || LAYOUT_DESC(op.layout));
+    // The subject's desc is the editor's label (or empty), never a layout tag: every `layout:*`
+    // desc reads as a plate everywhere else, and removeOverlaysOver below deletes plates. A tag an
+    // older version wrote is cleared; the style lives in a side field (CapCut drops it on save,
+    // which is fine — the mask is the durable record, currentLook reads that).
+    if (String(subject.desc || '').startsWith('layout:') && subject.desc !== SCREEN_RECORDING_DESC) subject.desc = '';
+    subject.capcutctl_layout = op.layout;
     if (layout.subject.mask) applyMask(doc, subject, layout.subject.maskTemplate, layout.subject.mask);
     else removeMask(doc, subject);
     // Always strip other-role plates on this span (seam-bar, white-ring, blur).
     // Switching split ↔ circle used to stack both because overlays are keyed by role.
-    removeOverlaysOver(doc, entry.trackIndex, subject.target_timerange);
+    removeOverlaysOver(doc, entry.trackIndex, subject.target_timerange, subject.id);
 
     if (layout.overlay && op.overlay !== false) {
       const slot = overlayTrackFor(doc, entry.trackIndex, subject.target_timerange, layout.overlay.role, layout.overlay.asset);
@@ -472,7 +537,7 @@ export function opLayoutApply(doc, op, context = {}) {
   }
   pruneEmptyScreenHelperTracks(doc);
   renumberTracks(doc);
-  return { changed: targets.length, layout: op.layout, overlays };
+  return { changed: targets.length, layout: op.layout, overlays, clearedCameraKeys };
 }
 
 /** Detach and delete the mask a previous layout bound to this segment. */
@@ -484,22 +549,43 @@ function removeMask(doc, segment) {
   if (!bound.length) return;
   const ids = new Set(bound.map(b => b.value.id));
   segment.extra_material_refs = (segment.extra_material_refs || []).filter(r => !ids.has(r));
-  doc.materials.common_mask = (doc.materials.common_mask || []).filter(m => !ids.has(m.id));
+  // A mask another segment still points at (a sibling cut from the same clip) stays.
+  removeUnreferencedMaterials(doc, ids);
 }
 
-/** Drop layout plates on ANY track covering this span (blur sits BELOW the subject). */
-function removeOverlaysOver(doc, _trackIndex, span) {
-  const wholeScreenOwners = new Set(allSegments(doc)
-    .filter(({ segment }) => isScreenRecordingSegment(doc, segment)
+/** The plates a face layout owns on its span. Anything else with a `layout:` desc is not ours. */
+const FACE_LAYOUT_PLATES = new Set(['layout:seam-bar', 'layout:white-ring', 'layout:background-blur']);
+const SCREEN_RECORDING_HIDDEN = 'screen_layout_recording_hidden';
+
+/**
+ * Drop layout plates on ANY track covering this span (blur sits BELOW the subject). An explicit
+ * allowlist, never "any layout:* desc on the same range": that open rule deleted the subject
+ * itself when its desc was empty (it had just been tagged layout:<name>) and the screen
+ * recording sharing its span. `keepId` (the subject) is never removed.
+ *
+ * A screen recording whose whole span this is loses its treatment (frame, pip, ring, plate by
+ * the owner rule) and is HIDDEN, alpha 0, not deleted: its source window is the editor's work,
+ * and an unframed 0.8 card floating over the new layout is never the look. Running
+ * `layout.screen` on it again replaces its clip with the preset and shows it.
+ */
+function removeOverlaysOver(doc, _trackIndex, span, keepId = null) {
+  const wholeScreen = allSegments(doc)
+    .filter(({ segment }) => segment.id !== keepId && isScreenRecordingSegment(doc, segment)
       && sameRange(segment.target_timerange, span))
-    .map(({ segment }) => String(segment.id)));
+    .map(({ segment }) => segment);
+  const wholeScreenOwners = new Set(wholeScreen.map(segment => String(segment.id)));
   for (const track of doc.tracks) {
     if (track.type !== 'video') continue;
-    track.segments = (track.segments || []).filter(s =>
-      !((s.desc || '').startsWith('layout:')
-        && (sameRange(s.target_timerange, span)
-          || (SCREEN_LAYOUT_ROLES.has(s.desc) && wholeScreenOwners.has(String(screenLayerOwner(s)))))));
+    track.segments = (track.segments || []).filter(s => s.id === keepId
+      || !((FACE_LAYOUT_PLATES.has(s.desc) && sameRange(s.target_timerange, span))
+        || (SCREEN_LAYOUT_ROLES.has(s.desc) && wholeScreenOwners.has(String(screenLayerOwner(s))))));
   }
+  for (const recording of wholeScreen) {
+    recording.clip ||= {};
+    recording.clip.alpha = 0;
+    recording[SCREEN_RECORDING_HIDDEN] = true;
+  }
+  return wholeScreen.length;
 }
 
 /**
@@ -550,6 +636,67 @@ export function layoutAudit(doc, trackIndex = null, projectDir = null) {
       return { id: s.id, at: Math.round(start / 1000) / 1000, end: Math.round(end / 1000) / 1000,
                brollUnder: covers(start, end), is, want, change };
     });
+}
+
+/** Seconds of an empty split or circle half the gate lets through (a seam's slack is not a stretch). */
+export const SPLIT_GAP_MIN_RUN = 0.3;
+
+/**
+ * Split-screen and circle stretches with nothing behind the face: the other half (or the whole
+ * frame around the avatar) shows the canvas or the room plate. A stretch is filled by picture:
+ * B-roll (isBrollSegment), a still that is not a sig:/layout:/blurred/background plate, or a
+ * rendered full-frame mograph scene; an alpha-0 or hidden clip fills nothing. Returns
+ * [{ id, look, t, end }] in seconds, gaps of at least `minRun`, merged across clip boundaries.
+ * `layout auto` is untouched: this is the gate's question, not the planner's.
+ */
+export function splitGaps(doc, projectDir = null, { minRun = SPLIT_GAP_MIN_RUN } = {}) {
+  let principal;
+  try { principal = principalTrack(doc); } catch { return []; }
+  const masks = new Set((doc.materials?.common_mask || []).map(m => m.id));
+  const videos = new Map((doc.materials?.videos || []).map(m => [m.id, m]));
+  const blurred = new Set(blurredBackgrounds(doc).map(b => b.id));
+  let plateName = null;
+  try { const raw = profileValue('brand.background.plate'); plateName = raw ? path.basename(String(raw)) : null; } catch { /* no profile */ }
+  const footage = footageStillIds(doc, projectDir);
+  const visible = s => Number(s.clip?.alpha ?? 1) > 0 && s.screen_layout_hidden !== true
+    && !(s.common_keyframes || []).some(g => g.property_type === 'KFTypeAlpha' && (g.keyframe_list || []).length
+      && g.keyframe_list.every(k => (k.values || []).every(v => Number(v) <= 0)));
+  const fills = [];
+  for (const { track, trackIndex, segment: s } of allSegments(doc)) {
+    if (track.type !== 'video' || trackIndex === principal.index || track.hidden === true || track.visible === false) continue;
+    if (!s.target_timerange || !visible(s)) continue;
+    const m = videos.get(s.material_id);
+    const desc = String(s.desc || '');
+    const scene = Boolean(m?.capcutctl_mograph?.scene);
+    const still = Boolean(m && m.type && m.type !== 'video') && !desc.startsWith('sig:') && !desc.startsWith('layout:')
+      && !blurred.has(s.id) && !(plateName && path.basename(m.path || '') === plateName);
+    if (!(scene || still || footage.has(s.material_id) || isBrollSegment(s, m))) continue;
+    fills.push([s.target_timerange.start, s.target_timerange.start + s.target_timerange.duration]);
+  }
+  fills.sort((a, b) => a[0] - b[0]);
+  const raw = [];
+  for (const seg of [...(principal.track.segments || [])].sort((a, b) => a.target_timerange.start - b.target_timerange.start)) {
+    const look = currentLook(doc, seg, masks);
+    if (look !== 'split-screen' && look !== 'circle') continue;
+    const a = seg.target_timerange.start, b = a + seg.target_timerange.duration;
+    let cursor = a;
+    for (const [x, y] of fills) {
+      if (y <= cursor || x >= b) continue;
+      if (x > cursor) raw.push({ id: seg.id, look, a: cursor, b: x });
+      cursor = Math.max(cursor, y);
+      if (cursor >= b) break;
+    }
+    if (cursor < b) raw.push({ id: seg.id, look, a: cursor, b });
+  }
+  const merged = [];
+  for (const g of raw) {
+    const last = merged.at(-1);
+    if (last && g.a - last.b <= 20000) { last.b = Math.max(last.b, g.b); if (g.look === 'circle') last.look = 'circle'; continue; }
+    merged.push({ ...g });
+  }
+  const r2 = n => Math.round(n * 100) / 100;
+  return merged.filter(g => (g.b - g.a) / 1e6 >= minRun - 1e-9)
+    .map(g => ({ id: g.id, look: g.look, t: r2(g.a / 1e6), end: r2(g.b / 1e6) }));
 }
 
 function currentLook(doc, segment, masks) {
@@ -607,11 +754,26 @@ export function clearBlurredBackgrounds(doc, context = {}) {
   const all = blurredBackgrounds(doc);
   const found = all.filter(b => b.kind === 'face-copy');
   const replaced = [], removed = [], unblurred = [];
-  const blurIds = new Set((doc.materials.video_effects || []).filter(e => e.name === 'Blur').map(e => e.id));
-  for (const hit of all.filter(b => b.kind === 'blurred-video')) {
-    const seg = doc.tracks[hit.trackIndex].segments.find(s => s.id === hit.id);
+  // By effect id as well as name: a localized CapCut names the effect 模糊, not Blur.
+  const blurIds = new Set((doc.materials.video_effects || []).filter(isBlurEffect).map(e => e.id));
+  const segmentOf = hit => doc.tracks[hit.trackIndex].segments.find(s => s.id === hit.id);
+  for (const hit of all.filter(b => b.kind === 'blurred-video' || b.kind === 'blurred-media')) {
+    const seg = segmentOf(hit);
+    const before = (seg.extra_material_refs || []).length;
     seg.extra_material_refs = (seg.extra_material_refs || []).filter(id => !blurIds.has(id));
-    unblurred.push(hit);
+    if (seg.extra_material_refs.length < before) unblurred.push(hit);
+  }
+  // CapCut's own Background → Blur fill: the canvas material is retyped in place to a plain
+  // colour fill (no blur, no image), so every segment keeps a valid ref and nothing is blurred.
+  const canvasIds = new Set(all.filter(b => b.kind === 'canvas').flatMap(hit => segmentOf(hit).extra_material_refs || []));
+  let canvases = 0;
+  for (const canvas of doc.materials.canvases || []) {
+    if (canvas.type !== 'canvas_blur' || !canvasIds.has(canvas.id)) continue;
+    canvas.type = 'canvas_color';
+    canvas.blur = 0;
+    canvas.color = '';
+    for (const key of ['image', 'image_id', 'image_name', 'album_image']) if (key in canvas) canvas[key] = '';
+    canvases++;
   }
   for (const hit of found) {
     const track = doc.tracks[hit.trackIndex];
@@ -625,9 +787,36 @@ export function clearBlurredBackgrounds(doc, context = {}) {
   }
   if (found.length || unblurred.length) {
     const used = new Set(allSegments(doc).flatMap(({ segment }) => segment.extra_material_refs || []));
-    doc.materials.video_effects = (doc.materials.video_effects || []).filter(e => used.has(e.id) || e.name !== 'Blur');
+    doc.materials.video_effects = (doc.materials.video_effects || []).filter(e => used.has(e.id) || !isBlurEffect(e));
   }
-  return { replaced: replaced.length, removed: removed.length + unblurred.length };
+  // A face copy deleted with no plate to put in its slot leaves its span over black.
+  return {
+    replaced: replaced.length, removed: removed.length + unblurred.length, canvases, overBlack: removed.length,
+    ...(removed.length ? { warnings: [plateWarning(plateStatus(), removed.length)] } : {}),
+  };
+}
+
+/**
+ * Why no room plate resolves, or null when one does. Basename only: the reason is printed and
+ * lands in build summaries, and a profile path is personal.
+ */
+export function plateStatus() {
+  const raw = profileValue('brand.background.plate');
+  if (!raw) return { ok: false, reason: 'brand.background.plate is not set' };
+  const file = expandHome(String(raw));
+  if (!fs.existsSync(file)) return { ok: false, reason: `${path.basename(file)} not found` };
+  return { ok: true, reason: null };
+}
+
+function plateWarning(status, spans) {
+  return `no room plate (${status?.reason || 'unresolved'}): ${spans} span(s) over black — `
+    + 'set brand.background.plate in your profile, then capcutctl layout background';
+}
+
+/** The warnings layout ops returned in an applySpec result, once each (every mirror repeats them). */
+export function specWarnings(result) {
+  const groups = Array.isArray(result?.result) ? result.result : [];
+  return [...new Set(groups.flatMap(group => (group?.operations || []).flatMap(op => op?.warnings || [])))];
 }
 
 export function opLayoutBackground(doc, op, context = {}) {
@@ -635,6 +824,7 @@ export function opLayoutBackground(doc, op, context = {}) {
   const config = presets();
   const bg = config.background;
   const unblurred = clearBlurredBackgrounds(doc, context);
+  const repaired = unblurred.replaced + unblurred.removed + unblurred.canvases;
   let scenes = op.selector
     ? selectSegments(doc, op.selector).map(e => ({ id: e.segment.id, trackIndex: e.trackIndex, range: e.segment.target_timerange }))
     : findCircleScenes(doc);
@@ -647,7 +837,8 @@ export function opLayoutBackground(doc, op, context = {}) {
   }
   if (!scenes.length) {
     return {
-      changed: unblurred.replaced + unblurred.removed, scenes: 0, skippedTemplate: skipped, unblurred,
+      changed: repaired, scenes: 0, skippedTemplate: skipped, unblurred,
+      ...(unblurred.warnings ? { warnings: unblurred.warnings } : {}),
       note: skipped
         ? `no circle scenes outside the cloned preset (${skipped} skipped; use --include-template to override)`
         : 'no circle scenes with a white ring found'
@@ -664,25 +855,32 @@ export function opLayoutBackground(doc, op, context = {}) {
     bgTrack.name = 'layout-background';
   }
 
-  let changed = 0;
+  let changed = 0, overBlack = 0;
   for (const scene of scenes) {
     const entry = byId.get(scene.id);
     if (!entry) continue;
     const subject = entry.segment;
-    bgTrack.segments = (bgTrack.segments || []).filter(s =>
-      !(s.target_timerange.start === subject.target_timerange.start
-        && s.target_timerange.duration === subject.target_timerange.duration));
     // The clear room plate — never a blurred copy of the face (clearBackgroundPlate).
     const plate = clearBackgroundPlate(doc, bg.segmentTemplate, {
       id: mint(`${subject.id}:bgplate`), target: subject.target_timerange,
       renderIndex: Math.max(0, (subject.render_index || 0) - 1), desc: 'layout:background-blur', projectDir: context?.projectDir || null });
-    if (!plate) continue;
+    if (!plate) { overBlack++; continue; }
+    bgTrack.segments = (bgTrack.segments || []).filter(s =>
+      !(s.target_timerange.start === subject.target_timerange.start
+        && s.target_timerange.duration === subject.target_timerange.duration));
     bgTrack.segments.push(plate);
     changed++;
   }
   bgTrack.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
+  // An empty lane we just made for nothing is not left behind.
+  if (!bgTrack.segments.length) doc.tracks = doc.tracks.filter(t => t !== bgTrack);
   renumberTracks(doc);
-  return { changed: changed + unblurred.replaced + unblurred.removed, scenes: scenes.length, skippedTemplate: skipped, unblurred, track: doc.tracks.indexOf(bgTrack) };
+  // Circles and cards with no plate behind them sit over black. Say so; the gate's
+  // card-background check is the blocking version.
+  const spans = overBlack + unblurred.overBlack;
+  const warnings = spans ? [plateWarning(plateStatus(), spans)] : null;
+  return { changed: changed + repaired, scenes: scenes.length, skippedTemplate: skipped, unblurred,
+    ...(warnings ? { warnings } : {}), track: doc.tracks.includes(bgTrack) ? doc.tracks.indexOf(bgTrack) : null };
 }
 
 
@@ -707,7 +905,9 @@ const round3 = v => Math.round(v * 1000) / 1000;
 const ORIGINAL_PATH_KEYS = [
   'original_path', 'originalPath', 'original_source', 'originalSource',
   'source_path', 'sourcePath', 'source_file', 'sourceFile', 'origin_path', 'originPath',
-  'media_path', 'mediaPath', 'file_path', 'filePath', 'file_Path'
+  'media_path', 'mediaPath', 'file_path', 'filePath', 'file_Path',
+  // A derived file (denoise, blur) has no transcript of its own; its original does.
+  'derived_from_path',
 ];
 const TRANSCRIPT_PATH_KEYS = [
   'transcript_path', 'transcriptPath', 'whisper_path', 'whisperPath',
@@ -839,15 +1039,40 @@ function transcriptStems(sourcePaths) {
   return stems;
 }
 
-function transcriptFileInDirectory(directory, stems) {
+/**
+ * How one whisper cache relates to the media it may describe. Keyed caches
+ * (`<stem>.whisper-<slug>.<key>.json`) carry the source token, so two takes both named
+ * face.mp4 can share a cache dir: a token is checked against every source on disk, never
+ * trusted by name. An unreadable file stays a candidate so the caller can report it.
+ */
+function whisperVerdict(file, media) {
+  let data;
+  try { data = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return 'legacy'; }
+  if (!media.length) return indexVerdict(data, null);
+  const verdicts = media.map(source => indexVerdict(data, source));
+  if (verdicts.includes('match')) return 'match';
+  return verdicts.includes('legacy') ? 'legacy' : 'mismatch';
+}
+
+function transcriptFileInDirectory(directory, stems, media = [], ambiguous = []) {
   if (!directory || !fs.existsSync(directory)) return null;
   let names;
   try { names = fs.readdirSync(directory).sort(); } catch { return null; }
   for (const stem of stems) {
-    const whisper = names.find(name => name.startsWith(`${stem}.whisper`));
-    if (whisper) return path.join(directory, whisper);
-    const legacy = names.find(name => name === `${stem}_transcript_ar.json`);
-    if (legacy) return path.join(directory, legacy);
+    const legacy = [], unverified = [];
+    for (const name of names.filter(n => n.startsWith(`${stem}.whisper`))) {
+      const file = path.join(directory, name);
+      const verdict = whisperVerdict(file, media);
+      if (verdict === 'match') return file;
+      if (verdict === 'legacy') legacy.push(file);
+      else if (verdict === 'unverified') unverified.push(file);
+    }
+    // Several keyed caches and no media to tell them apart: refuse rather than guess a take.
+    if (unverified.length > 1) { ambiguous.push(...unverified); continue; }
+    if (unverified.length) return unverified[0];
+    if (legacy.length) return legacy[0];
+    const old = names.find(name => name === `${stem}_transcript_ar.json`);
+    if (old) return path.join(directory, old);
   }
   return null;
 }
@@ -885,12 +1110,14 @@ function transcriptCandidates(mediaPath, projectDir, material) {
   addDirectory(path.join(os.homedir(), 'Downloads', '.video-index'));
 
   const stems = transcriptStems(sources);
+  const media = sources.filter(file => { try { return fs.statSync(file).isFile(); } catch { return false; } });
   const files = [...direct.filter(file => fs.existsSync(file))];
+  const ambiguous = [];
   for (const directory of directories) {
-    const file = transcriptFileInDirectory(directory, stems);
+    const file = transcriptFileInDirectory(directory, stems, media, ambiguous);
     if (file && !files.includes(file)) files.push(file);
   }
-  return { files, sources, directories, stems };
+  return { files, sources, directories, stems, ambiguous };
 }
 
 function transcriptPayloadSegments(payload) {
@@ -923,9 +1150,12 @@ export function resolveTranscript(mediaPath, projectDir = null, material = null)
   if (!lookup.files.length) {
     const source = lookup.sources[0] || mediaPath;
     const where = lookup.directories.length ? ` Searched: ${lookup.directories.join(', ')}.` : '';
+    const unsure = lookup.ambiguous.length
+      ? ` Refused ${lookup.ambiguous.length} keyed caches that could belong to another take with the same name (the source is not on disk to check): ${lookup.ambiguous.map(f => path.basename(f)).join(', ')}.`
+      : '';
     return {
       status: 'missing', segments: [], source, path: null,
-      note: `No transcript cache found for ${path.basename(source)}.${where}`
+      note: `No transcript cache found for ${path.basename(source)}.${where}${unsure}`
     };
   }
   let invalid = null;
@@ -1071,7 +1301,7 @@ function resolveIds(projectDir, opts = {}, required = true) {
  * The window is clamped inside the frame: a window running off the top or bottom leaves
  * blank canvas behind the B-roll, which is the one thing the look must never have.
  */
-export function brollFocus({ sourceWidth, sourceHeight, row, scale, explicitFraming = false, canvas = [1080, 1920] }) {
+export function brollFocus({ sourceWidth, sourceHeight, row, scale, canvas = [1080, 1920] }) {
   const [W, H] = canvas.map(Number);
   const sw = Number(sourceWidth), sh = Number(sourceHeight), requestedRow = Number(row);
   if (!(W > 0 && H > 0 && sw > 0 && sh > 0)) {
@@ -1082,37 +1312,46 @@ export function brollFocus({ sourceWidth, sourceHeight, row, scale, explicitFram
   }
   const k0 = Math.min(W / sw, H / sh);
   const fillScale = (W / sw) / k0;                       // scale at which the clip is exactly canvas-wide
-  // a hand-typed fill scale is usually a rounding hair under the exact one; snap it up
-  // rather than refuse, and only complain when the clip would genuinely show background.
-  const scaleWasExplicit = scale != null || explicitFraming === true;
+  const heightScale = (H / 2) / (sh * k0);               // scale at which it is exactly the upper half tall
+  const minScale = Math.max(fillScale, heightScale);
   let s = scale == null ? fillScale : Number(scale);
   if (!(s > 0) || !Number.isFinite(s)) {
     throw new CapcutError('layout.broll: --scale must be a finite positive number.', { code: 'BAD_SCALE', exitCode: 2 });
   }
+  // A landscape capture fitted to the canvas width is shorter than the 960px upper half.
+  // Automatically inventing a crop here is what made `layout broll` silently produce a short
+  // floating rectangle, so auto scale refuses and names the scale that fills the half.
+  if (scale == null && sh * k0 * s < H / 2 - 1e-6) {
+    throw new CapcutError(
+      `layout broll: a ${sw}x${sh} capture at fill width is ${(sh * k0 * s).toFixed(0)}px tall, short of the `
+      + `${(H / 2).toFixed(0)}px upper half. A landscape capture: pass --row R --scale ${minScale.toFixed(5)} `
+      + '(or larger) to crop it natively. A portrait window capture: use layout screen.',
+      { code: 'BROLL_NEEDS_SCREEN_LAYOUT', exitCode: 2, details: { minScale } }
+    );
+  }
+  // A hand-typed minimum is usually a rounding hair under the exact one; snap it up rather
+  // than refuse, and only complain when the clip would genuinely show background. An explicit
+  // scale gets the same blank-band guard as auto: the canvas width first, then the half's height.
   let snapped = false;
   if (s < fillScale) {
     if (s > fillScale * 0.99) { s = fillScale; snapped = true; }
     else {
       throw new CapcutError(
-        `scale ${s.toFixed(5)} leaves the clip ${(sourceWidth * k0 * s).toFixed(0)}px wide on a ${W}px canvas — `
-        + `that is blank background either side. Minimum is ${fillScale.toFixed(5)}.`,
-        { code: 'BROLL_TOO_SMALL', exitCode: 2 });
+        `scale ${s.toFixed(5)} leaves the clip ${(sw * k0 * s).toFixed(0)}px wide on a ${W}px canvas — `
+        + `that is blank background either side. Minimum is ${minScale.toFixed(5)}.`,
+        { code: 'BROLL_TOO_SMALL', exitCode: 2, details: { minScale } });
     }
   }
-  // A landscape/window capture fitted to the canvas width is shorter than the 960px
-  // upper split-screen half. Automatically inventing a crop here is what made `layout
-  // broll` silently produce a short floating rectangle. `layout screen` owns the measured
-  // window treatment; callers that intentionally choose a crop may opt into explicit framing.
-  const displayedHeight = sh * k0 * s;
-  if (!scaleWasExplicit && displayedHeight < H / 2 - 1e-6) {
-    throw new CapcutError(
-      `layout broll: ${sw}x${sh} landscape/window capture cannot fill the tall-source `
-      + `framing automatically; use layout screen for screen recordings or pass an explicit `
-      + 'framing/--scale.',
-      { code: 'BROLL_NEEDS_SCREEN_LAYOUT', exitCode: 2 }
-    );
+  if (s < heightScale) {
+    if (s > heightScale * 0.99) { s = heightScale; snapped = true; }
+    else {
+      throw new CapcutError(
+        `scale ${s.toFixed(5)} shows the clip ${(sh * k0 * s).toFixed(0)}px tall in the ${(H / 2).toFixed(0)}px `
+        + `upper half — that is a blank band under it. Minimum is ${minScale.toFixed(5)}.`,
+        { code: 'BROLL_TOO_SHORT', exitCode: 2, details: { minScale } });
+    }
   }
-  const visibleRows = (H / 2) / (k0 * s);
+  const visibleRows = Math.min(sh, (H / 2) / (k0 * s));
   const clamped = Math.max(visibleRows / 2, Math.min(sh - visibleRows / 2, requestedRow));
   // Half the clip's ON-CANVAS height. This used to be written `(H / 2) * s`, which is the same
   // number ONLY while k0 === H / sh — i.e. only for sources taller than the canvas aspect, which
@@ -1130,7 +1369,7 @@ export function brollFocus({ sourceWidth, sourceHeight, row, scale, explicitFram
     mask: { width: 0.28, height: 0, centerX: 0, centerY: round6(maskCenterY), rotation: 0,
             feather: 0, expansion: 0, roundCorner: 0, invert: false, aspectRatio: 1 },
     scale: s, snapped, row: clamped, clamped: Math.abs(clamped - requestedRow) > 0.5,
-    window: [Math.round(clamped - visibleRows / 2), Math.round(clamped + visibleRows / 2)],
+    window: [Math.max(0, Math.round(clamped - visibleRows / 2)), Math.min(sh, Math.round(clamped + visibleRows / 2))],
   };
 }
 const round6 = v => Math.round(v * 1e6) / 1e6;
@@ -1141,9 +1380,9 @@ export function opLayoutBroll(doc, op) {
   const found = selectSegments(doc, op.selector || {});
   if (!found.length) throw new CapcutError(`layout.broll: no segment matched ${JSON.stringify(op.selector)}.`, { code: 'SELECTOR_EMPTY' });
   const targets = op.all ? found : found.slice(0, 1);
+  // Only a scale changes the framing. `crop`/`frame`/`framing: true` used to switch the
+  // blank-band guard off without framing anything, so a 1920x1080 capture kept its band.
   const explicitScale = op.scale ?? op.framing?.scale;
-  const explicitFraming = explicitScale != null || op.explicitFraming === true
-    || op.framing === true || op.crop != null || op.frame != null;
   // Compute every frame before mutating any segment. A multi-selection that contains one
   // landscape capture must fail as a whole, not leave the earlier targets half-applied.
   const plans = targets.map(entry => {
@@ -1152,7 +1391,7 @@ export function opLayoutBroll(doc, op) {
     if (!mat?.width || !mat?.height) throw new CapcutError(`layout.broll: material for ${seg.id} has no dimensions.`, { code: 'MISSING_MATERIAL_SOURCE' });
     const cc = doc.canvas_config || {};
     const g = brollFocus({ sourceWidth: mat.width, sourceHeight: mat.height,
-                           row: op.row, scale: explicitScale, explicitFraming,
+                           row: op.row, scale: explicitScale,
                            canvas: [cc.width || 1080, cc.height || 1920] });
     return { entry, seg, mat, g };
   });
@@ -1162,7 +1401,7 @@ export function opLayoutBroll(doc, op) {
     seg.uniform_scale = { on: true, value: 1.0 };
     if (op.seam === false) { seg.enable_video_mask = false; }
     else applyMask(doc, seg, presets().layouts['split-screen'].subject.maskTemplate, g.mask);
-    out.push({ id: seg.id, scale: g.scale, row: g.row, window: g.window, clamped: g.clamped });
+    out.push({ id: seg.id, scale: g.scale, row: g.row, window: g.window, clamped: g.clamped, snapped: g.snapped });
   }
   return { changed: out.length, framed: out };
 }
@@ -1318,6 +1557,10 @@ function hidePrincipalVisual(doc, span) {
     const end = target.start + target.duration;
     const coveredEnd = covered.start + covered.duration;
     const parentId = segment[SCREEN_PARENT] || segment.id;
+    const transitions = new Set((doc.materials?.transitions || []).map(material => material.id));
+    const refs = segment.extra_material_refs || [];
+    const ownRefs = refs.filter(id => !transitions.has(id));
+    const transitionRefs = refs.filter(id => transitions.has(id));
     const pieces = [];
     if (start < covered.start) pieces.push({ range: { start, duration: covered.start - start }, hidden: false });
     pieces.push({ range: covered, hidden: true });
@@ -1326,6 +1569,15 @@ function hidePrincipalVisual(doc, span) {
       const id = index === 0 ? segment.id
         : mint(`screen:hidden:${parentId}:${pieceSpec.range.start}:${pieceSpec.range.duration}`);
       const piece = sliceSegment(segment, pieceSpec.range, id);
+      // The first piece keeps the original id and its refs; later pieces get private copies.
+      // A shared speed material made one piece's speed edit the other's (and
+      // CONFLICTING_MATERIAL_ID), and a shared mask was deleted under a sibling when one piece
+      // switched layout. The transition sits at the clip's end, so only the last piece has it.
+      const last = index === pieces.length - 1;
+      piece.extra_material_refs = [
+        ...(index === 0 ? ownRefs : cloneExtrasFor(doc, segment, id, ownRefs)),
+        ...(last ? transitionRefs : []),
+      ];
       piece[SCREEN_PARENT] = parentId;
       if (pieceSpec.hidden) {
         piece.clip ||= {};
@@ -1377,15 +1629,9 @@ function removeScreenLayersAt(doc, span, recordingId) {
     track.segments = keep;
   }
 
-  // Pip masks and blur effects are generated by this operation. Remove only the generated
-  // records that no remaining segment references; shared native materials stay untouched.
-  const removedRefs = new Set(removed.flatMap(segment => segment.extra_material_refs || []));
-  const usedRefs = new Set(allSegments(doc).flatMap(({ segment }) => segment.extra_material_refs || []));
-  for (const kind of ['common_mask', 'video_effects']) {
-    if (!Array.isArray(doc.materials?.[kind])) continue;
-    doc.materials[kind] = doc.materials[kind].filter(material =>
-      !removedRefs.has(material.id) || usedRefs.has(material.id));
-  }
+  // Pip masks and the pip's private extras (speed, canvas …) are generated by this operation.
+  // Remove only the records that no remaining segment references; shared native materials stay.
+  removeUnreferencedMaterials(doc, new Set(removed.flatMap(segment => segment.extra_material_refs || [])));
   return removed;
 }
 
@@ -1645,7 +1891,24 @@ function screenTrackForRecording(doc, trackSpec) {
   return { track, index: at, created: true };
 }
 
-function ensureScreenMaterial(doc, op, context, screen, sourceStartUs, sourceDurationUs) {
+function ensureScreenMaterial(doc, op, context, screen, sourceStartUs, sourceDurationUs, origin = null) {
+  // The origin contract's verdict (assertOrigin in opLayoutScreen) travels with the material and
+  // its provenance record, exactly as clip.add's annotateMediaSource writes it.
+  const record = (material, source, destination) => {
+    stampOrigin(material, origin);
+    if (path.resolve(destination) !== source || origin?.kind === 'derived') {
+      if (path.resolve(destination) !== source) material.original_path = source;
+      recordMediaProvenance(context, {
+        materialId: material.id,
+        originalPath: source,
+        localizedPath: destination,
+        sourceTakeId: material.source_take_id,
+        origin: origin?.kind || null,
+        derivedFromPath: origin?.derivedFrom || null,
+        derivedFromOffset: origin?.derivedOffset ?? null,
+      });
+    }
+  };
   // Keep the absolute spelling supplied by the caller on the material for transcript/cache
   // diagnostics. Canonicalization is still used by sourceTakeId and the map writer, so symlink
   // aliases cannot create two identities for one take.
@@ -1683,15 +1946,7 @@ function ensureScreenMaterial(doc, op, context, screen, sourceStartUs, sourceDur
     if (path.resolve(expand(material.path)) !== path.resolve(destination)) material.path = destination;
     material.source_take_id = sourceTakeId(source);
     material.source_path = source;
-    if (path.resolve(destination) !== source) {
-      material.original_path = source;
-      recordMediaProvenance(context, {
-        materialId: material.id,
-        originalPath: source,
-        localizedPath: destination,
-        sourceTakeId: material.source_take_id,
-      });
-    }
+    record(material, source, destination);
     if (!material.width) material.width = width;
     if (!material.height) material.height = height;
     material.duration = knownDuration;
@@ -1700,7 +1955,7 @@ function ensureScreenMaterial(doc, op, context, screen, sourceStartUs, sourceDur
 
   const template = (doc.materials?.videos || []).find(item => item.type === 'video')
     || { type: 'video', crop_scale: 1 };
-  material = clone(template);
+  material = neutralVideoMaterial(template);
   material.id = op.materialId || mint(`screen:material:${path.resolve(destination)}`);
   if ((doc.materials?.videos || []).some(item => item.id === material.id)) {
     throw new CapcutError(`layout.screen: material id ${material.id} already exists.`, { code: 'MATERIAL_ID_CONFLICT', exitCode: 2 });
@@ -1714,27 +1969,21 @@ function ensureScreenMaterial(doc, op, context, screen, sourceStartUs, sourceDur
   material.duration = probedDuration;
   material.source_take_id = sourceTakeId(source);
   material.source_path = source;
-  if (path.resolve(destination) !== source) {
-    material.original_path = source;
-    recordMediaProvenance(context, {
-      materialId: material.id,
-      originalPath: source,
-      localizedPath: destination,
-      sourceTakeId: material.source_take_id,
-    });
-  }
+  record(material, source, destination);
   ensureMaterialArray(doc, 'videos').push(material);
   return material;
 }
 
-function upsertScreenRecording(doc, op, context, screen) {
+function upsertScreenRecording(doc, op, context, screen, origin = null) {
   if (!op.media) throw new CapcutError('layout.screen requires media or an existing recording selector.',
     { code: 'NO_MEDIA', exitCode: 2 });
+  assertPortraitWindow(op.width == null ? screen.source.width : op.width,
+    op.height == null ? screen.source.height : op.height, 'layout.screen');
   const atUs = screenTime(op.at, '--at', { allowZero: true });
   const durationUs = screenTime(op.duration, '--duration');
   const sourceStartUs = screenTime(op.src == null ? 0 : op.src, '--src', { allowZero: true });
   const sourceDurationUs = screenTime(op.srcDur == null ? op.duration : op.srcDur, '--src-dur');
-  const material = ensureScreenMaterial(doc, op, context, screen, sourceStartUs, sourceDurationUs);
+  const material = ensureScreenMaterial(doc, op, context, screen, sourceStartUs, sourceDurationUs, origin);
   const destination = screenTrackForRecording(doc, op.track);
   const existing = (destination.track.segments || []).find(segment =>
     (op.id && segment.id === op.id)
@@ -1813,7 +2062,12 @@ function buildScreenPip(doc, recording, source, circle, piece) {
   pip.clip = clone(circle.subject.clip);
   pip.uniform_scale = { on: true, value: 1.0 };
   const transitions = new Set((doc.materials.transitions || []).map(material => material.id));
-  pip.extra_material_refs = (source.segment.extra_material_refs || []).filter(id => !transitions.has(id));
+  const index = materialById(doc);
+  // The inset's own copies of the face's extras (speed, canvas …), never the face's: the
+  // face's mask is replaced by the circle below and its transition stays on the face.
+  const keep = (source.segment.extra_material_refs || []).filter(id => !transitions.has(id)
+    && !(index.get(id)?.kind === 'common_mask' || index.get(id)?.value?.type === 'mask'));
+  pip.extra_material_refs = cloneExtrasFor(doc, source.segment, pip.id, keep);
   delete pip.keyframe_refs;
   delete pip.common_keyframes;
   if (Object.prototype.hasOwnProperty.call(source.segment, SCREEN_ORIGINAL_KEYFRAME_REFS)) {
@@ -1877,9 +2131,10 @@ export function opLayoutScreen(doc, op = {}, context = {}) {
   // cropped to the half-frame defeats its whole purpose; refusing it must not depend on
   // whether an unrelated indigo PNG happens to be on this machine (on CI it is not, and the
   // caller got ASSET_NOT_FOUND instead of the reason they actually needed).
+  let origin = null;
   if (op.media) {
     const canvasConfig = doc.canvas_config || {};
-    assertOrigin({
+    origin = assertOrigin({
       file: path.resolve(expandHome(String(op.media))),
       width: op.width == null ? Number(screen.source.width) : Number(op.width),
       height: op.height == null ? Number(screen.source.height) : Number(op.height),
@@ -1889,13 +2144,17 @@ export function opLayoutScreen(doc, op = {}, context = {}) {
       derivedOffset: op.derivedOffset, allowEphemeral: op.allowEphemeral === true,
     });
   }
+  if (op.media) {
+    assertPortraitWindow(op.width == null ? screen.source.width : op.width,
+      op.height == null ? screen.source.height : op.height, 'layout.screen');
+  }
   resolveAsset(doc, screen.frame.asset, projectDir);
   resolveAsset(doc, circle.overlay.asset, projectDir);
 
   let found;
   if (recordingSelector) found = selectSegments(doc, recordingSelector);
   else if (op.media) {
-    const created = upsertScreenRecording(doc, op, context, screen);
+    const created = upsertScreenRecording(doc, op, context, screen, origin);
     found = [{ segment: created.segment, track: created.track, trackIndex: created.index }];
   } else {
     throw new CapcutError('layout.screen requires media/at/duration or selector (the existing recording clip).',
@@ -1917,11 +2176,15 @@ export function opLayoutScreen(doc, op = {}, context = {}) {
       throw new CapcutError(`layout.screen: recording ${entry.segment.id} has no video material.`,
         { code: 'MISSING_MATERIAL_SOURCE', exitCode: 2 });
     }
-    return { recordingEntry: entry, pipSources: resolveScreenPip(doc, entry.segment, op) };
+    assertPortraitWindow(material.width, material.height, 'layout.screen');
+    const cc = doc.canvas_config || {};
+    return { recordingEntry: entry, pipSources: resolveScreenPip(doc, entry.segment, op),
+      frameClip: screenFrameClip(material.width, material.height, [cc.width || 1080, cc.height || 1920]) };
   });
 
   const output = [];
-  for (const { recordingEntry, pipSources } of plans) {
+  let overBlack = 0;
+  for (const { recordingEntry, pipSources, frameClip } of plans) {
     const recording = recordingEntry.segment;
     const recordingTrack = recordingEntry.track;
     removeScreenLayersAt(doc, recording.target_timerange, recording.id);
@@ -1934,6 +2197,9 @@ export function opLayoutScreen(doc, op = {}, context = {}) {
     recording.enable_video_mask = false;
     recording.desc = 'layout:screen-recording';
     recording.screen_recording_id = recording.id;
+    // A recording a face layout hid (removeOverlaysOver) shows again: the preset clip above
+    // carries no alpha, so only the marker is left to drop.
+    delete recording[SCREEN_RECORDING_HIDDEN];
 
     const backgroundTrack = screenTrack(doc, 'layout-screen-background', recordingTrack, true,
       recording.target_timerange, recording.id);
@@ -1947,7 +2213,7 @@ export function opLayoutScreen(doc, op = {}, context = {}) {
     const frame = buildOverlaySegment(doc, recording, {
       asset: screen.frame.asset,
       role: 'screen-frame',
-      clip: screen.frame.clip,
+      clip: frameClip,
       uniformScale: screen.frame.uniform_scale,
       renderIndexOffset: 1,
       ownerId: recording.id,
@@ -1988,11 +2254,14 @@ export function opLayoutScreen(doc, op = {}, context = {}) {
       || String(screenLayerOwner(segment) || '') !== String(recording.id));
     ringTrack.track.segments.push(ring);
 
+    let wanted = 0;
     const blurs = pipSources.flatMap((source, index) => {
       const piece = sourceSlice(source.segment, recording.target_timerange);
+      if (piece) wanted++;
       const built = piece ? buildScreenBlur(doc, recording, source, background, piece, index, context.projectDir || null) : null;
       return built ? [built] : [];
     });
+    overBlack += wanted - blurs.length;
     backgroundTrack.track.segments = (backgroundTrack.track.segments || []).filter(segment =>
       !(segment.desc === 'layout:screen-blur'
         && String(screenLayerOwner(segment) || '') === String(recording.id)));
@@ -2026,7 +2295,9 @@ export function opLayoutScreen(doc, op = {}, context = {}) {
     changed: output.length,
     layout: 'screen',
     operation: SCREEN_LAYOUT_OPERATION,
-    layers: output
+    layers: output,
+    // The card sits over the hidden face: with no room plate under it, that is black.
+    ...(overBlack ? { warnings: [plateWarning(plateStatus(), overBlack)] } : {}),
   };
 }
 

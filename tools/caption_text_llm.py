@@ -1,9 +1,12 @@
 """Default model for the caption typo pass: the cheapest CLI on this machine, with fallbacks.
 
 The engine sends one prompt and wants {"fixes":[...]} back; it validates every fix itself.
-Each backend here runs a locally signed-in CLI with tools off, from an empty directory, so
-no project context, hooks or agent actions are involved. The first backend whose answer
-parses as {"fixes": [...]} wins; the rest are fallbacks.
+Each backend runs a locally signed-in CLI from an empty temporary directory, so no project
+context is read. claude runs with tools off, no MCP servers, no user or project settings
+(so no hooks or plugins), no session file, and without ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN
+or the parent Claude Code session's variables, so it bills the signed-in plan, not an API
+key. codex runs ephemeral in a read-only sandbox. opencode runs with its own configuration.
+The first backend whose answer parses as {"fixes": [...]} wins; the rest are fallbacks.
 
 Models also "fix" a word into a different word (Gmail -> email, dialect -> formal). A typo is a
 small edit, so each fix is kept only if it changes at most 1 character, or 2 characters that are
@@ -25,13 +28,17 @@ from pathlib import Path
 
 DEFAULT_CHAIN = 'codex-luna,claude-haiku,opencode'
 TIMEOUT = 90
+# Kept out of the headless claude call; the same tuple as tools/watcher/watch.py.
+STRIP_ENV = ('ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT',
+             'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_CHILD_SESSION')
 
 
 def _claude(prompt, work):
     argv = ['claude', '-p', '--model', 'haiku', '--tools', '', '--no-session-persistence',
-            '--strict-mcp-config', '--output-format', 'text']
+            '--strict-mcp-config', '--setting-sources', '', '--output-format', 'text']
+    env = {k: v for k, v in os.environ.items() if k not in STRIP_ENV}
     # Thinking takes a one-line answer from ~4s to ~75s without improving it.
-    env = dict(os.environ, MAX_THINKING_TOKENS='0')
+    env['MAX_THINKING_TOKENS'] = '0'
     return subprocess.run(argv, input=prompt, text=True, capture_output=True, cwd=work, env=env,
                           timeout=TIMEOUT, check=True).stdout
 

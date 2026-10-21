@@ -19,3 +19,12 @@ test('timeline.set refuses unsupported export range values', () => {
   assert.throws(()=>applyOperations(doc,[{op:'timeline.set',exportRange:v}],{group:'root'}),/exportRange/);
  }
 });
+test('timeline.set refuses durations that fit neither seconds nor µs, and unit-slip tails', () => {
+ const run = op => { const doc = { duration: 10_000_000, materials: {}, tracks: [] }; applyOperations(doc, [op], { group: 'root' }); return doc.duration; };
+ for (const v of [100000, 33333, 50000]) assert.throws(() => run({ op: 'timeline.set', duration: v }), error => error.code === 'BAD_TIME');
+ assert.equal(run({ op: 'timeline.set', duration: 12.5 }), 12_500_000);
+ assert.equal(run({ op: 'timeline.set', duration: 12_500_000 }), 12_500_000);
+ assert.equal(run({ op: 'timeline.set', durationUs: 33333 }), 33333);
+ assert.throws(() => run({ op: 'timeline.set', duration: 600 }), error => error.code === 'DURATION_OUT_OF_RANGE');
+ assert.equal(run({ op: 'timeline.set', duration: 600, force: true }), 600_000_000);
+});

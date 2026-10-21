@@ -5,10 +5,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { readJson } from '../src/core.mjs';
-import { opMographPlace } from '../src/mograph-place.mjs';
+import { main, setOutput } from '../src/cli.mjs';
+import { normalizePlan, runBuild } from '../src/build.mjs';
+import { opMographPlace, resolvePlacementSfx } from '../src/mograph-place.mjs';
 import { opPolish } from '../src/polish.mjs';
 import { opSignature } from '../src/signature.mjs';
 import { buildProject } from './helpers/polish-project.mjs';
+import { stubMograph } from './helpers/mograph-stub.mjs';
 
 const US = s => Math.round(s * 1e6);
 const all = d => d.tracks.flatMap(t => t.segments || []);
@@ -128,4 +131,40 @@ test('a rerun of the endcard keeps its cue level; a cue on a beat that moved sta
   d.duration = US(10);
   opSignature(d, { endcard: { text: 'Follow' } });
   assert.equal(all(d).find(s => s.desc === 'sig:sfx:endcard').volume, 1);
+});
+
+test('the placement cue: no-sfx and an explicit null mean none, a named cue wins, otherwise the template\'s', () => {
+  assert.equal(resolvePlacementSfx(undefined, 'pop'), 'pop', 'the template default');
+  assert.equal(resolvePlacementSfx(null, 'pop'), null, 'the plan said no cue');
+  assert.equal(resolvePlacementSfx('impact', 'pop'), 'impact');
+  assert.equal(resolvePlacementSfx('impact', 'pop', true), null, '--no-sfx');
+  assert.equal(resolvePlacementSfx(undefined, null), null);
+});
+
+test('a rerender keeps the plan\'s "no cue" and its accepted unsafe box', async () => {
+  const dir = buildProject();
+  const mograph = stubMograph();
+  const unsafe = [100, 100, 600, 200];
+  const plan = normalizePlan({
+    version: 1, logos: false, layout: false, camera: { stress: false }, sound: { seams: false, loudness: false, music: false },
+    graphics: [{ id: 'g1', template: 'keyword-super', at: 2, sfx: null, allowUnsafe: true, params: { text: 'one', testBox: unsafe } }],
+  });
+  await runBuild(dir, plan, { forceRunning: true, backup: false, renderers: { mograph } });
+  const sidecar = readJson(path.join(dir, 'mograph', 'g1.json'));
+  assert.equal(sidecar.sfx, null, 'the sidecar keeps the null');
+  assert.equal(sidecar.allowUnsafe, true);
+  const cues = () => all(readJson(path.join(dir, 'draft_info.json'))).filter(s => s.desc === 'mograph:sfx:g1');
+  assert.equal(cues().length, 0);
+
+  let out = '';
+  const restore = setOutput(chunk => { out += String(chunk); return true; });
+  try {
+    await main(['mograph', 'rerender', '--project', dir, '--id', 'g1', '--params', JSON.stringify({ text: 'two' }),
+      '--force-running', '--no-backup'], { mograph });
+  } finally { restore(); }
+  assert.ok(JSON.parse(out).committed !== false, 'placed without MOGRAPH_SAFE_ZONE');
+  assert.equal(cues().length, 0, 'still no cue: the template default did not come back');
+  const placed = all(readJson(path.join(dir, 'draft_info.json'))).find(s => s.desc === 'mograph:g1');
+  assert.ok(placed, 'the graphic is placed');
+  assert.equal(readJson(path.join(dir, 'mograph', 'g1.json')).params.text, 'two');
 });

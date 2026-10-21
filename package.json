@@ -42,8 +42,8 @@
     ".github/AUTOMATION.md"
   ],
   "scripts": {
-    "test": "env -u CAPCUTCTL_PRESET_DIR XDG_CONFIG_HOME=/nonexistent/capcutctl-test node --test",
-    "check": "for f in bin/capcutctl.mjs src/*.mjs mograph/runtime.js mograph/scenes/runtime.js mograph/scenes/sound.mjs; do node --check \"$f\" || exit 1; done"
+    "test": "node test/run.mjs",
+    "check": "for f in bin/capcutctl.mjs src/*.mjs mograph/*.js mograph/scenes/*.js mograph/scenes/*.mjs examples/showreel/*.js examples/showreel/*.mjs .github/scripts/*.cjs; do node --check \"$f\" || exit 1; done"
   },
   "engines": {
     "node": ">=20"

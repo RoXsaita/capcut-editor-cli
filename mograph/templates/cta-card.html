@@ -122,7 +122,8 @@ MG.define({
     tail.className = 'tail';
     card.appendChild(tail);
 
-    const lay = mg.layout(params, { margin: 48 + 36 });
+    // Margin: crop pad + the pop's overshoot + what the card's shadows paint past it.
+    const lay = mg.layout(params, { margin: 48 + 36 + mg.maxReach(group) });
     mg.fitFont(group, tokens.type.list, lay.safe.w, lay.safe.h, tokens.type.micro);
     mg.place(group, lay);
     // Tail under the reading-start corner (right for Arabic), mirrored for LTR; sized in px from

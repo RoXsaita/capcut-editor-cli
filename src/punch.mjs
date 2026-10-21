@@ -3,10 +3,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CapcutError, allSegments, resolveMediaPath } from './core.mjs';
-import { opScaleKeyframe, resolveClip } from './add.mjs';
+import { maskVisibleRow, opScaleKeyframe, resolveClip } from './add.mjs';
 import { peakUpscale, UPSCALE_REFUSE } from './crispness.mjs';
 import { momentsFromSidecar } from './broll-lint.mjs';
 import { pythonForTool } from './python.mjs';
+import { partForMedia, takeParts, vtInPart } from './rl2-take.mjs';
+import { normalise, sourceToTimeline } from './signature.mjs';
 
 const US = s => Math.round(s * 1e6);
 const S = us => (us || 0) / 1e6;
@@ -57,7 +59,10 @@ export function matchOcrBoxes(boxes, query) {
   return (boxes || []).filter(box => {
     const text = normaliseQuery(box?.text);
     if (!text) return false;
-    if (text.includes(needle) || needle.includes(text)) return true;
+    if (text.includes(needle)) return true;
+    // A box inside the query only counts when it is a real word of it: "P" or "is" sits
+    // inside "Publish" and used to come back as a second, wrong, candidate.
+    if (needle.includes(text) && (text.length >= 3 || terms.includes(text))) return true;
     return terms.every(term => text.includes(term));
   });
 }
@@ -114,9 +119,10 @@ export function pickBox(hits, click = null, sourceDims = null) {
 
 /**
  * Source-pixel rectangle that, fed to `keyframe --focus`, yields ~`zoom` centred on the box.
- * Clamped so the framed region stays inside the source — the model never emits a coordinate.
+ * Clamped so the framed region stays inside the source — the model never emits a coordinate —
+ * and, on a split-screen clip, inside `band` ([top, bottom] source rows the split mask shows).
  */
-export function focusRectForZoom({ box, sourceW, sourceH, canvasW, canvasH, zoom }) {
+export function focusRectForZoom({ box, sourceW, sourceH, canvasW, canvasH, zoom, band = null }) {
   if (!(sourceW > 0 && sourceH > 0 && canvasW > 0 && canvasH > 0 && zoom > 0)) {
     throw new CapcutError('punch needs known source and canvas dimensions.', {
       code: 'BAD_FOCUS', exitCode: 2,
@@ -124,11 +130,13 @@ export function focusRectForZoom({ box, sourceW, sourceH, canvasW, canvasH, zoom
   }
   const fit = Math.min(canvasW / sourceW, canvasH / sourceH);
   const visW = Math.min(sourceW, (canvasW * 0.9) / (zoom * fit));
-  const visH = Math.min(sourceH, (canvasH * 0.9) / (zoom * fit));
+  const [top, bottom] = Array.isArray(band) && band[1] > band[0]
+    ? [Math.max(0, band[0]), Math.min(sourceH, band[1])] : [0, sourceH];
+  const visH = Math.min(bottom - top, (canvasH * 0.9) / (zoom * fit));
   const cx = (Number(box.x) + Number(box.w) / 2) * sourceW;
   const cy = (Number(box.y) + Number(box.h) / 2) * sourceH;
   const x = Math.min(Math.max(0, cx - visW / 2), sourceW - visW);
-  const y = Math.min(Math.max(0, cy - visH / 2), sourceH - visH);
+  const y = Math.min(Math.max(top, cy - visH / 2), bottom - visH);
   return [x, y, visW, visH];
 }
 
@@ -271,18 +279,66 @@ export function clickNear(clicks, t, window = 1.0) {
   return ranked[0]?.click ?? null;
 }
 
+function transcriptWords(words) {
+  if (Array.isArray(words)) return words;
+  const out = [];
+  for (const segment of words?.segments || []) for (const word of segment.words || []) out.push(word);
+  return out;
+}
+
+/**
+ * Source start of the first whole-token run that spells `needle`, or null. Tokens are
+ * normalised the way brand detection normalises them (case, punctuation, Arabic letter
+ * variants), and a phrase must match consecutive words exactly: the old two-way substring
+ * test let "save button" match the word "a".
+ */
 export function wordTime(words, needle) {
-  const query = normaliseQuery(needle);
-  if (!query) return null;
-  for (const word of words || []) {
-    const text = normaliseQuery(word.word || word.text);
-    if (!text) continue;
-    if (text.includes(query) || query.includes(text)) {
-      const start = Number(word.start);
-      if (Number.isFinite(start)) return start;
+  const want = normalise(needle).split(' ').filter(Boolean);
+  if (!want.length) return null;
+  const tokens = [];
+  for (const word of transcriptWords(words)) {
+    const start = Number(word.start);
+    for (const text of normalise(word.word ?? word.text).split(' ').filter(Boolean)) {
+      tokens.push({ text, start });
     }
   }
+  for (let i = 0; i + want.length <= tokens.length; i++) {
+    if (!want.every((text, k) => tokens[i + k].text === text)) continue;
+    if (Number.isFinite(tokens[i].start)) return tokens[i].start;
+  }
   return null;
+}
+
+/**
+ * Timeline second where the talking head says `phrase`: found in the principal's source-time
+ * words, then mapped through the cut. `--word` names the event, so this is the punch's `at`.
+ */
+export function wordTimelineAt(doc, words, phrase, { principalIndex = null } = {}) {
+  const list = transcriptWords(words);
+  if (!list.length) {
+    throw new CapcutError('punch --word has no transcript loaded; pass --words FILE or --at T.', {
+      code: 'PUNCH_NO_TRANSCRIPT', exitCode: 2,
+    });
+  }
+  const mapper = sourceToTimeline(doc, principalIndex);
+  // Every occurrence, in order: the first one the cut kept is the one the viewer hears.
+  const want = normalise(phrase).split(' ').filter(Boolean);
+  let rest = list;
+  let heard = false;
+  while (rest.length) {
+    const source = wordTime(rest, phrase);
+    if (source == null) break;
+    heard = true;
+    const at = mapper(source);
+    if (at != null) return at;
+    const index = rest.findIndex(word => Number(word.start) === source);
+    rest = rest.slice(index + Math.max(1, want.length));
+  }
+  throw new CapcutError(heard
+    ? `punch --word ${JSON.stringify(phrase)} was cut out of this timeline; pass --at T.`
+    : `punch --word ${JSON.stringify(phrase)} was not in the transcript.`, {
+    code: 'PUNCH_NO_TIME', exitCode: 2,
+  });
 }
 
 function eventVt(event, session, frames) {
@@ -342,10 +398,15 @@ export function loadClicks(mediaPath, projectDir = null) {
   catch { /* optional */ }
   const frames = readNdjson(path.join(dir, 'change.ndjson'))
     .filter(row => Number.isFinite(row.vt) && Number.isFinite(row.host));
+  // A restarted take is several files on one vt clock: keep this media's part only, on its
+  // own file clock. A one-part take passes vt through untouched.
+  const parts = takeParts(dir, session);
+  const part = partForMedia(parts, mediaPath);
+  if (!part) return [];
   const clicks = [];
   for (const event of readNdjson(path.join(dir, 'trace.ndjson'))) {
     if (event?.type !== 'click' || event.in_capture === false) continue;
-    const vt = eventVt(event, session, frames);
+    const vt = vtInPart(parts, part, eventVt(event, session, frames));
     if (!Number.isFinite(vt)) continue;
     clicks.push({ ...event, vt });
   }
@@ -401,13 +462,6 @@ function resolveEventSource(op, segment, clicks) {
   if (op.at != null && Number.isFinite(Number(op.at))) {
     return sourceOfTimeline(segment, Number(op.at));
   }
-  if (op.word) {
-    const found = wordTime(op.words, op.word);
-    if (found != null) return found;
-    throw new CapcutError(`punch --word ${JSON.stringify(op.word)} was not in the transcript.`, {
-      code: 'PUNCH_NO_TIME', exitCode: 2,
-    });
-  }
   const st = segment.source_timerange || { start: 0, duration: 0 };
   const inRange = (clicks || []).filter(click => {
     const vt = Number(click.vt);
@@ -439,6 +493,13 @@ export function opPunch(doc, op = {}, context = {}) {
   if (!(zoom > 0) || !(ramp > 0)) {
     throw new CapcutError('punch --zoom and --ramp must be positive.', { code: 'BAD_SCALE', exitCode: 2 });
   }
+
+  if (op.word != null && op.at != null) {
+    throw new CapcutError('punch takes --at T or --word TEXT, not both.', { code: 'PUNCH_TIMING_CONFLICT', exitCode: 2 });
+  }
+  // --word is a timing source: the phrase's timeline second becomes `at`, so the clip under
+  // it and the event inside it are found exactly as for --at.
+  if (op.word != null) op = { ...op, at: wordTimelineAt(doc, op.words, String(op.word)) };
 
   const clip = locateClip(doc, op);
   const segment = clip.segment;
@@ -474,6 +535,10 @@ export function opPunch(doc, op = {}, context = {}) {
   const hits = matchOcrBoxes(boxes, on);
   const click = clickNear(clicks, eventSource);
   const box = pickBox(hits, click, { width: sourceW, height: sourceH });
+  // A split-screen half shows only part of the source: frame inside that band, or the rect
+  // crosses the seam and keyframe --focus refuses it (FOCUS_MASKED).
+  const mask = segment.enable_video_mask !== false
+    && (doc.materials?.common_mask || []).find(m => (segment.extra_material_refs || []).includes(m.id));
   const focus = focusRectForZoom({
     box,
     sourceW,
@@ -481,6 +546,7 @@ export function opPunch(doc, op = {}, context = {}) {
     canvasW: Number(canvas.width) || 1080,
     canvasH: Number(canvas.height) || 1920,
     zoom,
+    band: mask ? maskVisibleRow(material, mask)?.band ?? null : null,
   });
 
   const at = timelineOfSource(segment, timing.arrive);

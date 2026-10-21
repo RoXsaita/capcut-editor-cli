@@ -295,6 +295,44 @@ class PreviewAndSamplingTests(unittest.TestCase):
             frame_qa.resolve_preview_range(str(self.project), self.tl, 21, 24), (21.0, 24.0)
         )
 
+    def _created(self, **fields):
+        (self.project / ".capcutctl" / "created.json").write_text(json.dumps(fields))
+
+    def _content(self, end, extra=()):
+        tl = json.loads(json.dumps(self.tl))
+        tl["tracks"] = [{"type": "video", "flag": 0, "segments": []},
+                        {"type": "video", "name": "content", "flag": 2, "segments": [
+                            segment("s0", 0, end), *extra]}]
+        tl["duration"] = 100_000_000
+        return tl
+
+    def test_stale_short_content_end_never_cuts_the_ending(self):
+        self._created(contentEnd=54_533_000, preserved={"start": 80_000_000, "end": 90_000_000})
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(frame_qa.CONTENT_RANGE_ENV, None)
+            self.assertEqual(frame_qa.content_edit_range(str(self.project), self._content(56.9)), (0.0, 56.9))
+
+    def test_stale_long_content_end_never_renders_dead_parked_time(self):
+        self._created(contentEnd=78_100_000, preserved={"start": 80_000_000, "end": 90_000_000})
+        tl = self._content(45, extra=[segment("park", 80, 10, desc="template parts bin")])
+        os.environ.pop(frame_qa.CONTENT_RANGE_ENV, None)
+        self.assertEqual(frame_qa.content_edit_range(str(self.project), tl), (0.0, 45.0))
+
+    def test_recorded_content_end_is_kept_when_it_agrees_with_the_scan(self):
+        self._created(contentEnd=44_980_000, preserved={"start": 80_000_000, "end": 90_000_000})
+        os.environ.pop(frame_qa.CONTENT_RANGE_ENV, None)
+        self.assertEqual(frame_qa.content_edit_range(str(self.project), self._content(45)), (0.0, 44.98))
+
+    def test_node_content_range_env_wins_and_is_clamped(self):
+        self._created(contentEnd=78_100_000, preserved={"start": 80_000_000, "end": 90_000_000})
+        tl = self._content(45)
+        with patch.dict(os.environ, {frame_qa.CONTENT_RANGE_ENV: "0,47250000"}):
+            self.assertEqual(frame_qa.content_edit_range(str(self.project), tl), (0.0, 47.25))
+        with patch.dict(os.environ, {frame_qa.CONTENT_RANGE_ENV: "1000000,95000000"}):
+            self.assertEqual(frame_qa.content_edit_range(str(self.project), tl), (1.0, 80.0))
+        with patch.dict(os.environ, {frame_qa.CONTENT_RANGE_ENV: "garbage"}):
+            self.assertEqual(frame_qa.content_edit_range(str(self.project), tl), (0.0, 45.0))
+
     def test_legacy_preview_range_uses_maximum_eligible_segment_end(self):
         legacy = json.loads(json.dumps(self.tl))
         legacy["tracks"][2]["segments"].append(segment("late-scene", 9, 3))
@@ -841,6 +879,85 @@ class RealFfmpegPreviewTests(unittest.TestCase):
                 self.assertLess(max(image.getpixel((16, 8))), 5)
                 self.assertGreater(image.getpixel((16, 28))[0], 200)
             self.assertTrue(sheet.is_file())
+
+    def _solid_timeline(self, root, colour, seconds):
+        media = root / "face.mp4"
+        subprocess.run([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", f"color=c={colour}:s=64x32:r=8:d={seconds}",
+            "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(media),
+        ], check=True)
+        return {
+            "duration": seconds * 1_000_000, "fps": 8,
+            "canvas_config": {"width": 32, "height": 64},
+            "tracks": [{"type": "video", "name": "content", "flag": 2, "segments": [
+                segment("face", 0, seconds, material="VIDEO")]}],
+            "materials": {"videos": [{"id": "VIDEO", "path": str(media)}]},
+        }
+
+    def test_targeted_qa_draws_guides_only_when_asked(self):
+        if not shutil.which("ffmpeg"):
+            self.skipTest("ffmpeg is required for targeted QA")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            timeline = self._solid_timeline(root, "blue", 2)
+            with contextlib.redirect_stdout(io.StringIO()):
+                plain = frame_qa.write_simple_targeted(str(root), timeline, [0.5], str(root / "plain"))
+                guided = frame_qa.write_simple_targeted(str(root), timeline, [0.5], str(root / "guided"),
+                                                        guides=[32])
+            with Image.open(plain[0][0]) as image:
+                r, _g, b = image.convert("RGB").getpixel((16, 32))
+                self.assertGreater(b, 180)
+                self.assertLess(r, 80)
+            with Image.open(guided[0][0]) as image:
+                r, _g, b = image.convert("RGB").getpixel((16, 32))
+                self.assertGreater(r, 200)
+                self.assertLess(b, 80)
+
+    def test_targeted_headers_name_the_files_they_print(self):
+        if not shutil.which("ffmpeg"):
+            self.skipTest("ffmpeg is required for targeted QA")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            timeline = self._solid_timeline(root, "blue", 31)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                tiles = frame_qa.write_simple_targeted(str(root), timeline, [1.0, 12.5, 30.0], str(root / "qa"))
+            headers = [line.split()[1][len("t="):] for line in output.getvalue().splitlines()
+                       if line.startswith("=== t=")]
+            stems = [Path(path).stem[len("t"):] for path, _label in tiles]
+            self.assertEqual(headers, ["1", "12.5", "30"])
+            self.assertEqual(stems, headers)
+
+    def test_contact_sheet_wraps_into_rows_or_keeps_one_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tiles = []
+            for i in range(10):
+                path = Path(tmp) / f"{i}.png"
+                Image.new("RGB", (40, 80), (i * 20, 0, 0)).save(path)
+                tiles.append((str(path), f"t={i}"))
+            grid = frame_qa.contact_sheet(tiles, str(Path(tmp) / "grid.png"), tile_w=40, cols=4)
+            row = frame_qa.contact_sheet(tiles, str(Path(tmp) / "row.png"), tile_w=40)
+            with Image.open(grid) as image:
+                self.assertEqual(image.size, (4 * (40 + 6) + 6, 3 * (22 + 6 + 80) + 6))
+            with Image.open(row) as image:
+                self.assertEqual(image.size, (10 * (40 + 6) + 6, 22 + 6 + 80 + 6))
+
+    def test_exif_rotated_still_extracts_upright(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "phone.jpg"
+            image = Image.new("RGB", (400, 300), (255, 255, 255))
+            image.paste((255, 0, 0), (0, 0, 40, 40))       # mark the stored top-left
+            exif = Image.Exif()
+            exif[0x0112] = 6                                # rotate 90 clockwise to display
+            image.save(path, exif=exif, quality=95)
+            sample = frame_qa.extract_frame(path, 0.0)
+            self.assertEqual(sample.image.size, (300, 400))
+            r, g, b, _a = sample.image.getpixel((300 - 10, 10))
+            self.assertGreater(r, 200)
+            self.assertLess(g, 60)
+            r, g, b, _a = sample.image.getpixel((10, 10))
+            self.assertGreater(g, 200)
 
 
 if __name__ == "__main__":

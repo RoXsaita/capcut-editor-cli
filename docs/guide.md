@@ -1,0 +1,397 @@
+# capcutctl guide
+
+How `capcutctl` works, workflow by workflow. This is the reference that used to live in the
+README; the README now leads with results and links here. Every command, with an example and
+every option, is in [commands.md](commands.md), generated from [cli-contract.json](cli-contract.json).
+
+## From a signed-off cut to a ready-to-post project
+
+After the talking head is cut and signed off, the rest of the edit is one plan and one command.
+The agent writes only the judgement — which words get a graphic, which brands, the CTA, the music
+brief — and `build` does the mechanics in a fixed order, with the style profile filling every gap:
+
+```json
+{
+  "version": 1,
+  "shots": "shots.json",
+  "graphics": [
+    { "template": "hook-title",    "say": "بنيت موقع",  "params": { "text": "موقع كامل بدقيقة" } },
+    { "template": "number-pop",    "say": "تسعين",      "params": { "value": 90, "suffix": "%", "label": "أسرع" } },
+    { "template": "cta-card",      "say": "اكتب",       "params": { "keyword": "AI" } }
+  ],
+  "endcard": { "text": "Follow" },
+  "sound": { "music": { "prompt": "tense minimal synth pulse that opens up at the reveal" } }
+}
+```
+
+```sh
+capcutctl build --project "My Edit" --edit edit.json --dry-run
+capcutctl build --project "My Edit" --edit edit.json      # exit 1 if the gate fails
+capcutctl gate  --project "My Edit"                       # the ready-to-post check on its own
+```
+
+Graphics are anchored to **source words**, so a recut rebuilds exactly; an unchanged plan on an
+unchanged cut is a no-op (a build-placed clip you deleted in CapCut stays deleted: build names it,
+and `--force` re-places it). A deliberate pause at a seam is declared as `"pauses": [12.3]`
+(timeline seconds): the build's seam-silence gate allows it, and declaring one does not rebuild.
+Build records them in `.capcutctl/build.json`, and the final gate in `export` allows them too
+(plus any `--pause`). The standalone `capcutctl gate` does not read edit.json; give it the same
+pause as `--pause 12.3`.
+Levels you set by hand survive a rebuild: a replaced graphic, pop,
+endcard or seam cue keeps the volume and fade its predecessor had (seam and signature cues when
+they land within 0.25 s of where they were). The loudness step holds the mix at or under the
+profile's true-peak ceiling (`sound.peak`, −1 dBTP): when overlapping SFX or music push it over,
+it lowers the layers around the voice first, then the whole mix if needed, and reports each change
+under `stages.peakLimit`. It never raises a level, so the music volume you chose is a ceiling. It
+measures before the duck (the measurement cannot render volume keyframes); the duck only lowers
+the bed. The gate checks the hook, proof on screen, dead stretches, crowding,
+repeats, platform-UI safe zones, graphics without a sound and seam variety, with thresholds from
+the style profile: the shipped, brand-neutral [`presets/profile.json`](../presets/profile.json) with
+your own `~/.config/capcutctl/profile.json` merged over it (see [Your profile](#your-profile)).
+
+Gate levels: **FAIL** blocks (exit 1), **WARN** must be named in the hand-off, and **NOTE** neither
+blocks nor warns. NOTEs come from `gate --xray DIR` when the X-ray scanned a low-fps proxy: a check
+that needs finer timing than the scan's frame step (a one-frame flash or glitch, a repeated frame, a
+frame-exact seam) cannot be trusted at about 6 fps, and a proxy's size and frame rate are not the
+delivery format, so those findings read "proxy-only, verify on the full-rate export" instead of
+failing. A scan at 24 fps or more keeps all of them at FAIL. Audio checks (peak, clipping, loudness)
+still judge the proxy's own audio.
+
+## Motion graphics
+
+Kinetic type, counters, callouts and the CTA card are deterministic HTML/JS templates rendered in
+headless Chromium to a tight ProRes 4444 alpha clip (or a PNG hold frame animated with native eased
+keys) and placed above the picture on the exact pixels they were designed for, with their sound.
+Footage, cuts, layouts and camera moves stay native and editable.
+
+```sh
+capcutctl mograph list
+capcutctl mograph preview --template number-pop --params '{"value":90,"suffix":"%"}' --out sheet.png
+capcutctl mograph add --project "My Edit" --template keyword-super --params '{"text":"أسرع"}' --say "أسرع"
+```
+
+Between shots, **scenes** take the whole frame for a beat or three: an opener, a hook that slams,
+glitches and dives into the next shot, a particle reveal, a style-frame stinger, and a name card.
+Each has real motion blur, film grain and synthesised sound locked to a 120 BPM grid. They chain
+end to end and take their colours from the same profile ([docs/mograph.md#scenes](mograph.md#scenes)).
+
+```sh
+capcutctl mograph scenes
+capcutctl mograph scene-render --scene particle-word --params '{"text":"Opus 5.5"}' --out reveal.mp4 --format mp4
+```
+
+See [docs/mograph.md](mograph.md), including the one-time CapCut import checklist.
+
+A reusable three-second follow ending: the edit's own last frame collapses into an avatar,
+then a dial, badge and follow/check button animate with deterministic sound. With
+`ending.auto` in your profile, `build` appends it to every video; on its own:
+
+```bash
+capcutctl ending --project "My Edit" --dry-run
+capcutctl ending --frame last-frame.png --out ending-preview.mp4
+```
+
+Copy and face position come from your private profile's `ending` section (or `edit.json`
+`ending` per video); colors and fonts come from its tokens. Reruns replace the command's own
+ending. Your image and identity are never bundled in the repository. See
+[the ending setup](ending.md).
+The older native `motion` recipes remain available but experimental; see
+[docs/native-motion.md](native-motion.md).
+
+## Editable word captions (experimental)
+
+```sh
+capcutctl captions --project "My Edit" --dry-run
+capcutctl captions --project "My Edit" --script script.txt
+capcutctl captions --project "My Edit" --cues captions.json
+```
+
+Uses the Staging word-cue engine and local Whisper, then writes ordinary editable
+text clips. No paid CapCut recognition and no burned-in caption media. Caption
+import needs no Python; generation needs the optional caption/ASR dependencies.
+**Native visual parity and the complete Staging review loop are not yet certified.**
+See [setup, safety, tested behaviour, and remaining gates](native-captions.md).
+
+## A first safe edit
+
+List the scenes and inspect the project before changing it:
+
+```bash
+capcutctl scenes --project "My Edit"
+capcutctl doctor --project "My Edit"
+capcutctl snapshot --project "My Edit" --label before-layout
+```
+
+Preview a transactional edit without writing anything:
+
+```bash
+capcutctl layout split-screen \
+  --project "My Edit" --at 12.5 --track 2 --dry-run
+```
+
+Close CapCut, then run the same command without `--dry-run`:
+
+```bash
+capcutctl close
+capcutctl layout split-screen \
+  --project "My Edit" --at 12.5 --track 2
+```
+
+Every committed transaction snapshots the project, validates the result, synchronizes
+the mirrors, and rolls back if the post-write doctor fails.
+
+## Long edits with CapCut open: stage and swap
+
+A multi-step edit is dozens of writes. Instead of keeping CapCut closed for all of them, stage
+the draft once, edit the staged copy with CapCut open, and close CapCut only for the swap:
+
+```bash
+capcutctl stage start  --project "My Edit"   # copy outside CapCut's drafts folder (+ repair, below)
+capcutctl build        --project "My Edit" --edit edit.json   # every command now edits the stage
+capcutctl gate         --project "My Edit"
+capcutctl stage status --project "My Edit"   # what the swap will write; anything CapCut saved meanwhile
+capcutctl close
+capcutctl stage commit --project "My Edit"   # the one step that needs CapCut closed
+```
+
+While a stage is active, every command that takes `--project` resolves to the staged copy
+(`$CAPCUTCTL_STAGE_DIR`, default `~/.capcutctl/stage`), so writes need no `--force-running`.
+`stage commit` keeps the usual guard (CapCut must be closed), then swaps the changed files in
+atomically, with a `before-stage-commit` snapshot and rollback. If CapCut saved the live draft
+after `stage start`, the commit refuses with `STAGE_CONFLICT` and names the files: nothing is
+written and the CapCut edits are kept. `stage discard` drops the copy. `export` refuses while a
+stage is active, because CapCut would export the draft without the staged edits.
+
+## After a CapCut save: `doctor --fix`
+
+Saving in CapCut duplicates material ids, strips capcutctl's own keys (`capcutctl_origin`, the
+mograph identity of seam-wipe / slab-super / follow-ending clips, provenance) and can leave a
+B-roll clip reading past the end of its source. Every committed transaction records those keys
+in `.capcutctl/meta-ledger.json`; `doctor --fix` (and `stage start`, automatically) restores them
+from it (falling back to the history snapshots and `media-map.json` for older projects), merges
+the duplicate ids and shortens the overrunning B-roll at its own speed:
+
+```bash
+capcutctl doctor --project "My Edit" --fix --dry-run
+capcutctl doctor --project "My Edit" --fix
+```
+
+It only fills keys that are missing on materials and segments that still exist: it never moves,
+re-levels or re-creates anything you edited or deleted in CapCut, never stamps provenance on a
+material you relinked to another file, and never shortens the talking-head track (that would open
+a gap; it is reported instead).
+
+## Hook variants for trial reels
+
+```bash
+capcutctl variant --project "My Edit" --hooks hooks.json --hook b --dry-run
+capcutctl variant --project "My Edit" --hooks hooks.json --hook b      # → "My Edit hook-b", gated
+capcutctl variant --project "My Edit" --src 41.2-44.9 --opening 3.8
+```
+
+`hooks.json` is `[{"id": "b", "in": 41.2, "out": 44.9}, …]` (or `{"hooks": […]}`; `src_in`/`src_out`
+also work): source seconds in the talking-head take. The signed-off project is duplicated under a
+unique name and its opening — the face up to the first cut, or `--opening S` — becomes that window.
+The body shifts by the difference, so every shot, graphic, caption and cue stays on its word; the
+opening's graphics and pops are re-timed into the new opening; a frame or bed that runs from the
+top is stretched to the new seam; a scene across the seam (seam-wipe) moves with it. The old
+hook's captions are replaced by the hook's own words, in the same style, from `--words` (default:
+the transcript `cut` cached). No volume is changed. The gate runs at the end; exit 1 on FAIL.
+
+## Common workflows
+
+| Goal | Command |
+|---|---|
+| Check whether this Mac is ready | `capcutctl preflight` |
+| List local CapCut projects | `capcutctl projects` |
+| Inspect structure and timeline | `capcutctl inspect --project NAME` |
+| Validate a project | `capcutctl doctor --project NAME` |
+| Repair what a CapCut save stripped or duplicated | `capcutctl doctor --project NAME --fix` |
+| Edit with CapCut open; close it only for the swap | `capcutctl stage start --project NAME` … `stage commit` |
+| Same edit, another hook, for a trial reel | `capcutctl variant --project NAME --hooks hooks.json --hook b` |
+| Create an empty project | `capcutctl new --project NAME --blank --dry-run` |
+| Analyze talking-head footage | `capcutctl cut VIDEO --lang en` |
+| Apply a reviewed A-roll cut | `capcutctl cut VIDEO --review decisions.json --project NAME --dry-run` |
+| Add full-frame source media | `capcutctl add --project NAME --media FILE --at 5 --dur 3 --track broll --dry-run` |
+| Apply a native layout | `capcutctl layout split-screen --project NAME --at 5 --track 2 --dry-run` |
+| Audit layout choices | `capcutctl layout audit --project NAME` |
+| Check exact frames | `capcutctl qa --project NAME --at-cuts --sheet --out qa/` |
+| Find on-screen text | `capcutctl find "phrase" --media FILE --shows [--boxes] [--region canvas]` |
+| Ramp B-roll wait, land the result at 1× | `capcutctl ramp --project NAME --segment ID --speed 20 --dry-run` |
+| Punch-in on a named on-screen element | `capcutctl punch --project NAME --segment ID --on Publish --dry-run` |
+| Match spoken sentences to screen moments (shot list; `--apply` writes) | `capcutctl match --project NAME --screen FILE` then `match --apply` |
+| Blind-verify placed B-roll (before/action/after strip) | `capcutctl verify-shots --project NAME [--shots shots.json]` |
+| Punch-in on stressed words (full-face, 1.08×, energy10) | `capcutctl zoom --project NAME --stress --plan` |
+| Match speech/SFX loudness via clip volume (−14 LUFS), mix held at or under −1 dBTP | `capcutctl loudness --project NAME --dry-run` |
+| Measure edited audio and the combined mix | `capcutctl loudness --project NAME --measure` |
+| Review selected music emphasis points | `capcutctl music --project NAME --file music.mp3 --hits 2.4,8.1 --plan --json` |
+| Preview an editable shared color layer | `capcutctl grade --project NAME --layer Finish --set 'contrast=0.1,saturation=0.05' --plan` |
+| Eased scale push-in (`FreeCurveInOut`; position stays Line) | `capcutctl keyframe --project NAME --segments ID --at S --ease --dry-run` |
+| Add a native intro/outro animation | `capcutctl animate --project NAME --segments ID --intro fade-in --outro fade-out --dry-run` |
+| Export through CapCut on macOS (explicit request) | `capcutctl export --project NAME --out final.mp4 --grid grid.png` |
+| Inspect an existing export without opening CapCut | `capcutctl export-grid --media final.mp4 --out grid.png --times 0,8,15` |
+| Check the rendered file before posting (black, stray frames, dead air, LUFS, peak, length) | `capcutctl check-export --media final.mp4 --project NAME` |
+| Measure a reference reel's pacing in the gate's terms | `capcutctl reference --media reel.mp4 --project NAME --profile-out ref-profile.json` |
+| Prove a scoped revision stayed in scope | `capcutctl diff --project NAME --snapshot NAME --allow SEGMENT-ID,track:broll` |
+| Record what was rejected and why; read it back each round | `capcutctl notes --project NAME --reject "orange captions" --why "fights the frame"` then `notes --brief` |
+| Render a lightweight proxy | `capcutctl preview --project NAME --out preview.mp4` |
+| Measure or apply colour matching | `capcutctl grade --project NAME --measure` |
+| Sharpen + clarity on the face | `capcutctl grade --project NAME --face-detail --apply --dry-run` |
+| View or restore snapshots | `capcutctl history --project NAME` |
+| Build the finished edit from a plan | `capcutctl build --project NAME --edit edit.json --dry-run` |
+| Is it ready to post? | `capcutctl gate --project NAME` |
+| Render or place a motion graphic | `capcutctl mograph add --project NAME --template keyword-super --params '{"text":"…"}' --say "…"` |
+| Append the reusable follow animation | `capcutctl ending --project NAME --dry-run` |
+| Show the effective style profile | `capcutctl profile` |
+| Start your own profile, outside the repo | `capcutctl profile init` |
+| Show the full command surface | `capcutctl help` |
+
+The checked-in [CLI contract](cli-contract.json) is generated from
+`capcutctl contract`; `test/cli-contract.test.mjs` fails when it is stale. The companion
+[`capcut-skills`](https://github.com/RoXsaita/capcut-skills) repository validates every
+`capcutctl` invocation in its agent instructions against that contract in CI
+(`scripts/validate.py`, against a vendored copy of the contract it refreshes deliberately).
+
+## Editing model
+
+CapCut keeps a root draft and an active timeline as separate authoritative documents.
+`capcutctl` resolves both and applies the same semantic operation independently rather
+than copying one over the other.
+
+For each committed transaction it:
+
+1. refuses to write while CapCut is running unless explicitly overridden (a staged copy,
+   which CapCut cannot see, is the exception; its `stage commit` keeps the guard);
+2. loads the root draft and active timeline;
+3. applies the requested operation to both documents;
+4. validates media, IDs, references, timing, transforms, masks, and overlaps;
+5. creates a snapshot under the project's `.capcutctl/history/` directory;
+6. stages and parses every changed file before atomically replacing it;
+7. synchronizes `draft_info.json`, `draft_info.json.bak`, and `template-2.tmp`;
+8. restores the snapshot if the post-write validation fails.
+
+Transactional edit commands share the same `--dry-run` guarantee: resolve and validate
+the edit, report what would change, and write nothing. The exact list is available at:
+
+```bash
+capcutctl contract | jq -r '.dryRun.commands[]'
+```
+
+## Editable-media contract
+
+The tool rejects two common ways of accidentally making a project less editable:
+
+- media that was cropped into its final layout before import;
+- media imported from a temporary or agent scratch directory.
+
+Use full-frame source recordings and express crops, placement, and zoom as native CapCut
+properties. If preprocessing is deliberate, record the durable source with
+`--derived-from`; use `--generated` for assets that genuinely have no editable original.
+
+```bash
+capcutctl add --project NAME --media graphic.mp4 --at 5 --dur 2 --track broll \
+  --generated --dry-run
+
+capcutctl add --project NAME --media cropped.mp4 --at 5 --dur 2 --track broll \
+  --derived-from ~/Movies/source.mp4 --dry-run
+```
+
+## A-roll and visual QA
+
+`cut` separates editorial selection from timing mechanics. The analysis pass transcribes
+the source, indexes speech and acoustic boundaries, and writes a reviewable handoff. A
+reviewed pass can then keep, reorder, trim, or safely recover selected beats.
+
+```bash
+capcutctl cut "Face Takes.mp4" --lang en
+capcutctl cut "Face Takes.mp4" \
+  --keep 0,2-6 --order 0,2,3,4,5,6 \
+  --project "A-roll Review" --dry-run
+```
+
+`doctor`, `qa`, and `preview` answer different questions:
+
+- `doctor` checks project structure;
+- `qa` renders bounded native-resolution frame evidence;
+- `preview` produces a watchable, lower-resolution proxy.
+
+They are intentionally separate so a quick preview is not mistaken for pixel-level QA.
+
+## Presets and machine-local resources
+
+The built-in layout artwork ships in `assets/`. CapCut effect and sound IDs do not: CapCut
+creates them when a user downloads those resources on a particular Mac. Missing SFX are
+reported and skipped instead of creating an invalid project.
+
+Third-party logos are not included. `capcutctl brands` reports which configured brands
+have a usable local image.
+
+### Your profile
+
+Your brand, styles and preferences live **outside the repository**, in your user dir
+(`~/.config/capcutctl/`, or `$XDG_CONFIG_HOME/capcutctl`, or `$CAPCUTCTL_PRESET_DIR`):
+
+```bash
+capcutctl profile init     # writes ~/.config/capcutctl/profile.json from presets/profile.template.json
+capcutctl profile where    # the layers, in merge order: bundled → yours → --profile FILE
+capcutctl profile          # the merged result every command uses
+```
+
+Your `profile.json` deep-merges over the shipped one, so it holds only what you change: your
+colours by role (`brand`, `accent`), your font, `brand` (who you are and the rules every video
+keeps), and `styles` (how the brand flexes per video type; `edit.json` picks one with
+`"style"`). `sfx.json`, `brands.json` and `layouts.json` in the same folder replace the shipped
+ones. Version that folder in your own dotfiles if you like; pulling a new CLI never touches it.
+
+Overlay artwork has its own override:
+
+```bash
+export CAPCUTCTL_ASSET_DIR=~/my-capcut-assets
+```
+
+On first use, an agent should ask whether to use the bundled example style, harvest the
+user's existing edits, or start from a blank project. It should not silently apply another
+editor's branding or style.
+
+## Optional transcription
+
+Transcription is deliberately not installed by default because the packages and model
+weights are large.
+
+Apple silicon fast path:
+
+```bash
+uv tool install mlx-whisper
+```
+
+Portable fallback:
+
+```bash
+.venv/bin/python -m pip install -e '.[whisper]'
+```
+
+## Learning from other agent editors
+
+A September 2026 survey of open-source agent video editors (browser-use/video-use, VEED
+open-edit, krusemedia video-editor-agent, Diffusion Studio, agentic-video-editor and others)
+is in [docs/specs/agent-editor-survey-2026-09.md](specs/agent-editor-survey-2026-09.md).
+Four of their best ideas are now commands here: QA on the rendered file (`check-export`),
+a reference reel measured into the profile's density numbers (`reference`), a scoped-edit
+proof (`diff --allow`), and a creative log that outlives a session (`notes`).
+
+## Native export bridge (macOS)
+
+`export` uses CapCut's real renderer through native accessibility controls and keyboard
+actions; it is not headless. CapCut must be open on Home or in the requested project. From
+Home it waits for the project cards, then scrolls the page until the card with the exact
+title is fully on screen; `EXPORT_PROJECT_NOT_ON_HOME` means no card has that title, and
+`EXPORT_HOME_SCROLL_STUCK` means Home has more cards but did not scroll. It clicks only
+when CapCut owns the point under the card; anything over it stops with
+`EXPORT_POINT_OCCLUDED`. Swift, macOS Accessibility/Automation permission, and brief app
+focus are required. The command uses the current native export settings, verifies the
+project, stages a unique MP4 in CapCut's configured export folder, checks duration and
+decoding, then publishes the requested file. Existing output needs `--overwrite`. Unknown
+controls or lost focus stop with a named error; no blind click loop is attempted.
+`export-grid` uses ffmpeg and the declared Python runtime to create labelled frames from
+an existing video. Grids verify picture; review relevant normal-speed sections for sound
+and motion. A new export requires an explicit user request.

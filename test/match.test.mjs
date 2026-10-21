@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import {
   loadBoxesAtTimes, tokenize, sentencesFromWords, timelineSentence, textScore, scorePair,
   alignMonotone, matchShots, shotsToSpec, writersAccept, MATCH_WRITER_OPS,
-  SKIP_SCORE, DEFAULT_MIN_MARGIN,
+  SKIP_SCORE, DEFAULT_MIN_MARGIN, sentenceKind,
 } from '../src/match.mjs';
 import { UPSCALE_REFUSE } from '../src/crispness.mjs';
 
@@ -297,4 +297,74 @@ test('matcher reads OCR payloads larger than 1 MiB', () => {
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('OCR fragments of one or two characters never match a token', () => {
+  assert.equal(textScore('the login button', [{ text: 'o', region: 'canvas' }, { text: 'In', region: 'canvas' }]).score, 0);
+  assert.ok(textScore('publish', [box('Publishing', 'canvas')]).score > 0);
+  assert.ok(textScore('github', [box('GitHub', 'canvas')]).score > 0);
+  assert.ok(textScore('github', [box('Git Hub', 'canvas')]).score > 0);
+});
+
+test('Levantine fillers drop out and Arabic action verbs make an action', () => {
+  assert.deepEqual(tokenize('يعني اضغط على زر النشر'), ['اضغط', 'زر', 'النشر']);
+  assert.equal(sentenceKind('يعني اضغط على زر النشر'), 'action');
+  assert.equal(sentenceKind('هلق كبس هون'), 'action');
+});
+
+function twoShortSentences(secondStart, firstWords = [
+  { word: 'Open', start: 10.0, end: 10.2 },
+  { word: 'Figma.', start: 10.2, end: 10.4 },
+]) {
+  return matchShots({
+    words: [
+      ...firstWords,
+      { word: 'Export', start: secondStart, end: secondStart + 0.2 },
+      { word: 'PNG.', start: secondStart + 0.2, end: secondStart + 0.4 },
+    ],
+    moments: [
+      moment(30, [box('Figma', 'canvas')]),
+      moment(60, [box('Export PNG', 'canvas')]),
+    ],
+    clicks: [{ type: 'click', vt: 30 }, { type: 'click', vt: 60 }],
+    mapper: t => t,
+    screen: '/screen.mp4',
+  });
+}
+
+test('a padded short sentence is clamped to the next placed shot', () => {
+  const result = twoShortSentences(10.6);
+  const [first, second] = result.shots;
+  assert.equal(first.decision, 'place', JSON.stringify(first));
+  assert.equal(second.decision, 'place', JSON.stringify(second));
+  assert.equal(first.onScreen, 0.6);
+  assert.ok(Math.abs(first.source.out - (first.source.in + 0.6)) < 1e-9, first.source);
+  assert.ok(first.reasons.includes('clamped-to-next'));
+  const screens = shotsToSpec(result).operations.filter(op => op.op === 'layout.screen')
+    .sort((a, b) => a.at - b.at);
+  assert.equal(screens.length, 2);
+  assert.ok(screens[0].at + screens[0].duration <= screens[1].at + 1e-9, screens);
+  assert.ok(Math.abs(screens[0].srcDur - screens[0].duration) < 1e-9, screens[0]);
+  assert.ok(!shotsToSpec(result).operations.some(op => op.op === 'pace'));
+});
+
+test('a shot with under 0.4s before the next one becomes a flag', () => {
+  const result = twoShortSentences(10.3, [{ word: 'Figma.', start: 10.0, end: 10.2 }]);
+  const first = result.shots[0];
+  assert.equal(first.decision, 'flag');
+  assert.ok(first.reasons.includes('overlaps-next'));
+  assert.equal(first.ops.length, 0);
+  assert.equal(result.flagged, 1);
+  assert.equal(result.placed, 1);
+});
+
+test('shotsToSpec refuses overlapping screen shots on one track', () => {
+  const op = (id, at) => ({ op: 'layout.screen', media: '/s.mp4', at, duration: 1, src: 0, track: 'screen', desc: `match:${id}` });
+  assert.throws(() => shotsToSpec({
+    shots: [
+      { decision: 'place', ops: [op('s0', 1)] },
+      { decision: 'place', ops: [op('s1', 1.5)] },
+    ],
+  }), error => error.code === 'CLIP_OVERLAP' && error.exitCode === 2
+    && /match:s0/.test(error.message) && /match:s1/.test(error.message));
 });

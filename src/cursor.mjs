@@ -4,6 +4,7 @@ import { brollWindows, findRl2Sessions, loadSession, windowsForSession, eventVt,
 import { opClipAdd, writeCameraPath } from './add.mjs';
 import { applyFreeCurve, keyframeValue, simplifyMotion } from './easing.mjs';
 import { planPolishedCursor, opPolishedCursor } from './polished-cursor.mjs';
+import { partForMedia, vtInPart } from './rl2-take.mjs';
 
 const US = s => Math.round(s * 1e6);
 const fail = m => { throw new CapcutError(m, { code: 'CURSOR_UNSUPPORTED', exitCode: 2 }); };
@@ -44,11 +45,17 @@ export function planCursor(doc, op = {}, context = {}) {
     if (!(material?.width>0 && material?.height>0)) fail('Cursor needs known source dimensions.');
     const session = loaded.find(s=>windowsForSession([w],s).length);
     if (!session) { result.skippedNoCursor.push(w.id); continue; }
+    // A restarted take is several files on one vt clock: read this window's part on its own
+    // file clock. Sessions without parts (one-part takes, injected fixtures) keep raw vt.
+    const parts = session.parts?.length > 1 ? session.parts : null;
+    const part = parts ? partForMedia(parts, w.path) : null;
+    if (parts && !part) { result.skippedNoCursor.push(w.id); continue; }
     const points = [];
     for (const ev of session.events) {
       const samples = ev.type==='pointer' ? ev.samples || [] : ev.type==='click' ? [ev] : [];
       for (const s of samples) {
-        const t=eventVt(s,session.session,session.frames), p=s.at?.src_px;
+        const raw=eventVt(s,session.session,session.frames), p=s.at?.src_px;
+        const t=parts && raw!=null ? vtInPart(parts,part,raw) : raw;
         if (s.in_capture===false || t==null || !Number.isFinite(p?.x) || !Number.isFinite(p?.y)) continue;
         if (p.x<0 || p.y<0 || p.x>material.width || p.y>material.height) continue;
         points.push({t,x:p.x,y:p.y,keep:ev.type==='click'});

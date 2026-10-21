@@ -137,8 +137,10 @@ test('a review round end to end with a fake driver: log, evidence, decisions, ga
   assert.equal(foldReview(report(), record.file).checks.find(c => c.id === 'review').ok, false, 'an accepted blocker blocks');
   assert.throws(() => decideIssue(record.file, 'G1', 'accepted', ''), /reason/);
 
-  await reviewVideo({ media, speech, projectDir: project, driver });
-  await assert.rejects(reviewVideo({ media, speech, projectDir: project, driver }), /hand off/);
+  const second = await reviewVideo({ media, speech, projectDir: project, driver });
+  await assert.rejects(reviewVideo({ media, speech, projectDir: project, driver }),
+    error => /hand off/.test(error.message) && error.code === 'REVIEW_ROUNDS_EXHAUSTED' && error.lastFile === second.file,
+    'the skip names the last counted review, for export to quote');
 });
 
 test('a review that cannot quote the first sentence is discarded and blocks; bad JSON gets one follow-up', { skip: !hasFfmpeg }, async () => {

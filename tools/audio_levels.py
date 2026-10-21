@@ -32,14 +32,27 @@ def analyze(payload):
         raise ValueError("native loudness processing requires native playback measurement")
     materials = _material_index(doc)
     audio_effect_ids = {m["id"] for m in doc.get("materials", {}).get("audio_effects", [])}
-    sources, probes = [], {}
+    sources, probes, keyed = [], {}, set()
+    # Parked parts-bin clips past the edit are not in the video. Without the field
+    # (an older caller, or a project with no parked range) every clip is measured.
+    content_end = payload.get("contentEndUs")
+    content_end = float(content_end) if isinstance(content_end, (int, float)) and content_end > 0 else None
     for track in doc.get("tracks", []):
         if track.get("type") not in ("video", "audio"):
             continue
         for segment in track.get("segments", []):
-            volume = float(segment.get("volume", 1))
+            if content_end is not None and \
+                    float(segment.get("target_timerange", {}).get("start", 0)) >= content_end - 1000:
+                continue
+            raw_volume = segment.get("volume", 1)
+            # A NaN volume from a bad flag reaches the draft as null; name the clip instead of
+            # dying in float(None) with a traceback.
+            try:
+                volume = float(raw_volume)
+            except (TypeError, ValueError):
+                raise ValueError(f"invalid clip volume {raw_volume!r} on segment {segment.get('id')}") from None
             if not math.isfinite(volume) or volume < 0:
-                raise ValueError("invalid clip volume")
+                raise ValueError(f"invalid clip volume {volume} on segment {segment.get('id')}")
             if volume == 0:
                 continue
             material = materials.get(segment.get("material_id"), {})
@@ -72,13 +85,18 @@ def analyze(payload):
             if segment.get("reverse") or any(ref in audio_effect_ids for ref in segment.get("extra_material_refs", [])) \
                     or any(r.get("curve_speed") or r.get("audio_channel_mapping", 0) != 0
                            or (r.get("type") == "vocal_separation" and r.get("choice", 0) != 0) for r in refs) \
-                    or any("volume" in k.get("property_type", "").lower()
-                   for k in segment.get("common_keyframes", [])) \
                     or any(r.get("type") in ("audio_effect", "audio_effects", "voice_changer") for r in refs):
                 raise ValueError("audio automation/effects require native playback measurement")
+            # Volume keys (build's duck) are rendered as gain automation by the shared
+            # renderer; a curve other than Line refuses there.
+            if any(k.get("property_type") == "KFTypeVolume" and k.get("keyframe_list")
+                   for k in segment.get("common_keyframes") or []):
+                keyed.add(segment.get("id"))
             sources.append(segment)
     end = max((s["target_timerange"]["start"] + s["target_timerange"]["duration"]
                for s in sources), default=0) / 1e6
+    if content_end is not None:
+        end = min(end, content_end / 1e6)
     if not sources:
         return {"segments": {}, "mix": {"lufs": None, "truePeak": None}, "silent": True}
     with tempfile.TemporaryDirectory(prefix="capcutctl-levels-") as tmp:
@@ -97,6 +115,9 @@ def analyze(payload):
                     "lufs": measured["lufs"] - gain if measured["lufs"] > -69.9 else -70,
                     "truePeak": measured["truePeak"] - gain if measured["truePeak"] is not None else None,
                 }
+                if segment["id"] in keyed:
+                    # Measured with its keys, so the static gain does not undo it.
+                    rows[segment["id"]]["keyed"] = True
         return {"segments": rows, "mix": measure(wav),
                 "scope": "Edited ranges, constant speed, clip gain, fades and stereo sum; native DSP is not emulated."}
 

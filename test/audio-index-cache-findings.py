@@ -2,6 +2,7 @@
 """Regression coverage for source tokens and derived-audio cache invalidation."""
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -11,7 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-from audio_index import AudioIndex, source_token
+from audio_index import AudioIndex, same_source, source_token
 
 
 def write_pcm(path, amplitude, frames=16000):
@@ -104,8 +105,62 @@ class AudioIndexCacheFindingsTest(unittest.TestCase):
             self.assertNotEqual(Path(calls[0][-1]), derived)
             self.assertNotEqual(derived.read_bytes(), stale_bytes)
             self.assertGreater(index.at(0), -10.0)
-            stamped = json.loads((cache / "take.energy10.json").read_text())
+            keyed = list(cache.glob("take.energy10.*.json"))
+            self.assertEqual(len(keyed), 1, "the rebuilt index is written under its content key")
+            stamped = json.loads(keyed[0].read_text())
             self.assertEqual(stamped["token"], AudioIndex._token(media))
+            legacy = json.loads((cache / "take.energy10.json").read_text())
+            self.assertEqual(legacy["token"], old_token, "the legacy unkeyed file is never overwritten")
+
+    def test_same_named_takes_keep_their_own_energy_files_and_copies_hit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first, second = root / "one" / "screen.mp4", root / "two" / "screen.mp4"
+            first.parent.mkdir()
+            second.parent.mkdir()
+            first.write_bytes(b"A" * 8192)
+            second.write_bytes(b"B" * 8192)
+            cache = root / "cache"
+            calls = []
+
+            def fake_ffmpeg(command, check):
+                calls.append(command)
+                write_pcm(command[-1], 20000 if "one" in command[5] else 1000)
+
+            with patch("audio_index.subprocess.run", side_effect=fake_ffmpeg):
+                loud = AudioIndex.build_or_load(first, cache_dir=cache)
+                quiet = AudioIndex.build_or_load(second, cache_dir=cache)
+                self.assertEqual(len(list(cache.glob("screen.energy10.*.json"))), 2)
+                self.assertEqual(AudioIndex.build_or_load(first, cache_dir=cache).db, loud.db)
+                self.assertEqual(len(calls), 2, "the second call on the first take is a cache hit")
+
+                copy = root / "proj" / "Downloads__screen.mp4"
+                copy.parent.mkdir()
+                shutil.copy2(first, copy)
+                stat = first.stat()
+                os.utime(first, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
+                # The same inode with a new mtime may be a same-size rewrite outside the hash's
+                # sampled windows: it is re-indexed, and the new stamp is what readers then match.
+                self.assertEqual(AudioIndex.build_or_load(first, cache_dir=cache).db, loud.db)
+                self.assertEqual(len(calls), 3, "a touched original is re-indexed")
+                stamps = [json.loads(path.read_text())["token"] for path in cache.glob("screen.energy10.*.json")]
+                self.assertIn(source_token(first), stamps, "the rebuilt index carries the current stamp")
+                self.assertEqual(AudioIndex.build_or_load(first, cache_dir=cache).db, loud.db)
+                self.assertEqual(len(calls), 3, "and is a cache hit again")
+            self.assertNotEqual(loud.db, quiet.db)
+
+            # A copy has its own stem, so it has its own file name; the bytes still say it is
+            # the same source (see find.py and src/video-index.mjs for the cross-name lookup).
+            self.assertTrue(same_source(source_token(copy), source_token(first)))
+            # A same-path, same-size rewrite the sampled hash cannot see: the mtime catches it.
+            token = source_token(first)
+            self.assertFalse(same_source(token, {**token, "mtime_ns": token["mtime_ns"] + 1}))
+            self.assertTrue(same_source(token, {**token, "ino": token["ino"] + 1, "inode": token["inode"] + 1,
+                                                "mtime_ns": token["mtime_ns"] + 1}),
+                            "a relink to another inode with the same bytes is the same source")
+            first.write_bytes(b"C" * 8192)
+            os.utime(first, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+            self.assertFalse(same_source(source_token(copy), source_token(first)))
 
 
 if __name__ == "__main__":

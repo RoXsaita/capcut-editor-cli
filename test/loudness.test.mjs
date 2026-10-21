@@ -8,6 +8,7 @@ import {
   volumeForLufs, playbackLufs, classifyLoudnessRole, isMusicSegment,
   opLoudness, DEFAULT_TARGET_LUFS, analyzeAudio,
 } from '../src/loudness.mjs';
+import { opDuckMusic } from '../src/duck.mjs';
 
 const US = s => Math.round(s * 1e6);
 
@@ -22,9 +23,10 @@ test('edited-range measurement, peak-limited gain, mixed clipping and mute prese
     tracks: [{ type: 'audio', segments: [{ id: 'a', material_id: 'A', volume: 1,
       source_timerange: { start: 0, duration: US(4) }, target_timerange: { start: 0, duration: US(4) }, extra_material_refs: [] }] }] };
   const quiet = analyzeAudio(d, root);
+  // a volume block with no keys is no automation: the static volume plays
   const automated = structuredClone(d);
   automated.tracks[0].segments[0].common_keyframes = [{ property_type: 'KFTypeVolume' }];
-  assert.throws(() => analyzeAudio(automated, root), { code: 'AUDIO_MEASURE_FAILED' });
+  assert.equal(analyzeAudio(automated, root).mix.lufs, quiet.mix.lufs);
   d.tracks[0].segments[0].source_timerange.start = US(4);
   const loud = analyzeAudio(d, root);
   assert.ok(loud.mix.lufs - quiet.mix.lufs > 25);
@@ -276,4 +278,116 @@ test('--allow-boost writes volume > 1 and marks UNVERIFIED', () => {
   assert.equal(out.unverified, true);
   assert.ok(out.segments.some(row => row.id === 'face0' && row.unverified));
   assert.equal(d.tracks[3].segments[0].volume, 1);
+});
+
+/** A steady tone clip carrying the given volume keys (absolute source µs). */
+function keyedTone(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'audio-keys-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const file = path.join(root, 'tone.wav');
+  execFileSync('ffmpeg', ['-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=6:sample_rate=48000',
+    '-af', 'volume=4', '-c:a', 'pcm_f32le', file]);
+  const make = (volume, keys, curveType = 'Line') => ({ duration: US(4),
+    materials: { audios: [{ id: 'A', type: 'extract', path: file }] },
+    tracks: [{ type: 'audio', segments: [{ id: 'a', material_id: 'A', volume, extra_material_refs: [],
+      source_timerange: { start: US(1), duration: US(4) }, target_timerange: { start: 0, duration: US(4) },
+      common_keyframes: keys ? [{ property_type: 'KFTypeVolume', keyframe_list: keys.map(([s, v]) => ({
+        time_offset: US(s), values: [v], curveType })) }] : [] }] }] });
+  return { root, make };
+}
+
+test('volume keys are rendered as gain automation, not refused (build\'s duck is measurable)', t => {
+  const { root, make } = keyedTone(t);
+  const one = analyzeAudio(make(1), root).mix.lufs;
+  const tenth = analyzeAudio(make(0.1), root).mix.lufs;
+  // a duck: full for the first two seconds of source, ramping down to 0.1 by the end
+  const duck = analyzeAudio(make(1, [[1, 1], [3, 1], [5, 0.1]]), root);
+  assert.ok(duck.mix.lufs < one - 0.5 && duck.mix.lufs > tenth + 0.5, `${tenth} < ${duck.mix.lufs} < ${one}`);
+  assert.equal(duck.segments.a.keyed, true);
+  // keys replace the static volume: equal keys at 0.5 play like a static 0.5, whatever segment.volume says
+  const flat = analyzeAudio(make(1, [[1, 0.5], [5, 0.5]]), root).mix.lufs;
+  assert.ok(Math.abs(flat - analyzeAudio(make(0.5), root).mix.lufs) < 0.05);
+  assert.throws(() => analyzeAudio(make(1, [[1, 1], [5, 0.1]], 'FreeCurveInOut'), root), { code: 'AUDIO_MEASURE_FAILED' });
+});
+
+test('the peak limiter scales the duck\'s music keys with the clip volume', t => {
+  const { root, d } = stems(t);
+  // the voice is the talking head on the principal video track, so the duck has speech to key from
+  const voice = d.tracks[0].segments[0];
+  d.materials.videos = [{ id: 'VID', type: 'video', path: d.materials.audios[0].path }];
+  voice.material_id = 'VID';
+  d.tracks.splice(0, 1, { type: 'video', flag: 0, segments: [] }, { type: 'video', flag: 2, name: 'face', segments: [voice] });
+  opDuckMusic(d, { transcript: { segments: [{ start: 1, end: 2.5 }, { start: 4, end: 5 }] }, __seed: 'test' });
+  const music = d.tracks.flatMap(x => x.segments).find(s => s.id === 'music');
+  const keys = () => music.common_keyframes.find(b => b.property_type === 'KFTypeVolume').keyframe_list.map(k => k.values[0]);
+  const before = keys(), volumeBefore = music.volume;
+  assert.ok(new Set(before).size > 1, 'the bed is ducked');
+  const out = opLoudness(d, { target: -14, peak: -1 }, { projectDir: root });
+  assert.ok(out.afterMix.truePeak <= -1, `mix true peak ${out.afterMix.truePeak} dBTP`);
+  assert.ok(out.skipped.some(r => r.id === 'music' && r.reason === 'music'));
+  const g = music.volume / volumeBefore;
+  assert.ok(g < 1, 'the limiter lowered the bed');
+  keys().forEach((value, i) => assert.ok(Math.abs(value - before[i] * g) < 1e-9, `key ${i}: ${value} vs ${before[i] * g}`));
+  assert.ok(out.peakLimit.steps.some(step => step.segments.some(r => r.id === 'music' && r.keysScaled)));
+});
+
+test('an SFX keeps its placed level; only a named selection matches it to the target', () => {
+  const sfxRow = (out) => out.segments.find(r => r.id === 'sfx0');
+  const measurements = { '/tmp/capcutctl-loudness-cam.mp4': -14, '/tmp/capcutctl-loudness-click.mp4': -11 };
+  const mograph = doc();
+  Object.assign(mograph.tracks[3].segments[0], { desc: 'mograph:sfx:kw-1', volume: 0.3 });
+  const out = opLoudness(mograph, { measurements });
+  assert.equal(mograph.tracks[3].segments[0].volume, 0.3);
+  assert.equal(sfxRow(out).capped, 'sfx-level');
+  assert.equal(out.changed, 1, 'only the voice was written');
+  const typing = doc();
+  Object.assign(typing.tracks[3].segments[0], { desc: 'sfx:typing', volume: 0.5 });
+  assert.equal(classifyLoudnessRole(typing.tracks[3], typing.tracks[3].segments[0], typing.materials.audios[0]), 'sfx');
+  opLoudness(typing, { measurements });
+  assert.equal(typing.tracks[3].segments[0].volume, 0.5);
+  const named = opLoudness(typing, { measurements, segments: ['sfx0'] });
+  assert.ok(Math.abs(typing.tracks[3].segments[0].volume - 0.708) < 0.001);
+  assert.equal(sfxRow(named).capped, undefined);
+});
+
+test('a parked parts-bin clip past the content end is neither measured nor rewritten', t => {
+  const { root, d, audio } = stems(t);
+  d.tracks.splice(1, 1);   // no hit: voice and bed only
+  const quiet = opLoudness(structuredClone(d), { target: -14, peak: -1 }, { projectDir: root });
+  fs.mkdirSync(path.join(root, '.capcutctl'));
+  fs.writeFileSync(path.join(root, '.capcutctl', 'created.json'), JSON.stringify({ preserved: { start: US(10), end: US(13) } }));
+  d.tracks.push(audio('parked', 'LOUD', 10, 3, 1, 'voice'));
+  const out = opLoudness(d, { target: -14, peak: -1, limitPeak: false }, { projectDir: root });
+  const parked = d.tracks.at(-1).segments[0];
+  assert.equal(parked.volume, 1);
+  assert.ok(out.skipped.some(r => r.id === 'parked' && r.reason === 'parked'));
+  assert.equal(out.beforeMix.truePeak, quiet.beforeMix.truePeak);
+  assert.equal(out.afterMix.truePeak, quiet.afterMix.truePeak);
+});
+
+test('without a parked range nothing counts as parked, so a cue past the raw content end is measured', t => {
+  // After a CapCut save strips the follow ender's identity, the raw content end stops before
+  // the ender: its cue must not drop out of measurement as if it were parked.
+  const { root, d, audio } = stems(t);
+  d.tracks.push(audio('late', 'HIT', 6.2, 0.3, 1, 'sfx:hit'));
+  assert.ok(analyzeAudio(d, root).segments.late, 'the cue past the raw content end is measured');
+  const out = opLoudness(d, { target: -14, peak: -1 }, { projectDir: root });
+  assert.ok(!out.skipped.some(r => r.reason === 'parked'), JSON.stringify(out.skipped));
+});
+
+test('--peak-only limits the current mix without re-matching clips', t => {
+  const { root, d } = stems(t);
+  const voice = d.tracks[0].segments[0];
+  voice.volume = 0.5;
+  const out = opLoudness(d, { peak: -1, match: false }, { projectDir: root });
+  assert.equal(out.peakOnly, true);
+  assert.deepEqual(out.segments, []);
+  assert.ok(voice.volume <= 0.5);
+  assert.ok(out.afterMix.truePeak <= -1, `mix true peak ${out.afterMix.truePeak} dBTP`);
+  assert.ok(out.peakLimit.steps.length > 0);
+  const again = opLoudness(d, { peak: -1, match: false }, { projectDir: root });
+  assert.equal(again.changed, 0);
+  assert.equal(again.peakLimit, undefined);
+  assert.throws(() => opLoudness(doc(), { match: false, measurements: -14 }), { code: 'BAD_ARGS' });
+  assert.throws(() => opLoudness(d, { match: false, limitPeak: false }, { projectDir: root }), { code: 'BAD_ARGS' });
 });

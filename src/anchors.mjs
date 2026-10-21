@@ -9,62 +9,46 @@
  * `cut --into` a rebuild lands every anchor on its word again, or refuses by name when the
  * word itself was cut.
  */
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { CapcutError, readJson } from './core.mjs';
+import { INDEX_MISMATCH, findIndexForMaterial, shiftWords } from './video-index.mjs';
 import { principalTrack } from './polish.mjs';
 import { normalise, sourceToTimeline } from './signature.mjs';
 import { wordsFromTranscript } from './match.mjs';
 
 const r3 = n => Math.round(n * 1000) / 1000;
+// A word whose Whisper start sits just before a clip's in-point: how far to probe forward,
+// in what steps, and how much of the word must still be heard after the probe.
+const ANCHOR_SNAP_S = 0.75;
+const ANCHOR_SNAP_STEP_S = 0.02;
+const ANCHOR_SNAP_MIN_S = 0.08;
 
-/** The word-level Whisper transcript `cut` cached for this project's talking head, or null. */
-export function findWordsFile(doc, principalIndex = null) {
-  const cache = path.join(os.homedir(), 'Downloads', '.video-index');
-  if (!fs.existsSync(cache)) return null;
-  const names = fs.readdirSync(cache).filter(n => n.includes('.whisper'));
-  if (!names.length) return null;
-
-  // An index file is only the right one if its stem IS the media's stem — `startsWith` alone
-  // matched `screen.whisper-*.json` for every `…__screen.mp4`, so a project's B-roll answered
-  // for the talking head and detection ran against a transcript with no speech in it.
-  const exact = stem => names.filter(n => n.startsWith(`${stem}.`)).sort()[0] || null;
-  const stemsFor = file => {
-    const base = path.basename(file).replace(/\.[^.]+$/, '');
-    const out = [base];
-    // `localizeMedia` prefixes the parent folder ("Downloads__F7ED1ECA-…") and may append an
-    // 8-hex collision tag; the index is keyed on the ORIGINAL stem.
-    const unprefixed = base.replace(/^[^_]+__/, '');
-    if (unprefixed !== base && unprefixed.length >= 8) out.push(unprefixed);
-    for (const v of [...out]) {
-      const bare = v.replace(/__[0-9a-f]{8}$/, '');
-      if (bare !== v) out.push(bare);
-    }
-    return out;
-  };
-
-  // The talking head first, always. Brand detection maps HIS words onto the timeline, so a
-  // screen recording's transcript is never the right answer even when one exists.
-  const ordered = [];
-  try {
-    const { track } = principalTrack(doc, principalIndex);
-    const byId = new Map((doc.materials?.videos || []).map(m => [m.id, m]));
-    for (const seg of track.segments || []) {
-      const m = byId.get(seg.material_id);
-      if (m?.path) ordered.push(m);
-    }
-  } catch { /* no principal track — fall through to every video */ }
-  for (const m of doc.materials?.videos || []) if (m.path) ordered.push(m);
-
-  for (const m of ordered) {
-    if (m.type && m.type !== 'video') continue;
-    for (const stem of stemsFor(m.path)) {
-      const hit = exact(stem);
-      if (hit) return path.join(cache, hit);
-    }
+/**
+ * The word-level Whisper transcript `cut` cached for this project's talking head:
+ * { file, offset } (offset: seconds the face file starts into the indexed original), or
+ * { file: null, reason }. Only the principal track's media is tried — never every video,
+ * since a screen recording's transcript is never the answer for the face — and each one's
+ * derived original first, because a denoised or re-encoded face has no index of its own.
+ */
+export function findWords(doc, principalIndex = null, { projectDir = null, cacheDir = null } = {}) {
+  let track;
+  try { ({ track } = principalTrack(doc, principalIndex)); } catch { return { file: null, reason: 'no principal track' }; }
+  const byId = new Map((doc.materials?.videos || []).map(m => [m.id, m]));
+  const seen = new Set();
+  let reason = null;
+  for (const seg of track.segments || []) {
+    const m = byId.get(seg.material_id);
+    if (!m?.path || seen.has(m.id) || (m.type && m.type !== 'video')) continue;
+    seen.add(m.id);
+    const hit = findIndexForMaterial(m, projectDir, 'whisper', { cacheDir, derivedFirst: true });
+    if (hit.file) return { file: hit.file, offset: hit.offset, legacy: hit.legacy };
+    if (hit.reason === INDEX_MISMATCH || !reason) reason = hit.reason;
   }
-  return null;
+  return { file: null, offset: 0, reason: reason || 'no index file' };
+}
+
+/** The transcript file alone (callers that only hash or display it). */
+export function findWordsFile(doc, principalIndex = null, options = {}) {
+  return findWords(doc, principalIndex, options).file;
 }
 
 /** Load the words of a Whisper transcript file as [{ text, start, end }], source seconds. */
@@ -94,7 +78,22 @@ export function resolveAnchor(anchor, words, mapper) {
     for (let k = 0; k < want.length && ok; k++) ok = normalise(words[i + k].text) === want[k];
     if (!ok) continue;
     const first = words[i], last = words[i + want.length - 1];
-    const at = mapper(first.start);
+    let at = mapper(first.start);
+    let snapped = false;
+    if (at == null) {
+      // Whisper often starts a word a few frames before the clip's in-point. Probe forward
+      // and keep the word when enough of it survives the cut; a word that was dropped stays
+      // an orphan because the probe never passes the word's own end.
+      const lastEnd = Number(last.end ?? last.start);
+      const limit = Math.min(lastEnd - 0.001, first.start + ANCHOR_SNAP_S);
+      for (let k = 1; first.start + k * ANCHOR_SNAP_STEP_S <= limit + 1e-9; k++) {
+        const t = first.start + k * ANCHOR_SNAP_STEP_S;
+        const mapped = mapper(t);
+        if (mapped == null) continue;
+        if (lastEnd - t >= ANCHOR_SNAP_MIN_S - 1e-9) { at = mapped; snapped = true; }
+        break;
+      }
+    }
     if (at == null) continue;                  // this utterance was cut out
     seen++;
     if (seen !== occurrence) continue;
@@ -103,6 +102,7 @@ export function resolveAnchor(anchor, words, mapper) {
     return {
       at: r3(at + Number(anchor.offset || 0)), end: r3(Math.max(end, at)),
       sourceAt: r3(first.start), text: words.slice(i, i + want.length).map(w => w.text).join(' '),
+      ...(snapped ? { snapped: true } : {}),
     };
   }
   return null;
@@ -112,18 +112,19 @@ export function resolveAnchor(anchor, words, mapper) {
  * Resolve every anchor or refuse naming the orphans. Items without `say` keep their `at`.
  * Returns items with `at` (and `end` when anchored) filled in.
  */
-export function resolveAnchors(items, { doc, words = null, wordsFile = null, principalIndex = null } = {}) {
+export function resolveAnchors(items, { doc, words = null, wordsFile = null, wordsOffset = 0, principalIndex = null, projectDir = null } = {}) {
   const needs = items.filter(item => item && item.say);
   if (!needs.length) return items.map(item => ({ ...item }));
   let list = words;
   if (!list) {
-    const file = wordsFile || findWordsFile(doc, principalIndex);
-    if (!file) {
+    const found = wordsFile ? { file: wordsFile, offset: wordsOffset } : findWords(doc, principalIndex, { projectDir });
+    if (!found.file) {
       throw new CapcutError('Anchors need the word-level transcript `cut` writes '
-        + '(~/Downloads/.video-index/<stem>.whisper-*.json). Pass --words FILE or give `at` seconds.',
-      { code: 'ANCHOR_NO_WORDS', exitCode: 2 });
+        + '(~/Downloads/.video-index/<stem>.whisper-*.json). Pass --words FILE or give `at` seconds.'
+        + (found.reason === INDEX_MISMATCH ? ` The cached transcript was refused: ${INDEX_MISMATCH} (re-run cut on this take).` : ''),
+      { code: 'ANCHOR_NO_WORDS', exitCode: 2, details: { reason: found.reason } });
     }
-    list = loadWords(file);
+    list = shiftWords(loadWords(found.file), Number(found.offset) || 0);
   }
   const mapper = sourceToTimeline(doc, principalIndex);
   const orphans = [];
@@ -131,7 +132,7 @@ export function resolveAnchors(items, { doc, words = null, wordsFile = null, pri
     if (!item?.say) return { ...item };
     const hit = resolveAnchor(item, list, mapper);
     if (!hit) { orphans.push(`${item.id || item.template || 'item'}: "${item.say}"${item.occurrence ? ` #${item.occurrence}` : ''}`); return null; }
-    return { ...item, at: hit.at, end: hit.end, anchor: { say: item.say, occurrence: item.occurrence || 1, sourceAt: hit.sourceAt, heard: hit.text } };
+    return { ...item, at: hit.at, end: hit.end, anchor: { say: item.say, occurrence: item.occurrence || 1, sourceAt: hit.sourceAt, heard: hit.text, ...(hit.snapped ? { snapped: true } : {}) } };
   });
   if (orphans.length) {
     throw new CapcutError(`Orphaned anchors — these words are not in the cut (recut dropped them, or `

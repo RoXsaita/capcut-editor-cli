@@ -7,6 +7,7 @@ import { applySpec, loadProject, validateDocument } from '../src/core.mjs';
 import { main, setOutput } from '../src/cli.mjs';
 import { opCaptions, captionDisplayText } from '../src/captions.mjs';
 import { captionStyleKey, captionStyleDrift } from '../src/house-rules.mjs';
+import { captionLayers } from '../src/gate.mjs';
 
 const cues = [
   {id: 1, start: 0, end: .5, text: 'خليت', position: 20},
@@ -93,7 +94,9 @@ for (const [label, invalid] of [
   ['empty cues', []],
 ]) test(`caption input refuses ${label} before project mutation`, () => fixture(project => {
   const before = fs.readFileSync(path.join(project,'draft_info.json'),'utf8');
-  assert.throws(()=>applySpec(project,{version:1,operations:[operation({cues:invalid})]},{forceRunning:true}),/CAPTION_/);
+  // A NaN is now refused by applySpec's finite-number backstop (BAD_NUMBER) before the
+  // caption validator sees it; either way nothing is written.
+  assert.throws(()=>applySpec(project,{version:1,operations:[operation({cues:invalid})]},{forceRunning:true}),/CAPTION_|not a number/);
   assert.equal(fs.readFileSync(path.join(project,'draft_info.json'),'utf8'),before);
 }));
 
@@ -179,3 +182,59 @@ test('caption-style compares with the house spec: an all-Arial track and an Engl
   captionTrack(doc).segments[0].clip.scale = {x: 1.4, y: 1.4};
   assert.equal(captionStyleDrift(doc).off.length, 2, 'a word scaled in the canvas is a different size');
 }));
+
+const textIdsReferenced = doc => new Set(doc.tracks.flatMap(t => (t.segments || []).map(s => s.material_id)));
+
+test('an SRT caption track or CapCut subtitle track conflicts too, and the message names --replace', () => fixture(project => {
+  applySpec(project, {version:1, operations:[operation()]}, {forceRunning:true});
+  const srt = loadProject(project).groups[0].doc;
+  const track = captionTrack(srt);
+  track.name = 'captions';                                      // the older SRT `caption` op's default
+  for (const s of track.segments) s.desc = '';
+  assert.throws(() => opCaptions(srt, operation()), err => /CAPTION_CONFLICT/.test(err.message)
+    && /captions \(srt, 2 words\)/.test(err.message) && /captions --replace/.test(err.message));
+  const auto = loadProject(project).groups[0].doc;
+  const autoTrack = captionTrack(auto);
+  autoTrack.name = 'Text';
+  for (const m of auto.materials.texts) m.type = 'subtitle';
+  assert.throws(() => opCaptions(auto, operation()), err => /CAPTION_CONFLICT/.test(err.message) && /Text \(subtitle/.test(err.message));
+}));
+
+test('captions --replace swaps every caption layer for one, leaving no orphan text', () => fixture(project => {
+  applySpec(project, {version:1, operations:[operation()]}, {forceRunning:true});
+  // A CapCut save strips desc: the track is no longer recognisably unchanged.
+  for (const g of loadProject(project).groups) for (const file of g.mirrors) {
+    const doc = JSON.parse(fs.readFileSync(file, 'utf8'));
+    for (const s of captionTrack(doc).segments) s.desc = '';
+    fs.writeFileSync(file, JSON.stringify(doc));
+  }
+  assert.throws(() => applySpec(project, {version:1, operations:[operation()]}, {forceRunning:true}), /captions --replace/);
+  const out = applySpec(project, {version:1, operations:[operation({replace:true, cues:[{...cues[0], text:'تغيير'}, cues[1]]})]}, {forceRunning:true});
+  assert.deepEqual(out.result[0].operations[0].replaced, [{name:'captions:suheil', kind:'captions', words:2}]);
+  const doc = loadProject(project).groups[0].doc;
+  assert.equal(doc.tracks.filter(t => t.type === 'text' && /^captions/.test(t.name || '')).length, 1);
+  const live = textIdsReferenced(doc);
+  assert.deepEqual(doc.materials.texts.filter(m => !live.has(m.id)), [], 'no orphan text materials');
+  assert.deepEqual(doc.materials.texts.map(m => JSON.parse(m.content).text), ['تغيير', 'الـ CV']);
+  const layers = captionLayers(doc);
+  assert.equal(layers.length, 1);
+  // A second identical run is still a no-op, replace or not.
+  const again = applySpec(project, {version:1, operations:[operation({replace:true, cues:[{...cues[0], text:'تغيير'}, cues[1]]})]}, {forceRunning:true});
+  assert.equal(again.result[0].operations[0].unchanged, true);
+}));
+
+test('CLI --cues forwards --replace; without it an existing layer refuses naming --replace', async () => {
+  const project = buildProject(), dir = path.dirname(project), input = path.join(dir, 'cues.json');
+  fs.writeFileSync(input, JSON.stringify({version:1, cues}));
+  let output = ''; const restore = setOutput(v => { output += v; return true; });
+  try {
+    await main(['captions', '--project', project, '--cues', input, '--force-running']);
+    fs.writeFileSync(input, JSON.stringify({version:1, cues:[{...cues[0], text:'تغيير'}, cues[1]]}));
+    await assert.rejects(main(['captions', '--project', project, '--cues', input, '--force-running']), /captions --replace/);
+    output = '';
+    await main(['captions', '--project', project, '--cues', input, '--replace', '--force-running']);
+    const doc = loadProject(project).groups[0].doc;
+    assert.equal(doc.tracks.filter(t => (t.name || '').startsWith('captions')).length, 1);
+    assert.deepEqual(doc.materials.texts.map(m => JSON.parse(m.content).text), ['تغيير', 'الـ CV']);
+  } finally { restore(); fs.rmSync(dir, {recursive:true, force:true}); }
+});

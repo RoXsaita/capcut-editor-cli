@@ -20,7 +20,6 @@ When --strip is used, frames carry requested/delivered PTS evidence from frame_q
 accuracy-checked extractor before they are put in the contact sheet.
 """
 import argparse
-import hashlib
 import json
 import math
 import os
@@ -33,7 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import change_index
-from audio_index import _write_json_atomic, source_token
+from audio_index import _write_json_atomic, same_source, source_key, source_token
 
 CACHE = os.path.expanduser("~/Downloads/.video-index")
 OCR_BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vision", "ocr")
@@ -144,8 +143,44 @@ def _expected_samples(duration, interval=OCR_SAMPLE_INTERVAL):
 
 
 def _source_cache_key(media, token):
-    value = f"{media}\0{json.dumps(token, sort_keys=True, separators=(',', ':'))}"
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+    """The content key in a cache name. It depends on the bytes only, never on the path, so
+    a project copy of a take (`Downloads__screen.mp4`) shares the original's key."""
+    del media
+    return source_key(token)
+
+
+def _base_stem(name):
+    """A media or cache stem with localize's decorations removed: `<parent>__<name>` keeps
+    `<name>`, and a trailing `__<8 hex>[_n]` collision tag is dropped (src/video-index.mjs
+    indexStems is the same rule)."""
+    stem = re.sub(r"__[0-9a-f]{8}(_\d+)?$", "", str(name))
+    return stem.rsplit("__", 1)[-1]
+
+
+def _ranked_cache_files(cache_dir, marker, media, token, stored_path):
+    """Cache files of one kind, best candidates first, each read only when reached.
+
+    Ranked by name so a hit costs one read: this media's own file (its stem and its content
+    key), then any file named for the same stem (localize prefix and tag stripped), then a
+    file carrying this content's key, then everything else, which only a stored-hash match
+    can claim. Yields (mine, path, data): `mine` says the file claims this media by name or
+    by its recorded path, so its problems are worth reporting; data is None when unreadable.
+    """
+    stem = _base_stem(Path(media).stem)
+    key = source_key(token)
+    ranked = []
+    for path in _cache_files(cache_dir, marker):
+        named = _base_stem(path.name.split(marker, 1)[0]) == stem
+        keyed = f".{key}.json" in path.name or f"{marker}-{key}.json" in path.name
+        ranked.append(((0 if named and keyed else 1 if named else 2 if keyed else 3), path.name, path))
+    ranked.sort()
+    for rank, _name, path in ranked:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            data = None
+        mine = rank <= 1 or (isinstance(data, dict) and stored_path(data) == media)
+        yield mine, path, data
 
 
 def ocr_cache_path(media, token=None, cache_dir=None):
@@ -431,9 +466,8 @@ def _parse_ocr_frames(data):
 def _validate_ocr_record(data, media, token, duration):
     if not isinstance(data, dict) or data.get("version") != OCR_INDEX_VERSION:
         return None, "untrusted legacy OCR index: verified metadata is missing"
-    if _ocr_source_path(data) != media:
-        return None, "OCR index source path does not match the requested media"
-    if _ocr_source_token(data) != token:
+    # The bytes decide, not the path: a project copy of the take reads the original's index.
+    if not same_source(_ocr_source_token(data), token):
         return None, "stale OCR index: source fingerprint does not match the media"
 
     try:
@@ -551,30 +585,27 @@ def load_ocr_record(media, refresh=False, cache_dir=None):
 
     token = source_token(media)
     directory = _cache_dir(cache_dir)
-    stem = Path(media).stem
     problems = []
-    for path in _cache_files(directory, ".ocr"):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, TypeError):
-            if path.name == f"{stem}.ocr.json" or path.name.startswith(f"{stem}.ocr-"):
+    duration = None
+    for mine, path, data in _ranked_cache_files(directory, ".ocr", media, token, _ocr_source_path):
+        # Problems are named only for files that claim this media (its path or its stem);
+        # anything else is another take's index that simply does not match.
+        if data is None:
+            if mine:
                 problems.append(f"{path.name} is unreadable; refresh it")
             continue
         source_path = _ocr_source_path(data) if isinstance(data, dict) else None
-        if source_path is None:
-            if path.name == f"{stem}.ocr.json" or path.name.startswith(f"{stem}.ocr-"):
+        stored_token = _ocr_source_token(data) if isinstance(data, dict) else None
+        if source_path is None or data.get("version") != OCR_INDEX_VERSION or stored_token is None:
+            if mine:
                 problems.append(f"{path.name} is an untrusted legacy OCR cache")
             continue
-        if source_path != media:
+        if not same_source(stored_token, token):
+            if mine:
+                problems.append(f"{path.name} is stale for this source fingerprint")
             continue
-        stored_token = _ocr_source_token(data)
-        if data.get("version") != OCR_INDEX_VERSION or stored_token is None:
-            problems.append(f"{path.name} is an untrusted legacy OCR cache")
-            continue
-        if stored_token != token:
-            problems.append(f"{path.name} is stale for this source fingerprint")
-            continue
-        duration = _probe_duration(media)
+        if duration is None:
+            duration = _probe_duration(media)
         frames, reason = _validate_ocr_record(data, media, token, duration)
         if reason:
             problems.append(f"{path.name}: {reason}")
@@ -695,9 +726,7 @@ def _validate_moment_record(data, media, token, index):
     """
     if not isinstance(data, dict) or data.get("version") != MOMENT_INDEX_VERSION:
         return None, "untrusted legacy moment index"
-    if _ocr_source_path(data) != media:
-        return None, "moment index source path does not match the requested media"
-    if _ocr_source_token(data) != token:
+    if not same_source(_ocr_source_token(data), token):
         return None, "stale moment index: source fingerprint does not match the media"
     try:
         if abs(float(data.get("min_score")) - index.min_score) > 1e-9:
@@ -731,14 +760,20 @@ def load_moment_record(media, index, refresh=False, cache_dir=None):
     token = source_token(media)
     if not refresh:
         path = moments_cache_path(media, token, cache_dir)
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, TypeError):
-            data = None
-        if data is not None:
+        # The key is the content's, so a copy of the take finds the original's file by name.
+        copies = sorted(other for other in Path(_cache_dir(cache_dir)).glob(f"*.moments-{source_key(token)}.json")
+                        if other != path)
+        candidates = [path, *copies]
+        reason = None
+        for candidate in candidates:
+            try:
+                data = json.loads(candidate.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, TypeError):
+                continue
             samples, reason = _validate_moment_record(data, media, token, index)
             if samples is not None:
                 return samples
+        if reason:
             print(f"  moment index: rebuilding — {reason}", file=sys.stderr)
     record = build_moment_index(media, index, cache_dir)
     samples, reason = _validate_moment_record(record, media, token, index)
@@ -752,30 +787,27 @@ def load_transcript(media):
     token = source_token(media)
     stem = Path(media).stem
     problems = []
-    for path in _cache_files(_cache_dir(), ".whisper"):
-        if not path.name.startswith(stem):
-            continue
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, TypeError):
-            problems.append(f"{path.name} is unreadable")
+    for mine, path, data in _ranked_cache_files(_cache_dir(), ".whisper", media, token, _ocr_source_path):
+        if data is None:
+            if mine:
+                problems.append(f"{path.name} is unreadable")
             continue
         if not isinstance(data, dict):
-            problems.append(f"{path.name} is malformed")
-            continue
-        stored_path = _ocr_source_path(data)
-        if stored_path is not None and stored_path != media:
+            if mine:
+                problems.append(f"{path.name} is malformed")
             continue
         stored_token = _transcript_source_token(data)
         if stored_token is None:
-            problems.append(f"{path.name} has no verified source fingerprint")
+            if mine:
+                problems.append(f"{path.name} has no verified source fingerprint")
             continue
-        if stored_token == token:
+        if same_source(stored_token, token):
             if not isinstance(data.get("segments"), list):
                 problems.append(f"{path.name} has no usable segments")
                 continue
             return data
-        problems.append(f"{path.name} is stale for this source fingerprint")
+        if mine:
+            problems.append(f"{path.name} is stale for this source fingerprint")
     legacy = Path(_cache_dir()) / f"{stem.split('-')[0]}_transcript_ar.json"
     if legacy.exists():
         problems.append(f"{legacy.name} is an untrusted legacy transcript cache")

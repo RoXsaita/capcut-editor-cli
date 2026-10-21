@@ -18,25 +18,38 @@
  * Every stage owns its output (mograph:*, sig:*, polish:*, finish:music), so running `build`
  * again replaces rather than stacks. Graphics are anchored to SOURCE WORDS: after a recut the
  * same plan lands every graphic on its word again, or refuses by name when a word was cut.
- * An unchanged plan on an unchanged cut is a no-op (`.capcutctl/build.json` holds its hash).
+ * An unchanged plan on an unchanged cut is a no-op (`.capcutctl/build.json` holds its hash and
+ * the ids of the segments build placed; when a restore took those away, it rebuilds).
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { CapcutError, stableJson, applySpec, loadProject, readJson, resolveMediaPath } from './core.mjs';
-import { findWordsFile, resolveAnchors } from './anchors.mjs';
-import { layoutAt } from './mograph-place.mjs';
-import { safeZoneViolations } from './mograph-geometry.mjs';
+import {
+  CapcutError, stableJson, applySpec, loadProject, loadWorkingDoc, readJson, resolveMediaPath, allSegments, BUILD_STATE_RELATIVE,
+  repairProject, restoreProjectSnapshot,
+} from './core.mjs';
+import { findWords, resolveAnchors } from './anchors.mjs';
+import { shiftTranscript } from './video-index.mjs';
+import { anchoredStart, layoutAt, resolvePlacementSfx } from './mograph-place.mjs';
+import { safeZoneAdvice, safeZoneText } from './mograph-geometry.mjs';
 import { loadProfile, applyStyle } from './profile.mjs';
 import { principalTrack, pictureChanges } from './polish.mjs';
 import { firstPictureProof } from './finish.mjs';
-import { gateReport, writeGateRecord } from './gate.mjs';
+import { gateReport, writeGateRecord, foldBuildStages, noteRestoredMeta } from './gate.mjs';
 
 export const EDIT_PLAN_VERSION = 1;
 const ENDING_KEYS = new Set(['frame', 'noSfx', 'pill', 'headline', 'sub', 'badge', 'faceX', 'faceY', 'faceScale']);
 const r3 = n => Math.round(n * 1000) / 1000;
 
 const fail = (code, message, details) => { throw new CapcutError(message, { code, exitCode: 2, details }); };
+
+const segmentIds = doc => new Set(allSegments(doc).map(entry => entry.segment.id));
+const firstLine = error => String(error?.message || error).split('\n')[0];
+// The loudness refusals the sound stage may fall back from (the mix stands without the pass,
+// and the gate FAILs build-stages). Anything else is a real error and propagates.
+const LOUDNESS_FALLBACK = new Set(['MIX_PEAK_EXCEEDED', 'AUDIO_MEASURE_FAILED', 'LUFS_MEASURE_FAILED', 'LUFS_UNMEASURABLE',
+  'VOLUME_BOOST_UNVERIFIED', 'BAD_LUFS']);
+const POLISH_OWNED = /^polish:(sfx|callout|click|type)$/;
 
 function workingDoc(projectDir) {
   const state = loadProject(projectDir);
@@ -48,7 +61,7 @@ function workingDoc(projectDir) {
 export function normalizePlan(raw, { baseDir = process.cwd() } = {}) {
   if (!raw || typeof raw !== 'object') fail('PLAN_INVALID', 'edit plan must be a JSON object');
   if (raw.version !== EDIT_PLAN_VERSION) fail('PLAN_VERSION', `edit plan version must be ${EDIT_PLAN_VERSION}`);
-  const known = new Set(['version', 'profile', 'style', 'words', 'shots', 'layout', 'camera', 'graphics', 'scenes', 'logos', 'endcard', 'ending', 'sound', 'notes']);
+  const known = new Set(['version', 'profile', 'style', 'words', 'shots', 'layout', 'camera', 'graphics', 'scenes', 'logos', 'endcard', 'ending', 'sound', 'notes', 'pauses']);
   const unknown = Object.keys(raw).filter(k => !known.has(k));
   if (unknown.length) fail('PLAN_INVALID', `unknown edit plan keys: ${unknown.join(', ')}`);
   const abs = file => (file ? path.resolve(baseDir, String(file).replace(/^~(?=$|\/)/, process.env.HOME || '~')) : null);
@@ -78,6 +91,12 @@ export function normalizePlan(raw, { baseDir = process.cwd() } = {}) {
     if (bad.length) fail('PLAN_INVALID', `unknown ending keys: ${bad.join(', ')}`);
     ending = { ...ending, ...(ending.frame ? { frame: abs(ending.frame) } : {}) };
   }
+  // Deliberate pauses (timeline seconds) the seam-silence and speech-gap gates allow.
+  if (raw.pauses !== undefined && (!Array.isArray(raw.pauses)
+    || raw.pauses.some(p => typeof p !== 'number' || !Number.isFinite(p) || p < 0))) {
+    fail('PLAN_INVALID', 'pauses must be a list of timeline seconds, e.g. [12.3, 40]');
+  }
+  const pauses = raw.pauses || [];
   const sound = { seams: 'motivated', music: false, duck: true, loudness: true, ...(raw.sound || {}) };
   if (sound.music && typeof sound.music === 'object' && sound.music.file) sound.music = { ...sound.music, file: abs(sound.music.file) };
   return {
@@ -94,6 +113,7 @@ export function normalizePlan(raw, { baseDir = process.cwd() } = {}) {
     endcard: raw.endcard === undefined ? null : raw.endcard,
     ending,
     sound,
+    ...(pauses.length ? { pauses } : {}),
   };
 }
 
@@ -115,11 +135,14 @@ function principalSignature(doc, projectDir = null) {
     s.target_timerange?.start, s.target_timerange?.duration].join(':')).join('|');
 }
 
-function planHash(plan, profile, doc, wordsFile, templateHashes, projectDir = null) {
+function planHash(plan, profile, doc, wordsFile, templateHashes, projectDir = null, assets = []) {
   let wordsStamp = null;
   if (wordsFile && fs.existsSync(wordsFile)) { const st = fs.statSync(wordsFile); wordsStamp = `${st.size}:${st.mtimeMs}`; }
+  // Declared pauses only change what the gate allows: adding one must not rebuild the edit.
+  const { pauses: _pauses, ...hashed } = plan;
   return crypto.createHash('sha256').update(JSON.stringify({
-    plan, profile, principal: principalSignature(doc, projectDir), wordsStamp, templateHashes,
+    plan: hashed, profile, principal: principalSignature(doc, projectDir), wordsStamp, templateHashes,
+    ...(assets.length ? { assets } : {}),
   })).digest('hex').slice(0, 24);
 }
 
@@ -128,18 +151,18 @@ function templateMotion(id, templates) {
 }
 
 /** Brands heard in the cut: art → native logo pop; no art → brand-chip graphic (when that template exists). */
-async function planLogos(plan, doc, wordsFile, templates) {
+async function planLogos(plan, doc, wordsFile, templates, wordsOffset = 0) {
   if (!plan.logos) return { logos: [], chips: [] };
   const sig = await import('./signature.mjs');
   const mapper = sig.sourceToTimeline(doc);
   let hits = [];
   if (plan.logos === 'auto') {
     if (!wordsFile) return { logos: [], chips: [], skipped: 'no word-level transcript for brand detection' };
-    hits = sig.detectBrands(readJson(wordsFile), mapper);
+    hits = sig.detectBrands(shiftTranscript(readJson(wordsFile), wordsOffset), mapper);
   } else if (Array.isArray(plan.logos)) {
     const brands = sig.brandPresets().brands;
     const anchored = resolveAnchors(plan.logos.map((l, i) => ({ ...l, id: l.brand || l.name || `logo-${i + 1}` })),
-      { doc, wordsFile });
+      { doc, wordsFile, wordsOffset });
     hits = anchored.map(l => ({ brand: l.brand || l.name || path.basename(l.logo || '').replace(/\.[^.]+$/, ''),
       at: l.at, logo: l.logo ? path.resolve(l.logo) : brands[l.brand]?.logo || null }));
     const noTime = hits.filter(h => h.at == null);
@@ -157,61 +180,85 @@ async function planLogos(plan, doc, wordsFile, templates) {
   return { logos, chips, missingArt: missing.map(h => h.brand) };
 }
 
-async function renderGraphics(projectDir, graphics, { dryRun, profile }) {
-  const mograph = await import('./mograph.mjs');
+/**
+ * A finished render of this exact graphic (fingerprint + format) whose file still exists: the
+ * sidecar of the last placement, or the render cache a failed build left behind.
+ */
+function reusableRender(mograph, dir, id, fingerprint, format) {
+  const sidecarFile = path.join(dir, `${id}.json`);
+  const usable = c => (c && c.fingerprint === fingerprint && c.format === format && c.file && fs.existsSync(c.file) ? c : null);
+  return usable(fs.existsSync(sidecarFile) ? readJson(sidecarFile) : null) || usable(mograph.readRenderCache(dir, id));
+}
+
+/** The MOGRAPH_SAFE_ZONE refusal, with the box, the overlaps and a centre to try. */
+function refuseUnsafeBox(g, box, profile) {
+  if (g.allowUnsafe) return;
+  const advice = safeZoneAdvice(box, profile);
+  if (!advice.hits.length) return;
+  fail('MOGRAPH_SAFE_ZONE', `${g.id} (${g.template}) sits in the platform UI: ${safeZoneText(box, advice)}. `
+    + 'Move it with params.center/layout, or set "allowUnsafe": true if intended.', { box, ...advice });
+}
+
+/**
+ * Render (or reuse) each graphic. Renders go to `mograph/<id>-<fingerprint>`, so the file a
+ * placed graphic uses is never overwritten; the safe zones refuse before a frame is encoded;
+ * each finished render is cached at once, so a later refusal does not throw it away.
+ */
+async function renderGraphics(projectDir, graphics, { dryRun, profile, mograph }) {
   const dir = path.join(projectDir, 'mograph');
   const out = [];
   for (const g of graphics) {
     const sidecarFile = path.join(dir, `${g.id}.json`);
     const fingerprint = mograph.fingerprint(g.template, g.params, profile);
-    const cached = fs.existsSync(sidecarFile) ? readJson(sidecarFile) : null;
+    const file = mograph.renderOut(dir, g.id, fingerprint);
+    const cached = reusableRender(mograph, dir, g.id, fingerprint, g.format);
     let rendered;
-    if (cached && cached.fingerprint === fingerprint && cached.format === g.format && fs.existsSync(cached.file)) {
+    if (cached) {
       rendered = { ...cached, cached: true };
     } else if (dryRun) {
       const probe = await mograph.probeMograph({ template: g.template, params: g.params, profile });
       rendered = { template: g.template, params: g.params, format: g.format, box: probe.box, meta: probe.meta, fingerprint,
-        file: path.join(dir, `${g.id}.${g.format === 'png-still' ? 'png' : 'mov'}`), importVerified: g.format === 'png-still' };
+        file: `${file}.${g.format === 'png-still' ? 'png' : 'mov'}`, importVerified: g.format === 'png-still' };
     } else {
-      rendered = await mograph.renderMograph({ template: g.template, params: g.params, out: path.join(dir, g.id), format: g.format, profile });
+      rendered = await mograph.renderMograph({ template: g.template, params: g.params, out: file, format: g.format, profile,
+        checkBox: box => refuseUnsafeBox(g, box, profile) });
+      mograph.writeRenderCache(dir, g.id, rendered);
     }
-    const unsafe = safeZoneViolations(rendered.box, profile);
-    if (unsafe.length && !g.allowUnsafe) {
-      fail('MOGRAPH_SAFE_ZONE', `${g.id} (${g.template}) sits in the platform UI (${unsafe.join(', ')}). `
-        + 'Move it with params.center/layout, or set "allowUnsafe": true if intended.');
-    }
+    refuseUnsafeBox(g, rendered.box, profile);          // a cached or probed box is checked here
     out.push({ ...g, rendered, sidecarFile, fingerprint });
   }
   return out;
 }
 
-async function renderScenes(projectDir, scenes, { dryRun, profile }) {
+async function renderScenes(projectDir, scenes, { dryRun, profile, mograph, sceneModule }) {
   if (!scenes.length) return [];
-  const mod = await import('./mograph-scene.mjs');
+  const mod = sceneModule || await import('./mograph-scene.mjs');
   const dir = path.join(projectDir, 'mograph');
+  const box = { x: 0, y: 0, w: profile.canvas.width, h: profile.canvas.height };
   const out = [];
   for (const g of scenes) {
     const sidecarFile = path.join(dir, `${g.id}.json`);
     const fingerprint = mod.sceneFingerprint(g.scene, g.params, profile);
-    const cached = fs.existsSync(sidecarFile) ? readJson(sidecarFile) : null;
+    const file = mograph.renderOut(dir, g.id, fingerprint);
+    const cached = reusableRender(mograph, dir, g.id, fingerprint, 'prores');
     let rendered;
-    if (cached && cached.fingerprint === fingerprint && fs.existsSync(cached.file)) {
+    if (cached) {
       rendered = { ...cached, unsafe: [], cached: true };
     } else if (dryRun) {
       const probe = await mod.probeScene({ scene: g.scene, params: g.params, profile });
       rendered = { scene: g.scene, params: g.params, format: 'prores', meta: probe.meta, unsafe: probe.unsafe, fingerprint,
-        file: path.join(dir, `${g.id}.mov`) };
+        file: `${file}.mov` };
     } else {
-      rendered = await mod.renderScene({ scene: g.scene, params: g.params, out: path.join(dir, g.id), format: 'prores', profile,
+      // renderScene refuses unsafe readable text before it draws a frame.
+      rendered = await mod.renderScene({ scene: g.scene, params: g.params, out: file, format: 'prores', profile,
         allowUnsafe: Boolean(g.allowUnsafe) });
+      mograph.writeRenderCache(dir, g.id, { ...rendered, box });
     }
     if (rendered.unsafe?.length && !g.allowUnsafe) {
-      const u = rendered.unsafe[0];
-      fail('SCENE_SAFE_ZONE', `${g.id} (${g.scene}): "${u.text}" is in the ${u.zone} zone at ${u.t}s. `
-        + 'Shorten the text, or set "allowUnsafe": true if intended.');
+      fail('SCENE_SAFE_ZONE', `${g.id} (${g.scene}): ${mod.sceneHitText(rendered.unsafe[0])}. `
+        + 'Shorten the text, or set "allowUnsafe": true if intended.', { unsafe: rendered.unsafe });
     }
-    out.push({ ...g, template: null, format: 'prores', rendered, sidecarFile, fingerprint,
-      box: { x: 0, y: 0, w: profile.canvas.width, h: profile.canvas.height } });
+    out.push({ ...g, template: null, format: 'prores', rendered, sidecarFile, fingerprint, box });
   }
   return out;
 }
@@ -220,27 +267,75 @@ function writeSidecars(graphics) {
   for (const g of graphics) {
     const r = g.rendered;
     fs.mkdirSync(path.dirname(g.sidecarFile), { recursive: true });
+    // sfx (null included: "no cue") and allowUnsafe are the plan's choices; a rerender keeps them.
     fs.writeFileSync(g.sidecarFile, stableJson({
       version: 1, id: g.id, ...(g.scene ? { scene: g.scene } : {}), template: g.template, params: g.params, format: g.format,
       file: r.file, box: g.box || r.box,
       meta: r.meta, fingerprint: g.fingerprint, anchor: g.anchor || null, at: g.at, duration: g.duration,
+      ...(g.sfx !== undefined ? { sfx: g.sfx } : {}), ...(g.allowUnsafe ? { allowUnsafe: true } : {}),
       importVerified: !g.scene && g.format === 'png-still',
     }));
   }
 }
 
 /**
- * Compile and apply. Returns { upToDate?, stages, gate }. `dryRun` validates every stage and
- * writes nothing (renders are probed, not encoded).
+ * What would refuse later, found before the first write: the music brief / Gemini key and the
+ * speech index the duck keys from. A real build throws; a dry run reports it in its stages.
  */
-export async function runBuild(projectDir, plan, { dryRun = false, force = false, forceRunning = false, backup = true, record = true } = {}) {
-  const profile = applyStyle(loadProfile({ file: plan.profile || null }), plan.style);
-  const mograph = await import('./mograph.mjs');
+async function preflight(projectDir, plan, doc, profile, wordsOps, dryRun) {
+  const found = {};
+  if (plan.sound.music) {
+    const { musicPreflight } = await import('./music.mjs');
+    const m = typeof plan.sound.music === 'object' ? plan.sound.music : {};
+    const music = musicPreflight(projectDir, doc, {
+      file: m.file || undefined, prompt: m.prompt || undefined, regen: Boolean(m.regen),
+      volume: m.volume ?? profile.sound.musicVolume, hits: Array.isArray(m.hits) && m.hits.length ? m.hits : null,
+    });
+    if (music.code) {
+      if (!dryRun) fail(music.code, music.error, { stage: 'music', needsBrief: music.needsBrief, keyMissing: music.keyMissing });
+      found.music = music;
+    }
+  }
+  if (plan.sound.music && plan.sound.duck && profile.sound.duck) {
+    const { speechSpans } = await import('./duck.mjs');
+    try { speechSpans(doc, wordsOps, { projectDir }); }
+    catch (error) {
+      if (!dryRun) throw error;
+      found.duck = { code: error.code || null, error: `${error.code || 'DUCK_FAILED'}: ${firstLine(error)}` };
+    }
+  }
+  return found;
+}
+
+/**
+ * Compile and apply. Returns { upToDate?, stages, gate }. `dryRun` validates every stage and
+ * writes nothing (renders are probed, not encoded). A stage that throws after an earlier one
+ * committed restores the draft to before the build (error.details.rolledBack).
+ */
+export async function runBuild(projectDir, plan, { dryRun = false, force = false, forceRunning = false, backup = true, record = true,
+  renderers = {} } = {}) {
+  const profileFile = plan.profile || null;
+  const profile = applyStyle(loadProfile({ file: profileFile }), plan.style);
+  // `renderers` ({ mograph, scenes }) stands in for the browser renderers in tests.
+  const mograph = renderers.mograph || await import('./mograph.mjs');
   const templates = mograph.listTemplates();
   const txn = label => ({ dryRun, forceRunning, backup, label });
-  let doc = workingDoc(projectDir);
+  const stages = {};
+  // A CapCut save strips desc / capcutctl_* (the identity of every mograph:*, sig:* and the
+  // follow ender). The writers prune and replace by those keys, so reading only would stack a
+  // second copy of every graphic: put them back in the draft first (a dry run uses the copy).
+  let { doc, restored } = loadWorkingDoc(projectDir);
+  if (restored.length && !dryRun) {
+    stages.repaired = repairProject(projectDir, { forceRunning, backup, label: 'build-repair' }).repaired;
+    ({ doc } = loadWorkingDoc(projectDir));
+  }
   principalTrack(doc);                                     // refuses a project with no talking head
-  const wordsFile = plan.words || findWordsFile(doc);
+  // The face's transcript, and how far into its indexed original the face file starts (a
+  // derived face: denoised, re-encoded). Every reader below gets the offset with the file.
+  const wordsIndex = plan.words ? { file: plan.words, offset: 0 } : findWords(doc, null, { projectDir });
+  const wordsFile = wordsIndex.file;
+  const wordsOffset = Number(wordsIndex.offset) || 0;
+  const wordsOps = wordsFile ? { wordsFile, ...(wordsOffset ? { wordsOffset } : {}) } : {};
   const templateHashes = Object.fromEntries(templates.map(t => [t.id, mograph.fingerprint(t.id, {}, profile)]));
   if (plan.scenes.length) {
     const { listScenes, sceneFingerprint } = await import('./mograph-scene.mjs');
@@ -249,174 +344,294 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
     if (unknown) fail('PLAN_INVALID', `unknown scene "${unknown.scene}" (see capcutctl mograph scenes)`);
     for (const id of new Set(plan.scenes.map(x => x.scene))) templateHashes[`scene:${id}`] = sceneFingerprint(id, {}, profile);
   }
-  const hash = planHash(plan, profile, doc, wordsFile, templateHashes, projectDir);
-  const stateFile = path.join(projectDir, '.capcutctl', 'build.json');
+  // A logo file's bytes are part of its graphic: new bytes under the same path rebuild it.
+  const assets = plan.graphics.map(g => [g.id, mograph.assetStamps(g.params)]).filter(([, stamps]) => stamps.length);
+  const hash = planHash(plan, profile, doc, wordsFile, templateHashes, projectDir, assets);
+  const stateFile = path.join(projectDir, BUILD_STATE_RELATIVE);
   const state = fs.existsSync(stateFile) ? readJson(stateFile) : {};
+  const startIds = segmentIds(doc);
+  const previousOutputs = Array.isArray(state.outputs) ? state.outputs : [];
+  // The hash covers the plan and the principal cut, not the overlays build placed. A restore
+  // that removed them left the hash matching, and "up to date" sat on an empty draft: when
+  // EVERY output is gone, rebuild. When only some are, the creator deleted them in CapCut;
+  // a rebuild would put them back and re-run sound (resetting hand-set levels), so keep his
+  // edit, name what is gone, and leave re-placing it to --force.
+  const missingOutputs = previousOutputs.filter(id => !startIds.has(id));
+  const outputsGone = previousOutputs.length > 0 && missingOutputs.length === previousOutputs.length;
   if (!force && !dryRun && state.hash === hash) {
-    const gate = gateReport(doc, { projectDir, profile });
-    return { upToDate: true, hash, gate };
-  }
-  const stages = {};
-
-  // ---- picture: shots (once), layout, camera ------------------------------------------------
-  const pictureOps = [];
-  if (plan.shots) {
-    const shotsKey = crypto.createHash('sha256').update(fs.readFileSync(plan.shots)).digest('hex').slice(0, 16);
-    if (state.shots !== shotsKey) {
-      const matcher = await import('./match.mjs');
-      const spec = matcher.shotsToSpec(matcher.readShotsFile(plan.shots), {});
-      const check = matcher.writersAccept(spec.operations);
-      if (!check.ok) fail('UNSUPPORTED_OPERATION', 'shots emit ops the writers do not accept', check.rejected);
-      pictureOps.push(...spec.operations);
-      stages.shots = { applied: spec.operations.length, key: shotsKey };
-    } else stages.shots = { applied: 0, reason: 'already applied (change shots with match/replace-media, or restore a snapshot)' };
-  }
-  if (pictureOps.length) {
-    stages.shotsResult = applySpec(projectDir, { version: 1, name: 'build-shots', operations: pictureOps }, txn('build-shots'));
-    if (!dryRun) doc = workingDoc(projectDir);
-  }
-  const cameraOps = [];
-  if (plan.layout === 'auto') {
-    const { buildLayoutSpec } = await import('./layouts.mjs');
-    try { cameraOps.push(...buildLayoutSpec(projectDir, 'auto', {}).operations); }
-    catch (error) { stages.layout = { skipped: error.message }; }
-  }
-  if (plan.camera.reframe) cameraOps.push({ op: 'reframe', auto: true });
-  if (plan.camera.cursor) cameraOps.push({ op: 'cursor', auto: true });
-  if (plan.camera.stress) {
-    const stressOp = { op: 'zoom.stress', ease: profile.camera.ease, ...(wordsFile ? { wordsFile } : {}) };
-    try {
-      applySpec(projectDir, { version: 1, name: 'build-stress-check', operations: [stressOp] }, { ...txn('check'), dryRun: true });
-      cameraOps.push(stressOp);
-    } catch (error) { stages.stress = { skipped: error.message.split('\n')[0] }; }
-  }
-  if (cameraOps.length) {
-    stages.picture = applySpec(projectDir, { version: 1, name: 'build-picture', operations: cameraOps }, txn('build-picture'));
-    if (!dryRun) doc = workingDoc(projectDir);
+    if (!outputsGone) {
+      // Pauses are outside the hash; a pause added since the last build still reaches build.json,
+      // which is where export reads what the final gate allows.
+      const pauses = plan.pauses || [];
+      if (JSON.stringify(state.pauses || []) !== JSON.stringify(pauses)) {
+        fs.writeFileSync(stateFile, stableJson({ ...state, pauses }));
+      }
+      const gate = gateReport(doc, { projectDir, profile, ...(plan.pauses?.length ? { pauses: plan.pauses } : {}) });
+      if (Array.isArray(state.skipped)) foldBuildStages(gate, state.skipped);
+      return { upToDate: true, hash, gate, skipped: Array.isArray(state.skipped) ? state.skipped : [],
+        ...(missingOutputs.length ? { missingOutputs,
+          note: `${missingOutputs.length} of ${previousOutputs.length} build-placed segments are gone from the draft (removed in CapCut?) and stay removed; \`build --force\` re-places them and re-runs sound and loudness.` } : {}),
+        ...(stages.repaired ? { repaired: stages.repaired } : {}) };
+    }
+    stages.reason = 'build outputs missing (restore?)';
   }
 
-  // ---- graphics -------------------------------------------------------------------------------
-  const logoPlan = await planLogos(plan, doc, wordsFile, templates);
-  const wanted = [...plan.graphics, ...logoPlan.chips];
-  const anchored = resolveAnchors(wanted, { doc, wordsFile });
-  const lead = profile.tokens.frames.lead / profile.canvas.fps;
-  const graphics = anchored.map(g => {
-    // Anchored graphics lead their word by the profile's lead frames (the anchor already
-    // carries any offset); timed ones take `at` plus their offset as given.
-    const at = Math.max(0, g.say ? g.at - lead : Number(g.at) + Number(g.offset || 0));
-    const params = { ...g.params };
-    if (!params.center && !params.box && !params.layout) params.layout = layoutAt(doc, at);
-    if (g.hold != null && params.hold == null) params.hold = g.hold;
-    const format = g.format || (templateMotion(g.template, templates) === 'rich' ? 'prores' : 'png-still');
-    return { ...g, at: r3(at), params, format };
-  });
-  const sceneItems = resolveAnchors(plan.scenes, { doc, wordsFile })
-    .map(g => ({ ...g, at: r3(Math.max(0, g.say ? g.at : Number(g.at) + Number(g.offset || 0))) }));
-  const rendered = [
-    ...(await renderGraphics(projectDir, graphics, { dryRun, profile })),
-    ...(await renderScenes(projectDir, sceneItems, { dryRun, profile })),
-  ].sort((a, b) => a.at - b.at);
-  for (const g of rendered) g.duration = r3(g.rendered.meta.duration);
-  // null: profile ending.auto decides; false also removes an ending placed earlier.
-  const ending = plan.ending ?? (profile.ending?.auto ? true : null);
-  const graphicOps = [{ op: 'mograph.prune', keep: rendered.map(g => g.id), dropEnding: plan.ending === false }];
-  for (const g of rendered) {
-    if (g.scene) {
+  const found = await preflight(projectDir, plan, doc, profile, wordsOps, dryRun);
+  if (found.duck) stages.duck = found.duck;
+
+  // From the first committed stage on, a throw puts the draft back to before the build.
+  const skipped = [];
+  let firstSnapshot = null;
+  let failedStage = null;
+  const remember = tx => { if (!dryRun && !firstSnapshot && tx?.snapshot) firstSnapshot = tx.snapshot; return tx; };
+  const apply = (name, operations) => {
+    failedStage = name;
+    return remember(applySpec(projectDir, { version: 1, name, operations }, txn(name)));
+  };
+  let rendered, logoPlan, ranPolish = false, prunedSeams = false;
+  let shotOutputs = Array.isArray(state.shotOutputs) ? state.shotOutputs : [];
+  try {
+    // ---- picture: shots (once), layout, camera ----------------------------------------------
+    const pictureOps = [];
+    if (plan.shots) {
+      const shotsKey = crypto.createHash('sha256').update(fs.readFileSync(plan.shots)).digest('hex').slice(0, 16);
+      // --force also re-applies shots whose placed clips are all gone (a restore from before them).
+      const shotOutputs = Array.isArray(state.shotOutputs) ? state.shotOutputs : [];
+      const shotsGone = force && shotOutputs.length > 0 && !shotOutputs.some(id => startIds.has(id));
+      if (state.shots !== shotsKey || shotsGone) {
+        const matcher = await import('./match.mjs');
+        const spec = matcher.shotsToSpec(matcher.readShotsFile(plan.shots), {});
+        const check = matcher.writersAccept(spec.operations);
+        if (!check.ok) fail('UNSUPPORTED_OPERATION', 'shots emit ops the writers do not accept', check.rejected);
+        pictureOps.push(...spec.operations);
+        stages.shots = { applied: spec.operations.length, key: shotsKey };
+      } else stages.shots = { applied: 0, reason: 'already applied (change shots with match/replace-media, or restore a snapshot)' };
+    }
+    if (pictureOps.length) {
+      const beforeShots = segmentIds(doc);
+      stages.shotsResult = apply('build-shots', pictureOps);
+      if (!dryRun) {
+        doc = workingDoc(projectDir);
+        shotOutputs = [...segmentIds(doc)].filter(id => !beforeShots.has(id));
+      }
+    }
+    const cameraOps = [];
+    if (plan.layout === 'auto') {
+      const { buildLayoutSpec } = await import('./layouts.mjs');
+      try { cameraOps.push(...buildLayoutSpec(projectDir, 'auto', {}).operations); }
+      catch (error) {
+        stages.layout = { skipped: error.message };
+        skipped.push({ stage: 'layout', reason: firstLine(error), code: error.code || null });
+      }
+    }
+    if (plan.camera.reframe) cameraOps.push({ op: 'reframe', auto: true });
+    if (plan.camera.cursor) cameraOps.push({ op: 'cursor', auto: true });
+    if (plan.camera.stress) {
+      const stressOp = { op: 'zoom.stress', ease: profile.camera.ease, ...wordsOps };
+      try {
+        applySpec(projectDir, { version: 1, name: 'build-stress-check', operations: [stressOp] }, { ...txn('check'), dryRun: true });
+        cameraOps.push(stressOp);
+      } catch (error) {
+        stages.stress = { skipped: firstLine(error) };
+        skipped.push({ stage: 'stress', reason: firstLine(error), code: error.code || null });
+      }
+    }
+    if (cameraOps.length) {
+      stages.picture = apply('build-picture', cameraOps);
+      if (!dryRun) doc = workingDoc(projectDir);
+    }
+
+    // ---- graphics -----------------------------------------------------------------------------
+    failedStage = 'build-graphics';
+    logoPlan = await planLogos(plan, doc, wordsFile, templates, wordsOffset);
+    const wanted = [...plan.graphics, ...logoPlan.chips];
+    const anchored = resolveAnchors(wanted, { doc, wordsFile, wordsOffset });
+    const graphics = anchored.map(g => {
+      // Anchored graphics lead their word by the profile's lead frames (the anchor already
+      // carries any offset); timed ones take `at` plus their offset as given.
+      const at = g.say ? anchoredStart(g, { profile }) : Math.max(0, Number(g.at) + Number(g.offset || 0));
+      const params = { ...g.params };
+      if (!params.center && !params.box && !params.layout) params.layout = layoutAt(doc, at);
+      if (g.hold != null && params.hold == null) params.hold = g.hold;
+      const format = g.format || (templateMotion(g.template, templates) === 'rich' ? 'prores' : 'png-still');
+      return { ...g, at: r3(at), params, format };
+    });
+    const sceneItems = resolveAnchors(plan.scenes, { doc, wordsFile, wordsOffset })
+      .map(g => ({ ...g, at: g.say ? anchoredStart(g, { scene: true, profile }) : r3(Math.max(0, Number(g.at) + Number(g.offset || 0))) }));
+    rendered = [
+      ...(await renderGraphics(projectDir, graphics, { dryRun, profile, mograph })),
+      ...(await renderScenes(projectDir, sceneItems, { dryRun, profile, mograph, sceneModule: renderers.scenes })),
+    ].sort((a, b) => a.at - b.at);
+    for (const g of rendered) g.duration = r3(g.rendered.meta.duration);
+    // null: profile ending.auto decides; false also removes an ending placed earlier.
+    const ending = plan.ending ?? (profile.ending?.auto ? true : null);
+    const graphicOps = [{ op: 'mograph.prune', keep: rendered.map(g => g.id), dropEnding: plan.ending === false }];
+    const canvas = { width: profile.canvas.width, height: profile.canvas.height };
+    for (const g of rendered) {
+      if (g.scene) {
+        graphicOps.push({
+          op: 'mograph.place', id: g.id, template: `scene:${g.scene}`, file: g.rendered.file, format: 'prores',
+          at: g.at, duration: g.duration, box: g.box, fingerprint: g.fingerprint, sfx: null, canvas,
+          ...(g.volume != null ? { clipVolume: g.volume } : {}), importVerified: false,
+        });
+        continue;
+      }
       graphicOps.push({
-        op: 'mograph.place', id: g.id, template: `scene:${g.scene}`, file: g.rendered.file, format: 'prores',
-        at: g.at, duration: g.duration, box: g.box, fingerprint: g.fingerprint, sfx: null,
-        ...(g.volume != null ? { clipVolume: g.volume } : {}), importVerified: false,
+        op: 'mograph.place', id: g.id, template: g.template, file: g.rendered.file, format: g.format,
+        at: g.at, duration: g.duration, box: g.rendered.box, fingerprint: g.fingerprint, canvas,
+        sfx: resolvePlacementSfx(g.sfx, g.rendered.meta.sfx), sfxLead: 0,
+        importVerified: g.format === 'png-still',
       });
-      continue;
     }
-    graphicOps.push({
-      op: 'mograph.place', id: g.id, template: g.template, file: g.rendered.file, format: g.format,
-      at: g.at, duration: g.duration, box: g.rendered.box, fingerprint: g.fingerprint,
-      sfx: g.sfx === null ? null : (g.sfx || g.rendered.meta.sfx), sfxLead: 0,
-      importVerified: g.format === 'png-still',
-    });
-  }
-  const signature = {};
-  if (logoPlan.logos.length) signature.logos = logoPlan.logos;
-  if (plan.endcard) signature.endcard = typeof plan.endcard === 'object' ? plan.endcard : {};
-  if (Object.keys(signature).length) {
-    graphicOps.push({ op: 'signature', ease: true, glow: (profile.logo?.reveal === 'glow'), ...signature });
-  }
-  const planned = rendered.map(g => ({ id: g.id, ...(g.scene ? { scene: g.scene } : { template: g.template }), at: g.at,
-    duration: g.duration, format: g.format, box: g.box || g.rendered.box, anchor: g.anchor || null, cached: Boolean(g.rendered.cached) }));
-  // A dry run has only probed the renders, so their files do not exist yet: validate everything
-  // else in the stage and report the placements it would make.
-  const applied = dryRun ? graphicOps.filter(op => op.op !== 'mograph.place') : graphicOps;
-  stages.graphics = { planned, signature: Object.keys(signature).length ? signature : null,
-    result: applySpec(projectDir, { version: 1, name: 'build-graphics', operations: applied }, txn('build-graphics')) };
-  if (logoPlan.missingArt?.length) stages.logosMissingArt = logoPlan.missingArt;
-  if (!dryRun) { writeSidecars(rendered); doc = workingDoc(projectDir); }
+    const signature = {};
+    if (logoPlan.logos.length) signature.logos = logoPlan.logos;
+    if (plan.endcard) signature.endcard = typeof plan.endcard === 'object' ? plan.endcard : {};
+    // logos:false, or a recut that no longer names a brand the last build popped, takes the old
+    // pops and their sounds away. Never when detection could not run (no transcript): those
+    // pops are kept, not judged. The endcard clears only on an explicit "endcard": false.
+    const clears = {};
+    if (!signature.logos && !logoPlan.skipped && (plan.logos === false || Number(state.logos) > 0)) clears.clearLogos = true;
+    if (plan.endcard === false) clears.clearEndcard = true;
+    if (Object.keys(signature).length || Object.keys(clears).length) {
+      graphicOps.push({ op: 'signature', ease: true, glow: (profile.logo?.reveal === 'glow'), ...signature, ...clears });
+    }
+    const planned = rendered.map(g => ({ id: g.id, ...(g.scene ? { scene: g.scene } : { template: g.template }), at: g.at,
+      duration: g.duration, format: g.format, box: g.box || g.rendered.box, anchor: g.anchor || null, cached: Boolean(g.rendered.cached) }));
+    // A dry run has only probed the renders, so their files do not exist yet: validate everything
+    // else in the stage and report the placements it would make.
+    const applied = dryRun ? graphicOps.filter(op => op.op !== 'mograph.place') : graphicOps;
+    stages.graphics = { planned, signature: Object.keys(signature).length ? signature : null,
+      ...(Object.keys(clears).length ? { cleared: Object.keys(clears) } : {}),
+      result: apply('build-graphics', applied) };
+    if (logoPlan.skipped) stages.logosSkipped = logoPlan.skipped;
+    if (logoPlan.missingArt?.length) {
+      stages.logosMissingArt = logoPlan.missingArt;
+      const chipped = new Set(logoPlan.chips.map(c => c.params.name));
+      const bare = logoPlan.missingArt.filter(b => !chipped.has(b));
+      if (bare.length) {
+        skipped.push({ stage: 'logos', reason: `no logo art (and no brand-chip template) for ${bare.join(', ')}: capcutctl brands`, code: 'NO_LOGO_ASSET' });
+      }
+    }
+    if (!dryRun) { writeSidecars(rendered); doc = workingDoc(projectDir); }
 
-  // ---- ending: after the picture and graphics are final, so it opens on the real last frame;
-  // before sound, so the music bed and loudness cover it.
-  if (ending) {
-    const { runEnding } = await import('./ending.mjs');
-    const o = typeof ending === 'object' ? ending : {};
-    stages.ending = await runEnding(projectDir, { frame: o.frame || null, copy: o, noSfx: Boolean(o.noSfx),
-      profileFile: plan.profile || null, dryRun, forceRunning, backup });
-    if (!dryRun) doc = workingDoc(projectDir);
-  }
+    // ---- ending: after the picture and graphics are final, so it opens on the real last frame;
+    // before sound, so the music bed and loudness cover it.
+    if (ending) {
+      failedStage = 'ending';
+      const { runEnding } = await import('./ending.mjs');
+      const o = typeof ending === 'object' ? ending : {};
+      stages.ending = await runEnding(projectDir, { frame: o.frame || null, copy: o, noSfx: Boolean(o.noSfx),
+        profileFile: plan.profile || null, dryRun, forceRunning, backup });
+      remember(stages.ending?.transaction);
+      if (!dryRun) doc = workingDoc(projectDir);
+    }
 
-  // ---- sound ----------------------------------------------------------------------------------
-  const soundOps = [];
-  if (plan.sound.seams) {
-    if (firstPictureProof(doc).ok) soundOps.push({ op: 'polish', motivated: plan.sound.seams !== 'all' });
-    else stages.seams = { skipped: 'first picture is not proof; fix the opening, then rebuild' };
-  }
-  if (plan.sound.music) {
-    const { prepareMusic } = await import('./music.mjs');
-    const m = typeof plan.sound.music === 'object' ? plan.sound.music : {};
-    const hits = Array.isArray(m.hits) ? m.hits
-      : [...new Set([...rendered.map(g => g.at), ...pictureChanges(doc, { projectDir }).map(c => c.t)].map(r3))].sort((a, b) => a - b);
-    const prepared = await prepareMusic(projectDir, doc, {
-      file: m.file || undefined, prompt: m.prompt || undefined, regen: Boolean(m.regen),
-      volume: m.volume ?? profile.sound.musicVolume, hits: hits.length ? hits : null, dryRun,
-    });
-    const off = prepared.align?.offset || 0;
-    stages.music = { file: prepared.file, hits: prepared.hits, offset: off, wouldGenerate: prepared.wouldGenerate || false };
-    if (!dryRun) {
-      soundOps.push({ op: 'music', file: prepared.file, duration: prepared.duration, volume: prepared.volume,
-        srcOffset: off < 0 ? -off : 0, at: off > 0 ? off : 0, fadeIn: 0.4, fadeOut: 1.2 });
+    // ---- sound --------------------------------------------------------------------------------
+    failedStage = 'build-sound';
+    const soundOps = [];
+    let pruneSeams = !plan.sound.seams;
+    if (plan.sound.seams) {
+      if (firstPictureProof(doc).ok) { soundOps.push({ op: 'polish', motivated: plan.sound.seams !== 'all' }); ranPolish = true; }
+      else { stages.seams = { skipped: 'first picture is not proof; fix the opening, then rebuild' }; pruneSeams = true; }
     }
-  }
-  // Loudness before the duck: the measurement cannot render volume keyframes, and the duck only
-  // lowers the bed, so the peak ceiling loudness proves on the full bed still holds once ducked.
-  // Loudness may lower the music (never raise it); the duck then keys from that level.
-  if (plan.sound.loudness) soundOps.push({ op: 'loudness', target: profile.sound.loudnessTarget, peak: profile.sound.peak });
-  if (plan.sound.music && !dryRun && plan.sound.duck && profile.sound.duck) {
-    soundOps.push({ op: 'music', duck: true, ...(wordsFile ? { wordsFile } : {}) });
-  }
-  if (soundOps.length) {
-    try {
-      stages.sound = applySpec(projectDir, { version: 1, name: 'build-sound', operations: soundOps }, txn('build-sound'));
-    } catch (error) {
-      // Loudness refuses a mix it cannot make safe; the rest of the sound stage still stands.
-      if (!soundOps.some(op => op.op === 'loudness')) throw error;
-      const rest = soundOps.filter(op => op.op !== 'loudness');
-      stages.sound = rest.length
-        ? applySpec(projectDir, { version: 1, name: 'build-sound', operations: rest }, txn('build-sound'))
-        : null;
-      stages.loudness = { skipped: error.message.split('\n')[0] };
+    // Seams off (or skipped): an earlier pass's transitions and woosh/click cues come out, but
+    // only the transitions build recorded placing — one the user added by hand stays.
+    const seamTransitions = Array.isArray(state.seamTransitions) ? state.seamTransitions : [];
+    const polishLeft = allSegments(doc).some(({ segment }) => POLISH_OWNED.test(segment.desc || ''));
+    if (pruneSeams && (seamTransitions.length || polishLeft)) {
+      soundOps.push({ op: 'polish', prune: true, only: seamTransitions });
+      prunedSeams = true;
+      stages.seams = { ...(stages.seams || {}), pruned: true };
     }
-    // what the peak limiter lowered to keep the mix under the ceiling (loudness reports it per segment)
-    const loud = stages.sound?.result?.[0]?.operations?.find(r => r.op === 'loudness');
-    if (loud?.peakLimit) stages.peakLimit = loud.peakLimit;
-    if (!dryRun) doc = workingDoc(projectDir);
+    if (plan.sound.music) {
+      const { prepareMusic } = await import('./music.mjs');
+      const m = typeof plan.sound.music === 'object' ? plan.sound.music : {};
+      const hits = Array.isArray(m.hits) ? m.hits
+        : [...new Set([...rendered.map(g => g.at), ...pictureChanges(doc, { projectDir }).map(c => c.t)].map(r3))].sort((a, b) => a - b);
+      const prepared = await prepareMusic(projectDir, doc, {
+        file: m.file || undefined, prompt: m.prompt || undefined, regen: Boolean(m.regen),
+        volume: m.volume ?? profile.sound.musicVolume, hits: hits.length ? hits : null, dryRun,
+      });
+      const off = prepared.align?.offset || 0;
+      stages.music = { file: prepared.file, hits: prepared.hits, offset: off, wouldGenerate: prepared.wouldGenerate || false,
+        needsBrief: Boolean(prepared.needsBrief || found.music?.needsBrief),
+        error: found.music?.error || prepared.error || null, keyMissing: Boolean(found.music?.keyMissing) };
+      if (!dryRun) {
+        soundOps.push({ op: 'music', file: prepared.file, duration: prepared.duration, volume: prepared.volume,
+          srcOffset: off < 0 ? -off : 0, at: off > 0 ? off : 0, fadeIn: 0.4, fadeOut: 1.2 });
+      }
+    }
+    // Loudness before the duck: the measurement cannot render volume keyframes, and the duck only
+    // lowers the bed, so the peak ceiling loudness proves on the full bed still holds once ducked.
+    // Loudness may lower the music (never raise it); the duck then keys from that level.
+    if (plan.sound.loudness) soundOps.push({ op: 'loudness', target: profile.sound.loudnessTarget, peak: profile.sound.peak });
+    if (plan.sound.music && !dryRun && plan.sound.duck && profile.sound.duck) {
+      soundOps.push({ op: 'music', duck: true, ...wordsOps });
+    }
+    if (soundOps.length) {
+      try {
+        stages.sound = apply('build-sound', soundOps);
+      } catch (error) {
+        // Loudness refuses a mix it cannot make safe; the rest of the sound stage still stands
+        // (and the gate FAILs build-stages). Any other error is real and propagates.
+        if (!soundOps.some(op => op.op === 'loudness') || !LOUDNESS_FALLBACK.has(error.code)) throw error;
+        const rest = soundOps.filter(op => op.op !== 'loudness');
+        stages.sound = rest.length ? apply('build-sound', rest) : null;
+        stages.loudness = { skipped: firstLine(error) };
+        skipped.push({ stage: 'loudness', reason: firstLine(error), code: error.code });
+      }
+      // what the peak limiter lowered to keep the mix under the ceiling (loudness reports it per segment)
+      const ops = stages.sound?.result?.[0]?.operations || [];
+      const loud = ops.find(r => r.op === 'loudness');
+      if (loud?.peakLimit) stages.peakLimit = loud.peakLimit;
+      const pruned = ops.find(r => r.op === 'polish' && r.pruned);
+      if (pruned) stages.seams = { ...(stages.seams || {}), pruned: { transitions: pruned.removedTransitions, sfx: pruned.removedSfx,
+        ...(pruned.transitionsUnknown ? { unknown: pruned.transitionsUnknown } : {}) } };
+      if (!dryRun) doc = workingDoc(projectDir);
+    }
+  } catch (error) {
+    if (dryRun) throw error;
+    let rolledBack = false, rollbackError = null;
+    if (firstSnapshot) {
+      try { restoreProjectSnapshot(projectDir, firstSnapshot, { forceRunning }); rolledBack = true; }
+      catch (undo) { rollbackError = firstLine(undo); }
+    }
+    const extra = { rolledBack, snapshot: firstSnapshot, failedStage, ...(rollbackError ? { rollbackError } : {}) };
+    if (error && typeof error === 'object') {
+      Object.assign(error, extra);
+      error.details = error.details && typeof error.details === 'object' && !Array.isArray(error.details)
+        ? { ...error.details, ...extra } : { ...(error.details != null ? { cause: error.details } : {}), ...extra };
+      if (rolledBack) error.message += ` (build rolled back to before ${failedStage}: ${path.basename(firstSnapshot)})`;
+    }
+    throw error;
   }
 
   // ---- gate -----------------------------------------------------------------------------------
-  const gate = gateReport(doc, { projectDir, profile });
+  const gate = gateReport(doc, { projectDir, profile, ...(plan.pauses?.length ? { pauses: plan.pauses } : {}) });
+  foldBuildStages(gate, skipped);
+  if (dryRun) noteRestoredMeta(gate, restored);
   if (!dryRun) {
     if (record) writeGateRecord(projectDir, gate);
     fs.mkdirSync(path.dirname(stateFile), { recursive: true });
-    const next = { version: 1, hash: planHash(plan, profile, workingDoc(projectDir), wordsFile, templateHashes, projectDir), builtFrom: hash,
-      shots: stages.shots?.key || state.shots || null, at: new Date().toISOString(), verdict: gate.verdict };
+    const finalDoc = workingDoc(projectDir);
+    // What build placed: segments that are new since the start, plus earlier outputs it kept
+    // (a rebuild re-places graphics under their stable ids).
+    const kept = new Set(previousOutputs);
+    const outputs = [...segmentIds(finalDoc)].filter(id => !startIds.has(id) || kept.has(id));
+    const seamTransitions = ranPolish ? (finalDoc.materials?.transitions || []).filter(m => m.capcutctl_polish === true).map(m => m.id)
+      : prunedSeams ? [] : (Array.isArray(state.seamTransitions) ? state.seamTransitions : []);
+    const next = { version: 1, hash: planHash(plan, profile, finalDoc, wordsFile, templateHashes, projectDir, assets), builtFrom: hash,
+      shots: stages.shots?.key || state.shots || null, shotOutputs, outputs, at: new Date().toISOString(), verdict: gate.verdict,
+      // logo pops placed (a later build with none clears them), the stages it could not run (the
+      // up-to-date path re-reports them), the polish transitions it owns, and what export gates with
+      logos: logoPlan.skipped ? (Number(state.logos) || 0) : logoPlan.logos.length,
+      skipped, seamTransitions,
+      profile: profileFile ? path.resolve(profileFile) : null, style: plan.style || null, pauses: plan.pauses || [] };
     fs.writeFileSync(stateFile, stableJson(next));
   }
-  return { dryRun, hash, stages, gate };
+  // Layout ops that could not lay a room plate (no brand.background.plate) say so; the summary
+  // carries it so a card over black is named before the gate's card-background check.
+  const { specWarnings } = await import('./layouts.mjs');
+  const warnings = [...new Set(Object.values(stages).flatMap(stage => specWarnings(stage)))];
+  return { dryRun, hash, stages, skipped, gate, ...(warnings.length ? { warnings } : {}) };
 }

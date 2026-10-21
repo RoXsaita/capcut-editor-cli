@@ -28,8 +28,12 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { CapcutError } from './core.mjs';
+
+/** This package's own install directory: bundled assets (cursor art) live under it. */
+const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url));
 
 /** Directories whose contents are deleted out from under the project. */
 function ephemeralRoots() {
@@ -133,7 +137,11 @@ export function assertOrigin({
     }
   }
 
-  if (found.ephemeral && !allowEphemeral) {
+  // A generated asset this package ships (the cursor art) is not someone's recording: its
+  // origin is the package, and it is the same bytes in every install. A checkout or an npx
+  // cache under /tmp or a scratchpad does not make it ephemeral media.
+  const bundled = generated && found.path != null && under(found.path, canonical(PACKAGE_ROOT));
+  if (found.ephemeral && !allowEphemeral && !bundled) {
     throw new CapcutError(
       `${label}: ${name} lives in a temporary directory (${found.path}).\n`
       + 'The bytes would be copied into the project, but the recorded origin would point at a path\n'
@@ -172,5 +180,27 @@ export function stampOrigin(material, note) {
   if (note.derivedFrom) material.derived_from_path = note.derivedFrom;
   if (note.derivedOffset != null) material.derived_from_offset = note.derivedOffset;
   if (note.preframed) material.capcutctl_preframed = true;
+  return material;
+}
+
+/**
+ * A video material template stripped of everything that belongs to the clip it was copied
+ * from. New materials are cloned from the project's first video (the face) to keep CapCut's
+ * field set, and that copied the face's provenance (a screen recording "derived" from the face's
+ * original, doctor then reporting MEDIA_ORIGIN_LOST against the wrong file), its crop and its
+ * beauty/matting/stabilisation passes onto unrelated footage.
+ */
+export function neutralVideoMaterial(template) {
+  const material = structuredClone(template || { type: 'video' });
+  for (const key of Object.keys(material)) {
+    if (key.startsWith('capcutctl_') || key.startsWith('derived_from_') || key.startsWith('beauty_')) delete material[key];
+  }
+  for (const key of ['original_path', 'source_path', 'source_take_id', 'matting', 'video_algorithm', 'stable']) delete material[key];
+  material.crop = {
+    upper_left_x: 0, upper_left_y: 0, upper_right_x: 1, upper_right_y: 0,
+    lower_left_x: 0, lower_left_y: 1, lower_right_x: 1, lower_right_y: 1,
+  };
+  material.crop_scale = 1;
+  material.crop_ratio = 'free';
   return material;
 }

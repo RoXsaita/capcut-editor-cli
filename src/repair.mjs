@@ -27,6 +27,16 @@ const isSegmentKey = key => key.startsWith('capcutctl_') || SEGMENT_KEYS.has(key
 const present = value => value != null && value !== '';
 const SNAPSHOT_FALLBACK_LIMIT = 20;
 
+/**
+ * Is this one of the `layout:*` descs capcutctl gives its own plates and screen layers (the face
+ * plates, and every `layout:screen-*` role including the recording)? Any other `layout:<name>` is
+ * the tag older versions put on the talking head itself; `layout apply` now clears it, so the
+ * ledger never records or restores it (it would read as a plate to every gate and writer).
+ */
+const FACE_PLATE_DESCS = new Set(['layout:seam-bar', 'layout:white-ring', 'layout:background-blur']);
+export const isLayoutPlateDesc = desc => FACE_PLATE_DESCS.has(String(desc || '')) || String(desc || '').startsWith('layout:screen-');
+const staleSubjectTag = (key, value) => key === 'desc' && String(value).startsWith('layout:') && !isLayoutPlateDesc(value);
+
 /** The capcutctl-owned fields of one document, keyed by material and segment id. */
 export function metaRecord(docs) {
   const record = { version: 1, materials: {}, segments: {} };
@@ -44,7 +54,7 @@ export function metaRecord(docs) {
     for (const track of doc?.tracks || []) {
       for (const s of track?.segments || []) {
         if (!s?.id) continue;
-        const fields = Object.fromEntries(Object.entries(s).filter(([k, v]) => isSegmentKey(k) && present(v)));
+        const fields = Object.fromEntries(Object.entries(s).filter(([k, v]) => isSegmentKey(k) && present(v) && !staleSubjectTag(k, v)));
         if (!Object.keys(fields).length) continue;
         const entry = record.segments[s.id] ||= { material_id: s.material_id || null, fields: {} };
         Object.assign(entry.fields, fields);
@@ -60,9 +70,10 @@ const isEmpty = record => !Object.keys(record.materials).length && !Object.keys(
 function fillRecord(into, from) {
   for (const section of ['materials', 'segments']) {
     for (const [id, entry] of Object.entries(from?.[section] || {})) {
+      const fields = Object.entries(entry.fields || {}).filter(([key, value]) => section !== 'segments' || !staleSubjectTag(key, value));
       const have = into[section][id];
-      if (!have) { into[section][id] = structuredClone(entry); continue; }
-      for (const [key, value] of Object.entries(entry.fields || {})) if (!(key in have.fields)) have.fields[key] = value;
+      if (!have) { into[section][id] = { ...structuredClone(entry), fields: structuredClone(Object.fromEntries(fields)) }; continue; }
+      for (const [key, value] of fields) if (!(key in have.fields)) have.fields[key] = value;
     }
   }
   return into;
@@ -151,7 +162,7 @@ export function restoreMeta(doc, record) {
       const entry = record.segments[s?.id];
       if (!entry || (entry.material_id && s.material_id !== entry.material_id)) continue;
       for (const [key, value] of Object.entries(entry.fields)) {
-        if (present(s[key])) continue;
+        if (present(s[key]) || staleSubjectTag(key, value)) continue;
         s[key] = structuredClone(value);
         restored.push({ segment: s.id, key });
       }

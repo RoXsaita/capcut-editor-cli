@@ -118,6 +118,59 @@ class FindIndexTests(unittest.TestCase):
                 self.assertEqual(find.load_transcript(first)["segments"][0]["text"], "alpha")
                 self.assertEqual(find.load_transcript(second)["segments"][0]["text"], "beta")
 
+    def test_a_project_copy_hits_every_index_and_a_touched_original_re_indexes(self):
+        box = {"text": "Publish", "conf": 0.9, "x": 0.2, "y": 0.4, "w": 0.18, "h": 0.04}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            media = root / "take" / "screen-20261017.mp4"
+            media.parent.mkdir()
+            media.write_bytes(b"original take bytes")
+            cache = root / "cache"
+            cache.mkdir()
+            write_ocr(cache, media, {0: {"text": "hit Publish", "boxes": [box]},
+                                     1: {"text": "idle", "boxes": []}}, 2.0)
+            (cache / f"{media.stem}.whisper-model.{find.source_key(find.source_token(media))}.json").write_text(
+                json.dumps({"_token": find.source_token(media),
+                            "segments": [{"start": 0, "end": 1, "text": "alpha", "words": []}]}))
+
+            copy = root / "proj" / f"Downloads__{media.stem}.mp4"
+            copy.parent.mkdir()
+            shutil.copy2(media, copy)
+            stat = media.stat()
+            os.utime(media, ns=(stat.st_atime_ns, stat.st_mtime_ns + 7_000_000_000))
+            with patch.object(find, "CACHE", str(cache)), \
+                    patch.object(find, "_probe_duration", return_value=2.0):
+                self.assertEqual(find.load_transcript(copy)["segments"][0]["text"], "alpha")
+                self.assertEqual(find.load_ocr(copy), {0: "hit publish", 1: "idle"})
+                self.assertEqual(find.ocr_boxes(copy, 0.4), [box])
+                # A new mtime on the same inode may be a same-size rewrite outside the sampled
+                # hash windows, so the original's indexes are stale until the next index run.
+                with self.assertRaisesRegex(SystemExit, "stale"):
+                    find.load_ocr(media)
+                with self.assertRaisesRegex(SystemExit, "no verified transcript"):
+                    find.load_transcript(media)
+
+                # The same path rewritten with different bytes of the same size re-indexes.
+                media.write_bytes(b"replaced take bytes")
+                os.utime(media, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+                with self.assertRaisesRegex(SystemExit, "stale"):
+                    find.load_ocr(media)
+                with self.assertRaisesRegex(SystemExit, "no verified transcript"):
+                    find.load_transcript(media)
+
+    def test_cache_keys_are_the_content_not_the_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            media = root / "screen.mp4"
+            media.write_bytes(b"bytes")
+            copy = root / "proj" / "Downloads__screen.mp4"
+            copy.parent.mkdir()
+            shutil.copy2(media, copy)
+            self.assertEqual(find.ocr_cache_path(media).name.split(".ocr-")[1],
+                             find.ocr_cache_path(copy).name.split(".ocr-")[1])
+            self.assertEqual(find._base_stem("Downloads__screen"), "screen")
+            self.assertEqual(find._base_stem("F7ED__screen__1a2b3c4d_2"), "screen")
+
     def test_refresh_builds_and_reloads_a_tiny_real_media_index(self):
         if not (shutil.which("ffmpeg") and shutil.which("ffprobe")
                 and os.path.isfile(find.OCR_BIN) and os.access(find.OCR_BIN, os.X_OK)):

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CapcutError, allSegments, seededId, clone, removeUnreferencedMaterials, resolveMediaPath } from './core.mjs';
 import { findRl2Sessions, loadSession, windowsForSession } from './polish.mjs';
-import { opClipAdd, writeCameraPath } from './add.mjs';
+import { maskVisibleRow, opClipAdd, writeCameraPath } from './add.mjs';
 import { keyframeValue, simplifyMotion } from './easing.mjs';
 import { renumberTracks } from './layouts.mjs';
 
@@ -63,9 +63,9 @@ function visibleAt(doc, segment, material, p, projected) {
   if (!p.visible || p.x < 0 || p.y < 0 || p.x > material.width || p.y > material.height) return false;
   if (projected.x < 0 || projected.y < 0 || projected.x > doc.canvas_config.width || projected.y > doc.canvas_config.height) return false;
   const mask = segment.enable_video_mask !== false && doc.materials.common_mask?.find(m => segment.extra_material_refs?.includes(m.id));
-  if (!mask) return true;
-  const row = material.height * (1 - (mask.config?.centerY || 0)) / 2;
-  return Number(mask.config?.rotation || 0) === 180 ? p.y >= row : p.y <= row;
+  const split = mask ? maskVisibleRow(material, mask) : null;
+  if (!split) return true;
+  return split.lower ? p.y >= split.row : p.y <= split.row;
 }
 
 export function planPolishedCursor(doc, op = {}, context = {}) {

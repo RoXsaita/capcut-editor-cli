@@ -229,7 +229,6 @@ def scan(media, cut=CUT_THRESHOLD, build=BUILD_THRESHOLD, silence_db=-40.0, sile
 def cut_sheet(media, cuts, out, duration, limit=40, per_row=8):
     """The first frame of every shot (0s, then just after each cut), labelled, as one PNG."""
     from frame_qa import contact_sheet
-    from PIL import Image
 
     times = [0.0] + [c['t'] for c in cuts]
     times = [min(max(0.0, t + 0.04), max(0.0, duration - 0.05)) for t in times][:limit]
@@ -242,18 +241,7 @@ def cut_sheet(media, cuts, out, duration, limit=40, per_row=8):
             subprocess.run(['ffmpeg', '-v', 'error', '-y', '-ss', f'{t:.3f}', '-i', media, '-frames:v', '1',
                             '-vf', 'scale=270:-2', str(dest)], check=True, timeout=60)
             tiles.append((str(dest), f'shot {i + 1} @ {t:.2f}s'))
-        rows = []
-        for i in range(0, len(tiles), per_row):
-            row = Path(tmp) / f'row-{i}.png'
-            contact_sheet(tiles[i:i + per_row], str(row), 180)
-            with Image.open(row) as im:
-                rows.append(im.copy())
-        sheet = Image.new('RGB', (max(r.width for r in rows), sum(r.height for r in rows)), '#121212')
-        y = 0
-        for row in rows:
-            sheet.paste(row, (0, y))
-            y += row.height
-        sheet.save(out)
+        contact_sheet(tiles, str(out), 180, cols=per_row)
     return {'path': str(out), 'shots': len(times), 'truncated': len(cuts) + 1 > limit}
 
 

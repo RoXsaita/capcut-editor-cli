@@ -21,7 +21,11 @@
     ],
     "avoid": [
       "Looks you have rejected and never want proposed again, with the reason."
-    ]
+    ],
+    "background": {
+      "_about": "The sharp photo of your room that fills the frame behind a circle or a screen card (never a blurred copy of the face). Set plate to a private PNG/JPEG path; with none, cards and circles sit over black and the gate's card-background check fails.",
+      "plate": null
+    }
   },
 
   "tokens": {

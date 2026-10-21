@@ -48,6 +48,38 @@ export function isFollowEnding(doc, segment) {
 export const mographDesc = id => `mograph:${id}`;
 export const mographSfxDesc = id => `mograph:sfx:${id}`;
 
+/**
+ * Where graphic `id` starts on the timeline now (seconds), or null when it is not placed. A
+ * ripple or a hand move in CapCut changes this, not the sidecar: a rerender keeps it.
+ */
+export function liveMographStart(doc, id) {
+  const desc = mographDesc(id);
+  for (const track of doc.tracks || []) {
+    const segment = (track.segments || []).find(s => s.desc === desc);
+    if (segment) return r3(S(segment.target_timerange?.start));
+  }
+  return null;
+}
+
+/**
+ * The start for a graphic anchored on a spoken word (`hit.at`, the word's timeline time with
+ * any offset): a template leads its word by the profile's lead frames; a scene is a cut, so it
+ * starts ON the word. Never before 0.
+ */
+export function anchoredStart(hit, { scene = false, profile = loadProfile() } = {}) {
+  const lead = scene ? 0 : profile.tokens.frames.lead / profile.canvas.fps;
+  return r3(Math.max(0, Number(hit.at) - lead));
+}
+
+/**
+ * The paired cue a placement gets: none with --no-sfx; an explicit null (plan or sidecar)
+ * stays none; a named cue wins; otherwise the template's own (meta.sfx).
+ */
+export function resolvePlacementSfx(override, metaSfx, noSfx = false) {
+  if (noSfx || override === null) return null;
+  return override || metaSfx || null;
+}
+
 /** Which look the principal track has at time t: full-face, split-screen or card (circle). */
 export function layoutAt(doc, t) {
   let rows = [];
@@ -109,6 +141,15 @@ export function opMographPlace(doc, op, context = {}) {
   }
   const at = Number(op.at), duration = Number(op.duration);
   if (!(at >= 0) || !(duration > 0)) throw new CapcutError('mograph.place: bad at/duration.', { code: 'BAD_TIME', exitCode: 2 });
+  // The box is in the pixels of the canvas the graphic was rendered for; on a draft with another
+  // canvas the arithmetic below would put it in the wrong place at the wrong size.
+  const rendered = op.canvas || loadProfile().canvas;
+  const drawn = doc.canvas_config;
+  if (drawn && Number.isFinite(drawn.width) && Number.isFinite(drawn.height)
+    && (drawn.width !== rendered.width || drawn.height !== rendered.height)) {
+    throw new CapcutError(`mograph.place: the draft is ${drawn.width}×${drawn.height} but ${op.id} was rendered for `
+      + `${rendered.width}×${rendered.height}; use a profile whose canvas matches the draft.`, { code: 'MOGRAPH_CANVAS', exitCode: 2 });
+  }
   const owns = s => s.desc === mographDesc(op.id) || s.desc === mographSfxDesc(op.id);
   // resetLevels opts back into the palette levels instead of carrying hand-set ones.
   const levels = op.resetLevels ? [] : snapshotLevels(doc, owns);

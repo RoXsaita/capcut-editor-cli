@@ -106,6 +106,10 @@ jobs:
       - name: Test standalone caption engine
         run: python -m unittest discover -s test -p test_caption_generate.py
 
+      # The watcher's privacy gates decide what leaves the machine; synthetic events only.
+      - name: Test watcher privacy gates
+        run: python -m unittest discover -s tools/watcher -p 'test_*.py'
+
       - name: Compile Python helpers
         run: python -m compileall -q tools
 
@@ -114,6 +118,9 @@ jobs:
 
       - name: Run frame QA self-tests
         run: python tools/frame_qa.py --selftest
+
+      - name: Run Claude timeline redaction self-tests
+        run: python tools/claude_timeline.py --selftest
 
       # The X-ray self-test builds and measures real media, so it needs ffmpeg like the node job.
       - name: Install ffmpeg

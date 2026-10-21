@@ -264,11 +264,21 @@ def _atomic_write(path, text):
 
 # ---------------------------------------------------------------- exact extraction
 
-_SHOWINFO = re.compile(r"\bn:\s*(\d+)\s+pts:\s*(-?\d+)")
+_SHOWINFO = re.compile(r"\bn:\s*(\d+)\s+pts:\s*(-?\d+)(?:[^\n]*?\biskey:\s*(\d)\s+type:\s*(\S))?")
 
 
 def _parse_showinfo(stderr):
     return [int(m.group(2)) for m in _SHOWINFO.finditer(stderr)]
+
+
+def _parse_showinfo_rows(stderr):
+    """(pts, keys, types) per decoded frame, the same fields build_ledger reads from ffprobe."""
+    pts, keys, types = [], [], []
+    for m in _SHOWINFO.finditer(stderr):
+        pts.append(int(m.group(2)))
+        keys.append(m.group(3) == "1")
+        types.append(m.group(4) or "?")
+    return pts, keys, types
 
 
 def extract(video, ledger, frames, out_dir, crop=None, width=None, force_decode=False, ext="png"):
@@ -330,6 +340,9 @@ def _drain(stream, sink):
 
 
 def scan_video(video, ledger, info):
+    """Per-frame measurements from one decode. The result also carries the decode's own pts,
+    keys and types, so `scan` builds the ledger from it instead of decoding a second time;
+    pass ledger=None for that, or a ledger to check the decode against it."""
     w, h = int(info["video"]["width"]), int(info["video"]["height"])
     sw = min(SCAN_WIDTH, w - w % 2)
     sh = max(2, round(h * sw / w / 2) * 2)
@@ -389,12 +402,16 @@ def scan_video(video, ledger, info):
     stderr = "".join(errs)
     if rc:
         fail(f"ffmpeg failed while scanning {video}: {stderr.strip()[-300:]}")
-    got = _parse_showinfo(stderr)
+    got, keys, types = _parse_showinfo_rows(stderr)
     n = len(cols["mean"])
-    if n != ledger["frames"] or got != ledger["pts"]:
+    if n != len(got):
+        fail(f"scan read {n} raw frames but ffmpeg reported {len(got)}; "
+             "no frame index can be trusted")
+    if ledger is not None and (n != ledger["frames"] or got != ledger["pts"]):
         fail(f"scan decoded {n} frames but the ledger has {ledger['frames']}; "
              "the decode and the ledger disagree, so no frame index can be trusted")
     return {
+        "pts": got, "keys": keys, "types": types,
         "scan_size": [sw, sh], "tiles": [tx, ty], "tile_px": TILE,
         "cols": {k: np.array(v, np.float32) for k, v in cols.items()},
         "td1": np.stack(td1), "td2": np.stack(td2), "td3": np.stack(td3),
@@ -546,7 +563,15 @@ def decode_audio(video, rate=48000):
     return np.frombuffer(r.stdout, np.float32).reshape(-1, 2), rate
 
 
-_EBU_LINE = re.compile(r"t:\s*([\d.]+)\s+TARGET.*?M:\s*(-?[\d.]+|-inf)\s+S:\s*(-?[\d.]+|-inf)")
+# One ebur128 frame-log line per 100 ms: "t: 1.2  TARGET:-23 LUFS  M: -20.1 S: -21.0 ... FTPK: -3.1 -3.4 dBFS".
+# Each line is read once, so the momentary and true-peak series always line up; a value ffmpeg
+# prints as -inf, inf or nan (versions differ) is None rather than a dropped frame.
+_EBU_FRAME = re.compile(r"t:\s*([\d.]+)\s+TARGET")
+_EBU_M = re.compile(r"\bM:\s*(\S+)")
+_EBU_S = re.compile(r"\bS:\s*(\S+)")
+# With peak=true the same line carries FTPK: the true peak of that 100 ms frame, one value per channel.
+_EBU_FTPK = re.compile(r"FTPK:\s*(.*?)\s*dBFS")
+TRUE_PEAK_FRAME_S = 0.1
 
 
 def loudness(video):
@@ -560,17 +585,61 @@ def loudness(video):
     def grab(pattern):
         m = re.search(pattern, summary, re.S)
         return float(m.group(1)) if m and m.group(1) not in ("-inf", "inf") else None
-    series = [(float(t), _num(m), _num(s)) for t, m, s in _EBU_LINE.findall(text)]
+    series, ftpk = [], []
+    for line in text.splitlines():
+        frame = _EBU_FRAME.search(line)
+        if not frame:
+            continue
+        t = float(frame.group(1))
+        m, s = _EBU_M.search(line), _EBU_S.search(line)
+        series.append((t, _num(m.group(1)) if m else None, _num(s.group(1)) if s else None))
+        pk = _EBU_FTPK.search(line)
+        if pk:
+            peaks = [v for v in (_num(x) for x in pk.group(1).split()) if v is not None]
+            ftpk.append((t, max(peaks) if peaks else None))
     return {
         "integrated_lufs": grab(r"Integrated loudness:\s*I:\s*(-?[\d.]+|-inf)"),
         "lra_lu": grab(r"Loudness range:\s*LRA:\s*(-?[\d.]+)"),
         "true_peak_dbtp": grab(r"True peak:\s*Peak:\s*(-?[\d.]+|-inf)"),
         "momentary": series,
+        "frame_true_peak": ftpk,
     }
 
 
+def hot_peaks(frame_true_peak, ceiling, top=3):
+    """The loudest stretches over the true-peak ceiling: each logged frame t covers
+    [t - 0.1, t]; touching windows merge. -> [{t0, t1, peak_dbtp}], loudest first."""
+    merged = []
+    for t, pk in sorted(frame_true_peak or [], key=lambda r: r[0]):
+        if pk is None or pk <= ceiling:
+            continue
+        t0, t1 = max(0.0, t - TRUE_PEAK_FRAME_S), t
+        if merged and t0 <= merged[-1]["t1"] + 1e-3:
+            merged[-1]["t1"] = round(t1, 3)
+            merged[-1]["peak_dbtp"] = max(merged[-1]["peak_dbtp"], pk)
+        else:
+            merged.append({"t0": round(t0, 3), "t1": round(t1, 3), "peak_dbtp": pk})
+    return sorted(merged, key=lambda w: -w["peak_dbtp"])[:top]
+
+
+def overlapping_sound(draft, t0, t1):
+    """Draft audio and video events under [t0, t1]: the layers that can make that peak."""
+    out = []
+    for e in (draft or {}).get("events") or []:
+        if e.get("type") in ("audio", "video") and e["t0"] < t1 and e["t1"] > t0:
+            item = {"track": e["track"], "label": e.get("label", "")}
+            if "volume_db" in e:
+                item["volume_db"] = e["volume_db"]
+            out.append(item)
+    return out
+
+
 def _num(v):
-    return None if v in ("-inf", "inf") else float(v)
+    try:
+        x = float(v)
+    except ValueError:
+        return None
+    return x if math.isfinite(x) else None
 
 
 def _db(x):
@@ -851,9 +920,11 @@ def cmd_scan(args):
     out.mkdir(parents=True, exist_ok=True)
     ident = file_identity(video)
     info = probe_streams(video)
-    ledger = build_ledger(video, info)
+    # One decode: the scan reports every frame's pts, key flag and type, and the ledger is
+    # built from that rather than from a second full ffprobe decode.
+    scan = scan_video(video, None, info)
+    ledger = _ledger_from(info, scan["pts"], scan["keys"], scan["types"])
     _save_ledger(out, ledger, info, {k: ident[k] for k in ("path", "bytes", "mtime_ns", "sha256")})
-    scan = scan_video(video, ledger, info)
     vid = detect_video(scan, ledger)
     fps = 1 / (ledger["frame_step_pts"]["median"] * ledger["_tb"])
     sx = int(info["video"]["width"]) / scan["scan_size"][0]
@@ -1017,7 +1088,7 @@ def build_verdicts(vid, audio, draft, ledger, sx, dims=(0, 0)):
 
     v.append({"property": "export.ledger", "verdict": "PASS", "origin": "M",
               "detail": f"{ledger['frames']} frames, strictly increasing PTS, "
-                        f"{'constant' if ledger['constant_rate'] else 'variable'} frame step; scan decode matched every PTS"})
+                        f"{'constant' if ledger['constant_rate'] else 'variable'} frame step; built from the scan decode"})
     by = {}
     for f in vid["findings"]:
         by.setdefault(f["kind"], []).append(f)
@@ -1091,8 +1162,27 @@ def build_verdicts(vid, audio, draft, ledger, sx, dims=(0, 0)):
         add("audio.loudness", "UNKNOWN" if il is None or abs(il - target) > tol else "PASS",
             f"{il} LUFS integrated (profile target {target} ±{tol} LU), LRA {L.get('lra_lu')} LU")
         tp = L.get("true_peak_dbtp")
-        add("audio.true_peak", "UNKNOWN" if tp is None else ("PASS" if tp <= P["true_peak_dbtp"] + 0.05 else "FAIL"),
-            f"{tp} dBTP (policy ≤ {P['true_peak_dbtp']})")
+        tp_verdict = "UNKNOWN" if tp is None else ("PASS" if tp <= P["true_peak_dbtp"] + 0.05 else "FAIL")
+        tp_detail, tp_where = f"{tp} dBTP (policy ≤ {P['true_peak_dbtp']})", None
+        if tp_verdict == "FAIL":
+            # Name when (and with --project, which layers) so the fix is one `volume`, not a hunt.
+            hot = hot_peaks(L.get("frame_true_peak"), P["true_peak_dbtp"])
+            parts = []
+            for w in hot:
+                part = f"{fmt_t(w['t0'])}-{fmt_t(w['t1'])} {w['peak_dbtp']:.1f}"
+                layers = overlapping_sound(draft, w["t0"], w["t1"])
+                if layers:
+                    w["layers"] = layers
+                    part += " [" + "; ".join(
+                        f"track {x['track']} {x['label'][:30]}" + (f" {x['volume_db']} dB" if "volume_db" in x else "")
+                        for x in layers) + "]"
+                parts.append(part)
+            if hot:
+                last = ledger["duration_s"] - 1e-6
+                tp_detail += "; hottest: " + ", ".join(parts)
+                tp_where = [[frame_at(ledger, min(w["t0"], last)), frame_at(ledger, min(w["t1"], last))] for w in hot]
+            L["hot_peaks"] = hot
+        add("audio.true_peak", tp_verdict, tp_detail, where=tp_where)
         kinds = {}
         for f in audio["findings"]:
             kinds.setdefault(f["kind"], []).append(f)
@@ -1585,6 +1675,31 @@ def _selftest_text(check):
             check("its box sits where it was drawn", 1180 <= y <= 1230 and 50 <= h <= 130, f"y={y:.0f} h={h:.0f}")
 
 
+def _selftest_jev_errors(check):
+    """A per-call error that quotes the key must reach xray.json with the key masked."""
+    import xray_intent as xi
+    fake_key = "selftest" + "-not-a-key-" + "4242"
+    saved = (xi.jev_python, os.environ.get("TYPESAFE_API_KEY"))
+    with tempfile.TemporaryDirectory() as td:
+        child = Path(td) / "python"
+        child.write_text('#!/bin/sh\ncat >/dev/null\n'
+                         'printf \'{"beats": {}, "triage": {}, "errors": ["beats: AuthError: bad key %s"]}\' '
+                         '"$TYPESAFE_API_KEY"\n')
+        child.chmod(0o755)
+        xi.jev_python = lambda: child
+        os.environ["TYPESAFE_API_KEY"] = fake_key
+        try:
+            errors = xi.ask_jev(beats=[{"id": "b000"}])["errors"]
+        finally:
+            xi.jev_python = saved[0]
+            if saved[1] is None:
+                os.environ.pop("TYPESAFE_API_KEY", None)
+            else:
+                os.environ["TYPESAFE_API_KEY"] = saved[1]
+    check("Jev per-call errors mask the key", len(errors) == 1 and "***" in errors[0] and fake_key not in errors[0],
+          f"{errors}")
+
+
 def cmd_bench(args):
     need("ffmpeg")
     import xray_bench as xb
@@ -1628,6 +1743,10 @@ def cmd_selftest(_args):
             k = frame_at(ledger, n / 30 + 0.001)
             check(f"time {n / 30 + 0.001:.3f}s maps to frame {n}", k == n, f"got {k}")
         scan = scan_video(video, ledger, info)
+        own = _ledger_from(info, scan["pts"], scan["keys"], scan["types"])
+        same = {k: own[k] == ledger[k] for k in ("pts", "key", "types", "frames")}
+        check("the scan-built ledger equals the ffprobe ledger", all(same.values()),
+              f"{same}, types {own['types'][:12]!r} vs {ledger['types'][:12]!r}")
         vid = detect_video(scan, ledger)
         kinds = {(f["kind"], tuple(f["frames"])) for f in vid["findings"]}
         check("black frame at 40", ("black_frames", (40, 40)) in kinds)
@@ -1669,6 +1788,11 @@ def cmd_selftest(_args):
         check("queue commands quote hostile filenames",
               shlex.split(f"capcutctl xray window {shlex.quote(hostile)} --frames 1-2")[3] == hostile)
         check("true peak measured", lo["true_peak_dbtp"] is not None and lo["true_peak_dbtp"] > -1.0, f"{lo['true_peak_dbtp']}")
+        hot = hot_peaks(lo["frame_true_peak"], -1.0)
+        check("the hottest true-peak window holds the clipping at 3.0s",
+              bool(hot) and hot[0]["t0"] - 0.15 <= 3.0 <= hot[0]["t1"] + 0.15, f"{hot}")
+        check("momentary series is unchanged by the true-peak log", len(lo["momentary"]) == len(lo["frame_true_peak"]) > 0,
+              f"{len(lo['momentary'])} momentary, {len(lo['frame_true_peak'])} true-peak frames")
     noted = proxy_notes([{"property": "video.one_or_two_frame_glitch", "verdict": "FAIL", "detail": "1 event(s)"},
                          {"property": "video.stutter", "verdict": "UNKNOWN", "detail": "1 event(s)"},
                          {"property": "export.canvas", "verdict": "FAIL", "detail": "360x640 at 6 fps"},
@@ -1679,6 +1803,7 @@ def cmd_selftest(_args):
     kept = proxy_notes([{"property": "video.white_flash", "verdict": "FAIL", "detail": "x"}], 30000 / 1001)
     check("a full-rate scan keeps the FAIL", kept[0]["verdict"] == "FAIL")
     _selftest_text(check)
+    _selftest_jev_errors(check)
     failed = [c for c in checks if not c[1]]
     print(f"xray selftest: {len(checks) - len(failed)}/{len(checks)} passed")
     return 1 if failed else 0

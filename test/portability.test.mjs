@@ -7,6 +7,7 @@ import test from 'node:test';
 import {
   BUNDLED_ASSET_DIR, assetSearchRoots, loadPreset, preflight, presetFile, hasBinary,
 } from '../src/core.mjs';
+import { tmpDir } from './helpers/tmp.mjs';
 
 /**
  * These guard the answer to "someone clones this and it works".
@@ -31,7 +32,7 @@ test('the overlays the built-in layouts need ship with the package', () => {
 
 test('the bundle is searched before any home directory, and after an explicit override', () => {
   const previous = process.env.CAPCUTCTL_ASSET_DIR;
-  const mine = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-assets-'));
+  const mine = tmpDir('capcutctl-assets-');
   try {
     process.env.CAPCUTCTL_ASSET_DIR = mine;
     const roots = assetSearchRoots(['~/Downloads/Media/Images/2026']);
@@ -48,7 +49,7 @@ test('the bundle is searched before any home directory, and after an explicit ov
 
 test('binary discovery uses PATH directly instead of requiring an external which command', () => {
   const previous = process.env.PATH;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-path-'));
+  const dir = tmpDir('capcutctl-path-');
   const binary = path.join(dir, 'fixture-tool');
   try {
     fs.writeFileSync(binary, '#!/bin/sh\nexit 0\n');
@@ -64,7 +65,7 @@ test('binary discovery uses PATH directly instead of requiring an external which
 
 test('CAPCUTCTL_PRESET_DIR overrides one preset and falls back for the rest', () => {
   const previous = process.env.CAPCUTCTL_PRESET_DIR;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-presets-'));
+  const dir = tmpDir('capcutctl-presets-');
   try {
     fs.writeFileSync(path.join(dir, 'sfx.json'), JSON.stringify({ audioTemplates: {}, transitionTemplates: {} }));
     process.env.CAPCUTCTL_PRESET_DIR = dir;
@@ -115,7 +116,7 @@ test('preflight names every environment problem and the command that fixes it', 
 });
 
 test('preflight exercises the toolchain and reports writable disk capacity', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-preflight-'));
+  const root = tmpDir('capcutctl-preflight-');
   const calls = [];
   const binaries = new Set(['ffmpeg', 'ffprobe', 'mlx_whisper', 'python3', 'swiftc']);
   // The declared runtime, stubbed: preflight must probe whatever this resolves to, and the
@@ -160,7 +161,7 @@ test('preflight exercises the toolchain and reports writable disk capacity', () 
 });
 
 test('preflight fails closed when a probe hangs or the drafts volume is full', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-preflight-fail-'));
+  const root = tmpDir('capcutctl-preflight-fail-');
   const report = preflight({
     root,
     binaryCheck: () => true,
@@ -183,7 +184,7 @@ test('preflight fails closed when a probe hangs or the drafts volume is full', (
 });
 
 test('preflight requires the declared Python runtime even when mlx_whisper itself is runnable', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-preflight-python-'));
+  const root = tmpDir('capcutctl-preflight-python-');
   const report = preflight({
     root,
     binaryCheck: name => name !== 'python3',
@@ -203,8 +204,8 @@ test('preflight requires the declared Python runtime even when mlx_whisper itsel
 
 test('preflight reports malformed presets instead of aborting the diagnostic', () => {
   const previous = process.env.CAPCUTCTL_PRESET_DIR;
-  const presets = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-broken-presets-'));
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-preflight-root-'));
+  const presets = tmpDir('capcutctl-broken-presets-');
+  const root = tmpDir('capcutctl-preflight-root-');
   try {
     fs.writeFileSync(path.join(presets, 'layouts.json'), '{broken');
     fs.writeFileSync(path.join(presets, 'sfx.json'), '{broken');
@@ -234,7 +235,7 @@ test('polish skips sounds this machine does not have instead of writing broken r
   // "Transaction failed validation with 12 error(s)" — a valid project refusing to be polished
   // because of someone else's ~/Library. Now the sounds that are missing are skipped and named.
   const previous = process.env.CAPCUTCTL_PRESET_DIR;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-absent-sfx-'));
+  const dir = tmpDir('capcutctl-absent-sfx-');
   try {
     const palette = JSON.parse(fs.readFileSync(path.join(BUNDLED_ASSET_DIR, '..', 'presets', 'sfx.json'), 'utf8'));
     for (const kind of ['audioTemplates', 'transitionTemplates']) {
@@ -273,7 +274,7 @@ test('new --blank works on a machine with no CapCut drafts at all', async () => 
   const { createProject } = await import('../src/create.mjs');
   const { readJson } = await import('../src/core.mjs');
 
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-empty-root-'));
+  const root = tmpDir('capcutctl-empty-root-');
   const media = path.join(root, 'face.mp4');
   fs.writeFileSync(media, 'face-bytes');
 
@@ -293,6 +294,39 @@ test('new --blank works on a machine with no CapCut drafts at all', async () => 
   // a stray empty lane sitting above the real one in CapCut.
   const empties = doc.tracks.filter(t => t.type === 'video' && t.flag === 2 && !(t.segments || []).length);
   assert.deepEqual(empties, [], 'no stray empty overlay lane');
+});
+
+test('add works on a fresh new --blank project, modelled on the bundled skeleton', async () => {
+  // A blank project has no video segment to clone, so the first `add` died NO_TEMPLATE, and
+  // the material fell back to a two-key stub CapCut does not recognise as media.
+  const { createProject } = await import('../src/create.mjs');
+  const { applySpec, readJson, validateDocument } = await import('../src/core.mjs');
+
+  const root = tmpDir('capcutctl-blank-add-');
+  const created = createProject('fresh', { root, blank: true, forceRunning: true });
+  const still = path.join(root, 'card.png');
+  fs.writeFileSync(still, 'png-bytes');
+  applySpec(created.project, { version: 1, name: 'add', operations: [{
+    op: 'clip.add', media: still, at: 0, duration: 3, track: 'content', volume: 0,
+    width: 1080, height: 1920, mediaDuration: 10_800_000_000,
+  }] }, { forceRunning: true });
+
+  const skeleton = loadPreset('blank-draft').videoMaterialTemplate;
+  const doc = readJson(path.join(created.project, 'draft_info.json'));
+  assert.equal(doc.tracks[0].segments.length, 0, 'the main/cover track stays empty');
+  const placed = doc.tracks.filter(t => (t.segments || []).length);
+  assert.equal(placed.length, 1);
+  assert.equal(placed[0].flag, 2, 'the clip landed on an overlay track');
+  assert.equal(placed[0].segments.length, 1);
+  const material = doc.materials.videos.find(m => m.id === placed[0].segments[0].material_id);
+  assert.equal(material.width, 1080);
+  assert.equal(material.height, 1920);
+  // Everything but what neutralVideoMaterial deliberately strips (origin, beauty, matting).
+  const stripped = /^(capcutctl_|derived_from_|beauty_)|^(original_path|source_path|source_take_id|matting|video_algorithm|stable)$/;
+  for (const key of Object.keys(skeleton).filter(k => !stripped.test(k))) {
+    assert.ok(key in material, `material keeps the skeleton key ${key}`);
+  }
+  assert.deepEqual(validateDocument(doc, { checkFiles: false, projectDir: created.project }), []);
 });
 
 test('the bundled draft skeleton carries no trace of the project it was harvested from', () => {

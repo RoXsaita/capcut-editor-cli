@@ -25,6 +25,10 @@ import wave
 from pathlib import Path
 
 SPEECH, SOFT, SIL = -28.0, -45.0, -55.0     # dB thresholds, tuned on this user's cam audio
+# Seam dead air (see lint): incoming-side silence, and tail + head together. SOFT and these two
+# are mirrored in src/stress.mjs (SOFT_DB, SEAM_HEAD_MAX_S, SEAM_TOTAL_MAX_S) for the gate's
+# draft-level seam-silence check; change them together.
+SEAM_HEAD_MAX_S, SEAM_TOTAL_MAX_S = 0.30, 0.45
 FIRST_WORD_CLIP_TOLERANCE_FRAMES = 0.5
 SOURCE_SAMPLE_BYTES = 64 * 1024
 ENERGY_INDEX_VERSION = 2
@@ -70,6 +74,65 @@ def source_token(media):
         # vocabulary. Both values are derived from the same digest.
         "fingerprint": content_hash,
     }
+
+
+def _token_hash(token):
+    if not isinstance(token, dict):
+        return None
+    value = token.get("content_hash", token.get("fingerprint"))
+    return value if isinstance(value, str) and value else None
+
+
+def _token_int(token, *keys):
+    for key in keys:
+        value = token.get(key)
+        if isinstance(value, bool):
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def same_source(stored, current):
+    """Whether a cache stamped with `stored` describes the media whose token is `current`.
+
+    Always: the same size and the same content hash. On the same inode (the file itself) the
+    mtime_ns must match too: the content hash only samples five 64 KiB windows, so a same-size
+    rewrite in place (a re-rendered stem with a muted or ducked stretch) can keep it, and the
+    mtime is what catches that. src/video-index.mjs applies the same rule. A different inode
+    is a copy or a relink (a project's `Downloads__take.mp4`), which carries no mtime of its
+    own; the bytes are its evidence.
+    """
+    if not isinstance(stored, dict) or not isinstance(current, dict):
+        return False
+    digest = _token_hash(stored)
+    if digest is None or digest != _token_hash(current):
+        return False
+    try:
+        if int(stored.get("size")) != int(current.get("size")):
+            return False
+    except (TypeError, ValueError):
+        return False
+    stored_ino, current_ino = _token_int(stored, "ino", "inode"), _token_int(current, "ino", "inode")
+    if stored_ino is not None and stored_ino == current_ino:
+        stored_mtime, current_mtime = _token_int(stored, "mtime_ns"), _token_int(current, "mtime_ns")
+        if stored_mtime is not None and stored_mtime != current_mtime:
+            return False
+    return True
+
+
+def source_key(token):
+    """The short content key in a cache file name: `<stem>.<kind>.<key>.json`.
+
+    Two takes both named screen.mp4 get two files instead of overwriting one, and a copy of a
+    take finds the original's file by this key without reading any JSON.
+    """
+    digest = _token_hash(token)
+    if digest is None:
+        raise ValueError("source token has no content hash")
+    return digest[:16]
 
 
 def _write_json_atomic(path, value):
@@ -128,17 +191,28 @@ class AudioIndex:
         cd = os.path.abspath(os.path.expanduser(cache_dir))
         os.makedirs(cd, exist_ok=True)
         stem = os.path.basename(media).rsplit(".", 1)[0]
-        key = os.path.join(cd, stem + f".energy{bin_ms}.json")
         token = AudioIndex._token(media)
-        if not force and os.path.exists(key):
+        # `<stem>.energy10.<key>.json`: the kind marker stays right after the stem so the
+        # `${stem}.energy10` prefix readers in src/video-index.mjs still match. The legacy
+        # `<stem>.energy10.json` is read when its token matches and is never overwritten:
+        # it may belong to another take of the same name.
+        key = os.path.join(cd, stem + f".energy{bin_ms}.{source_key(token)}.json")
+        legacy = os.path.join(cd, stem + f".energy{bin_ms}.json")
+        for candidate in ([] if force else [key, legacy]):
+            if not os.path.exists(candidate):
+                continue
             try:
-                d = json.loads(Path(key).read_text(encoding="utf-8"))
+                d = json.loads(Path(candidate).read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError, TypeError):
                 d = None
-            if (isinstance(d, dict) and d.get("version") == ENERGY_INDEX_VERSION and d.get("token") == token
+            if (isinstance(d, dict) and d.get("version") == ENERGY_INDEX_VERSION and same_source(d.get("token"), token)
                     and isinstance(d.get("db"), list) and d["db"]
                     and all(isinstance(value, (int, float)) and math.isfinite(value) for value in d["db"])
                     and isinstance(d.get("bin"), (int, float)) and math.isfinite(d["bin"]) and d["bin"] > 0):
+                if candidate != key or d.get("token") != token:
+                    # A legacy unkeyed file (or a keyed one stamped by a copy): write the keyed
+                    # file with the current token. The legacy file is left alone.
+                    _write_json_atomic(key, {**d, "token": token})
                 return AudioIndex(d["db"], d["bin"], media, token=token)
 
         wav = media
@@ -164,7 +238,7 @@ class AudioIndex:
 
         idx.path = media
         idx.token = token
-        if source_token(media) != token:
+        if not same_source(token, source_token(media)):
             raise RuntimeError("media changed while its energy index was being built; rerun indexing")
         _write_json_atomic(key, {"version": ENERGY_INDEX_VERSION, "bin": idx.bin, "db": idx.db, "token": token})
         return idx
@@ -221,6 +295,37 @@ class AudioIndex:
                        ('#' if self.at(t) > SPEECH else ('o' if self.at(t) > SOFT else '.')))
             t += bin_s; i += 1
         return "".join(out)
+
+
+def snap_word_starts(idx, words, max_lead=0.7, min_gap=0.05, lead=1/30, min_dur=0.08):
+    """Move Whisper word starts that sit in silence to just before the sound begins.
+
+    Whisper stretches a word's start back into the pause before it, so a one-word caption
+    shows before the word is said. When at least ``min_gap`` of silence follows a start and
+    sound begins within ``max_lead``, the start moves to ``onset - lead`` (never earlier than
+    it was, never closer than ``min_dur`` to the word's end). The original start is kept as
+    ``start_whisper``. Mutates ``words`` in place and returns how many moved.
+    """
+    moved = 0
+    for word in words:
+        try:
+            start, end = float(word["start"]), float(word["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (math.isfinite(start) and math.isfinite(end)) or end <= start:
+            continue
+        if idx.at(start) >= SOFT or idx.head_silence(start, cap=max_lead) < min_gap:
+            continue
+        onset = idx.onset_after(start, cap=max_lead)
+        if onset is None:
+            continue
+        snapped = max(start, onset - lead)
+        if snapped <= start + 1e-9 or snapped > end - min_dur:
+            continue
+        word.setdefault("start_whisper", start)
+        word["start"] = round(snapped, 3)
+        moved += 1
+    return moved
 
 
 def _span_fields(span):
@@ -325,6 +430,12 @@ def lint(idx, spans, fps=30.0, first_word_starts=None, loud_threshold=SOFT):
             shown = str(word.get("word") or "first word").strip()
             f.append(f"{lbl} IN FIRST_WORD_CLIPPED  {a:.3f} starts "
                      f"{a - float(word['start']):.3f}s after trusted {shown!r} at {float(word['start']):.3f}")
+        # --- IN inside sound: a later clip that starts loud, with no quiet frame before it,
+        # was cut mid-word (a recovery or snap that landed inside continuous speech). The
+        # first clip is exempt: the video starting on speech is not a splice.
+        if i > 0 and idx.at(a) >= loud_threshold and idx.tail_silence(a) < frame:
+            f.append(f"{lbl} IN LOUD_BOUNDARY  {a:.3f}  boundary is loud ({idx.at(a):.0f}dB) "
+                     f"with no quiet frame before it; this IN cuts into a word")
         # --- first clip: a lead-in is desirable, only an excessive one is a fault
         if i == 0 and idx.head_silence(a) > 0.60:
             f.append(f"{lbl} IN  {a:.3f}  {idx.head_silence(a):.2f}s before the video starts")
@@ -342,7 +453,7 @@ def lint(idx, spans, fps=30.0, first_word_starts=None, loud_threshold=SOFT):
         if i+1 < len(spans):
             nl, na, _, _ = _span_fields(spans[i+1])
             tail, head = idx.tail_silence(b), idx.head_silence(na)
-            if head > 0.30:
+            if head > SEAM_HEAD_MAX_S:
                 on = idx.onset_after(na)
                 if on is None:
                     f.append(f"{lbl}->{nl} SEAM  {head:.2f}s dead air on the incoming side "
@@ -350,7 +461,7 @@ def lint(idx, spans, fps=30.0, first_word_starts=None, loud_threshold=SOFT):
                 else:
                     f.append(f"{lbl}->{nl} SEAM  {head:.2f}s dead air on the incoming side "
                              f"(tail {tail:.2f}s) -> move {nl} IN to {on-2*frame:.3f}")
-            elif tail + head > 0.45:
+            elif tail + head > SEAM_TOTAL_MAX_S:
                 f.append(f"{lbl}->{nl} SEAM  {tail+head:.2f}s total stitched pause "
                          f"(tail {tail:.2f} + head {head:.2f})")
     return f

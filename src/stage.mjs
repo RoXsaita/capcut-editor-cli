@@ -12,8 +12,8 @@
  * between — and names the files, so the user's CapCut edits are never overwritten. A freshly
  * staged copy is repaired first (repair.mjs): CapCut's last save may have stripped metadata.
  *
- * Copies use copy-on-write clones (APFS clonefile), so staging a draft with gigabytes of
- * Resources is instant on a Mac and costs no disk until a file diverges.
+ * Copies use copy-on-write clones (APFS clonefile via `cp -c`, see core.cloneOrCopy), so staging
+ * a draft with gigabytes of Resources is instant on a Mac and costs no disk until a file diverges.
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -21,7 +21,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
-  CapcutError, LIVE_FILE_NAMES, STAGE_MARKER, STAGE_OF, activeStage, commitProjectFiles, isStageDir,
+  CapcutError, LIVE_FILE_NAMES, STAGE_MARKER, STAGE_OF, activeStage, commitProjectFiles, copyTree, isStageDir,
   readJson, repairProject, sha256, stableJson,
 } from './core.mjs';
 
@@ -99,13 +99,31 @@ function readMarker(liveDir) {
   return marker;
 }
 
-/** Clone a draft folder without capcutctl's history, locks or stage markers. */
-export function copyDraftTree(from, to) {
+/**
+ * Clone a draft folder without capcutctl's history, locks or stage markers (nor whatever
+ * `extraSkip(rel)` also refuses). Timestamps are kept: the stage compares big media by size and
+ * mtime, so a copy with fresh mtimes would read as a draft CapCut kept saving.
+ */
+export function copyDraftTree(from, to, { extraSkip = null } = {}) {
   fs.mkdirSync(path.dirname(to), { recursive: true });
-  fs.cpSync(from, to, {
-    recursive: true, mode: fs.constants.COPYFILE_FICLONE, preserveTimestamps: true,
-    filter: src => !skipped(posix(path.relative(from, src))),
-  });
+  copyTree(from, to, { preserveTimestamps: true, filter: rel => !skipped(rel) && !(extraSkip && extraSkip(rel)) });
+}
+
+/**
+ * A copy of a draft that is its own draft: the tree (see copyDraftTree), then every path baked
+ * into its JSON (localized media, renders, sidecars) moved from the source folder to the copy,
+ * so the copy never plays — or loses — the source's media.
+ */
+export function cloneDraft(from, to, { extraSkip = null } = {}) {
+  copyDraftTree(from, to, { extraSkip });
+  const rewritten = [];
+  for (const rel of listFiles(to).filter(isText)) {
+    const file = path.join(to, rel);
+    const text = fs.readFileSync(file, 'utf8');
+    const moved = rewritePaths(text, from, to);
+    if (moved !== text) { fs.writeFileSync(file, moved); rewritten.push(rel); }
+  }
+  return { rewritten };
 }
 
 /** Copy the live draft out of CapCut's folder and point every later command at the copy. */
@@ -233,9 +251,60 @@ export function commitStage(liveDir, { dryRun = false, forceRunning = false, pro
       check: () => { const again = stagePlan(liveDir); if (again.conflicts.length) throw conflictError(again); },
     });
   }
+  // The stage's snapshots are the undo history of the whole staged session; deleting the
+  // stage with them left only the one before-stage-commit snapshot to go back to.
+  let historyCarried;
+  try {
+    historyCarried = carryHistory(plan.stage, liveDir);
+  } catch (error) {
+    historyCarried = { error: error.message, stage: plan.stage };
+  }
   fs.rmSync(path.join(liveDir, STAGE_MARKER), { force: true });
-  fs.rmSync(plan.stage, { recursive: true, force: true });
-  return { ...summary, ...result, committed: true };
+  if (Array.isArray(historyCarried)) fs.rmSync(plan.stage, { recursive: true, force: true });
+  return { ...summary, ...result, committed: true, historyCarried };
+}
+
+/**
+ * Copy every stage snapshot into the live draft's history, as a snapshot OF the live draft: the
+ * paths inside point at the live folder, each checksum is recomputed over the rewritten bytes,
+ * and the manifest names the live folder. A name already taken gets `-staged`. Returns the names.
+ */
+export function carryHistory(stage, liveDir) {
+  const from = path.join(stage, '.capcutctl', 'history');
+  if (!fs.existsSync(from)) return [];
+  const to = path.join(liveDir, '.capcutctl', 'history');
+  fs.mkdirSync(to, { recursive: true });
+  const carried = [];
+  for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
+    const manifestFile = path.join(from, entry.name, 'manifest.json');
+    if (!entry.isDirectory() || !fs.existsSync(manifestFile)) continue;
+    let name = entry.name;
+    for (let n = 1; fs.existsSync(path.join(to, name)); n++) name = `${entry.name}-staged${n > 1 ? `-${n}` : ''}`;
+    const target = path.join(to, name);
+    const temp = `${target}.capcutctl-staged`;
+    fs.rmSync(temp, { recursive: true, force: true });
+    try {
+      const manifest = readJson(manifestFile);
+      for (const item of manifest.files || []) {
+        const source = path.join(from, entry.name, item.relative);
+        const file = path.join(temp, item.relative);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        const bytes = isText(item.relative)
+          ? Buffer.from(rewritePaths(fs.readFileSync(source, 'utf8'), stage, liveDir), 'utf8')
+          : fs.readFileSync(source);
+        fs.writeFileSync(file, bytes);
+        item.sha256 = sha256(bytes);
+      }
+      manifest.projectDir = liveDir;
+      fs.writeFileSync(path.join(temp, 'manifest.json'), stableJson(manifest));
+      fs.renameSync(temp, target);
+    } catch (error) {
+      fs.rmSync(temp, { recursive: true, force: true });
+      throw error;
+    }
+    carried.push(name);
+  }
+  return carried;
 }
 
 export function discardStage(liveDir) {

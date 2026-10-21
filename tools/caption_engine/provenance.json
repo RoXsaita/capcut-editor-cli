@@ -2,7 +2,7 @@
   "source": "RoXsaita/Openclaw dashboard/caption_engine",
   "purpose": "Pinned Staging snapshot; standalone adapter lives outside this directory. No dashboard runtime dependency.",
   "files": {
-    "align.py": "182b768108c2d9d506787871a6747e2ba6cefaf2094ed3f531f8082ab2dfbcd4",
+    "align.py": "6c44fe2b728cdb5ac778187e40812ed6968815595b8147d6889e0a01ea83d8a6",
     "layout.py": "90e4226ceeae0b1d3a0678516d7fc81ea3ec0fd9ca907fe97f72dcaf2e0e202c",
     "apple_face_detect.swift": "af7041fe623ec032f51473969da1b716d8f9ca6803ac1f7fb3a94a8f44599a57",
     "subtitle_utils.py": "965e8053d3172fde7312e0d50786b03fddd6db3a4f7b68cf85aa160122eb2d7e",

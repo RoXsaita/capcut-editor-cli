@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>capcutctl: AI-edited CapCut projects</title>
+<meta name="description" content="capcutctl lets an AI agent edit real CapCut projects that stay editable: transactional edits, native drafts, ready-to-post checks. Open source, macOS.">
+<meta property="og:title" content="capcutctl: your AI agent edits real CapCut projects">
+<meta property="og:description" content="A raw take and a screen recording in, a native, still-editable CapCut project out.">
+<meta property="og:image" content="https://roxsaita.github.io/capcut-editor-cli/media/poster-main.jpg">
+<meta name="color-scheme" content="light dark">
+<style>
+  :root {
+    --bg: #F6F7F8;
+    --surface: #FFFFFF;
+    --ink: #0B0B14;
+    --muted: #3D3F4A;
+    --line: #C9CCD3;
+    --brand: #4040FE;
+    --on-brand: #FFFFFF;
+    --accent: #FFD84D;
+    --on-accent: #0B0B14;
+    --code-bg: #0B0B14;
+    --code-ink: #F4F4F6;
+    --link: #2A2AD6;
+    --focus: #0B0B14;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0B0B14;
+      --surface: #161622;
+      --ink: #F4F4F6;
+      --muted: #C3C5CE;
+      --line: #3A3B4A;
+      --link: #B9BAFF;
+      --code-bg: #000000;
+      --focus: #FFD84D;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0B0B14;
+    --surface: #161622;
+    --ink: #F4F4F6;
+    --muted: #C3C5CE;
+    --line: #3A3B4A;
+    --link: #B9BAFF;
+    --code-bg: #000000;
+    --focus: #FFD84D;
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 17px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  img, iframe { max-width: 100%; display: block; }
+  img { height: auto; }
+  a { color: var(--link); text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 2px; }
+  a:focus-visible, button:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; border-radius: 4px; }
+  code, pre { font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace; }
+  :not(pre) > code { font-size: .9em; background: var(--surface); border: 1px solid var(--line); border-radius: 5px; padding: .05em .35em; }
+
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 16px; }
+  section { padding: 64px 0; border-top: 1px solid var(--line); }
+  h1, h2, h3 { line-height: 1.15; letter-spacing: -.015em; margin: 0 0 .5em; }
+  h1 { font-size: clamp(2.1rem, 6vw, 3.6rem); font-weight: 800; }
+  h2 { font-size: clamp(1.6rem, 4vw, 2.3rem); font-weight: 800; }
+  h3 { font-size: 1.15rem; font-weight: 750; }
+  p { margin: 0 0 1em; }
+  .lede { font-size: 1.2rem; color: var(--muted); max-width: 38em; }
+  .eyebrow { display: inline-block; font-weight: 700; font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 12px; }
+
+  /* Header */
+  header { padding: 18px 0; }
+  header .wrap { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+  .logo { font: 800 1.15rem/1 ui-monospace, "SF Mono", Menlo, monospace; color: var(--ink); text-decoration: none; }
+  .logo span { background: var(--brand); color: var(--on-brand); padding: 2px 6px; border-radius: 4px; margin-right: 2px; }
+  nav { display: flex; gap: 18px; flex-wrap: wrap; font-weight: 600; font-size: .95rem; }
+  nav a { color: var(--ink); }
+
+  /* Hero */
+  .hero { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr); gap: 48px; align-items: center; padding-top: 40px; padding-bottom: 72px; }
+  .hero h1 mark { background: var(--accent); color: var(--on-accent); padding: 0 .12em; border-radius: 4px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+  .ctas { display: flex; flex-wrap: wrap; gap: 12px; margin: 28px 0 14px; }
+  .btn { display: inline-flex; align-items: center; gap: 8px; font-weight: 700; font-size: 1rem; padding: 13px 20px; border-radius: 10px; text-decoration: none; border: 2px solid var(--ink); }
+  .btn.primary { background: var(--brand); color: var(--on-brand); border-color: var(--brand); }
+  .btn.secondary { background: transparent; color: var(--ink); }
+  .meta { font-size: .9rem; color: var(--muted); }
+  figure { margin: 0; }
+  figcaption { font-size: .9rem; color: var(--muted); margin-top: 10px; }
+  .media-frame { background: #0B0B14; border-radius: 14px; overflow: hidden; border: 1px solid var(--line); }
+  .ba-labels { display: grid; grid-template-columns: 1fr 1fr; font-weight: 700; font-size: .85rem; text-align: center; margin-top: 10px; }
+
+  /* Demo */
+  .demo { display: grid; grid-template-columns: minmax(0, 360px) 1fr; gap: 48px; align-items: start; }
+  .short { aspect-ratio: 9 / 16; width: 100%; border: 0; border-radius: 14px; background: #000; }
+  table.facts { width: 100%; border-collapse: collapse; font-size: .95rem; }
+  .facts th, .facts td { text-align: left; vertical-align: top; padding: 10px 12px 10px 0; border-bottom: 1px solid var(--line); }
+  .facts th { font-weight: 700; width: 9em; }
+  .facts .tag { display: inline-block; font-size: .72rem; font-weight: 800; letter-spacing: .06em; padding: 1px 6px; border-radius: 4px; margin-right: 6px; vertical-align: 1px; }
+  .tag.before { border: 2px solid var(--ink); color: var(--ink); }
+  .tag.after { background: var(--ink); color: var(--bg); border: 2px solid var(--ink); }
+
+  /* Examples */
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; }
+  .card img { width: 100%; aspect-ratio: 9 / 16; object-fit: cover; background: #0B0B14; }
+  .card .body { padding: 14px 16px 18px; display: flex; flex-direction: column; gap: 6px; flex: 1; }
+  .card .body p { font-size: .93rem; color: var(--muted); margin: 0; }
+  .card .links { margin-top: auto; padding-top: 8px; font-weight: 700; font-size: .93rem; display: flex; gap: 14px; flex-wrap: wrap; }
+  .pill { align-self: flex-start; font-size: .72rem; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; border: 2px solid var(--ink); border-radius: 999px; padding: 1px 8px; }
+
+  /* Steps */
+  ol.steps { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; counter-reset: step; }
+  .steps li { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 22px; counter-increment: step; }
+  .steps li::before { content: counter(step); display: inline-grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: var(--ink); color: var(--bg); font-weight: 800; margin-bottom: 12px; }
+  .steps p { color: var(--muted); font-size: .95rem; margin: 0; }
+
+  /* Why */
+  .why { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px 40px; }
+  .why div { border-left: 4px solid var(--ink); padding-left: 16px; }
+  .why p { color: var(--muted); margin: 0; }
+  .levels { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 0; padding: 0; list-style: none; font-size: .85rem; }
+  .levels li { border: 2px solid var(--ink); border-radius: 6px; padding: 2px 8px; }
+  .levels b { margin-right: 4px; }
+
+  /* Install */
+  .code { position: relative; background: var(--code-bg); color: var(--code-ink); border-radius: 12px; padding: 46px 18px 18px; overflow-x: auto; font-size: .9rem; line-height: 1.7; margin: 0 0 16px; border: 1px solid var(--line); }
+  .code .c { color: #A9ABB8; }
+  .copy { position: absolute; top: 10px; right: 10px; font: 700 .8rem/1 inherit; font-family: inherit; background: var(--accent); color: var(--on-accent); border: 0; border-radius: 6px; padding: 7px 10px; cursor: pointer; }
+  .install { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, .8fr); gap: 40px; align-items: start; }
+  ul.plain { padding-left: 1.1em; margin: 0; }
+  ul.plain li { margin-bottom: 8px; }
+
+  footer { border-top: 1px solid var(--line); padding: 36px 0 48px; font-size: .9rem; color: var(--muted); }
+  footer p { max-width: 52em; }
+
+  @media (max-width: 900px) {
+    .hero, .demo, .install { grid-template-columns: minmax(0, 1fr); gap: 32px; }
+    .grid { grid-template-columns: repeat(2, 1fr); }
+    ol.steps, .why { grid-template-columns: 1fr; }
+    .demo .short { max-width: 360px; margin: 0 auto; }
+  }
+  @media (max-width: 520px) {
+    body { font-size: 16px; }
+    section { padding: 48px 0; }
+    .grid { grid-template-columns: 1fr; }
+    .card img { aspect-ratio: 4 / 5; }
+    nav { gap: 12px; }
+    .facts th { width: 6.5em; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .gif { display: none; }
+    .gif-still { display: block !important; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <a class="logo" href="#top" aria-label="capcutctl home"><span>cc</span>capcutctl</a>
+    <nav aria-label="Main">
+      <a href="#examples">Examples</a>
+      <a href="#how">How it works</a>
+      <a href="#install">Install</a>
+      <a href="https://github.com/RoXsaita/capcut-editor-cli">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+  <div class="wrap hero">
+    <div>
+      <span class="eyebrow">Open source · macOS · CapCut Desktop</span>
+      <h1>Your AI agent edits <mark>real CapCut projects</mark>. They stay editable.</h1>
+      <p class="lede">Give a coding agent a raw talking-head take and a screen recording. Through <code>capcutctl</code> it cuts, lays out, captions, animates and checks the edit, then hands back a native CapCut project you can still change clip by clip.</p>
+      <div class="ctas">
+        <a class="btn primary" href="#install">Get started</a>
+        <a class="btn secondary" href="https://github.com/RoXsaita/capcut-editor-cli">View on GitHub</a>
+      </div>
+      <p class="meta">MIT licensed. Unofficial: not affiliated with ByteDance or CapCut.</p>
+    </div>
+    <figure>
+      <div class="media-frame">
+        <img class="gif" src="media/before-after.gif" width="540" height="516" alt="Left, labelled BEFORE: the raw talking-head take, a man speaking to camera in a plain room. Right, labelled AFTER: the same words in the finished short, with the face in the lower half, three icons labelled Prompt, Skill and Agent landing one per word above it, and word-by-word Arabic captions.">
+        <img class="gif-still" src="media/poster-main.jpg" alt="The finished short: icons labelled Agent, Skill and Prompt above the speaker, with an Arabic caption." style="display:none">
+      </div>
+      <figcaption>The same 4 seconds: the raw take, and the finished short an agent built from it.</figcaption>
+    </figure>
+  </div>
+
+  <section id="demo" aria-labelledby="demo-title">
+    <div class="wrap demo">
+      <iframe class="short" src="https://www.youtube-nocookie.com/embed/ZZ6nCUMYYPE" title="Prompt vs skill vs agent, a short edited with capcutctl (YouTube)" loading="lazy" allow="accelerometer; encrypted-media; gyroscope; picture-in-picture; fullscreen" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
+      <div>
+        <span class="eyebrow">A real, posted video</span>
+        <h2 id="demo-title">Prompt vs skill vs agent</h2>
+        <p>Edited end to end by Claude Code agents with <code>capcutctl</code> and the capcut-skills, then posted on 2026-10-20. It is in Levantine Arabic; the captions are the ones the edit shipped with.</p>
+        <table class="facts">
+          <tbody>
+            <tr><th scope="row">Footage</th><td><span class="tag before">BEFORE</span>one 157.7 s face take with retakes, plus screen recordings<br><span class="tag after">AFTER</span>a 57.7 s 1080×1920 short</td></tr>
+            <tr><th scope="row">A-roll</th><td>40 spoken beats down to the last clean take of each line, cut on acoustic boundaries by <code>capcutctl cut</code></td></tr>
+            <tr><th scope="row">Picture</th><td>split screens, full-frame scenes with a circle PiP, proof shots from the real session</td></tr>
+            <tr><th scope="row">Text</th><td>113 editable word-by-word caption clips</td></tr>
+            <tr><th scope="row">Checks</th><td><code>doctor</code> 0 errors · draft <code>gate</code>: warnings, no FAIL · export loudness −14.3 LUFS</td></tr>
+          </tbody>
+        </table>
+        <p style="margin-top:16px"><a href="https://www.youtube.com/watch?v=ZZ6nCUMYYPE">Watch on YouTube</a> · <a href="https://www.instagram.com/reel/DeuTTy2n1i3/">Watch on Instagram</a></p>
+      </div>
+    </div>
+  </section>
+
+  <section id="examples" aria-labelledby="examples-title">
+    <div class="wrap">
+      <span class="eyebrow">Examples</span>
+      <h2 id="examples-title">One edit, three openings, all native</h2>
+      <p class="lede">The main post and two other openings of the same edit, posted as Instagram trial reels. Plus a look inside the edit.</p>
+      <div class="grid">
+        <article class="card">
+          <img src="media/poster-main.jpg" width="540" height="960" loading="lazy" alt="Hook A: icons labelled Agent, Skill and Prompt above the speaker.">
+          <div class="body">
+            <span class="pill">Hook A · main post</span>
+            <h3>“Prompt, skill and agent: what's the difference?”</h3>
+            <p>Three icons land, one per spoken word.</p>
+            <div class="links"><a href="https://www.youtube.com/watch?v=ZZ6nCUMYYPE">YouTube</a><a href="https://www.instagram.com/reel/DeuTTy2n1i3/">Instagram</a></div>
+          </div>
+        </article>
+        <article class="card">
+          <img src="media/poster-hook-b.jpg" width="540" height="960" loading="lazy" alt="Hook B: an AI badge and a speech bubble under the label Every week, above the speaker.">
+          <div class="body">
+            <span class="pill">Hook B · trial reel</span>
+            <h3>“Explaining it all again every week?”</h3>
+            <p>The same body after a different opening line.</p>
+            <div class="links"><a href="https://www.instagram.com/reel/DeuTcbxiGGj/">Instagram</a></div>
+          </div>
+        </article>
+        <article class="card">
+          <img src="media/poster-hook-c.jpg" width="540" height="960" loading="lazy" alt="Hook C: an Agent badge and a Skill page under a yellow label, above the speaker.">
+          <div class="body">
+            <span class="pill">Hook C · trial reel</span>
+            <h3>“Everyone talks about skills and agents”</h3>
+            <p><code>capcutctl variant</code> makes a duplicate like this from a signed-off edit in one command.</p>
+            <div class="links"><a href="https://www.instagram.com/reel/DeuTlEKlAJt/">Instagram</a></div>
+          </div>
+        </article>
+        <article class="card">
+          <img class="gif" src="media/proof-split.gif" width="300" height="533" loading="lazy" alt="Split screen: the agent's session shows Launching skill capcut-cli and Read aroll.md, then the aroll.md page with a paragraph highlighted, over the speaker.">
+          <img class="gif-still" src="media/poster-main.jpg" alt="" style="display:none">
+          <div class="body">
+            <span class="pill">Inside the edit</span>
+            <h3>Proof from the real session</h3>
+            <p>The screen recording plays at 1×, punched in so the text reads on a phone.</p>
+            <div class="links"><a href="media/scene-skill.gif">See a scene on a word</a></div>
+          </div>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section id="how" aria-labelledby="how-title">
+    <div class="wrap">
+      <span class="eyebrow">How it works</span>
+      <h2 id="how-title">Three steps</h2>
+      <ol class="steps">
+        <li><h3>Record</h3><p>One talking-head take, and the screen recordings that prove what you say.</p></li>
+        <li><h3>Ask your agent</h3><p>With the capcut-skills installed, it asks which style to use, proposes an A-roll cut for you to sign off, writes a shot list and an <code>edit.json</code> plan, runs <code>capcutctl build</code>, and stops on a failing <code>gate</code>.</p></li>
+        <li><h3>Open it in CapCut</h3><p>Review, change anything by hand, and export. Clips, masks, keyframes and captions are all still there.</p></li>
+      </ol>
+    </div>
+  </section>
+
+  <section id="why" aria-labelledby="why-title">
+    <div class="wrap">
+      <span class="eyebrow">Why it is different</span>
+      <h2 id="why-title">Built so an agent can't break your project</h2>
+      <div class="why">
+        <div><h3>Native and editable</h3><p>It writes CapCut's own draft files. Clips stay clips, layouts are transforms and masks, captions are text clips. Nothing is flattened into a rendered video.</p></div>
+        <div><h3>Transactional</h3><p>Every write snapshots the project, validates both of CapCut's live documents, syncs the mirror files and rolls back on failure. Every edit command takes <code>--dry-run</code>.</p></div>
+        <div><h3>Gates and X-ray QA</h3><p><code>gate</code> is a ready-to-post check; <code>xray</code> measures every frame and audio sample of an export.</p>
+          <ul class="levels" aria-label="Gate levels"><li><b>FAIL</b>blocks</li><li><b>WARN</b>named in the hand-off</li><li><b>NOTE</b>informational</li></ul></div>
+        <div><h3>Made for agents</h3><p>A machine-readable contract describes every command. The Claude Code skills are checked against it in CI, and your brand stays in your own profile.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="install" aria-labelledby="install-title">
+    <div class="wrap install">
+      <div>
+        <span class="eyebrow">Install</span>
+        <h2 id="install-title">About five minutes</h2>
+        <p>macOS with CapCut Desktop installed and opened once, plus Homebrew.</p>
+<pre class="code" id="install-code"><button class="copy" type="button" data-copy="install-code">Copy</button><code>brew install node python@3.11 ffmpeg
+git clone https://github.com/RoXsaita/capcut-editor-cli.git
+cd capcut-editor-cli
+npm link
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -e .
+capcutctl preflight   <span class="c"># names the fix for anything missing</span>
+capcutctl projects    <span class="c"># lists your CapCut drafts</span></code></pre>
+        <p>Then install the skills and ask your agent: <em>“Use the capcut-editing skill to edit my face take and screen recording into a short.”</em></p>
+      </div>
+      <div>
+        <h3>Links</h3>
+        <ul class="plain">
+          <li><a href="https://github.com/RoXsaita/capcut-editor-cli">capcut-editor-cli on GitHub</a>: the CLI, README and docs</li>
+          <li><a href="https://github.com/RoXsaita/capcut-editor-cli/blob/main/SETUP.md">SETUP.md</a>: a new Mac from zero</li>
+          <li><a href="https://github.com/RoXsaita/capcut-editor-cli/blob/main/docs/commands.md">Command reference</a>, generated from the contract</li>
+          <li><a href="https://github.com/RoXsaita/capcut-skills">capcut-skills</a>: the agent skills (editing, CLI rules, motion design)</li>
+          <li><a href="https://github.com/RoXsaita/capcut-editor-cli/issues">Issues</a></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p><strong>capcutctl</strong> is MIT licensed and unofficial: it is not affiliated with, endorsed by, or sponsored by ByteDance, CapCut, or Lemon Inc. CapCut and its project format belong to their owners.</p>
+    <p>Example videos and stills © Suheil Abu Aittah, shown to illustrate what the tool produces; they are not covered by the MIT license.</p>
+  </div>
+</footer>
+
+<script>
+  document.querySelectorAll('[data-copy]').forEach(function (button) {
+    button.addEventListener('click', function () {
+      var code = document.getElementById(button.dataset.copy).querySelector('code');
+      var text = code.innerText.replace(/\s+#.*$/gm, '');
+      var done = function (label) { button.textContent = label; setTimeout(function () { button.textContent = 'Copy'; }, 1600); };
+      if (navigator.clipboard) navigator.clipboard.writeText(text).then(function () { done('Copied'); }, function () { done('Select and copy'); });
+      else done('Select and copy');
+    });
+  });
+</script>
+</body>
+</html>

@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { sourceToTimeline, detectBrands, talkingHeadScenes, opSignature, imageSize, logoScaleFor, sigPresets } from '../src/signature.mjs';
+import { tmpDir } from './helpers/tmp.mjs';
 
 const US = s => Math.round(s * 1e6);
 
@@ -204,7 +205,7 @@ test('imageSize reads PNG IHDR', () => {
 });
 
 test('imageSize rejects truncated WebP dimension headers without throwing', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcut-webp-test-'));
+  const dir = tmpDir('capcut-webp-test-');
   try {
     const file = path.join(dir, 'truncated.webp');
     for (const kind of ['VP8X', 'VP8 ']) {
@@ -266,7 +267,7 @@ test('a missing logo asset is an error, not a silent skip', () => {
 });
 
 test('missing per-machine signature sound is skipped and reported', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcut-signature-sfx-test-'));
+  const dir = tmpDir('capcut-signature-sfx-test-');
   const previous = process.env.CAPCUTCTL_PRESET_DIR;
   try {
     const preset = JSON.parse(fs.readFileSync(new URL('../presets/signature.json', import.meta.url), 'utf8'));
@@ -287,7 +288,7 @@ test('missing per-machine signature sound is skipped and reported', () => {
 });
 
 test('signature reuses project audio with placeholder and relative paths', () => {
-  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcut-signature-local-sfx-'));
+  const projectDir = tmpDir('capcut-signature-local-sfx-');
   try {
     fs.mkdirSync(path.join(projectDir, 'Resources'));
     fs.writeFileSync(path.join(projectDir, 'Resources', 'local.mp3'), 'sfx-fixture-bytes');
@@ -425,4 +426,53 @@ test('layoutAudit counts a footage photo as B-roll but never a frame plate', () 
     ] });
     assert.equal(layoutAudit(d)[0].want, want, String(origin));
   }
+});
+
+test('clearLogos takes the pops, their cue, their materials and the empty sig- tracks; the endcard and its cue stay', () => {
+  const f = path.join(os.tmpdir(), 'capcutctl-clear-logo.png');
+  fs.writeFileSync(f, PNG_1x1);
+  const d = doc();
+  d.canvas_config = { width: 1080, height: 1920 };
+  opSignature(d, { logos: [{ brand: 'grok', at: 1, logo: f }], endcard: { text: 'Follow' }, glow: true });
+  const tagged = tag => d.tracks.flatMap(t => t.segments || []).filter(s => s.desc === tag);
+  assert.ok(tagged('sig:logo').length >= 1);
+  assert.equal(tagged('sig:sfx:logo').length, 1);
+  const owned = new Set(tagged('sig:logo').flatMap(s => [s.material_id, ...(s.extra_material_refs || [])]));
+  const ids = () => new Set(Object.values(d.materials).filter(Array.isArray).flat().map(m => m.id));
+  const tracks = d.tracks.length;
+
+  const r = opSignature(d, { clearLogos: true });
+  assert.ok(r.cleared >= 2, 'a clear-only pass is not NOTHING_TO_SIGN');
+  assert.equal(tagged('sig:logo').length, 0);
+  assert.equal(tagged('sig:sfx:logo').length, 0);
+  assert.ok(!d.tracks.some(t => /^sig-logo/.test(t.name || '')), 'empty sig-logo tracks removed');
+  assert.ok(d.tracks.length < tracks);
+  assert.ok([...owned].every(id => !ids().has(id)), 'logo material, effects and extras swept');
+  assert.equal(tagged('sig:endcard').length, 1);
+  assert.equal(tagged('sig:sfx:endcard').length, 1);
+  assert.ok(ids().has(tagged('sig:sfx:endcard')[0].material_id), 'the endcard cue keeps its sound');
+
+  const e = opSignature(d, { clearEndcard: true });
+  assert.ok(e.cleared >= 2);
+  assert.equal(tagged('sig:endcard').length, 0);
+  assert.equal(tagged('sig:sfx:endcard').length, 0);
+  assert.throws(() => opSignature(doc(), {}), /NOTHING_TO_SIGN|wrote nothing/, 'an empty op still refuses');
+});
+
+test('a logo past the end of the edit writes no material and copies no file', () => {
+  const f = path.join(os.tmpdir(), 'capcutctl-logo-late.png');
+  fs.writeFileSync(f, PNG_1x1);
+  const project = tmpDir('sig-late-logo-');
+  const d = doc();
+  const videosBefore = d.materials.videos.length;
+  const r = opSignature(d, { logos: [{ brand: 'grok', at: 19.9, logo: f }], noSfx: true }, { projectDir: project });
+  assert.equal(r.logos[0].skipped, 'past-end');
+  assert.equal(d.materials.videos.length, videosBefore);
+  const copied = [];
+  const walk = dir => { for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) walk(p); else if (e.name.endsWith('.png')) copied.push(p);
+  } };
+  walk(project);
+  assert.deepEqual(copied, []);
 });

@@ -68,7 +68,7 @@
   },
 
   "ending": {
-    "_note": "The follow ending: auto appends it on every build; copy and face position. Keep your frame path and personal copy in your private profile. --frame overrides frame per video; coordinates are canvas pixels.",
+    "_note": "The follow ending: auto appends it on every build; copy and face position. Keep your frame path and personal copy in your private profile. --frame overrides frame per video; coordinates are canvas pixels. ctaPatterns are role regexes for the spoken CTA, matched against beat text after Arabic folding and lowercasing: `capcutctl cut` warns (! CTA lines, plan.cta) when a matching beat is dropped or is not last, and never refuses. Extend the list in your user profile.",
     "auto": false,
     "frame": null,
     "faceX": 540,
@@ -77,7 +77,15 @@
     "pill": "Next up",
     "headline": "Follow",
     "sub": null,
-    "badge": "2"
+    "badge": "2",
+    "ctaPatterns": [
+      "\\bتابع(?:و|وا|وني|ونا|ني)\\b",
+      "\\bاشترك(?:و|وا)?\\b",
+      "\\bعلق(?:و|وا|ولي|ولنا)\\b",
+      "\\b(?:بالتعليقات|بالكومنتات|بالكومنت)\\b",
+      "\\b(?:follow|subscribe|comment)\\b",
+      "\\blink in (?:the |my )?bio\\b"
+    ]
   },
 
   "styles": {

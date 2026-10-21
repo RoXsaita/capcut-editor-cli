@@ -2,9 +2,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  CapcutError, clone, seededId, allSegments, loadPreset, resolveMediaPath, contentEndUs
+  CapcutError, clone, seededId, allSegments, loadPreset, resolveMediaPath, contentEndUs, removeUnreferencedMaterials
 } from './core.mjs';
 import { carryLevels, snapshotLevels } from './levels.mjs';
+import { hasClipAnimations } from './animations.mjs';
+import { resolveClip } from './add.mjs';
+import { partForMedia, takeParts, vtInPart } from './rl2-take.mjs';
+import { isLayoutPlateDesc, readMetaRecord } from './repair.mjs';
+import { detachLibraryIdentity, localizeAudioFile, probeAudioDuration } from './local-audio.mjs';
 
 export function sfxPresets() {
   return loadPreset('sfx');
@@ -43,12 +48,29 @@ function contentBoundaryUs(doc, projectDir = null) {
   return end;
 }
 
-function inContent(doc, segment, projectDir = null) {
-  const start = Number(segment?.target_timerange?.start);
-  return Number.isFinite(start) && start < contentBoundaryUs(doc, projectDir);
+/** Material lookups by id, first record wins (as `Array.find` did). */
+function videosById(doc) {
+  const videos = new Map();
+  for (const m of doc.materials?.videos || []) if (m && !videos.has(m.id)) videos.set(m.id, m);
+  return videos;
 }
 
-function isVisibleBroll(doc, segment, track, trackIndex, principalIndex) {
+/**
+ * What the planners look up again and again, computed once per entry point: the content end
+ * (contentEndUs re-reads created.json and re-resolves the principal track on every call, and
+ * it used to be called per segment per probe), the videos by id, and the visible B-roll per
+ * principal index. Never cached on the doc: ops mutate it between calls.
+ */
+function planCtx(doc, projectDir = null) {
+  return { boundaryUs: contentBoundaryUs(doc, projectDir), videos: videosById(doc), broll: new Map(), masks: null };
+}
+
+function inContent(doc, segment, boundaryUs) {
+  const start = Number(segment?.target_timerange?.start);
+  return Number.isFinite(start) && start < boundaryUs;
+}
+
+function isVisibleBroll(doc, segment, track, trackIndex, principalIndex, videos = videosById(doc)) {
   const desc = String(segment?.desc || '');
   const markedScreen = isScreenRecording(segment);
   const belowPrincipal = trackIndex < principalIndex;
@@ -56,7 +78,7 @@ function isVisibleBroll(doc, segment, track, trackIndex, principalIndex) {
   if (!track || track.type !== 'video' || track.flag === 0 || track.hidden === true || track.visible === false
       || (!belowPrincipal && !markedAbovePrincipal)
       || isScreenHelper(segment) || desc.startsWith('sig:')) return false;
-  const material = (doc.materials?.videos || []).find(item => item.id === segment.material_id);
+  const material = videos.get(segment.material_id);
   if (!material) return false;
   if (material.capcutctl_mograph) return false;
   if (material.type && material.type !== 'video') return false;
@@ -72,17 +94,28 @@ function isVisibleBroll(doc, segment, track, trackIndex, principalIndex) {
 
 function r2(n) { return Math.round(n * 100) / 100; }
 
-function coveringBroll(doc, t, principalIndex, projectDir = null) {
-  const us = US(t);
-  if (us < 0 || us >= contentBoundaryUs(doc, projectDir)) return null;
-  const videos = new Map((doc.materials?.videos || []).map(m => [m.id, m]));
-  let found = null;
+/** The visible, in-content B-roll for one principal index, in allSegments order. */
+function brollList(doc, principalIndex, ctx) {
+  let list = ctx.broll.get(principalIndex);
+  if (list) return list;
+  list = [];
   for (const { segment: s, track, trackIndex: i } of allSegments(doc)) {
-    if (!isVisibleBroll(doc, s, track, i, principalIndex)) continue;
-    if (!s.target_timerange || !inContent(doc, s, projectDir)) continue;
-    const a = s.target_timerange.start, b = a + s.target_timerange.duration;
+    if (!isVisibleBroll(doc, s, track, i, principalIndex, ctx.videos)) continue;
+    if (!s.target_timerange || !inContent(doc, s, ctx.boundaryUs)) continue;
+    const a = s.target_timerange.start;
+    list.push({ s, i, a, b: a + s.target_timerange.duration });
+  }
+  ctx.broll.set(principalIndex, list);
+  return list;
+}
+
+function coveringBroll(doc, t, principalIndex, ctx) {
+  const us = US(t);
+  if (us < 0 || us >= ctx.boundaryUs) return null;
+  let found = null;
+  for (const { s, i, a, b } of brollList(doc, principalIndex, ctx)) {
     if (!(a - 20000 < us && us < b - 20000)) continue;
-    const m = videos.get(s.material_id);
+    const m = ctx.videos.get(s.material_id);
     const sr = s.source_timerange || {};
     const cl = s.clip || {};
     const hit = {
@@ -97,10 +130,15 @@ function coveringBroll(doc, t, principalIndex, projectDir = null) {
   return found;
 }
 
-function coveringLayout(doc, t, principal) {
+/** The principal clip's look at time t, read from its mask: 'circle', 'split-screen', 'full-face' or 'none'. */
+export function coveringLayout(doc, t, principal, ctx = null) {
   if (!principal) return 'none';
   const us = US(t);
-  const masks = new Map((doc.materials?.common_mask || []).map(m => [m.id, m]));
+  let masks = ctx?.masks;
+  if (!masks) {
+    masks = new Map((doc.materials?.common_mask || []).map(m => [m.id, m]));
+    if (ctx) ctx.masks = masks;
+  }
   const seg = (principal.track.segments || []).find(s => {
     const a = s.target_timerange.start, b = a + s.target_timerange.duration;
     return a - 20000 <= us && us < b + 20000;
@@ -159,20 +197,21 @@ export function pictureChanges(doc, { minGap = 0.9, track = null, projectDir = n
   const principal = optionalPrincipal(doc, track);
   // With no talking head above it, every visible video track is B-roll.
   const brollBelow = principal ? principal.index : doc.tracks.length;
+  const ctx = planCtx(doc, projectDir);
   const marks = [];
   const seen = new Set();
   for (const { segment, track: tr } of allSegments(doc)) {
     if (tr.type !== 'video' || !(tr.segments || []).length) continue;
-    if (isScreenHelper(segment) || !inContent(doc, segment, projectDir)) continue;
+    if (isScreenHelper(segment) || !inContent(doc, segment, ctx.boundaryUs)) continue;
     const t = segment.target_timerange.start / 1e6;
     if (t <= 0.001) continue;
     const key = Math.round(t * 30) / 30;
     if (seen.has(key)) continue;
     seen.add(key);
-    const beforeB = coveringBroll(doc, t - 0.05, brollBelow, projectDir);
-    const afterB = coveringBroll(doc, t + 0.05, brollBelow, projectDir);
-    const beforeL = coveringLayout(doc, t - 0.05, principal);
-    const afterL = coveringLayout(doc, t + 0.05, principal);
+    const beforeB = coveringBroll(doc, t - 0.05, brollBelow, ctx);
+    const afterB = coveringBroll(doc, t + 0.05, brollBelow, ctx);
+    const beforeL = coveringLayout(doc, t - 0.05, principal, ctx);
+    const afterL = coveringLayout(doc, t + 0.05, principal, ctx);
     const brollChanged = shotChanged(beforeB, afterB);
     const layoutChanged = beforeL !== afterL;
     if (!brollChanged && !layoutChanged) continue;
@@ -189,10 +228,10 @@ export function pictureChanges(doc, { minGap = 0.9, track = null, projectDir = n
 /** Cut points that a viewer actually sees: a scene change on any visual track. */
 export function cutPoints(doc, { minGap = 0.9, projectDir = null } = {}) {
   const marks = new Map();
+  const boundaryUs = contentBoundaryUs(doc, projectDir);
   for (const { segment, track } of allSegments(doc)) {
     if (track.type !== 'video' || !(track.segments || []).length) continue;
-    const desc = segment.desc || '';
-    if (isScreenHelper(segment) || !inContent(doc, segment, projectDir)) continue;
+    if (isScreenHelper(segment) || !inContent(doc, segment, boundaryUs)) continue;
     const t = segment.target_timerange.start / 1e6;
     if (t <= 0.001) continue;                              // the first frame is not a cut
     const key = Math.round(t * 30) / 30;                   // frame-quantised
@@ -256,8 +295,65 @@ function makeTransition(doc, name, durationS, key) {
   const m = clone(tpl);
   m.id = mint(`transition:${key}`);
   m.duration = US(durationS);
+  // Ownership mark. A CapCut save strips it, but the meta ledger records every capcutctl_* key
+  // by id, so the next polish still knows which transitions are its own.
+  m.capcutctl_polish = true;
   arr(doc, 'transitions').push(m);
   return m.id;
+}
+
+/**
+ * Take back the transitions an earlier polish placed, and only those: marked
+ * capcutctl_polish, or recorded so in the meta ledger (a CapCut save strips the mark).
+ * A transition the user added by hand stays where it is.
+ *
+ * A legacy draft — transitions present, none marked, no polish entry in the ledger — was
+ * polished before the mark existed, so its polish transitions are indistinguishable from hand
+ * ones. It gets the old clear-all once (reported); every transition placed after that is marked.
+ */
+function clearOwnedTransitions(doc, projectDir = null) {
+  const all = doc.materials.transitions || [];
+  let ledgerOwned = new Set();
+  if (projectDir) {
+    const record = readMetaRecord(projectDir);
+    ledgerOwned = new Set(Object.entries(record?.materials || {})
+      .filter(([, entry]) => entry?.fields?.capcutctl_polish === true).map(([id]) => id));
+  }
+  const isOwned = m => m?.capcutctl_polish === true || ledgerOwned.has(m?.id);
+  const legacyClearAll = all.length > 0 && !ledgerOwned.size && !all.some(isOwned);
+  const removing = new Set(all.filter(m => legacyClearAll || isOwned(m)).map(m => m.id));
+  for (const { segment } of allSegments(doc)) {
+    segment.extra_material_refs = (segment.extra_material_refs || []).filter(r => !removing.has(r));
+  }
+  doc.materials.transitions = all.filter(m => !removing.has(m.id));
+  return { removed: removing.size, kept: new Set(doc.materials.transitions.map(m => m.id)), legacyClearAll };
+}
+
+/** Filter out the segments `drop` claims, recording what they referenced in `owned`. */
+function dropOwned(segments, owned, drop) {
+  return (segments || []).filter(s => {
+    if (!drop(s)) return true;
+    if (s.material_id) owned.add(s.material_id);
+    for (const r of s.extra_material_refs || []) owned.add(r);
+    return false;
+  });
+}
+
+/**
+ * Remove what the dropped cues referenced and nothing now uses. A stable seed re-mints a
+ * dropped cue's extras under the same ids, so of several records under one owned id only the
+ * freshest (last pushed) is kept.
+ */
+function sweepOwned(doc, owned) {
+  if (!owned.size) return;
+  removeUnreferencedMaterials(doc, owned);
+  for (const [kind, values] of Object.entries(doc.materials || {})) {
+    if (!Array.isArray(values)) continue;
+    const last = new Map();
+    values.forEach((value, i) => { if (owned.has(value?.id)) last.set(value.id, i); });
+    if (!last.size) continue;
+    doc.materials[kind] = values.filter((value, i) => !owned.has(value?.id) || last.get(value.id) === i);
+  }
 }
 
 /**
@@ -304,10 +400,10 @@ export function ensureAudioTrack(doc, name, mintFn = mint) {
   return track;
 }
 
-function isLayoutOrPlate(doc, segment) {
-  if ((segment.desc || '').startsWith('layout:')) return true;
-  const mats = doc.materials?.videos || [];
-  const m = mats.find(x => x.id === segment.material_id);
+function isLayoutOrPlate(doc, segment, videos = videosById(doc)) {
+  // A plate or screen layer; a legacy `layout:<name>` tag older versions put on the face is not one.
+  if (isLayoutPlateDesc(segment.desc)) return true;
+  const m = videos.get(segment.material_id);
   return Boolean(m && m.type && m.type !== 'video');
 }
 
@@ -333,10 +429,11 @@ export function principalTrack(doc, explicit = null) {
     return { index: explicit, track: t };
   }
   const candidates = [];
+  const videos = videosById(doc);
   for (const [index, track] of doc.tracks.entries()) {
     if (track.type !== 'video' || track.flag === 0) continue;
     const segs = [...(track.segments || [])]
-      .filter(s => s.target_timerange && !isLayoutOrPlate(doc, s))
+      .filter(s => s.target_timerange && !isLayoutOrPlate(doc, s, videos))
       .sort((a, b) => a.target_timerange.start - b.target_timerange.start);
     if (!segs.length) continue;
     let gap = false, cursor = segs[0].target_timerange.start;
@@ -378,62 +475,174 @@ function optionalPrincipal(doc, explicit = null) {
   }
 }
 
-/** Clone a segment's extra materials so the two halves of a split do not share state. */
-function cloneRefs(doc, segment, key) {
-  const out = [];
-  for (const ref of segment.extra_material_refs || []) {
+/**
+ * The right half's extra materials, so the two halves of a split do not share state.
+ *
+ * Each ref gets its own id: keyed by bucket alone, a clip with a speed and two effects minted
+ * one id for both effects, and the next validation failed CONFLICTING_MATERIAL_ID. A material
+ * bound to the old segment is rebound to the new one. A transition is not cloned: it belongs
+ * to the segment's END, which the right half now owns, so it moves there.
+ */
+function cloneRefs(doc, segment, rightId, key) {
+  const left = [], right = [], pairs = [];
+  for (const [i, ref] of (segment.extra_material_refs || []).entries()) {
     let found = null, bucket = null;
     for (const [k, v] of Object.entries(doc.materials)) {
       if (!Array.isArray(v)) continue;
       const m = v.find(x => x && x.id === ref);
       if (m) { found = m; bucket = k; break; }
     }
-    if (!found) { out.push(ref); continue; }
+    if (!found) { left.push(ref); right.push(ref); continue; }
+    if (bucket === 'transitions') { right.push(ref); continue; }
     const copy = clone(found);
-    copy.id = mint(`${bucket}:${key}`);
+    copy.id = mint(`${bucket}:${i}:${ref}:${key}`);
+    if ('bind_segment_id' in copy && (copy.bind_segment_id === segment.id || copy.bind_segment_id === '')) {
+      copy.bind_segment_id = rightId;
+    }
     doc.materials[bucket].push(copy);
-    out.push(copy.id);
+    left.push(ref);
+    right.push(copy.id);
+    pairs.push({ bucket, left: found, right: copy });
   }
-  return out;
+  return { left, right, pairs };
 }
 
 /**
- * Split the segment straddling `t` (absolute seconds) in two. Returns true if a cut was
- * made or already existed. Keyframed segments are refused — their values are anchored to
- * the segment's own timeline and splitting silently rescales the animation.
+ * Cut `entry.segment` (on `entry.track`) at absolute `us`, which must lie inside it. The left
+ * half keeps the original id; the right half gets `rightId` (or one minted from `key`).
+ * Shared by polish and ramp (through `sliceAt`) and by `clip.split`:
+ *
+ * - the source splits at the speed-scaled offset, so both halves keep the clip's speed;
+ * - every extra material is private to its half (`cloneRefs`), a transition moves right;
+ * - render_timerange follows target_timerange on each half;
+ * - a fade-in stays on the left and a fade-out moves right (each half's other side is zeroed);
+ * - an intro animation stays left, an outro moves right with its start measured on the right
+ *   half. Combo animations and keyframes are the caller's to refuse.
  */
-export function sliceAt(doc, track, t, key, seed) {
+export function splitSegmentAt(doc, entry, us, key, seed, { rightId = null } = {}) {
   const prev = SEED;
   if (seed !== undefined) SEED = seed;
   try {
-    const us = US(t);
-    const segs = track.segments || [];
-    if (segs.some(s => Math.abs(s.target_timerange.start - us) < 20000)) return 'existing';
-    const seg = segs.find(s => s.target_timerange.start + 20000 < us
-                            && s.target_timerange.start + s.target_timerange.duration - 20000 > us);
-    if (!seg) return false;
-    if ((seg.common_keyframes || []).some(k => (k.keyframe_list || []).length)) return 'keyframed';
-
+    const seg = entry.segment;
+    const segs = entry.track.segments;
     const tt = seg.target_timerange, st = seg.source_timerange;
     const offset = us - tt.start;
     const ratio = st && tt.duration ? st.duration / tt.duration : 1;
     const srcOffset = Math.round(offset * ratio);
 
     const right = clone(seg);
-    right.id = mint(`slice:${key}`);
-    right.extra_material_refs = cloneRefs(doc, seg, `slice:${key}`);
+    right.id = rightId || mint(`slice:${key}`);
+    const refs = cloneRefs(doc, seg, right.id, `slice:${key}`);
+    seg.extra_material_refs = refs.left;
+    right.extra_material_refs = refs.right;
     right.target_timerange = { ...tt, start: us, duration: tt.duration - offset };
     if (st) right.source_timerange = { ...st, start: st.start + srcOffset, duration: st.duration - srcOffset };
 
     tt.duration = offset;
     if (st) st.duration = srcOffset;
+    if (seg.render_timerange?.duration) {
+      right.render_timerange = { ...seg.render_timerange, start: right.target_timerange.start, duration: right.target_timerange.duration };
+      seg.render_timerange = { ...seg.render_timerange, start: tt.start, duration: tt.duration };
+    }
+
+    for (const { bucket, left, right: copy } of refs.pairs) {
+      if (bucket === 'audio_fades') {
+        if ('fade_out_duration' in left) left.fade_out_duration = 0;
+        if ('fade_in_duration' in copy) copy.fade_in_duration = 0;
+      } else if (bucket === 'material_animations' && Array.isArray(left.animations)) {
+        left.animations = left.animations.filter(a => a?.type !== 'out');
+        copy.animations = (copy.animations || []).filter(a => a?.type === 'out')
+          .map(a => ({ ...a, start: Math.max(0, right.target_timerange.duration - Number(a.duration || 0)) }));
+      }
+    }
 
     segs.push(right);
     segs.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
-    return 'split';
+    return right;
   } finally {
     if (seed !== undefined) SEED = prev;
   }
+}
+
+/**
+ * Split the segment straddling `t` (absolute seconds) in two. Returns 'split' when a cut was
+ * made, 'existing' when one was already there, false when nothing straddles `t`.
+ * Keyframed segments are refused ('keyframed') — their values are anchored to the segment's
+ * own timeline and splitting silently rescales the animation. Clips with a native intro/outro
+ * animation are refused too ('animated'): both halves would carry it, so the intro replays
+ * mid-shot and the outro keeps a start measured from the old, longer clip.
+ */
+export function sliceAt(doc, track, t, key, seed) {
+  const us = US(t);
+  const segs = track.segments || [];
+  if (segs.some(s => Math.abs(s.target_timerange.start - us) < 20000)) return 'existing';
+  const seg = segs.find(s => s.target_timerange.start + 20000 < us
+                          && s.target_timerange.start + s.target_timerange.duration - 20000 > us);
+  if (!seg) return false;
+  if ((seg.common_keyframes || []).some(k => (k.keyframe_list || []).length)) return 'keyframed';
+  if (hasClipAnimations(doc, seg)) return 'animated';
+  splitSegmentAt(doc, { segment: seg, track }, us, key, seed);
+  return 'split';
+}
+
+const SPLIT_ID_SEED = 'clip.split.v1';
+
+/**
+ * `clip.split`: cut one clip in two at timeline second `at`. Select it by `selector.id`
+ * (or `id`), or by `at` + `track`. T snaps to the project's frame grid. Splitting on an
+ * existing boundary is a no-op; within one frame of an edge is SPLIT_EDGE. Keyframed clips
+ * and combo animations are refused in v1. The left half keeps the id; the right id is a pure
+ * function of (id, T), so the root and timeline mirrors agree and a rerun names the same clip.
+ */
+export function opClipSplit(doc, op = {}) {
+  if (op.at == null || !Number.isFinite(Number(op.at)) || Number(op.at) < 0) {
+    throw new CapcutError('clip.split requires at SECONDS (timeline).', { code: 'BAD_TIME', exitCode: 2 });
+  }
+  const id = op.selector?.id || op.id || null;
+  const entry = resolveClip(doc, id ? { id: String(id) } : { at: Number(op.at), track: op.track });
+  const seg = entry.segment;
+  const tt = seg.target_timerange;
+  const fps = Number.isFinite(doc.fps) && doc.fps > 0 ? doc.fps : 30;
+  const frameUs = 1e6 / fps;
+  const us = Math.round(Math.round(Number(op.at) * fps) * frameUs);
+  const start = tt.start, end = tt.start + tt.duration;
+  const base = { id: seg.id, at: us / 1e6 };
+  if (Math.abs(us - start) < frameUs / 2 || Math.abs(us - end) < frameUs / 2) {
+    return { changed: 0, ...base, leftId: seg.id, rightId: null, existing: true };
+  }
+  if (us < start || us > end) {
+    throw new CapcutError(`clip.split: ${base.at}s is outside clip ${seg.id} (${start / 1e6}–${end / 1e6}s).`,
+      { code: 'SPLIT_OUTSIDE', exitCode: 2 });
+  }
+  if (us - start < frameUs || end - us < frameUs) {
+    throw new CapcutError(`clip.split: ${base.at}s is within one frame of an edge of ${seg.id}; split elsewhere or trim instead.`,
+      { code: 'SPLIT_EDGE', exitCode: 2 });
+  }
+  if ((seg.common_keyframes || []).some(k => (k.keyframe_list || []).length)) {
+    throw new CapcutError(`clip.split refuses ${seg.id}: it has keyframes, and splitting would rescale the move. `
+      + 'Clear the camera move (keyframe --clear), split, then re-add it on the half that needs it.',
+    { code: 'SPLIT_KEYFRAMED', exitCode: 2 });
+  }
+  const refs = new Set(seg.extra_material_refs || []);
+  const animations = (doc.materials?.material_animations || []).filter(m => refs.has(m?.id))
+    .flatMap(m => m.animations || []);
+  if (animations.some(a => a?.type !== 'in' && a?.type !== 'out')) {
+    throw new CapcutError(`clip.split refuses ${seg.id}: it has a combo animation that spans the whole clip.`,
+      { code: 'SPLIT_ANIMATED', exitCode: 2 });
+  }
+  const leftDur = us - start, rightDur = end - us;
+  const tooLong = animations.find(a => Number(a.duration || 0) > (a.type === 'in' ? leftDur : rightDur));
+  if (tooLong) {
+    throw new CapcutError(`clip.split: the ${tooLong.type === 'in' ? 'intro' : 'outro'} animation on ${seg.id} `
+      + `is longer than its half after the split.`, { code: 'SPLIT_ANIMATED', exitCode: 2 });
+  }
+  const rightId = seededId(SPLIT_ID_SEED, `${seg.id}:${us}`);
+  if (allSegments(doc).some(e => e.segment.id === rightId)) {
+    throw new CapcutError(`clip.split: ${seg.id} was already split at ${base.at}s.`, { code: 'SPLIT_EXISTS', exitCode: 2 });
+  }
+  splitSegmentAt(doc, entry, us, `split:${seg.id}:${us}`, op.__seed || SPLIT_ID_SEED, { rightId });
+  return { changed: 1, ...base, leftId: seg.id, rightId,
+    left: { start: start / 1e6, duration: leftDur / 1e6 }, right: { start: us / 1e6, duration: rightDur / 1e6 } };
 }
 
 /**
@@ -467,8 +676,9 @@ export function planPolish(doc, opts = {}) {
   // Horizontal Triptych share against the ~45% ceiling in his hand-cut projects.
   // Compare the actual layout class either side instead.
   const principalT = optionalPrincipal(doc, opts.track ?? null);
+  const layoutCtx = { masks: null };
   const layoutChange = t =>
-    coveringLayout(doc, t - 0.05, principalT) !== coveringLayout(doc, t + 0.05, principalT);
+    coveringLayout(doc, t - 0.05, principalT, layoutCtx) !== coveringLayout(doc, t + 0.05, principalT, layoutCtx);
 
   // A sweep is reserved for a layout change (above), so it does not belong in the
   // generic rotation — drawing sweepL here put Horizontal Triptych on cuts that changed
@@ -525,6 +735,7 @@ export function isCalloutPlate(material, segment) {
 
 export function calloutPlates(doc, { minGap = 0.15, projectDir = null } = {}) {
   const videos = new Map((doc.materials?.videos || []).map(m => [m.id, m]));
+  const boundaryUs = contentBoundaryUs(doc, projectDir);
   const hits = [];
   for (const { segment, track } of allSegments(doc)) {
     if (track.type !== 'video') continue;
@@ -532,7 +743,7 @@ export function calloutPlates(doc, { minGap = 0.15, projectDir = null } = {}) {
     if (!isCalloutPlate(m, segment)) continue;
     const tr = segment.target_timerange;
     if (!tr) continue;
-    if (!inContent(doc, segment, projectDir)) continue;
+    if (!inContent(doc, segment, boundaryUs)) continue;
     hits.push({ t: r2(tr.start / 1e6), file: path.basename(m.path || ''), id: segment.id });
   }
   hits.sort((a, b) => a.t - b.t);
@@ -567,8 +778,9 @@ export function opCalloutSfx(doc, op = {}, context = {}) {
     throw new CapcutError('no callout SFX configured in presets/sfx.json', { code: 'UNKNOWN_SFX', exitCode: 2 });
   }
   const volume = op.volume ?? p.rules.volume ?? 1;
+  const owned = new Set();
   for (const track of doc.tracks) {
-    track.segments = (track.segments || []).filter(s => (s.desc || '') !== 'polish:callout');
+    track.segments = dropOwned(track.segments, owned, s => (s.desc || '') === 'polish:callout');
   }
   const projectDir = op.projectDir || context.projectDir || null;
   const plates = calloutPlates(doc, { projectDir });
@@ -576,6 +788,7 @@ export function opCalloutSfx(doc, op = {}, context = {}) {
     // do not leave an empty lane behind when the last callout is removed
     doc.tracks = doc.tracks.filter(t => t.name !== CALLOUT_LANE || (t.segments || []).length);
     doc.tracks.forEach((t, i) => (t.segments || []).forEach(s => { s.track_render_index = i; }));
+    sweepOwned(doc, owned);
     return { changed: 0, sfx: 0, cues: [] };
   }
   const lane = ensureAudioTrack(doc, CALLOUT_LANE);
@@ -596,6 +809,7 @@ export function opCalloutSfx(doc, op = {}, context = {}) {
   }
   lane.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
   doc.tracks.forEach((t, i) => (t.segments || []).forEach(s => { s.track_render_index = i; }));
+  sweepOwned(doc, owned);
   return { changed: cues.length, sfx: cues.length, cues };
 }
 
@@ -608,11 +822,12 @@ export function brollWindows(doc, { projectDir = null } = {}) {
   let principal = null;
   try { principal = optionalPrincipal(doc, null); } catch { /* malformed drafts are still inspectable */ }
   const principalIndex = principal ? principal.index : doc.tracks.length;
+  const ctx = planCtx(doc, projectDir);
   const out = [];
   for (const { segment, trackIndex } of allSegments(doc)) {
     const track = doc.tracks[trackIndex];
-    if (!isVisibleBroll(doc, segment, track, trackIndex, principalIndex)) continue;
-    if (!inContent(doc, segment, projectDir)) continue;
+    if (!isVisibleBroll(doc, segment, track, trackIndex, principalIndex, ctx.videos)) continue;
+    if (!inContent(doc, segment, ctx.boundaryUs)) continue;
     const st = segment.source_timerange, tt = segment.target_timerange;
     if (!(tt.duration > 0) || !(st.duration > 0)) continue;
     out.push({
@@ -723,10 +938,25 @@ export function loadSession(dir) {
   return {
     dir,
     session,
+    parts: takeParts(dir, session),
     sourceTakeId: sessionTakeId(session),
     events: readNdjson(path.join(dir, 'trace.ndjson')),
     frames: readNdjson(path.join(dir, 'frames.ndjson')),
   };
+}
+
+/**
+ * Map one take-wide vt onto the timeline through the windows cut from the file that holds it.
+ * A restarted take is several files on one vt clock; each B-roll window's source time is its
+ * own file's clock, so the vt moves to that part's file time first. One-part takes map as before.
+ */
+export function mapTakeVt(windows, parts, vt) {
+  if (!parts || parts.length <= 1) return mapVtToTimeline(windows, vt);
+  for (const w of windows) {
+    const t = vtInPart(parts, partForMedia(parts, w.path), vt);
+    if (t != null && t >= w.srcIn && t < w.srcOut) return r2(w.tgtIn + (t - w.srcIn) / w.speed);
+  }
+  return null;
 }
 
 function sessionTakeId(session) {
@@ -791,10 +1021,11 @@ export function windowsForSession(windows, loaded) {
 export function planInteractions(doc, { projectDir = null, minGap = 0.15 } = {}) {
   const windows = brollWindows(doc, { projectDir });
   if (!windows.length) return [];
+  const boundaryUs = contentBoundaryUs(doc, projectDir);
   const cues = [];
   for (const dir of findRl2Sessions(projectDir, doc)) {
     const loaded = loadSession(dir);
-    const { session, events, frames } = loaded;
+    const { session, events, frames, parts } = loaded;
     const sessionWindows = windowsForSession(windows, loaded);
     if (!sessionWindows.length) continue;
     for (const ev of events) {
@@ -805,9 +1036,9 @@ export function planInteractions(doc, { projectDir = null, minGap = 0.15 } = {})
       if (kind === 'click' && ev.in_capture === false) continue;
       const vt = eventVt(ev, session, frames);
       if (!Number.isFinite(vt)) continue;
-      const t = mapVtToTimeline(sessionWindows, vt);
+      const t = mapTakeVt(sessionWindows, parts, vt);
       if (t == null) continue;
-      if (US(t) >= contentBoundaryUs(doc, projectDir)) continue;
+      if (US(t) >= boundaryUs) continue;
       let dur = 0.3;
       if (kind === 'type') {
         const host0 = eventHost(ev);
@@ -832,13 +1063,15 @@ export function opInteractions(doc, op = {}, context = {}) {
   if (op.skip) return { changed: 0, sfx: 0, cues: [], skipped: true };
   const p = sfxPresets();
   const volume = op.volume ?? p.rules.volume ?? 1;
+  const owned = new Set();
   for (const track of doc.tracks) {
-    track.segments = (track.segments || []).filter(s => !INTERACT_DESC.test(s.desc || ''));
+    track.segments = dropOwned(track.segments, owned, s => INTERACT_DESC.test(s.desc || ''));
   }
   const plan = planInteractions(doc, { projectDir: context.projectDir, minGap: op.minGap });
   if (!plan.length) {
     doc.tracks = doc.tracks.filter(t => t.name !== INTERACT_LANE || (t.segments || []).length);
     doc.tracks.forEach((t, i) => (t.segments || []).forEach(s => { s.track_render_index = i; }));
+    sweepOwned(doc, owned);
     return { changed: 0, sfx: 0, cues: [], sessions: findRl2Sessions(context.projectDir, doc).length };
   }
   const lane = ensureAudioTrack(doc, INTERACT_LANE);
@@ -862,40 +1095,148 @@ export function opInteractions(doc, op = {}, context = {}) {
   }
   lane.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
   doc.tracks.forEach((t, i) => (t.segments || []).forEach(s => { s.track_render_index = i; }));
+  sweepOwned(doc, owned);
   return { changed: cues.length, sfx: cues.length, cues };
 }
 
 /**
- * Place a named palette sound at explicit times (typing under a typed command, an Enter click on
- * the real Enter). Cues are {at, dur?, src?} in timeline seconds; `src` starts inside a long bed
- * such as the one-minute typing recording. The sound must be cached on this machine.
+ * The first audio lane of the `base` family (base, base-2, base-3, …) with nothing over the
+ * half-open range [startUs, startUs + durUs). The next lane is created only when every lane
+ * is busy. A typing bed and the clicks inside it used to stack on one lane, which CapCut
+ * plays as one and doctor reports as TRACK_OVERLAP.
  */
-export function opSfxPlace(doc, op = {}) {
+export function pickFreeAudioLane(doc, base, startUs, durUs, mintFn = mint) {
+  const endUs = startUs + durUs;
+  const busy = track => (track.segments || []).some(segment => {
+    const tt = segment.target_timerange;
+    return tt && tt.start < endUs && startUs < tt.start + tt.duration;
+  });
+  for (let n = 1; ; n++) {
+    const name = n === 1 ? base : `${base}-${n}`;
+    const track = doc.tracks.find(t => t.type === 'audio' && t.name === name);
+    if (!track) return ensureAudioTrack(doc, name, mintFn);
+    if (!busy(track)) return track;
+  }
+}
+
+/** An audio lane named `base` or `base-N`. */
+function laneFamily(base) {
+  const escaped = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`^${escaped}(?:-\\d+)?$`);
+}
+
+/** Audio file extensions `sfx --file` takes and `add` refuses. */
+export const AUDIO_FILE_EXTENSIONS = Object.freeze(['.wav', '.mp3', '.m4a', '.aac', '.aif', '.aiff', '.flac', '.ogg', '.opus', '.caf']);
+
+/**
+ * The material for a local audio file: localized under a content hash, cloned from a
+ * harvested sound template with the library identity removed, and typed 'sound' — never
+ * 'music', which loudness and duck treat as the bed. A rerun reuses it by path.
+ */
+function ensureFileAudio(doc, file, context = {}) {
+  const source = path.resolve(String(file));
+  if (!fs.existsSync(source)) {
+    throw new CapcutError(`sfx --file not found: ${file}`, { code: 'SFX_FILE_MISSING', exitCode: 2 });
+  }
+  const durationS = probeAudioDuration(source);
+  const placed = localizeAudioFile(context.projectDir, source, { dryRun: context.dryRun, prefix: 'sfx' });
+  const base = path.basename(source);
+  const found = (doc.materials.audios || []).find(m => m.path === placed && m.type === 'sound');
+  if (found) return { id: found.id, durationS, base, placed, reused: true };
+  const templates = Object.values(sfxPresets().audioTemplates);
+  const tpl = templates.find(m => m.type === 'sound') || templates.find(m => m.type !== 'music') || templates[0];
+  const material = detachLibraryIdentity(clone(tpl));
+  material.id = mint(`audio:file:${path.basename(placed)}`);
+  material.type = 'sound';
+  material.name = base;
+  material.path = placed;
+  material.duration = US(durationS);
+  if ('wave_points' in material) material.wave_points = [];
+  arr(doc, 'audios').push(material);
+  return { id: material.id, durationS, base, placed, reused: false };
+}
+
+function attachFade(doc, segment, fadeIn, fadeOut) {
+  if (!(fadeIn > 0) && !(fadeOut > 0)) return null;
+  const fade = { type: 'audio_fade', fade_type: 0, fade_in_duration: US(fadeIn || 0), fade_out_duration: US(fadeOut || 0) };
+  fade.id = mint(`fade:${segment.id}`);
+  arr(doc, 'audio_fades').push(fade);
+  segment.extra_material_refs = [...(segment.extra_material_refs || []), fade.id];
+  return fade.id;
+}
+
+/**
+ * Place a named palette sound (`sound`) or a local audio file (`file`) at explicit times:
+ * typing under a typed command, an Enter click on the real Enter, a WAV whoosh, a voice patch.
+ * Cues are {at, dur?, src?} in timeline seconds; `src` starts inside a long bed such as the
+ * one-minute typing recording. `lead` moves every cue earlier. Each cue takes the first free
+ * lane of the family (sfx-keys, sfx-keys-2, …; an explicit `track` spills to <track>-2), so
+ * overlapping cues never stack on one lane. A cue identical to one already placed (same
+ * sound, start, length and source offset) is skipped and reported, not duplicated.
+ */
+export function opSfxPlace(doc, op = {}, context = {}) {
   SEED = op.__seed || SEED || null;
   const p = sfxPresets();
-  const name = p.accents?.[op.sound] || (p.audioTemplates[op.sound] ? op.sound : null);
-  if (!name) {
-    throw new CapcutError(`sfx: unknown sound "${op.sound}". Use ${Object.keys(p.accents || {}).join(', ')} or a palette name from presets/sfx.json.`, { code: 'UNKNOWN_SFX', exitCode: 2 });
+  const hasSound = op.sound != null && op.sound !== '';
+  const hasFile = op.file != null && op.file !== '';
+  if (hasSound === hasFile) {
+    throw new CapcutError('sfx takes exactly one of --sound NAME or --file PATH.', { code: 'SFX_SOURCE', exitCode: 2 });
   }
   if (!Array.isArray(op.cues) || !op.cues.length) throw new CapcutError('sfx needs --cues AT[:DUR[:SRC]],…', { code: 'SFX_NO_CUES', exitCode: 2 });
-  const audioId = ensureAudio(doc, name);
-  if (!audioId) throw new CapcutError(`sfx: "${name}" is not cached on this machine; open it once in CapCut or pick another sound.`, { code: 'SFX_UNAVAILABLE', exitCode: 2 });
-  const fileDur = (p.audioTemplates[name].duration || US(0.5)) / 1e6;
-  const lane = ensureAudioTrack(doc, op.track || 'sfx-keys');
+  let audioId, fileDur, name, desc, file = null;
+  if (hasFile) {
+    const local = ensureFileAudio(doc, op.file, context);
+    audioId = local.id;
+    fileDur = local.durationS;
+    name = local.base;
+    desc = `sfx:file:${local.base}`;
+    file = { path: local.placed, reused: local.reused };
+  } else {
+    name = p.accents?.[op.sound] || (p.audioTemplates[op.sound] ? op.sound : null);
+    if (!name) {
+      throw new CapcutError(`sfx: unknown sound "${op.sound}". Use ${Object.keys(p.accents || {}).join(', ')} or a palette name from presets/sfx.json.`, { code: 'UNKNOWN_SFX', exitCode: 2 });
+    }
+    audioId = ensureAudio(doc, name);
+    if (!audioId) throw new CapcutError(`sfx: "${name}" is not cached on this machine; open it once in CapCut or pick another sound.`, { code: 'SFX_UNAVAILABLE', exitCode: 2 });
+    fileDur = (p.audioTemplates[name].duration || US(0.5)) / 1e6;
+    desc = `sfx:${op.sound}`;
+  }
+  const base = String(op.track || 'sfx-keys');
   const volume = op.volume ?? p.rules?.volume ?? 1;
+  const lead = Number(op.lead ?? 0);
+  if (!Number.isFinite(lead) || lead < 0) throw new CapcutError('sfx --lead must be a nonnegative number of seconds.', { code: 'BAD_NUMBER', exitCode: 2 });
+  const family = laneFamily(base);
+  const familySegments = () => doc.tracks.filter(t => t.type === 'audio' && family.test(t.name || ''))
+    .flatMap(t => t.segments || []);
+  const touched = new Set();
+  const lanes = [];
+  const duplicates = [];
   let placed = 0;
   for (const [i, cue] of op.cues.entries()) {
     const src = Math.max(0, Number(cue.src) || 0);
     const dur = Math.min(Number(cue.dur) || fileDur, fileDur - src);
     if (!(Number.isFinite(cue.at) && cue.at >= 0 && dur > 0)) throw new CapcutError(`sfx cue ${i} is out of range: ${JSON.stringify(cue)}`, { code: 'SFX_BAD_CUE', exitCode: 2 });
-    const seg = audioSegment(doc, audioId, cue.at, dur, `sfx-place:${name}:${i}:${cue.at}`, volume, `sfx:${op.sound}`);
-    seg.source_timerange = { start: US(src), duration: US(dur) };
+    const at = Math.max(0, cue.at - lead);
+    const startUs = US(at), durUs = US(dur), srcUs = US(src);
+    const twin = familySegments().find(s => s.material_id === audioId && s.target_timerange?.start === startUs
+      && s.target_timerange?.duration === durUs && (s.source_timerange?.start ?? 0) === srcUs);
+    if (twin) { duplicates.push({ at: Math.round(at * 1000) / 1000, id: twin.id, code: 'SFX_DUPLICATE' }); continue; }
+    const lane = pickFreeAudioLane(doc, base, startUs, durUs);
+    const seg = audioSegment(doc, audioId, at, dur, `sfx-place:${name}:${i}:${cue.at}`, volume, desc);
+    seg.source_timerange = { start: srcUs, duration: durUs };
+    attachFade(doc, seg, Number(op.fadeIn) || 0, Number(op.fadeOut) || 0);
     lane.segments.push(seg);
+    touched.add(lane);
+    if (!lanes.includes(lane.name)) lanes.push(lane.name);
     placed++;
   }
-  lane.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
+  for (const lane of touched) lane.segments.sort((a, b) => a.target_timerange.start - b.target_timerange.start);
   doc.tracks.forEach((t, i) => (t.segments || []).forEach(s => { s.track_render_index = i; }));
-  return { changed: placed, sfx: name, track: lane.name };
+  return {
+    changed: placed, sfx: name, track: lanes[0] || base, tracks: lanes,
+    ...(file ? { file } : {}),
+    ...(duplicates.length ? { skipped: duplicates } : {}),
+  };
 }
 
 /**
@@ -906,16 +1247,17 @@ export function coldOpen(doc, { seconds = 5, projectDir = null } = {}) {
   const principal = optionalPrincipal(doc, null);
   if (!principal) return null;
   const t0 = (principal.track.segments[0]?.target_timerange?.start || 0) / 1e6;
-  const contentEnd = contentBoundaryUs(doc, projectDir) / 1e6;
+  const ctx = planCtx(doc, projectDir);
+  const contentEnd = ctx.boundaryUs / 1e6;
   const sampleEnd = Math.min(t0 + seconds, contentEnd);
   let n = 0, covered = 0;
   for (let t = t0 + 0.2; t < sampleEnd; t += 0.5) {
     n++;
-    if (coveringBroll(doc, t, principal.index, projectDir)) covered++;
+    if (coveringBroll(doc, t, principal.index, ctx)) covered++;
   }
   if (!n) return null;
   if (covered / n >= 0.5) return null;
-  const layout = coveringLayout(doc, t0 + 0.25, principal);
+  const layout = coveringLayout(doc, t0 + 0.25, principal, ctx);
   if (layout !== 'full-face') return null;
   return { seconds: Math.min(seconds, Math.max(0, sampleEnd - t0)), layout, covered, samples: n };
 }
@@ -942,7 +1284,40 @@ export function seamVariety(plan) {
   };
 }
 
+/**
+ * Take back what an earlier polish pass placed, without planning a new one: its SFX cues
+ * (polish:sfx/callout/click/type) and only the transitions named in `only` (build records the
+ * ids it placed, so a transition the user added by hand survives). The slices it cut into the
+ * principal track stay: they are invisible without a transition. For `seams: false`.
+ */
+function prunePolish(doc, op) {
+  const only = new Set(op.only || []);
+  let removedSfx = 0;
+  const owned = new Set();
+  for (const track of doc.tracks) {
+    const before = (track.segments || []).length;
+    track.segments = (track.segments || []).filter(s => {
+      if (!/^polish:(sfx|callout|click|type)$/.test(s.desc || '')) return true;
+      if (s.material_id) owned.add(s.material_id);
+      for (const r of s.extra_material_refs || []) owned.add(r);
+      return false;
+    });
+    removedSfx += before - track.segments.length;
+  }
+  const present = new Set((doc.materials.transitions || []).map(m => m.id));
+  const removedTransitions = [...only].filter(id => present.has(id));
+  for (const { segment } of allSegments(doc)) {
+    segment.extra_material_refs = (segment.extra_material_refs || []).filter(r => !only.has(r));
+  }
+  doc.materials.transitions = (doc.materials.transitions || []).filter(m => !only.has(m.id));
+  doc.tracks = doc.tracks.filter(t => t.name !== 'polish-sfx' || (t.segments || []).length);
+  removeUnreferencedMaterials(doc, owned);
+  return { changed: removedSfx + removedTransitions.length, pruned: true, removedTransitions: removedTransitions.length,
+    removedSfx, transitionsUnknown: [...only].filter(id => !present.has(id)).length };
+}
+
 export function opPolish(doc, op, context = {}) {
+  if (op.prune) return prunePolish(doc, op);
   SEED = op.__seed || null;
   const p = sfxPresets();
   const lead = op.lead ?? p.rules.sfxLeadSeconds;
@@ -950,29 +1325,18 @@ export function opPolish(doc, op, context = {}) {
   const ownsCue = s => /^polish:/.test(s.desc || '');
   const levels = snapshotLevels(doc, ownsCue);
 
-  // start clean so re-running is idempotent
+  // start clean so re-running is idempotent; what the dropped cues owned is swept at the end
+  const owned = new Set();
   for (const track of doc.tracks) {
-    track.segments = (track.segments || []).filter(s => (s.desc || '') !== 'polish:sfx'
-      && !(op.noSfx && /^polish:(callout|click|type)$/.test(s.desc || '')));
+    track.segments = dropOwned(track.segments, owned, s => (s.desc || '') === 'polish:sfx'
+      || (op.noSfx && /^polish:(callout|click|type)$/.test(s.desc || '')));
     for (const s of track.segments || []) {
       if (Array.isArray(s.extra_material_refs) && s.__polishTransition) delete s.__polishTransition;
     }
   }
-  // Polish owns the transitions. It cannot mark its own — CapCut strips unknown keys such as
-  // __polish on the next save, so a marker-based cleanup silently duplicates on the second
-  // run. So every transition is cleared and rebuilt from the plan, which is deterministic:
-  // the same timeline always yields the same set. Pass keepExisting to leave hand-made ones.
-  let removed = 0;
-  if (!op.keepExisting) {
-    const priorTransitions = new Set((doc.materials.transitions || []).map(m => m.id));
-    removed = priorTransitions.size;
-    for (const { segment } of allSegments(doc)) {
-      segment.extra_material_refs = (segment.extra_material_refs || []).filter(r => !priorTransitions.has(r));
-    }
-    doc.materials.transitions = [];
-  }
+  const ownership = clearOwnedTransitions(doc, context.projectDir);
 
-  const plan = planPolish(doc, { ...op, motivated: Boolean(op.motivated), projectDir: context.projectDir });
+  let plan = planPolish(doc, { ...op, motivated: Boolean(op.motivated), projectDir: context.projectDir });
   const lane = op.noSfx ? null : ensureAudioTrack(doc, 'polish-sfx');
 
   // Every transition rides the principal track, and the principal track gets sliced to
@@ -980,20 +1344,36 @@ export function opPolish(doc, op, context = {}) {
   // the B-roll so the whole frame wipes together, and it needs a clip on *both* sides —
   // a transition on a segment with nothing after it is silently discarded by CapCut.
   const principal = op.noTransitions ? null : principalTrack(doc, op.track ?? null);
-  const slices = { split: 0, existing: 0, refused: [] };
+  const slices = { split: 0, existing: 0, refused: [], animated: [] };
   if (principal) {
     for (const [i, cue] of plan.entries()) {
       const r = sliceAt(doc, principal.track, cue.t, `${i}:${cue.t}`);
       if (r === 'split') slices.split++;
       else if (r === 'existing') slices.existing++;
       else if (r === 'keyframed') slices.refused.push(cue.t);
+      else if (r === 'animated') { slices.refused.push(cue.t); slices.animated.push(cue.t); }
     }
+  }
+
+  // A seam the user already dressed by hand keeps its own transition, and gets no second
+  // transition or woosh from polish on top of it.
+  const seamKeptByHand = [];
+  if (principal && ownership.kept.size) {
+    const segs = principal.track.segments;
+    plan = plan.filter(cue => {
+      const at = segs.findIndex(s =>
+        Math.abs((s.target_timerange.start + s.target_timerange.duration) / 1e6 - cue.t) < 0.05);
+      const hand = at >= 0 && (segs[at].extra_material_refs || []).some(r => ownership.kept.has(r));
+      if (hand) seamKeptByHand.push(cue.t);
+      return !hand;
+    });
   }
 
   let transitions = 0;
   let sfxPlaced = 0;
   const skipped = [];
   resetUnavailableSfx();
+  const maxEnd = contentBoundaryUs(doc, context.projectDir) / 1e6;
   for (const [i, cue] of plan.entries()) {
     if (principal) {
       const segs = principal.track.segments;
@@ -1016,7 +1396,6 @@ export function opPolish(doc, op, context = {}) {
     const tpl = p.audioTemplates[cue.sfx];
     const dur = Math.min((tpl.duration || US(0.5)) / 1e6, 1.2);
     const start = Math.max(0, cue.t - lead);
-    const maxEnd = contentBoundaryUs(doc, context.projectDir) / 1e6;
     if (start >= maxEnd) continue;
     const clipped = Math.max(0.05, Math.min(dur, maxEnd - start));
     lane.segments.push(audioSegment(doc, audioId, start, clipped, `${i}:${cue.t}`, volume));
@@ -1031,7 +1410,14 @@ export function opPolish(doc, op, context = {}) {
   SEED = op.__seed || null;
   const carried = carryLevels(doc, levels, { owns: ownsCue, tolerance: 0.25, mint: key => mint(`carry:${key}`),
     keepVolume: () => op.volume == null });
-  return { changed: plan.length, transitions, removedTransitions: removed, sfx: sfxPlaced,
+  sweepOwned(doc, owned);
+  return { changed: plan.length, transitions, removedTransitions: ownership.removed, sfx: sfxPlaced,
+           keptHandTransitions: ownership.kept.size,
+           ...(ownership.legacyClearAll ? { legacyClearAll: true } : {}),
+           ...(seamKeptByHand.length ? { seamKeptByHand } : {}),
+           // keepExisting is deprecated: hand-made transitions are always kept now, and keeping
+           // polish's own as well only stacked a second transition on every seam.
+           ...(op.keepExisting ? { deprecated: ['keepExisting'] } : {}),
            ...(carried.length ? { carried } : {}),
            // Named, not silent: a palette entry whose CapCut cache file is not on this machine
            // is skipped rather than written as a broken reference. `capcutctl harvest` after
@@ -1043,6 +1429,7 @@ export function opPolish(doc, op, context = {}) {
            callouts: callouts.cues,
            interactions: interactions.cues,
            ...(slices.refused.length ? { keyframedSoNotSliced: slices.refused } : {}),
+           ...(slices.animated.length ? { animatedSoNotSliced: slices.animated } : {}),
            ...(skipped.length ? { noTransition: skipped } : {}),
            cues: plan.map(c => ({ t: c.t, pair: c.pair, transition: c.transition, sfx: c.sfx })) };
 }

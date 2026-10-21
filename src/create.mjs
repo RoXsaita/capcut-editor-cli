@@ -4,12 +4,13 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
-  CapcutError, DEFAULT_ROOT, LIVE_FILE_NAMES, PRESET_PARK_GAP_US, assertCapcutClosed,
-  clone, listProjects, loadPreset, readJson, resolveProject, stableJson, uuid, localizeMedia,
+  CapcutError, DEFAULT_ROOT, LIVE_FILE_NAMES, PRESET_PARK_GAP_US, activeStage, assertCapcutClosed,
+  clone, copyTree, listProjects, loadPreset, readJson, resolveProject, stableJson, uuid, localizeMedia,
   requireBinary
 } from './core.mjs';
 import { assertOrigin, stampOrigin } from './origin.mjs';
 import { annotateMediaSource } from './add.mjs';
+import { cloneDraft } from './stage.mjs';
 
 /**
  * A new project is a literal duplicate of the branded preset with the name changed —
@@ -21,6 +22,20 @@ export const DEFAULT_TEMPLATE = 'Preset 3';
 
 /** ~94MB of per-project mask cache. Nothing references it; CapCut recreates it. */
 const SKIP_COPY = new Set(['matting', '.capcutctl', 'draft_info.BACKUP_prewrite.json']);
+
+/**
+ * What `new --from` carries out of the source's .capcutctl: the sidecars that describe the MEDIA
+ * the copy now holds (where each file came from, rl2 traces, the index, alpha checks). Never the
+ * edit's own state — history, locks, stage markers, build/review/verify/oracle records — which
+ * belongs to the source and would make the copy claim work it has not had done.
+ */
+const CARRIED_SIDECARS = new Set(['media-map.json', 'meta-ledger.json', 'rl2', '.video-index', 'alpha-cache.json']);
+
+function skipForCopy(rel) {
+  if (rel === 'matting' || rel.startsWith('matting/') || rel === 'draft_info.BACKUP_prewrite.json') return true;
+  if (!rel.startsWith('.capcutctl/')) return false;
+  return !CARRIED_SIDECARS.has(rel.split('/')[1]);
+}
 
 export function parseScenes(spec) {
   const out = [];
@@ -133,7 +148,15 @@ function materialiseBlankTemplate() {
 }
 
 function pickTemplate(root, from, { blank = false } = {}) {
-  if (from) return resolveProject(from, root);
+  if (from) {
+    // The live folder, never its stage: the copy is registered and has to stand on its own.
+    const source = resolveProject(from, root, { live: true });
+    if (activeStage(source)) {
+      throw new CapcutError(`${path.basename(source)} has an active stage; \`capcutctl stage commit\` (or discard) it before copying it with --from.`,
+        { code: 'STAGE_ACTIVE', exitCode: 2 });
+    }
+    return source;
+  }
   const dir = path.join(root, DEFAULT_TEMPLATE);
   if (fs.existsSync(path.join(dir, 'draft_info.json'))) return dir;
   if (blank) return materialiseBlankTemplate();
@@ -144,14 +167,19 @@ function pickTemplate(root, from, { blank = false } = {}) {
   );
 }
 
+/** The preset, file by file (cloned where big), without its mask cache or capcutctl state. */
 function duplicate(from, to) {
-  for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
-    if (SKIP_COPY.has(entry.name)) continue;
-    const src = path.join(from, entry.name);
-    const dst = path.join(to, entry.name);
-    if (entry.isDirectory()) fs.cpSync(src, dst, { recursive: true });
-    else fs.copyFileSync(src, dst);
-  }
+  copyTree(from, to, { filter: rel => !SKIP_COPY.has(rel), followSymlinks: true });
+  fs.mkdirSync(path.join(to, 'matting'), { recursive: true });
+}
+
+/**
+ * `--from` copies a real edit: its localized media and sidecars carry over and every path in it
+ * moves to the copy. A plain duplicate left the copy playing the source's Resources (gone the
+ * day the source is deleted) and lost the media map that says where each file came from.
+ */
+function duplicateDraft(from, to) {
+  cloneDraft(from, to, { extraSkip: skipForCopy });
   fs.mkdirSync(path.join(to, 'matting'), { recursive: true });
 }
 
@@ -395,7 +423,8 @@ export function createProject(name, options = {}) {
   fs.mkdirSync(root, { recursive: true });
   fs.mkdirSync(projectDir);
   try {
-    duplicate(templateDir, projectDir);
+    if (options.from) duplicateDraft(templateDir, projectDir);
+    else duplicate(templateDir, projectDir);
     if (options.media && options.localize !== false) {
       options.media = localizeMedia(projectDir, options.media);
     }
@@ -507,14 +536,24 @@ function finishCreate(projectDir, { name, root, templateDir, options, probe, sce
   }
 
   fs.mkdirSync(path.join(projectDir, '.capcutctl'), { recursive: true });
-  fs.writeFileSync(path.join(projectDir, '.capcutctl', 'created.json'), stableJson({
-    template: path.basename(templateDir),
-    contentTrack,
-    preserved: scenes.length && !options.blank
-      ? { start: contentUs + PRESET_PARK_GAP_US, end: durationUs }
-      : null,
-    contentEnd: scenes.length ? contentUs : null
-  }));
+  // A copy of a real edit keeps its content end, content track and parked range: the timeline
+  // is the same one, and a null contentEnd made every later command treat the parked endcard
+  // as content.
+  let inherited = null;
+  if (options.from && !scenes.length && !options.blank) {
+    try { inherited = readJson(path.join(templateDir, '.capcutctl', 'created.json')); } catch { inherited = null; }
+    if (!inherited || typeof inherited !== 'object' || Array.isArray(inherited)) inherited = null;
+  }
+  fs.writeFileSync(path.join(projectDir, '.capcutctl', 'created.json'), stableJson(inherited
+    ? { ...inherited, template: path.basename(templateDir) }
+    : {
+      template: path.basename(templateDir),
+      contentTrack,
+      preserved: scenes.length && !options.blank
+        ? { start: contentUs + PRESET_PARK_GAP_US, end: durationUs }
+        : null,
+      contentEnd: scenes.length ? contentUs : null
+    }));
 
   const registration = registerDraft(root, projectDir, name, draftId, durationUs);
   return {
@@ -530,6 +569,36 @@ function finishCreate(projectDir, { name, root, templateDir, options, probe, sce
     created: true,
     ...registration
   };
+}
+
+/** CapCut's draft library with every entry for `projectDir` dropped (nothing written). */
+function registryWithout(registry, projectDir) {
+  if (!fs.existsSync(registry)) return { meta: null, removedEntries: 0 };
+  const meta = readJson(registry);
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)
+      || (meta.all_draft_store != null && !Array.isArray(meta.all_draft_store))) {
+    throw new CapcutError('Invalid draft registry.', { code: 'INVALID_REGISTRY' });
+  }
+  const before = (meta.all_draft_store || []).length;
+  meta.all_draft_store = (meta.all_draft_store || [])
+    .filter(e => path.resolve(e.draft_fold_path || '') !== path.resolve(projectDir));
+  return { meta, removedEntries: before - meta.all_draft_store.length };
+}
+
+/**
+ * Undo registerDraft: drop `projectDir`'s library entry (the folder is the caller's business).
+ * For a copy that failed after it was registered, so CapCut never lists a draft with no folder.
+ */
+export function unregisterDraft(root, projectDir) {
+  const registry = path.join(root, 'root_meta_info.json');
+  const { meta, removedEntries } = registryWithout(registry, projectDir);
+  if (!removedEntries) return { unregistered: 0 };
+  fs.copyFileSync(registry, `${registry}.bak_capcutctl`);
+  const staged = `${registry}.capcutctl-staged`;
+  fs.writeFileSync(staged, stableJson(meta));
+  readJson(staged);
+  fs.renameSync(staged, registry);
+  return { unregistered: removedEntries };
 }
 
 /**
@@ -551,19 +620,7 @@ export function removeProject(name, options = {}) {
   for (let n = 2; fs.existsSync(dest); n++) dest = path.join(bin, `${label} (${n})`);
 
   const registry = path.join(root, 'root_meta_info.json');
-  let removedEntries = 0;
-  let meta = null;
-  if (fs.existsSync(registry)) {
-    meta = readJson(registry);
-    if (!meta || typeof meta !== 'object' || Array.isArray(meta)
-        || (meta.all_draft_store != null && !Array.isArray(meta.all_draft_store))) {
-      throw new CapcutError('Invalid draft registry.', { code: 'INVALID_REGISTRY' });
-    }
-    const before = (meta.all_draft_store || []).length;
-    meta.all_draft_store = (meta.all_draft_store || [])
-      .filter(e => path.resolve(e.draft_fold_path || '') !== path.resolve(projectDir));
-    removedEntries = before - meta.all_draft_store.length;
-  }
+  const { meta, removedEntries } = registryWithout(registry, projectDir);
   if (!options.dryRun) {
     fs.mkdirSync(bin, { recursive: true });
     fs.renameSync(projectDir, dest);

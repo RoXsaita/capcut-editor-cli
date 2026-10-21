@@ -116,6 +116,18 @@ function materialArray(doc) {
   return (doc.materials.material_animations ||= []);
 }
 
+/**
+ * Does this clip carry a native intro/outro/combo animation? Splitting such a clip copies the
+ * container to both halves: the intro replays mid-shot and the outro keeps a start measured
+ * from the old, longer clip. Slicers (polish, ramp) refuse these instead.
+ */
+export function hasClipAnimations(doc, segment) {
+  const refs = new Set(segment?.extra_material_refs || []);
+  if (!refs.size) return false;
+  return (doc?.materials?.material_animations || [])
+    .some(material => material && refs.has(material.id) && (material.animations || []).length > 0);
+}
+
 function findContainer(doc, segment) {
   const byId = new Map(materialArray(doc).map(material => [material.id, material]));
   for (const id of segment.extra_material_refs || []) {

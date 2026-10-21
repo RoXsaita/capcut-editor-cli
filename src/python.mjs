@@ -69,6 +69,19 @@ export const CONDITIONAL_TOOL_IMPORTS = Object.freeze({
   ]),
 });
 
+/**
+ * Groups of modules a tool needs ONE of, keyed by tool basename. caption_generate.py tries
+ * mlx-whisper first and falls back to faster-whisper (tools/caption_engine/asr.py), so either
+ * is enough, but with neither the worker runs the whole mix and then dies in ASR.
+ *
+ * Both are imported lazily inside the worker, so a TOOL_IMPORTS entry would be wrong (each
+ * alone is optional) and an absent check is how preflight said "captions ready" over an
+ * interpreter that could not transcribe a word. `captions --cues` never spawns the worker.
+ */
+export const TOOL_ANY_OF = Object.freeze({
+  'caption_generate.py': Object.freeze([Object.freeze(['mlx_whisper', 'faster_whisper'])]),
+});
+
 /** Present as `--flag`, `--flag=value` or `--flag value`, without matching `--flag-other`. */
 function argvHasFlag(argv, flag) {
   return argv.some(arg => arg === flag || arg.startsWith(`${flag}=`));
@@ -88,7 +101,9 @@ export function toolImports(toolBasename, argv = []) {
 
 /** Every third-party module the package's Python side can need, and how to install it. */
 export const RUNTIME_IMPORTS = Object.freeze(['numpy', 'PIL']);
-export const DISTRIBUTION = Object.freeze({ numpy: 'numpy', PIL: 'pillow' });
+export const DISTRIBUTION = Object.freeze({
+  numpy: 'numpy', PIL: 'pillow', mlx_whisper: 'mlx-whisper', faster_whisper: 'faster-whisper',
+});
 
 /** Install line for a set of missing import names. */
 export function installHint(missing, executable = 'python3') {
@@ -284,12 +299,36 @@ export function missingImports(executable, modules, { runner = spawnSync } = {})
  * Resolve the interpreter for one tool and prove it can import what that tool needs.
  * This is what stands between a user and a ModuleNotFoundError traceback.
  */
+/** Fix line for an any-of group none of whose members the interpreter can import. */
+export function anyOfHint(group, executable = 'python3') {
+  const names = group.map(name => DISTRIBUTION[name] || name);
+  return `install one of ${names.join(' or ')} INTO this interpreter: `
+    + `${JSON.stringify(String(executable))} -m pip install ${names[0]}`
+    + ` (a \`uv tool install ${names[0]}\` puts it in its own environment, which this interpreter cannot import)`;
+}
+
 export function pythonForTool(toolBasename, options = {}) {
   const resolved = resolvePython(options);
   const argv = options.argv || [];
   const required = toolImports(toolBasename, argv);
+  const groups = TOOL_ANY_OF[toolBasename] || [];
   const imports = options.imports || missingImports;
-  const missing = imports(resolved.executable, required, options);
+  // One subprocess for the hard imports and every group member together.
+  const asked = [...new Set([...required, ...groups.flat()])];
+  const absent = asked.length ? imports(resolved.executable, asked, options) : [];
+  const missing = absent.filter(name => required.includes(name));
+  const emptyGroup = groups.find(group => group.every(name => absent.includes(name)));
+  if (!missing.length && emptyGroup) {
+    throw new CapcutError(
+      `${toolBasename} needs one of ${emptyGroup.join(', ')} (speech recognition), which ${resolved.executable} cannot import`,
+      {
+        code: 'PYTHON_MISSING_DEPENDENCY',
+        exitCode: 2,
+        details: { interpreter: resolved.executable, missing: [...emptyGroup], anyOf: true,
+          fix: anyOfHint(emptyGroup, resolved.executable) },
+      },
+    );
+  }
   if (missing.length) {
     // Name the flag when a flag is what created the requirement. "find.py needs numpy" is
     // baffling on a command that has never needed NumPy before.
@@ -330,11 +369,29 @@ export function preflightPython(options = {}) {
       ok: false,
       detail: 'skipped because no supported interpreter was found',
       fix: `install Python ${MIN_PYTHON_TEXT}+ first, then ${installHint(RUNTIME_IMPORTS)}`,
+    }, {
+      name: 'Caption generation',
+      ok: false,
+      blocking: false,
+      detail: 'skipped because no supported interpreter was found; `captions --cues` works without it',
+      fix: null,
     }];
   }
 
   const imports = options.imports || missingImports;
-  const missing = imports(resolved.executable, RUNTIME_IMPORTS, options);
+  const asr = TOOL_ANY_OF['caption_generate.py'][0];
+  // One subprocess: the runtime set, caption generation's hard imports and its ASR group.
+  const probed = [...new Set([...RUNTIME_IMPORTS, ...TOOL_IMPORTS['caption_generate.py'], ...asr])];
+  const absent = imports(resolved.executable, probed, options);
+  const missing = absent.filter(name => RUNTIME_IMPORTS.includes(name));
+  const captionHard = absent.filter(name => TOOL_IMPORTS['caption_generate.py'].includes(name));
+  const asrMissing = asr.every(name => absent.includes(name));
+  const asrPresent = asr.filter(name => !absent.includes(name));
+  const captionsOk = !captionHard.length && !asrMissing;
+  const captionProblems = [
+    ...(captionHard.length ? [`cannot import ${captionHard.join(', ')}`] : []),
+    ...(asrMissing ? [`no speech recognition module (${asr.join(' or ')})`] : []),
+  ];
   return [{
     name: 'Python runtime',
     ok: true,
@@ -350,5 +407,18 @@ export function preflightPython(options = {}) {
       : `${RUNTIME_IMPORTS.join(', ')} importable`,
     fix: missing.length ? installHint(missing, resolved.executable) : null,
     missing,
+  }, {
+    // Optional: `captions --cues` places prepared cues without ASR, and nothing else needs it.
+    name: 'Caption generation',
+    ok: captionsOk,
+    blocking: false,
+    detail: captionsOk
+      ? `${resolved.executable} can import ${TOOL_IMPORTS['caption_generate.py'].join(', ')} and ${asrPresent.join(', ')}`
+      : `${resolved.executable}: ${captionProblems.join('; ')} — \`captions\` cannot transcribe; \`captions --cues\` still works`,
+    fix: captionsOk ? null : [
+      ...(captionHard.length ? [installHint(captionHard, resolved.executable)] : []),
+      ...(asrMissing ? [anyOfHint(asr, resolved.executable)] : []),
+    ].join('; '),
+    missing: [...captionHard, ...(asrMissing ? asr : [])],
   }];
 }

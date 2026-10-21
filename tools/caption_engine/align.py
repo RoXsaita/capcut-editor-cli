@@ -120,22 +120,15 @@ ASR WORD SEQUENCE / CUES_JSON:
         from .layout import parse_layout_agent_output
         data = parse_layout_agent_output(raw)
         sparse = isinstance(data, dict)
+        rejected: list[dict] = []
         if sparse:
             fixes = data.get("fixes")
             if not isinstance(fixes, list):
                 raise ValueError("missing fixes array")
-            by_id = {str(c.get("id")): c for c in cues}
-            seen = set()
-            for fixed in fixes:
-                if not isinstance(fixed, dict):
-                    raise ValueError("invalid correction")
-                key = str(fixed.get("id"))
-                if key not in by_id or key in seen:
-                    raise ValueError("unknown/duplicate correction id")
-                if fixed.get("before") != by_id[key].get("text"):
-                    raise ValueError("stale correction text")
-                seen.add(key)
-            replacements = {str(f["id"]): f for f in fixes}
+            replacements = _valid_sparse_fixes(cues, fixes, rejected)
+            if fixes and not replacements and rejected:
+                raise ValueError("every proposed correction was rejected: "
+                                 + "; ".join(f"{r.get('id')}: {r['reason']}" for r in rejected[:5]))
         else:
             # Accept the old full-array contract for existing callers/tests,
             # but never use a greedy regex that mistakes an inner fixes array.
@@ -159,12 +152,60 @@ ASR WORD SEQUENCE / CUES_JSON:
             nc["text"] = normalize_caption_terms(str(nc.get("text") or ""))
             nc["align_source"] = (nc.get("align_source") or "whisper") + "+llm"
             out.append(nc)
-        meta.update(status="completed", changed=sum(a["text"] != b["text"] for a, b in zip(cues, out)))
+        meta.update(status="completed", changed=sum(a["text"] != b["text"] for a, b in zip(cues, out)),
+                    rejected=len(rejected))
+        if rejected:
+            meta["rejections"] = rejected[:20]
         return out
     except Exception as exc:
         log.warning("llm polish failed: %s", exc)
         meta.update(status="failed", error=str(exc)[:400])
         return fallback
+
+
+def _valid_sparse_fixes(cues: list[dict], fixes: list, rejected: list[dict]) -> dict:
+    """Keep each valid sparse fix on its own; one stale or unknown fix never voids the rest."""
+    by_id = {str(c.get("id")): c for c in cues}
+    counts: dict[str, int] = {}
+    for fixed in fixes:
+        if isinstance(fixed, dict):
+            counts[str(fixed.get("id"))] = counts.get(str(fixed.get("id")), 0) + 1
+    try:
+        from caption_text_llm import is_typo_fix
+    except ImportError:  # the engine also runs without the adapter on sys.path
+        is_typo_fix = None
+    out = {}
+    for fixed in fixes:
+        if not isinstance(fixed, dict):
+            rejected.append({"id": None, "reason": "not an object"})
+            continue
+        key = str(fixed.get("id"))
+        if key not in by_id:
+            rejected.append({"id": fixed.get("id"), "reason": "unknown id"})
+            continue
+        if counts.get(key, 0) > 1:
+            rejected.append({"id": fixed.get("id"), "reason": "duplicate id"})
+            continue
+        current = str(by_id[key].get("text") or "")
+        before, text = fixed.get("before"), fixed.get("text")
+        if not isinstance(text, str) or not text.strip() or len(text) > 60:
+            rejected.append({"id": fixed.get("id"), "reason": "invalid text"})
+            continue
+        if len(text.split()) > min(2, len(current.split())):
+            rejected.append({"id": fixed.get("id"), "reason": "adds words"})
+            continue
+        if before != current:
+            # A hamza or whitespace difference is the same text; anything else is stale.
+            if not isinstance(before, str) or _norm(before) != _norm(current):
+                rejected.append({"id": fixed.get("id"), "reason": "stale before"})
+                continue
+            if text.strip() == current:
+                continue
+            if is_typo_fix is not None and not is_typo_fix({"before": current, "text": text}):
+                rejected.append({"id": fixed.get("id"), "reason": "not a typo fix of the cue text"})
+                continue
+        out[key] = fixed
+    return out
 
 
 def align_transcript_bundle(

@@ -1,10 +1,19 @@
 /**
  * Loudness match via clip `volume` — `capcutctl loudness`.
  *
- * Measure edited ranges and the mix with ffmpeg ebur128, then set speech/SFX
- * clip volume toward −14 LUFS, constrained by true-peak headroom. Music beds are
- * never raised (F23 / F20). Only attenuation (volume < 1.0) is round-tripped;
- * a needed boost is VOLUME_BOOST_UNVERIFIED unless --allow-boost.
+ * Measure edited ranges and the mix with ffmpeg ebur128, then set speech clip
+ * volume toward −14 LUFS, constrained by true-peak headroom. Music beds are never
+ * raised (F23 / F20). SFX keep the level they were placed at (a mograph pop, a
+ * `capcutctl sfx` hit, a hand-set level): the clip pass may bring a hot one down to
+ * the target but never raises one back up, and otherwise only the peak limiter
+ * lowers them. An explicit --segments selection still matches a named SFX to the
+ * target. Only attenuation (volume < 1.0) is round-tripped; a needed boost is
+ * VOLUME_BOOST_UNVERIFIED unless --allow-boost.
+ *
+ * Parked parts-bin clips past the content end are neither measured nor rewritten.
+ * Volume keyframes (build's duck) are keys of absolute gain that replace the static
+ * volume; every volume write here scales them by the same gain. --peak-only
+ * (match:false) skips the clip pass and only limits the mix peak.
  *
  * Clip headroom cannot guarantee mix headroom where SFX, music or a scene's sound
  * overlap the voice, so a mix still over the peak ceiling is brought under it by
@@ -19,7 +28,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
-import { CapcutError, resolveMediaPath } from './core.mjs';
+import { CapcutError, ledgerContentEndUs, preservedRange, resolveMediaPath } from './core.mjs';
 import { isBrollSegment } from './broll-lint.mjs';
 import { pythonForTool, PACKAGE_ROOT } from './python.mjs';
 
@@ -28,10 +37,22 @@ const r6 = n => Math.round(n * 1e6) / 1e6;
 
 export const DEFAULT_TARGET_LUFS = -14;
 
+/**
+ * Where parked parts-bin clips begin, or 0 (nothing is parked) when the project records no
+ * parked range. Read from the ledger-restored doc: after a CapCut save strips the follow
+ * ender's identity, the raw doc's content end stops before the ender, and the ender and its
+ * cue would drop out of measurement and peak limiting as if parked.
+ */
+function parkedFromUs(doc, projectDir) {
+  return preservedRange(projectDir) ? ledgerContentEndUs(doc, projectDir) : 0;
+}
+
 export function analyzeAudio(doc, projectDir, { mixOnly = false } = {}) {
   const python = pythonForTool('audio_levels.py');
+  // Parked parts-bin clips past the edit are not in the video: leave them out of the mix.
+  const endUs = parkedFromUs(doc, projectDir);
   const result = spawnSync(python.executable, [path.join(PACKAGE_ROOT, 'tools/audio_levels.py')], {
-    input: JSON.stringify({ doc, projectDir: projectDir || '.', mixOnly }),
+    input: JSON.stringify({ doc, projectDir: projectDir || '.', mixOnly, ...(endUs > 0 ? { contentEndUs: endUs } : {}) }),
     encoding: 'utf8', timeout: 300_000, maxBuffer: 16 * 1024 * 1024,
   });
   if (result.error || result.status !== 0) {
@@ -118,7 +139,7 @@ export function classifyLoudnessRole(track, segment, material) {
   const graphic = String(segment?.desc || '').startsWith('mograph:');   // a graphic's cue, a scene's own sound
   if (track?.type === 'audio') {
     const desc = String(segment?.desc || '');
-    if (graphic || desc.startsWith('polish:') || desc.startsWith('sig:sfx') || desc === 'sig:sfx') return 'sfx';
+    if (graphic || desc.startsWith('polish:') || desc.startsWith('sig:sfx') || desc.startsWith('sfx:')) return 'sfx';
     return 'speech';
   }
   if (track?.type !== 'video' || track?.flag === 0) return 'skip';
@@ -145,6 +166,33 @@ const PEAK_MARGIN_DB = 0.2;
 // A step around the voice that moved the peak less than this did not touch what makes it.
 const MIN_HELP_DB = 0.1;
 
+const volumeKeyBlocks = segment => (segment.common_keyframes || []).filter(b => b?.property_type === 'KFTypeVolume');
+
+/**
+ * Set a clip's static volume and scale its volume keys by the same gain: CapCut's keys are
+ * absolute gain that replace the static volume, so a duck left alone would play the bed at
+ * its old level. Returns an undo function.
+ */
+function setVolume(segment, volume) {
+  const from = segment.volume ?? 1;
+  const hadVolume = 'volume' in segment;
+  const last = segment.last_nonzero_volume;
+  const keys = volumeKeyBlocks(segment).flatMap(b => (b.keyframe_list || []).map(k => [k, k.values ? [...k.values] : k.values]));
+  const g = from > 0 ? volume / from : 1;
+  segment.volume = volume;
+  if ('last_nonzero_volume' in segment) segment.last_nonzero_volume = volume;
+  for (const [key] of keys) if (Array.isArray(key.values)) key.values = key.values.map(v => v * g);
+  return () => {
+    if (hadVolume) segment.volume = from; else delete segment.volume;
+    if (last !== undefined) segment.last_nonzero_volume = last;
+    for (const [key, values] of keys) key.values = values;
+  };
+}
+
+function isParked(segment, endUs) {
+  return endUs > 0 && Number(segment.target_timerange?.start) >= endUs;
+}
+
 /**
  * Bring the measured mix under `peak` dBTP by lowering clip volumes, never raising one (a music
  * level the user set stays a ceiling). First the layers around the voice — SFX, pops, music, a
@@ -153,11 +201,11 @@ const MIN_HELP_DB = 0.1;
  * Then, if the mix is still over, every layer by the remaining excess: gain is linear, so that
  * step lands.
  */
-function limitMixPeak(doc, analysis, mix, peak, { projectDir, selected }) {
+function limitMixPeak(doc, analysis, mix, peak, { projectDir, selected, endUs }) {
   const layers = [];
   for (const track of doc.tracks || []) {
     for (const segment of track.segments || []) {
-      if (!analysis.segments[segment.id] || !((segment.volume ?? 1) > 0)) continue;
+      if (!analysis.segments[segment.id] || !((segment.volume ?? 1) > 0) || isParked(segment, endUs)) continue;
       if (selected && !selected.has(segment.id)) continue;
       const role = classifyLoudnessRole(track, segment, materialFor(doc, segment.material_id));
       layers.push({ segment, around: role === 'sfx' || role === 'music' });
@@ -167,12 +215,12 @@ function limitMixPeak(doc, analysis, mix, peak, { projectDir, selected }) {
   const lower = (rows, stage) => {
     const gainDb = peak - PEAK_MARGIN_DB - mix.truePeak;
     const g = 10 ** (gainDb / 20);
-    const undo = rows.map(({ segment }) => [segment, segment.volume, segment.last_nonzero_volume]);
+    const undo = [];
     const segments = rows.map(({ segment }) => {
       const from = segment.volume ?? 1;
-      segment.volume = from * g;
-      if ('last_nonzero_volume' in segment) segment.last_nonzero_volume = segment.volume;
-      return { id: segment.id, from: r6(from), to: r6(segment.volume) };
+      undo.push(setVolume(segment, from * g));
+      return { id: segment.id, from: r6(from), to: r6(segment.volume),
+        ...(volumeKeyBlocks(segment).length ? { keysScaled: true } : {}) };
     });
     const prev = mix;
     const after = analyzeAudio(doc, projectDir, { mixOnly: true }).mix;
@@ -185,10 +233,7 @@ function limitMixPeak(doc, analysis, mix, peak, { projectDir, selected }) {
   for (let i = 0; i < 3 && around.length && around.length < layers.length && mix.truePeak > peak; i++) {
     const step = lower(around, 'around-voice');
     if (step.after.truePeak == null || step.prev.truePeak - step.after.truePeak < MIN_HELP_DB) {
-      for (const [segment, volume, last] of step.undo) {
-        if (volume === undefined) delete segment.volume; else segment.volume = volume;
-        if (last !== undefined) segment.last_nonzero_volume = last;
-      }
+      for (const restore of step.undo.reverse()) restore();
       steps.pop();
       break;
     }
@@ -207,6 +252,15 @@ export function opLoudness(doc, op = {}, context = {}) {
     });
   }
   const allowBoost = Boolean(op.allowBoost);
+  const match = op.match !== false;
+  if (!match && op.measurements != null) {
+    throw new CapcutError('loudness --peak-only limits the measured mix; it cannot run on injected clip measurements.', {
+      code: 'BAD_ARGS', exitCode: 2,
+    });
+  }
+  if (!match && op.limitPeak === false) {
+    throw new CapcutError('loudness --peak-only with peak limiting turned off would do nothing.', { code: 'BAD_ARGS', exitCode: 2 });
+  }
   const peak = op.peak == null ? -1 : Number(op.peak);
   if (!Number.isFinite(peak) || peak > 0 || peak < -24) {
     throw new CapcutError('loudness --peak must be between -24 and 0 dBTP.', { code: 'BAD_PEAK', exitCode: 2 });
@@ -224,21 +278,27 @@ export function opLoudness(doc, op = {}, context = {}) {
   const loudnessesBefore = doc.loudnesses ? JSON.stringify(doc.loudnesses) : null;
   const analysis = op.measurements == null ? analyzeAudio(doc, context.projectDir) : null;
   const before = analysis ? structuredClone(doc) : null;
+  const endUs = parkedFromUs(doc, context.projectDir);
   const segments = [];
   const skipped = [];
   const refused = [];
   let changed = 0;
 
-  for (const track of doc.tracks || []) {
+  for (const track of match ? doc.tracks || [] : []) {
     for (const segment of track.segments || []) {
       if (selected && !selected.has(segment.id)) continue;
       const material = materialFor(doc, segment.material_id);
       const role = classifyLoudnessRole(track, segment, material);
+      if (role === 'skip') continue;
+      if (isParked(segment, endUs)) {
+        // A parts-bin clip past the edit: not in the video, so its level is not ours to set.
+        skipped.push({ id: segment.id, reason: 'parked' });
+        continue;
+      }
       if (role === 'music') {
         skipped.push({ id: segment.id, reason: 'music' });
         continue;
       }
-      if (role === 'skip') continue;
       if (segment.volume === 0) {
         skipped.push({ id: segment.id, reason: 'muted' });
         continue;
@@ -248,6 +308,11 @@ export function opLoudness(doc, op = {}, context = {}) {
       const level = analysis?.segments[segment.id];
       if (analysis && !level) {
         skipped.push({ id: segment.id, reason: 'no audio stream' });
+        continue;
+      }
+      if (level?.keyed) {
+        // Its measured level moves with the keys; the peak limiter still scales them.
+        skipped.push({ id: segment.id, reason: 'volume keyframes' });
         continue;
       }
       const measured = level?.lufs ?? lookupMeasurement(op.measurements, { path: mediaPath, id: material?.id });
@@ -267,8 +332,12 @@ export function opLoudness(doc, op = {}, context = {}) {
 
       const previousVolume = segment.volume == null ? 1 : Number(segment.volume);
       const desired = volumeForLufs(measured, target);
-      const needed = level?.truePeak != null
+      const peakSafe = level?.truePeak != null
         ? Math.min(desired, volumeForLufs(level.truePeak, peak)) : desired;
+      // An SFX keeps the level it was placed at: never raised back toward the voice target.
+      // Only a named --segments selection matches one to the target.
+      const capped = role === 'sfx' && !selected && peakSafe > previousVolume;
+      const needed = capped ? previousVolume : peakSafe;
       const fades = snapshotFades(doc, segment);
       const row = {
         id: segment.id,
@@ -282,9 +351,14 @@ export function opLoudness(doc, op = {}, context = {}) {
         ...(level ? {
           beforeTruePeak: level.truePeak == null ? null : r3(playbackLufs(level.truePeak, previousVolume)),
           afterTruePeak: level.truePeak == null ? null : r3(playbackLufs(level.truePeak, needed)),
-          peakLimited: needed < desired,
+          peakLimited: peakSafe < desired,
         } : {}),
+        ...(capped ? { capped: 'sfx-level' } : {}),
       };
+      if (capped) {
+        segments.push({ ...row, unchanged: true });
+        continue;
+      }
 
       if (needed > 1) {
         const boost = {
@@ -296,8 +370,7 @@ export function opLoudness(doc, op = {}, context = {}) {
           refused.push(boost);
           continue;
         }
-        segment.volume = needed;
-        if ('last_nonzero_volume' in segment) segment.last_nonzero_volume = needed;
+        setVolume(segment, needed);
         changed++;
         segments.push({
           ...row,
@@ -308,8 +381,7 @@ export function opLoudness(doc, op = {}, context = {}) {
         continue;
       }
 
-      segment.volume = needed;
-      if ('last_nonzero_volume' in segment) segment.last_nonzero_volume = needed;
+      setVolume(segment, needed);
       changed++;
       segments.push(row);
       const fadesAfter = snapshotFades(doc, segment);
@@ -325,11 +397,12 @@ export function opLoudness(doc, op = {}, context = {}) {
     });
   }
 
-  let after = analysis ? analyzeAudio(doc, context.projectDir, { mixOnly: true }).mix : null;
+  // --peak-only: the clip pass did not run, so the measured mix is still the current one.
+  let after = !analysis ? null : match ? analyzeAudio(doc, context.projectDir, { mixOnly: true }).mix : analysis.mix;
   let peakLimit = null;
   if (after?.truePeak != null && after.truePeak > peak && op.limitPeak !== false) {
     ({ mix: after, report: peakLimit } = limitMixPeak(doc, analysis, after, peak,
-      { projectDir: context.projectDir, selected }));
+      { projectDir: context.projectDir, selected, endUs }));
   }
   if (after?.truePeak != null && after.truePeak > peak + (op.limitPeak === false ? 0.05 : 0)) {
     // Nothing left to lower (a --segments selection that misses the overlap), or limiting was turned off.
@@ -342,13 +415,14 @@ export function opLoudness(doc, op = {}, context = {}) {
     });
   }
   if (peakLimit) {
-    const matched = new Set(segments.map(row => row.id));
+    const matched = new Set(segments.filter(row => !row.unchanged).map(row => row.id));
     changed += new Set(peakLimit.steps.flatMap(step => step.segments.map(row => row.id)).filter(id => !matched.has(id))).size;
   }
 
   return {
     target,
     peak,
+    ...(match ? {} : { peakOnly: true }),
     ...(analysis ? { beforeMix: analysis.mix, afterMix: after, measurementScope: analysis.scope } : {}),
     ...(peakLimit ? { peakLimit } : {}),
     changed,

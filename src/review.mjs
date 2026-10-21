@@ -222,10 +222,12 @@ function pathsAtDirectory(dir, id) {
   };
 }
 
-function runTool(command, args, label) {
+function runTool(command, args, label, { statusError = null } = {}) {
   const result = spawnSync(command, args, { encoding: 'utf8' });
   if (result.stdout) process.stderr.write(result.stdout);
   if (result.stderr) process.stderr.write(result.stderr);
+  const mapped = !result.error && result.status !== 0 && statusError ? statusError(result.status) : null;
+  if (mapped) throw mapped;
   if (result.error || result.status !== 0) {
     throw new CapcutError(
       `${label} failed${result.status == null ? '' : ` (exit ${result.status})`}: ${result.error?.message || result.stderr?.trim() || 'unknown error'}`,
@@ -295,9 +297,15 @@ export function reviewProject(projectDir, {
   ffmpeg = 'ffmpeg',
   fps = 6,
   width = 240,
+  // frame_qa's preview budget. Off by default: review already bounds its range to the
+  // content, and a long review that used to finish must not start failing on the budget.
+  maxMinutes = 0,
 } = {}) {
   if (!Number.isFinite(Number(fps)) || Number(fps) <= 0) {
     throw new CapcutError('review requires --fps greater than zero.', { code: 'BAD_FPS', exitCode: 2 });
+  }
+  if (!Number.isFinite(Number(maxMinutes)) || Number(maxMinutes) < 0) {
+    throw new CapcutError('review requires --max-minutes of zero (off) or more.', { code: 'BAD_MAX_MINUTES', exitCode: 2 });
   }
   if (!Number.isFinite(Number(width)) || Number(width) <= 0) {
     throw new CapcutError('review requires --width greater than zero.', { code: 'BAD_WIDTH', exitCode: 2 });
@@ -320,7 +328,13 @@ export function reviewProject(projectDir, {
     const fullProxy = path.join(tmp, 'full-proxy.mp4');
     runTool(interpreter, [FRAME_QA, '--project', projectDir, '--preview', fullProxy,
       '--from', String(edl.contentRange.start), '--to', String(edl.contentRange.end),
-      '--fps', String(fps)], 'review proxy compositor');
+      '--fps', String(fps), '--max-minutes', String(Number(maxMinutes))], 'review proxy compositor', {
+      // frame_qa exits 3 when the preview would overrun --max-minutes or stops advancing.
+      statusError: status => (status === 3 ? new CapcutError(
+        'review stopped: the proxy preview would overrun its time budget or stopped advancing; '
+        + 'retry at the default --fps 6, or with a larger --max-minutes (0 turns the budget off).',
+        { code: 'PREVIEW_TOO_SLOW', exitCode: 3 }) : null),
+    });
 
     const trimArgs = ['-y', '-loglevel', 'error'];
     // frame_qa already renders the explicit content range above. Re-encode that proxy for a

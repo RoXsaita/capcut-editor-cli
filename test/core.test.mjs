@@ -16,6 +16,7 @@ import {
   closeCapcut,
   contentEndUs,
   createSnapshot,
+  dedupeMaterials,
   deepMerge,
   discoverOpenDraft,
   draftEndUs,
@@ -23,11 +24,13 @@ import {
   durationInfo,
   executeTransaction,
   inspectProject,
+  ledgerContentEndUs,
   LIVE_FILE_NAMES,
   PRESET3_DUPLICATE_BASELINE,
   projectLockStatus,
   listSnapshots,
   readJson,
+  resolveSnapshotDir,
   restoreProjectSnapshot,
   sha256,
   stableJson,
@@ -36,6 +39,7 @@ import {
   unsetPath,
   waitForCapcutClosed
 } from '../src/core.mjs';
+import { tmpDir } from './helpers/tmp.mjs';
 
 test('patch and unset reject prototype traversal', () => {
   for (const key of ['__proto__', 'constructor', 'prototype']) {
@@ -63,7 +67,7 @@ test('validation reports malformed document collections without throwing', () =>
 });
 
 function fixture({ missingMedia = false, drift = true } = {}) {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-test-'));
+  const temp = tmpDir('capcutctl-test-');
   const project = path.join(temp, 'Fixture Project');
   const timelineId = 'TIMELINE-ONE';
   const timelineDir = path.join(project, 'Timelines', timelineId);
@@ -324,6 +328,7 @@ test('history lists snapshots and manual restore preserves a rescue point', () =
 
 test('writes refuse to race CapCut unless explicitly forced', () => {
   const fx = fixture({ drift: false });
+  const previous = process.env.CAPCUTCTL_ASSUME_RUNNING;
   process.env.CAPCUTCTL_ASSUME_RUNNING = '1';
   try {
     assert.throws(
@@ -333,11 +338,16 @@ test('writes refuse to race CapCut unless explicitly forced', () => {
     const forced = syncMirrors(fx.project, { forceRunning: true, dryRun: true });
     assert.equal(forced.committed, false);
   } finally {
-    delete process.env.CAPCUTCTL_ASSUME_RUNNING;
+    if (previous == null) delete process.env.CAPCUTCTL_ASSUME_RUNNING;
+    else process.env.CAPCUTCTL_ASSUME_RUNNING = previous;
   }
 });
 
-test('CapCut probe errors are unknown and only verified no-match is closed', () => {
+test('CapCut probe errors are unknown and only verified no-match is closed', t => {
+  // This tests the probe itself, so the suite-wide CAPCUTCTL_ASSUME_RUNNING must not answer for it.
+  const previous = process.env.CAPCUTCTL_ASSUME_RUNNING;
+  delete process.env.CAPCUTCTL_ASSUME_RUNNING;
+  t.after(() => { if (previous != null) process.env.CAPCUTCTL_ASSUME_RUNNING = previous; });
   const failed = capcutProcess({
     spawn: () => ({ status: 2, stdout: '', stderr: 'permission denied' }),
   });
@@ -376,11 +386,15 @@ test('transactions lock before loading and serialize concurrent writers', async 
   const coreUrl = new URL('../src/core.mjs', import.meta.url).href;
   const childCode = `
     import { executeTransaction } from ${JSON.stringify(coreUrl)};
-    import { spawnSync } from 'node:child_process';
+    import fs from 'node:fs';
     try {
       executeTransaction(${JSON.stringify(fx.project)}, groups => {
         for (const group of groups) group.doc.concurrentWrites = (group.doc.concurrentWrites || 0) + 1;
-        spawnSync('sleep', ['0.35'], { stdio: 'ignore' });
+        // The first writer holds the lock until the parent has watched the second one refuse.
+        const release = process.env.RELEASE_FILE;
+        const tick = new Int32Array(new SharedArrayBuffer(4));
+        const deadline = Date.now() + 15_000;
+        while (release && !fs.existsSync(release) && Date.now() < deadline) Atomics.wait(tick, 0, 0, 10);
         return { changed: true };
       }, { processProbe: () => ({ running: false, verified: true, pids: [] }), backup: false });
     } catch (error) {
@@ -388,8 +402,10 @@ test('transactions lock before loading and serialize concurrent writers', async 
       process.exitCode = error.code === 'LOCKED' ? 4 : 1;
     }
   `;
+  const releaseFile = path.join(path.dirname(fx.project), 'release-first-writer');
   const first = spawn(process.execPath, ['--input-type=module', '--eval', childCode], {
     cwd: path.dirname(path.dirname(new URL(import.meta.url).pathname)),
+    env: { ...process.env, RELEASE_FILE: releaseFile },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const lockFile = path.join(fx.project, '.capcutctl', 'write.lock');
@@ -409,7 +425,10 @@ test('transactions lock before loading and serialize concurrent writers', async 
     child.once('error', reject);
     child.once('close', code => resolve({ code, stderr }));
   });
-  const [firstResult, secondResult] = await Promise.all([wait(first), wait(second)]);
+  const firstDone = wait(first);
+  const secondResult = await wait(second);
+  fs.writeFileSync(releaseFile, '');
+  const firstResult = await firstDone;
   assert.equal(firstResult.code, 0, firstResult.stderr);
   assert.equal(secondResult.code, 4, secondResult.stderr);
   for (const dir of [fx.project, fx.timelineDir]) {
@@ -1217,4 +1236,519 @@ test('a live lock is never reclaimed after a stale preflight check', () => {
   );
   assert.equal(fs.readFileSync(lock, 'utf8'), before);
   fs.unlinkSync(lock);
+});
+
+// ---- review 2026-10-19: transaction, materials, time units, snapshots -----------------------
+
+function rewriteMirrors(fx, mutate, dirs = [fx.project, fx.timelineDir]) {
+  for (const dir of dirs) {
+    const doc = readJson(path.join(dir, 'draft_info.json'));
+    mutate(doc);
+    for (const name of LIVE_FILE_NAMES) fs.writeFileSync(path.join(dir, name), stableJson(doc));
+  }
+}
+const withTransition = doc => { doc.materials.transitions = [{ id: 'TR1', type: 'transition', duration: 200_000 }]; };
+const withOrphan = doc => { withTransition(doc); doc.tracks[0].segments[0].extra_material_refs.push('TR1'); };
+const volumeSpec = value => ({ version: 1, operations: [{ op: 'segment.patch', selector: { id: 'SEGMENT-ONE' }, set: { volume: value } }] });
+const orphanSpec = { version: 1, operations: [{ op: 'segment.patch', selector: { id: 'SEGMENT-ONE' }, set: { extra_material_refs: ['MASK-ONE', 'TR1'] } }] };
+
+test('a transition orphaned before the edit is a preexisting warning, and the apply commits', () => {
+  const fx = fixture({ drift: false });
+  rewriteMirrors(fx, withOrphan);
+  assert.ok(doctor(fx.project).issues.some(item => item.code === 'TRANSITION_ORPHANED' && item.level === 'error'
+    && /capcutctl polish/.test(item.message)));
+  const dry = applySpec(fx.project, volumeSpec(0.5), { forceRunning: true, dryRun: true });
+  const orphan = dry.validation.filter(item => item.code === 'TRANSITION_ORPHANED');
+  assert.ok(orphan.length);
+  assert.ok(orphan.every(item => item.level === 'warning' && item.preexisting === true));
+  const real = applySpec(fx.project, volumeSpec(0.5), { forceRunning: true, backup: false });
+  assert.equal(real.committed, true);
+  assert.equal(readJson(path.join(fx.project, 'draft_info.json')).tracks[0].segments[0].volume, 0.5);
+  assert.deepEqual(listSnapshots(fx.project), [], 'no rollback snapshot left behind');
+});
+
+test('a null volume the draft already had is a preexisting warning; a new one still refuses', () => {
+  const fx = fixture({ drift: false });
+  // An older capcutctl wrote a bad flag's NaN as null.
+  rewriteMirrors(fx, doc => { doc.tracks[0].segments[0].volume = null; });
+  assert.ok(doctor(fx.project).issues.some(item => item.code === 'BAD_NUMBER' && item.level === 'error'));
+  const alpha = { version: 1, operations: [{ op: 'segment.patch', selector: { id: 'SEGMENT-ONE' }, set: { clip: { alpha: 0.8 } } }] };
+  const dry = applySpec(fx.project, alpha, { forceRunning: true, dryRun: true });
+  const legacy = dry.validation.filter(item => item.code === 'BAD_NUMBER');
+  assert.ok(legacy.length && legacy.every(item => item.level === 'warning' && item.preexisting === true), JSON.stringify(legacy));
+  const real = applySpec(fx.project, alpha, { forceRunning: true, backup: false });
+  assert.equal(real.committed, true, 'the post-write doctor baselines it too');
+  assert.equal(readJson(path.join(fx.project, 'draft_info.json')).tracks[0].segments[0].clip.alpha, 0.8);
+  // A bad value the edit writes is not baselined by the null volume, even on the same segment.
+  const nullKey = groups => {
+    for (const group of groups) group.doc.tracks[0].segments[0].common_keyframes = [{ property_type: 'KFTypeAlpha',
+      keyframe_list: [{ id: 'K1', time_offset: 0, values: [null] }] }];
+  };
+  const fractional = groups => {
+    for (const group of groups) group.doc.tracks[0].segments[0].target_timerange.start = 0.5;
+  };
+  for (const [mutate, code] of [[nullKey, 'BAD_NUMBER'], [fractional, 'NON_INTEGER_TIMERANGE']]) {
+    assert.throws(() => executeTransaction(fx.project, mutate, { forceRunning: true, dryRun: true }),
+      error => error.code === 'VALIDATION_FAILED' && error.details.some(item => item.code === code));
+  }
+});
+
+test('restore puts back a snapshot that carries a legacy null volume', () => {
+  const fx = fixture({ drift: false });
+  rewriteMirrors(fx, doc => { doc.tracks[0].segments[0].volume = null; });
+  createSnapshot(fx.project, 'legacy');
+  rewriteMirrors(fx, doc => { doc.tracks[0].segments[0].volume = 1; });
+  const dry = restoreProjectSnapshot(fx.project, 'legacy', { forceRunning: true, dryRun: true });
+  assert.ok(dry.validation.some(item => item.code === 'BAD_NUMBER' && item.level === 'warning'));
+  const real = restoreProjectSnapshot(fx.project, 'legacy', { forceRunning: true, backup: false });
+  assert.ok(real.restored);
+  assert.equal(readJson(path.join(fx.project, 'draft_info.json')).tracks[0].segments[0].volume, null);
+});
+
+test('a snapshot label is matched whole: build never picks <timestamp>-pre-build', async () => {
+  const fx = fixture({ drift: false });
+  const build = createSnapshot(fx.project, 'build');
+  await new Promise(resolve => setTimeout(resolve, 5));
+  createSnapshot(fx.project, 'pre-build');
+  assert.equal(resolveSnapshotDir(fx.project, 'build').name, path.basename(build));
+  assert.match(resolveSnapshotDir(fx.project, 'pre-build').name, /-pre-build$/);
+  assert.throws(() => resolveSnapshotDir(fx.project, 'uild'), { code: 'SNAPSHOT_NOT_FOUND' });
+});
+
+test('ledgerContentEndUs keeps the follow ender after a CapCut save strips its identity', () => {
+  const dir = tmpDir('capcutctl-ender-');
+  fs.mkdirSync(path.join(dir, '.capcutctl'), { recursive: true });
+  const seg = (id, material, start, duration) => ({ id, material_id: material, extra_material_refs: [],
+    source_timerange: { start: 0, duration }, target_timerange: { start, duration } });
+  // As CapCut saves it: no desc on the ender, no capcutctl_mograph on its material.
+  const doc = {
+    fps: 30, duration: 7_000_000,
+    materials: { videos: [
+      { id: 'FACE', type: 'video', path: '/face.mp4', duration: 60_000_000 },
+      { id: 'ENDER', type: 'video', path: '/ender.mov', duration: 2_000_000 },
+    ] },
+    tracks: [
+      { id: 'T0', type: 'video', segments: [seg('F1', 'FACE', 0, 5_000_000)] },
+      { id: 'T1', type: 'video', segments: [seg('END', 'ENDER', 5_000_000, 2_000_000)] },
+    ],
+  };
+  fs.writeFileSync(path.join(dir, '.capcutctl', 'meta-ledger.json'), JSON.stringify({ version: 1,
+    materials: { ENDER: { kind: 'videos', path: null, fields: { capcutctl_mograph: { template: 'scene:follow-ending' } } } },
+    segments: { END: { material_id: 'ENDER', fields: { desc: 'mograph:follow-ender' } } } }));
+  assert.equal(contentEndUs(doc, dir), 5_000_000, 'the raw saved doc no longer knows its ender');
+  assert.equal(ledgerContentEndUs(doc, dir), 7_000_000);
+  assert.equal(doc.tracks[1].segments[0].desc, undefined, 'the caller\'s doc is not changed');
+});
+
+test('an edit that orphans a transition refuses at the dry run, not after the write', () => {
+  const fx = fixture({ drift: false });
+  rewriteMirrors(fx, withTransition);
+  for (const dryRun of [true, false]) {
+    assert.throws(() => applySpec(fx.project, orphanSpec, { forceRunning: true, dryRun }),
+      error => error.code === 'VALIDATION_FAILED' && error.details.some(item => item.code === 'TRANSITION_ORPHANED'));
+  }
+  assert.deepEqual(readJson(path.join(fx.project, 'draft_info.json')).tracks[0].segments[0].extra_material_refs, ['MASK-ONE']);
+});
+
+test('a dry run that passes never rolls back at commit (doctor-only checks run before the write)', () => {
+  const variants = {
+    plain: () => {},
+    orphaned: fx => rewriteMirrors(fx, withOrphan),
+    transitionMaterial: fx => rewriteMirrors(fx, withTransition),
+    timelineIdMismatch: fx => rewriteMirrors(fx, doc => { doc.id = 'SOME-OTHER-TIMELINE'; }, [fx.project]),
+  };
+  for (const [name, setup] of Object.entries(variants)) {
+    for (const spec of [volumeSpec(0.3), orphanSpec]) {
+      const fx = fixture({ drift: false });
+      setup(fx);
+      let dryError = null;
+      try { applySpec(fx.project, spec, { forceRunning: true, dryRun: true }); } catch (error) { dryError = error; }
+      if (dryError) {
+        assert.equal(dryError.code, 'VALIDATION_FAILED', `${name}: ${dryError.message}`);
+        assert.throws(() => applySpec(fx.project, spec, { forceRunning: true }), error => error.code === 'VALIDATION_FAILED');
+      } else {
+        const result = applySpec(fx.project, spec, { forceRunning: true });
+        assert.ok(result.committed || result.changedFiles.length === 0, `${name} committed (or had nothing to write)`);
+      }
+      if (name === 'timelineIdMismatch' && spec !== orphanSpec) {
+        assert.ok(dryError?.details.some(item => item.code === 'TIMELINE_ID_MISMATCH'), 'reported at the dry run, still blocking');
+      }
+    }
+  }
+});
+
+test('dedupe merges loosely only media copies; speeds and texts must be byte-identical', () => {
+  const doc = {
+    materials: {
+      speeds: [
+        { id: 'S1', type: 'speed', speed: 1, mode: 0 }, { id: 'S1', type: 'speed', speed: 2.5, mode: 0 },
+        { id: 'S2', type: 'speed', speed: 1, mode: 0 }, { id: 'S2', type: 'speed', speed: 1, mode: 0 },
+      ],
+      texts: [{ id: 'T1', type: 'text', content: 'one' }, { id: 'T1', type: 'text', content: 'two' }],
+    },
+    tracks: [],
+  };
+  const merged = dedupeMaterials(doc);
+  assert.deepEqual([...merged], [{ kind: 'speeds', id: 'S2' }]);
+  assert.deepEqual(merged.unmerged, [{ kind: 'speeds', id: 'S1' }, { kind: 'texts', id: 'T1' }]);
+  assert.equal(validateDocument(doc, { checkFiles: false }).filter(item => item.code === 'CONFLICTING_MATERIAL_ID').length, 2);
+});
+
+test('sync leaves a conflicting speed for the human and says so; doctor still reports it', () => {
+  const fx = fixture({ drift: false });
+  rewriteMirrors(fx, doc => {
+    doc.materials.speeds = [{ id: 'SP', type: 'speed', speed: 1, mode: 0 }, { id: 'SP', type: 'speed', speed: 2.5, mode: 0 }];
+  });
+  assert.throws(() => syncMirrors(fx.project, { forceRunning: true }),
+    error => error.code === 'VALIDATION_FAILED' && /1 conflicting id\(s\) left for you \(SP\)/.test(error.message));
+  assert.ok(doctor(fx.project).issues.some(item => item.code === 'CONFLICTING_MATERIAL_ID' && item.id === 'SP'));
+});
+
+test('spec times refuse the ambiguous range; explicit µs and raw timeranges are integers', () => {
+  const doc = () => ({ duration: 10_000_000, fps: 30, materials: { videos: [{ id: 'V', type: 'video', duration: 60_000_000 }] },
+    tracks: [{ id: 'T', type: 'video', flag: 2, segments: [{ id: 'S', material_id: 'V', extra_material_refs: [],
+      target_timerange: { start: 0, duration: 2_000_000 }, source_timerange: { start: 0, duration: 2_000_000 } }] }] });
+  const run = op => { const d = doc(); applyOperations(d, [op], { group: 'root' }); return d; };
+  assert.throws(() => run({ op: 'segment.clone', from: { id: 'S' }, id: 'N', target: { start: 3, duration: 50000 } }),
+    error => error.code === 'BAD_TIME' && /50000 is read as seconds/.test(error.message));
+  const clone = run({ op: 'segment.clone', from: { id: 'S' }, id: 'N', target: { start: 3, durationUs: 33333 } });
+  assert.deepEqual(clone.tracks[0].segments.find(s => s.id === 'N').target_timerange, { start: 3_000_000, duration: 33333 });
+  assert.throws(() => run({ op: 'segment.clone', from: { id: 'S' }, id: 'N', target: { start: 3, durationUs: 1.5 } }),
+    error => error.code === 'BAD_TIME');
+  const patched = run({ op: 'segment.patch', selector: { id: 'S' }, set: { target_timerange: { start: 33333, duration: 1.167 } } });
+  assert.deepEqual(patched.tracks[0].segments[0].target_timerange, { start: 33333, duration: 1_167_000 });
+
+  const codes = duration => {
+    const d = doc();
+    d.tracks[0].segments[0].target_timerange.duration = duration;
+    d.tracks[0].segments[0].source_timerange.duration = duration;
+    return validateDocument(d, { checkFiles: false }).map(item => `${item.level}:${item.code}`);
+  };
+  assert.ok(codes(1.167).includes('error:NON_INTEGER_TIMERANGE'));
+  assert.ok(codes(2).includes('warning:SUBFRAME_SEGMENT'));
+  assert.ok(codes(0).includes('warning:ZERO_DURATION_SEGMENT'));
+  assert.deepEqual(codes(2_840_000).filter(code => /TIMERANGE|SEGMENT$/.test(code)), []);
+  assert.deepEqual(codes(33_333).filter(code => /SUBFRAME/.test(code)), [], 'one 30fps frame is not sub-frame');
+});
+
+test('a failure before the first rename leaves live drafts untouched and drops its snapshot', () => {
+  const fx = fixture({ drift: false });
+  const file = path.join(fx.project, 'draft_info.json');
+  const bytes = fs.readFileSync(file);
+  const inode = fs.statSync(file).ino;
+  assert.throws(() => executeTransaction(fx.project, groups => {
+    for (const group of groups) group.doc.name = 'changed';
+  }, { forceRunning: true,
+    extraWrites: () => [{ file: path.join(fx.project, '.capcutctl', 'invalid.json'), data: 'invalid JSON' }] }),
+  error => error.code === 'ROLLED_BACK' && error.details.restored === false
+    && error.details.snapshot === null && error.details.cause.code === 'INVALID_JSON');
+  assert.deepEqual(fs.readFileSync(file), bytes);
+  assert.equal(fs.statSync(file).ino, inode, 'the live draft was not rewritten');
+  assert.deepEqual(listSnapshots(fx.project), []);
+});
+
+test('a failing rescue restore still runs the journal and reports both errors', () => {
+  const fx = fixture({ drift: false });
+  const snapshot = createSnapshot(fx.project, 'broken');
+  const snapFile = path.join(snapshot, 'draft_info.json');
+  const broken = readJson(snapFile);
+  broken.tracks[0].segments[0].material_id = 'MISSING';
+  // Snapshot mirrors are hardlinked: replace the name, or the edit lands in every twin too
+  // (which restore's checksum then refuses, as it should).
+  fs.rmSync(snapFile);
+  fs.writeFileSync(snapFile, stableJson(broken));
+  const manifest = readJson(path.join(snapshot, 'manifest.json'));
+  manifest.files.find(item => item.relative === 'draft_info.json').sha256 = sha256(fs.readFileSync(snapFile));
+  fs.writeFileSync(path.join(snapshot, 'manifest.json'), stableJson(manifest));
+  rewriteMirrors(fx, doc => { doc.tracks[0].segments[0].volume = 0.2; });
+  const before = fs.readFileSync(path.join(fx.project, 'draft_info.json'));
+  process.env.CAPCUTCTL_FAIL_RESCUE_RESTORE = '1';
+  try {
+    assert.throws(() => restoreProjectSnapshot(fx.project, snapshot, { forceRunning: true }),
+      error => error.code === 'RESTORE_ROLLED_BACK' && error.details.cause.code === 'RESTORE_VALIDATION'
+        && /Injected rescue restore/.test(error.details.rollbackError));
+  } finally {
+    delete process.env.CAPCUTCTL_FAIL_RESCUE_RESTORE;
+  }
+  assert.deepEqual(fs.readFileSync(path.join(fx.project, 'draft_info.json')), before);
+});
+
+test('the fingerprint sees re-pointed extras and renamed tracks in one document only', () => {
+  const drift = fx => doctor(fx.project).issues.some(item => item.code === 'DOCUMENT_DRIFT');
+  for (const mutate of [doc => { doc.tracks[0].segments[0].extra_material_refs = []; }, doc => { doc.tracks[0].name = 'renamed'; }]) {
+    const fx = fixture({ drift: false });
+    assert.equal(drift(fx), false);
+    rewriteMirrors(fx, mutate, [fx.timelineDir]);
+    assert.equal(drift(fx), true);
+  }
+  const fx = fixture({ drift: false });
+  const broll = path.join(fx.temp, 'screen.mp4');
+  fs.writeFileSync(broll, 'screen');
+  applySpec(fx.project, { version: 1, operations: [
+    { op: 'segment.clone', from: { id: 'SEGMENT-ONE' }, target: { start: 5, duration: 2 } },
+    { op: 'clip.add', media: broll, at: 1, duration: 2, src: 0, track: 'broll', volume: 0, width: 1080, height: 1920, mediaDuration: 20_000_000 },
+  ] }, { forceRunning: true });
+  assert.equal(drift(fx), false, 'applySpec keeps both documents structurally equal');
+});
+
+test('restore --snapshot LABEL resolves the newest <timestamp>-LABEL', async () => {
+  const fx = fixture({ drift: false });
+  const first = createSnapshot(fx.project, 'pre-x');
+  await new Promise(resolve => setTimeout(resolve, 5));
+  const second = createSnapshot(fx.project, 'pre-x');
+  const options = { dryRun: true, forceRunning: true };
+  const dry = restoreProjectSnapshot(fx.project, 'pre-x', options);
+  assert.equal(dry.snapshotName, path.basename(second));
+  assert.equal(dry.resolvedFrom, 'label');
+  assert.equal(path.basename(resolveSnapshotDir(fx.project, 'pre-x').snapshotDir), path.basename(second));
+  const exact = restoreProjectSnapshot(fx.project, path.basename(first), options);
+  assert.equal(exact.snapshotName, path.basename(first));
+  assert.equal(exact.resolvedFrom, 'name');
+  assert.throws(() => restoreProjectSnapshot(fx.project, 'never-made', options),
+    error => error.code === 'SNAPSHOT_NOT_FOUND' && error.details.candidates.length === 2);
+  assert.throws(() => restoreProjectSnapshot(fx.project, '../x', options), error => error.code === 'SNAPSHOT_SCOPE');
+  const real = restoreProjectSnapshot(fx.project, 'pre-x', { forceRunning: true, backup: false });
+  assert.equal(path.basename(real.restored), path.basename(second));
+});
+
+test('applySpec refuses a NaN before the JSON clone turns it into null', async () => {
+  // JSON has no NaN: clone() wrote `volume: NaN` as `volume: null`, and every validator after
+  // the clone saw null, not a bad number. The backstop runs on the caller's spec.
+  const { writeCliProject, projectFingerprint } = await import('./helpers/cli-project.mjs');
+  const temp = tmpDir('capcutctl-nan-');
+  try {
+    const media = path.join(temp, 'face.mp4');
+    fs.writeFileSync(media, 'fixture media');
+    const project = writeCliProject(temp, media);
+    const before = projectFingerprint(project);
+    assert.throws(() => applySpec(project, { version: 1, operations: [
+      { op: 'segment.patch', selector: { id: 'SEGMENT' }, set: { volume: NaN } },
+    ] }, { forceRunning: true }), error => error.code === 'BAD_NUMBER' && error.exitCode === 2
+      && /segment\.patch/.test(error.message) && /set\.volume/.test(error.message));
+    assert.equal(projectFingerprint(project), before);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test('doctor reports a null volume, fade or keyframe value as an error', async () => {
+  const { writeCliProject } = await import('./helpers/cli-project.mjs');
+  const temp = tmpDir('capcutctl-null-volume-');
+  try {
+    const media = path.join(temp, 'face.mp4');
+    fs.writeFileSync(media, 'fixture media');
+    const project = writeCliProject(temp, media);
+    for (const dir of [project, path.join(project, 'Timelines', 'CLI-TIMELINE')]) {
+      for (const name of ['draft_info.json', 'draft_info.json.bak', 'template-2.tmp']) {
+        const file = path.join(dir, name);
+        const doc = JSON.parse(fs.readFileSync(file, 'utf8'));
+        const segment = doc.tracks[1].segments[0];
+        segment.volume = null;
+        segment.extra_material_refs = ['FADE'];
+        segment.common_keyframes = [{ id: 'KF', property_type: 'KFTypeScaleX',
+          keyframe_list: [{ id: 'K1', time_offset: 0, values: [null] }] }];
+        doc.materials.audio_fades = [{ id: 'FADE', type: 'audio_fade', fade_in_duration: null, fade_out_duration: 0 }];
+        fs.writeFileSync(file, `${JSON.stringify(doc, null, 2)}\n`);
+      }
+    }
+    const report = doctor(project);
+    const bad = report.issues.filter(item => item.code === 'BAD_NUMBER' && item.level === 'error');
+    assert.ok(bad.some(item => /volume/.test(item.message)), 'a null volume is an error');
+    assert.ok(bad.some(item => /fade_in_duration/.test(item.message)), 'a null fade is an error');
+    assert.ok(bad.some(item => /null value/.test(item.message)), 'a null keyframe value is an error');
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test('cut.recut reports hand-placed sound it left at its old time, not build-owned cues', NEEDS_FFMPEG, () => {
+  const f = recutFixture();
+  writeRecutDocs(f, doc => {
+    const sound = (id, desc, start) => ({
+      id, material_id: 'AUDIO-MATERIAL', extra_material_refs: [], desc, speed: 1, volume: 1,
+      source_timerange: { start: 0, duration: 500_000 },
+      target_timerange: { start, duration: 500_000 },
+    });
+    doc.tracks.push({ id: 'KEYS-TRACK', type: 'audio', name: 'sfx-keys', segments: [
+      sound('HAND-SFX', 'sfx:typing', 2_500_000),
+      sound('MOGRAPH-SFX', 'mograph:sfx:X', 3_200_000),
+    ] });
+  });
+  const result = applySpec(f.project, recutSpec(f), { forceRunning: true });
+  assert.equal(result.committed, true);
+  const op = result.result.find(group => group.group === 'root').operations
+    .find(item => item?.operation === 'cut.recut');
+  assert.ok(op);
+  const listed = op.anchors.unownedAudio.map(item => item.id);
+  assert.ok(listed.includes('HAND-SFX'));
+  assert.equal(listed.includes('MOGRAPH-SFX'), false);
+  assert.deepEqual(op.anchors.unownedAudio.find(item => item.id === 'HAND-SFX'),
+    { id: 'HAND-SFX', track: 'sfx-keys', startUs: 2_500_000 });
+  assert.match(op.next, /unownedAudio/);
+  for (const dir of [f.project, f.timelineDir]) {
+    const keys = readJson(path.join(dir, 'draft_info.json')).tracks.find(track => track.id === 'KEYS-TRACK').segments;
+    assert.deepEqual(keys.find(s => s.id === 'HAND-SFX').target_timerange, { start: 2_500_000, duration: 500_000 });
+    assert.deepEqual(keys.find(s => s.id === 'MOGRAPH-SFX').target_timerange, { start: 3_200_000, duration: 500_000 });
+  }
+});
+
+/* ---- clip.split ------------------------------------------------------------ */
+
+function splitDoc({ speed = 1, keyframed = false, animations = [] } = {}) {
+  const US = s => Math.round(s * 1e6);
+  const seg = {
+    id: 'CLIP', material_id: 'V', desc: 'broll',
+    target_timerange: { start: US(2), duration: US(4) },
+    render_timerange: { start: US(2), duration: US(4) },
+    source_timerange: { start: US(10), duration: US(4 * speed) },
+    speed, extra_material_refs: ['SPEED', 'FADE', 'TRANS', 'ANIM'],
+    clip: { scale: { x: 1, y: 1 }, transform: { x: 0, y: 0 }, alpha: 1 },
+    common_keyframes: keyframed ? [{ id: 'K', property_type: 'KFTypeScaleX', keyframe_list: [{ id: 'k0', time_offset: 0, values: [1] }] }] : [],
+  };
+  return {
+    fps: 30, duration: US(10),
+    materials: {
+      videos: [{ id: 'V', type: 'video', path: '/tmp/split.mp4', duration: US(60) }],
+      speeds: [{ id: 'SPEED', type: 'speed', speed, mode: 0 }],
+      audio_fades: [{ id: 'FADE', type: 'audio_fade', fade_type: 0, fade_in_duration: US(0.2), fade_out_duration: US(0.3) }],
+      transitions: [{ id: 'TRANS', type: 'transition', duration: US(0.4) }],
+      material_animations: [{ id: 'ANIM', type: 'sticker_animation', animations }],
+    },
+    tracks: [{ id: 'T', type: 'video', flag: 2, name: 'broll', segments: [seg] }],
+  };
+}
+
+const splitOp = (extra = {}) => ({ op: 'clip.split', selector: { id: 'CLIP' }, at: 3.5, __seed: 'split-test', ...extra });
+const split = (doc, op) => applyOperations(doc, [op], { dryRun: false, projectDir: null, group: 'root' })[0];
+
+for (const speed of [1, 2]) {
+  test(`clip.split cuts a ${speed}x clip into contiguous halves with private extras`, () => {
+    const doc = splitDoc({ speed, animations: [
+      { id: 'in-fx', type: 'in', start: 0, duration: 500000 },
+      { id: 'out-fx', type: 'out', start: 3500000, duration: 500000 },
+    ] });
+    const result = split(doc, splitOp());
+    assert.equal(result.leftId, 'CLIP');
+    assert.ok(result.rightId && result.rightId !== 'CLIP');
+    const [left, right] = doc.tracks[0].segments;
+    assert.equal(left.id, 'CLIP');
+    assert.equal(right.id, result.rightId);
+    assert.equal(left.target_timerange.start + left.target_timerange.duration, right.target_timerange.start);
+    assert.equal(right.target_timerange.start + right.target_timerange.duration, 6_000_000);
+    assert.equal(left.source_timerange.start + left.source_timerange.duration, right.source_timerange.start);
+    assert.equal(left.source_timerange.duration + right.source_timerange.duration, 4_000_000 * speed);
+    assert.equal(right.source_timerange.duration / right.target_timerange.duration, speed);
+    assert.deepEqual(left.render_timerange, left.target_timerange);
+    assert.deepEqual(right.render_timerange, right.target_timerange);
+    // No extra is shared, except nothing: the transition moved right.
+    const shared = left.extra_material_refs.filter(ref => right.extra_material_refs.includes(ref));
+    assert.deepEqual(shared, []);
+    assert.ok(!left.extra_material_refs.includes('TRANS'));
+    assert.ok(right.extra_material_refs.includes('TRANS'));
+    const fades = new Map(doc.materials.audio_fades.map(f => [f.id, f]));
+    const leftFade = fades.get(left.extra_material_refs.find(r => fades.has(r)));
+    const rightFade = fades.get(right.extra_material_refs.find(r => fades.has(r)));
+    assert.deepEqual([leftFade.fade_in_duration, leftFade.fade_out_duration], [200000, 0]);
+    assert.deepEqual([rightFade.fade_in_duration, rightFade.fade_out_duration], [0, 300000]);
+    const anims = new Map(doc.materials.material_animations.map(a => [a.id, a]));
+    const leftAnim = anims.get(left.extra_material_refs.find(r => anims.has(r)));
+    const rightAnim = anims.get(right.extra_material_refs.find(r => anims.has(r)));
+    assert.deepEqual(leftAnim.animations.map(a => a.type), ['in']);
+    assert.deepEqual(rightAnim.animations.map(a => a.type), ['out']);
+    assert.equal(rightAnim.animations[0].start, right.target_timerange.duration - 500000);
+    const speeds = doc.materials.speeds.filter(m => [...left.extra_material_refs, ...right.extra_material_refs].includes(m.id));
+    assert.equal(speeds.length, 2);
+    assert.ok(validateDocument(doc, { checkFiles: false }).every(issue => issue.level !== 'error'),
+      validateDocument(doc, { checkFiles: false }));
+  });
+}
+
+test('clip.split snaps to the frame grid, is a no-op on a boundary and refuses an edge or keyframes', () => {
+  const doc = splitDoc();
+  const snapped = split(doc, splitOp({ at: 3.501 }));
+  assert.equal(snapped.at, Math.round(Math.round(3.501 * 30) * 1e6 / 30) / 1e6);
+  const same = splitDoc();
+  assert.equal(split(same, splitOp({ at: 2 })).changed, 0);
+  assert.equal(split(same, splitOp({ at: 6 })).changed, 0);
+  assert.equal(same.tracks[0].segments.length, 1);
+  assert.throws(() => split(splitDoc(), splitOp({ at: 2.03 })), { code: 'SPLIT_EDGE' });
+  assert.throws(() => split(splitDoc({ keyframed: true }), splitOp()), { code: 'SPLIT_KEYFRAMED' });
+  assert.throws(() => split(splitDoc({ animations: [{ id: 'g', type: 'group', start: 0, duration: 4000000 }] }), splitOp()),
+    { code: 'SPLIT_ANIMATED' });
+  // The right id is a function of (id, T): both mirrors, and a second run, agree.
+  const a = splitDoc(), b = splitDoc();
+  assert.equal(split(a, splitOp({ __seed: 'one' })).rightId, split(b, splitOp({ __seed: 'two' })).rightId);
+  // Select by time and track instead of id.
+  const byTime = splitDoc();
+  assert.equal(split(byTime, { op: 'clip.split', at: 4, track: 'broll', __seed: 's' }).leftId, 'CLIP');
+});
+
+test('capcutctl split --dry-run changes nothing', async t => {
+  const { buildProject } = await import('./helpers/polish-project.mjs');
+  const { main, setOutput } = await import('../src/cli.mjs');
+  const project = buildProject();
+  const file = path.join(project, 'draft_info.json');
+  const before = fs.readFileSync(file, 'utf8');
+  let stdout = '';
+  const restore = setOutput(chunk => { stdout += String(chunk); return true; });
+  t.after(restore);
+  await main(['split', '--project', project, '--segments', 'A', '--at', '2', '--dry-run', '--json']);
+  assert.equal(fs.readFileSync(file, 'utf8'), before);
+  assert.match(stdout, /rightId/);
+  stdout = '';
+  await main(['split', '--project', project, '--segments', 'A', '--at', '2', '--json', '--force-running']);
+  const after = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const content = after.tracks.find(track => track.name === 'content');
+  assert.equal(content.segments.length, 3);
+  assert.deepEqual(content.segments.map(s => s.target_timerange.start), [0, 2_000_000, 4_000_000]);
+});
+
+test('a snapshot hardlinks identical mirrors and still restores, recovers metadata and diffs', async () => {
+  const { readMetaRecord, LEDGER_RELATIVE } = await import('../src/repair.mjs');
+  const { summarizeProject } = await import('../src/diff.mjs');
+  const fx = fixture({ drift: false });
+  // capcutctl metadata CapCut strips on save: the snapshot is where readMetaRecord finds it.
+  for (const dir of [fx.project, fx.timelineDir]) {
+    const doc = readJson(path.join(dir, 'draft_info.json'));
+    doc.materials.videos[0].capcutctl_origin = 'generated';
+    for (const name of LIVE_FILE_NAMES) fs.writeFileSync(path.join(dir, name), stableJson(doc));
+  }
+  const applied = applySpec(fx.project, { version: 1, name: 'volume',
+    operations: [{ op: 'segment.patch', selector: { id: 'SEGMENT-ONE' }, set: { volume: 0.5 } }] }, { forceRunning: true });
+  const after = createSnapshot(fx.project, 'after');
+
+  for (const snapshot of [applied.snapshot, after]) {
+    for (const group of [snapshot, path.join(snapshot, 'Timelines', 'TIMELINE-ONE')]) {
+      const [first, ...rest] = LIVE_FILE_NAMES.map(name => fs.statSync(path.join(group, name)));
+      assert.ok(first.nlink >= LIVE_FILE_NAMES.length, `${group}: mirrors share one inode`);
+      for (const stat of rest) assert.equal(stat.ino, first.ino);
+    }
+    // Distinct documents stay distinct files.
+    assert.notEqual(fs.statSync(path.join(snapshot, 'draft_info.json')).ino,
+      fs.statSync(path.join(snapshot, 'Timelines', 'TIMELINE-ONE', 'draft_info.json')).ino);
+    const manifest = readJson(path.join(snapshot, 'manifest.json'));
+    for (const item of manifest.files) {
+      assert.equal(sha256(fs.readFileSync(path.join(snapshot, item.relative))), item.sha256);
+    }
+  }
+  for (const name of LIVE_FILE_NAMES) {
+    assert.equal(fs.statSync(path.join(fx.project, name)).nlink, 1, 'live project files are never link targets');
+  }
+  // diff --snapshot reads a linked snapshot like any other.
+  assert.deepEqual(summarizeProject(after), summarizeProject(fx.project));
+
+  fs.rmSync(path.join(fx.project, LEDGER_RELATIVE), { force: true });
+  for (const dir of [fx.project, fx.timelineDir]) {
+    const doc = readJson(path.join(dir, 'draft_info.json'));
+    delete doc.materials.videos[0].capcutctl_origin;
+    for (const name of LIVE_FILE_NAMES) fs.writeFileSync(path.join(dir, name), stableJson(doc));
+  }
+  assert.equal(readMetaRecord(fx.project).materials['VIDEO-ONE']?.fields.capcutctl_origin, 'generated');
+
+  restoreProjectSnapshot(fx.project, applied.snapshot, { forceRunning: true });
+  assert.equal(readJson(path.join(fx.project, 'draft_info.json')).tracks[0].segments[0].volume, 1);
+  assert.equal(readJson(path.join(fx.timelineDir, 'template-2.tmp')).tracks[0].segments[0].volume, 1);
+  // Restoring rewrote the live files; the snapshot's linked copies are untouched.
+  assert.equal(readJson(path.join(applied.snapshot, 'draft_info.json.bak')).tracks[0].segments[0].volume, 1);
+  assert.equal(readJson(path.join(after, 'template-2.tmp')).tracks[0].segments[0].volume, 0.5);
 });

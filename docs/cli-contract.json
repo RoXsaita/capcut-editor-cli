@@ -40,6 +40,7 @@
       "screen-motion",
       "sfx",
       "shift",
+      "split",
       "stage",
       "sync",
       "trim",
@@ -65,6 +66,7 @@
         "--dur",
         "--generated",
         "--height",
+        "--layer",
         "--media",
         "--media-duration",
         "--no-localize",
@@ -156,14 +158,17 @@
     },
     "captions": {
       "group": "graphics",
-      "summary": "Word-by-word native captions, one style for Arabic and English alike; --restyle fixes an existing track.",
+      "summary": "Word-by-word native captions in one style; --replace redoes them, --restyle the look, --reposition the places.",
       "example": "capcutctl captions --project NAME --dry-run",
       "options": [
+        "--clamp",
         "--cues",
         "--dry-run",
         "--lang",
         "--name",
         "--project",
+        "--replace",
+        "--reposition",
         "--restyle",
         "--script",
         "--track"
@@ -180,8 +185,7 @@
         "--peak",
         "--project",
         "--sheet",
-        "--target",
-        "--times"
+        "--target"
       ],
       "transactional": false
     },
@@ -228,6 +232,7 @@
         "--drop",
         "--dry-run",
         "--force",
+        "--force-running",
         "--fps",
         "--in-place",
         "--into",
@@ -240,6 +245,7 @@
         "--recover-beat",
         "--reindex",
         "--review",
+        "--root",
         "--selftest",
         "--trim-beat"
       ],
@@ -323,9 +329,11 @@
         "--out",
         "--overwrite",
         "--pause",
+        "--profile",
         "--project",
         "--review-model",
         "--script",
+        "--style",
         "--times",
         "--xray"
       ],
@@ -593,6 +601,7 @@
         "--dry-run",
         "--measure",
         "--peak",
+        "--peak-only",
         "--plan",
         "--project",
         "--segments",
@@ -816,6 +825,7 @@
       "options": [
         "--fps",
         "--from",
+        "--max-minutes",
         "--native",
         "--no-cache",
         "--no-grade",
@@ -855,8 +865,8 @@
     },
     "punch": {
       "group": "camera",
-      "summary": "Eased push onto a named on-screen element (OCR locates it).",
-      "example": "capcutctl punch --project NAME --on Publish --segment ID --dry-run",
+      "summary": "Eased push onto a named on-screen element (OCR locates it), timed by --at or by the --word he says.",
+      "example": "capcutctl punch --project NAME --on Publish --word \"hit publish\" --dry-run",
       "options": [
         "--at",
         "--dry-run",
@@ -870,8 +880,10 @@
         "--project",
         "--ramp",
         "--segment",
+        "--segments",
         "--track",
         "--word",
+        "--words",
         "--zoom"
       ],
       "transactional": true
@@ -892,6 +904,7 @@
         "--guide",
         "--label",
         "--languages",
+        "--max-minutes",
         "--native",
         "--no-cache",
         "--no-grade",
@@ -918,6 +931,8 @@
         "--at",
         "--dry-run",
         "--project",
+        "--reach-back",
+        "--reach-forward",
         "--result-at",
         "--segment",
         "--settle",
@@ -974,6 +989,7 @@
       "summary": "Relink a clip to another file, keeping its keyframes.",
       "example": "capcutctl replace-media --project NAME --file new.mp4 --at 5 --track broll --dry-run",
       "options": [
+        "--all",
         "--allow-ephemeral",
         "--at",
         "--derived-from",
@@ -1013,6 +1029,7 @@
       "options": [
         "--fps",
         "--id",
+        "--max-minutes",
         "--out",
         "--project",
         "--width"
@@ -1093,11 +1110,15 @@
     },
     "sfx": {
       "group": "graphics",
-      "summary": "Place a named palette sound at explicit times: typing under a typed command, a click on the real Enter.",
+      "summary": "Place a palette sound or your own audio --file (whoosh, click, voice patch) at set times; overlaps take the next lane.",
       "example": "capcutctl sfx --project NAME --sound typing --cues 8.03:2.8:2,31.1:1.2:10 --volume 0.5 --dry-run",
       "options": [
         "--cues",
         "--dry-run",
+        "--fade-in",
+        "--fade-out",
+        "--file",
+        "--lead",
         "--project",
         "--sound",
         "--track",
@@ -1129,13 +1150,25 @@
       ],
       "transactional": false
     },
+    "split": {
+      "group": "broll",
+      "summary": "Cut one clip in two at a timeline second; the left half keeps the id, the output names both.",
+      "example": "capcutctl split --project NAME --segments ID --at 5.2 --dry-run",
+      "options": [
+        "--at",
+        "--dry-run",
+        "--project",
+        "--segments",
+        "--track"
+      ],
+      "transactional": true
+    },
     "stage": {
       "group": "safety",
       "summary": "Stage-and-swap: edit a copy outside CapCut's folder with CapCut open; commit is the one closed-CapCut step.",
       "example": "capcutctl stage start --project NAME",
       "options": [
         "--dry-run",
-        "--fix",
         "--force-running",
         "--no-backup",
         "--project"
@@ -1184,13 +1217,14 @@
     },
     "trim": {
       "group": "broll",
-      "summary": "Change a clip's source window.",
+      "summary": "Change a clip's source window (source seconds); the talking head stays 1x unless --retime.",
       "example": "capcutctl trim --project NAME --at 5 --track broll --src 90-94 --dry-run",
       "options": [
         "--at",
         "--dry-run",
         "--dur",
         "--project",
+        "--retime",
         "--segments",
         "--src",
         "--start",
@@ -1264,7 +1298,6 @@
         "--only",
         "--plan",
         "--project",
-        "--stress",
         "--text",
         "--track",
         "--words",
