@@ -96,3 +96,15 @@ test('a low-fps proxy notes the format instead of failing it; a full-rate wrong 
   const wrong = byId(exportGates(xray({ info: { video: { width: 720, height: 1280, avg_frame_rate: '25/1' }, format: { duration: '20' } } }), null, { profile }));
   assert.equal(wrong['export-format'].level, 'FAIL');
 });
+
+test('first-word is the first sustained voice: an opening whoosh or a music bed is not the first word', () => {
+  const said = words([0, 1], [1, 5], [5, 17.8]);
+  const whoosh = byId(exportGates(xray(), said, { profile, enderAt: 18, envelope: envelope(20, [0.05, 0.15], [1.2, 5], [5.3, 17.6]) }));
+  assert.equal(whoosh['first-word'].ok, false);
+  assert.match(whoosh['first-word'].message, /starts at 1\.2s/);
+  const bed = envelope(20, [1.2, 5], [5.3, 17.6]);
+  bed.db = bed.db.map(v => (v === -65 ? -30 : v));          // a -30 dB music bed under the room tone
+  const music = byId(exportGates(xray(), said, { profile, enderAt: 18, envelope: bed }));
+  assert.equal(music['first-word'].ok, false);
+  assert.match(music['first-word'].message, /starts at 1\.2s/);
+});

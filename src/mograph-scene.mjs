@@ -23,7 +23,7 @@ import { pathToFileURL } from 'node:url';
 import { CapcutError, requireBinary } from './core.mjs';
 import { PREMULTIPLY_FILTER, PRORES_ALPHA_ARGS } from './alpha.mjs';
 import { loadProfile } from './profile.mjs';
-import { FONT_DIR, MOGRAPH_DIR, launch, loadPlaywright, pngPipeEncoder } from './mograph.mjs';
+import { FONT_DIR, MOGRAPH_DIR, launch, loadPlaywright, pngPipeEncoder, writeAtomic } from './mograph.mjs';
 
 export const SCENE_DIR = path.join(MOGRAPH_DIR, 'scenes');
 export const SCENE_FORMATS = Object.freeze(['prores', 'mp4']);
@@ -108,12 +108,21 @@ async function unsafeText(page, meta, profile) {
     for (const b of boxes) {
       for (const z of zones) {
         if (b.x < z.x + z.w && b.x + b.w > z.x && b.y < z.y + z.h && b.y + b.h > z.y) {
-          hits.push({ t: Math.round(t * 1000) / 1000, text: b.text, zone: z.name, box: [b.x, b.y, b.w, b.h].map(Math.round) });
+          hits.push({ t: Math.round(t * 1000) / 1000, text: b.text, zone: z.name, box: [b.x, b.y, b.w, b.h].map(Math.round),
+            zoneRect: [z.x, z.y, z.w, z.h],
+            overlap: [Math.min(b.x + b.w, z.x + z.w) - Math.max(b.x, z.x), Math.min(b.y + b.h, z.y + z.h) - Math.max(b.y, z.y)].map(Math.round) });
         }
       }
     }
   }
   return hits;
+}
+
+/** One unsafe-text hit in words: the text, its box, the zone's rect and the overlap in px. */
+export function sceneHitText(hit) {
+  const [x, y, w, h] = hit.box, [zx, zy, zw, zh] = hit.zoneRect || [], [ox, oy] = hit.overlap || [];
+  return `"${hit.text}" [${x},${y} ${w}×${h}] is in the ${hit.zone} zone`
+    + (hit.zoneRect ? ` [${zx},${zy} ${zw}×${zh}] by ${ox}×${oy}px` : '') + ` at ${hit.t}s`;
 }
 
 /** Inspect without rendering: meta (duration, beats, cues, handoff) and any unsafe text. */
@@ -159,7 +168,7 @@ export async function renderScene({ scene, params = {}, out, format = 'prores', 
   } finally { await probe.close(); }
   if (unsafe.length && !allowUnsafe) {
     const first = unsafe[0];
-    fail('SCENE_SAFE_ZONE', `${scene}: "${first.text}" is in the ${first.zone} zone at ${first.t}s `
+    fail('SCENE_SAFE_ZONE', `${scene}: ${sceneHitText(first)} `
       + `(${unsafe.length} hit${unsafe.length > 1 ? 's' : ''}); shorten or resize the text, or pass --allow-unsafe.`);
   }
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'scene-'));
@@ -194,8 +203,10 @@ export async function renderScene({ scene, params = {}, out, format = 'prores', 
     fs.writeFileSync(wav, synthesize(meta.cues, { duration: meta.duration }));
     const file = `${out}.${segExt}`;
     const audio = format === 'prores' ? ['-c:a', 'pcm_s16le'] : ['-c:a', 'aac', '-b:a', '256k'];
-    execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', list, '-i', wav,
-      '-map', '0:v', '-map', '1:a', '-c:v', 'copy', ...audio, '-t', String(meta.duration), '-movflags', '+faststart', file]);
+    // Written under `<file>.partial` (muxer named) and renamed: never a truncated file at `file`.
+    await writeAtomic(file, async partial => execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'concat',
+      '-safe', '0', '-i', list, '-i', wav, '-map', '0:v', '-map', '1:a', '-c:v', 'copy', ...audio, '-t', String(meta.duration),
+      '-movflags', '+faststart', '-f', format === 'prores' ? 'mov' : 'mp4', partial]));
     return { scene, params, file, format, meta, frames: total, unsafe,
       fingerprint: sceneFingerprint(scene, params, profile) };
   } finally {

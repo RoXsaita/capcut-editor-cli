@@ -56,13 +56,13 @@ const OPTION = /--[a-z][a-z0-9-]*/g;
  */
 export const TOOL_OPTIONS = Object.freeze({
   cut: Object.freeze([
-    '--drop', '--dry-run', '--force', '--fps', '--in-place', '--into', '--keep', '--lang',
+    '--drop', '--dry-run', '--force', '--force-running', '--fps', '--in-place', '--into', '--keep', '--lang',
     '--model', '--no-repair', '--order', '--project', '--recover-beat', '--reindex',
-    '--review', '--selftest', '--trim-beat',
+    '--review', '--root', '--selftest', '--trim-beat',
   ]),
   qa: Object.freeze([
     '--allow-missing', '--at-broll', '--at-cuts', '--at-scenes', '--cut-window', '--expect',
-    '--fps', '--from', '--guide', '--label', '--languages', '--native', '--no-cache', '--no-grade',
+    '--fps', '--from', '--guide', '--label', '--languages', '--max-minutes', '--native', '--no-cache', '--no-grade',
     '--ocr', '--out', '--preview', '--project', '--rects-only', '--resolution', '--selftest',
     '--sheet', '--times', '--to', '--width', '--z',
   ]),
@@ -87,9 +87,14 @@ export function parseHelp(help = HELP) {
   const start = /^ {2}capcutctl\s+([a-z][a-z0-9-]*)(?:\s+(\S+))?/;
   const commands = new Map();
   let current = null;
+  // Once an entry's continuation turns into prose (a line opening with an em dash), the flags
+  // it mentions describe behaviour — "(and repairs it, as doctor --fix)", "Face pushes are
+  // zoom --stress" — and are not this command's options. Reading them as options put
+  // `stage --fix` and `wrap --stress` in the contract, flags neither command accepts.
+  let prose = false;
 
   const ensure = name => {
-    if (!commands.has(name)) commands.set(name, { name, options: new Set(), subcommands: new Set() });
+    if (!commands.has(name)) commands.set(name, { name, options: new Set(), subcommands: new Set(), lines: [] });
     return commands.get(name);
   };
 
@@ -98,22 +103,43 @@ export function parseHelp(help = HELP) {
     if (opened) {
       const [, name, second] = opened;
       current = ensure(name);
+      prose = false;
       if (SUBCOMMAND_PARENTS.has(name) && second && !second.startsWith('--')) {
         current.subcommands.add(second);
       }
     } else if (current && (line.startsWith('  ') || line.trim() === '')) {
       // Still inside the current entry, or a blank line between wrapped lines.
       if (line.trim() === '') continue;
+      if (line.trim().startsWith('—')) prose = true;
     } else if (line.length && !line.startsWith(' ')) {
       // A section heading at column 0 ends the command list for this block.
       current = null;
       continue;
     }
     if (!current) continue;
+    current.lines.push(line);
+    if (prose) continue;
     for (const option of line.match(OPTION) || []) current.options.add(option);
   }
 
   return commands;
+}
+
+/**
+ * One command's slice of HELP, for `capcutctl <command> --help`: its usage lines, then the
+ * contract's summary, example and complete option list. The whole HELP is ~37 KB, which is
+ * a lot of context to spend on one command's flags.
+ */
+export function commandHelp(name, help = HELP) {
+  const entry = parseHelp(help).get(name);
+  if (!entry) return null;
+  const contract = buildContract({ help }).commands[name];
+  const out = [...entry.lines.map(line => line.replace(/^ {2}/, '')), ''];
+  if (contract?.summary) out.push(contract.summary);
+  if (contract?.example) out.push(`Example: ${contract.example}`);
+  if (contract?.options?.length) out.push(`Options: ${contract.options.join(' ')}`);
+  out.push('', 'Run `capcutctl help` for every command.');
+  return `${out.join('\n')}\n`;
 }
 
 /** Build the full contract document. Pure: same help text in, same JSON out. */

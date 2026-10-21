@@ -5,11 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { applySpec, doctor, isLocalMedia, localizeMedia, readJson, stableJson } from '../src/core.mjs';
+import { applySpec, cloneOrCopy, CLONE_MIN_BYTES, doctor, isLocalMedia, localizeMedia, readJson, stableJson } from '../src/core.mjs';
 import { opClipAdd, opClipFade, opLocalizeAll, opReplaceMedia, parkPresetLeftover } from '../src/add.mjs';
+import { tmpDir } from './helpers/tmp.mjs';
 
-function fixture({ duration = 10_000_000, endcard = false } = {}) {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-add-'));
+function fixture({ duration = 10_000_000, endcard = false, extraTracks = [] } = {}) {
+  const temp = tmpDir('capcutctl-add-');
   const project = path.join(temp, 'Add Project');
   const timelineId = 'TIMELINE-ONE';
   const media = path.join(temp, 'face.mp4');
@@ -42,7 +43,8 @@ function fixture({ duration = 10_000_000, endcard = false } = {}) {
     },
     tracks: [
       { id: 'T0', type: 'video', flag: 0, attribute: 0, segments: [] },
-      { id: 'T1', type: 'video', flag: 2, attribute: 0, name: 'content', segments: segs }
+      { id: 'T1', type: 'video', flag: 2, attribute: 0, name: 'content', segments: segs },
+      ...extraTracks
     ]
   };
   const write = (dir, value) => {
@@ -105,6 +107,52 @@ test('localize copies two screen.mp4 takes under unique parent-prefixed names', 
   assert.equal(fs.readFileSync(paths[1], 'utf8'), 'chrome-bytes');
 });
 
+test('localize hashes a colliding take once, and again only when the take changes', () => {
+  const f = fixture();
+  const dir = path.join(f.temp, 'Take-20261019-101010');
+  fs.mkdirSync(dir);
+  const take = path.join(dir, 'screen.mp4');
+  fs.writeFileSync(take, 'take-bytes-one');
+  let hashed = 0;
+  const hash = file => { hashed++; return fs.readFileSync(file).toString('hex'); };
+  // The destination is already there (an earlier session localized it): the first look must hash.
+  const destination = localizeMedia(f.project, take, undefined, { dryRun: true });
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  fs.copyFileSync(take, destination);
+  for (let i = 0; i < 3; i++) assert.equal(localizeMedia(f.project, take, undefined, { hash }), destination);
+  assert.equal(hashed, 2, 'one comparison (both sides), then the stats answer');
+
+  // Re-recorded in place: same size, new bytes, newer mtime.
+  fs.writeFileSync(take, 'take-bytes-two');
+  const later = new Date(Date.now() + 60_000);
+  fs.utimesSync(take, later, later);
+  const moved = localizeMedia(f.project, take, undefined, { hash });
+  assert.equal(hashed, 4, 'the changed take is hashed again');
+  assert.notEqual(moved, destination);
+  assert.match(path.basename(moved), /__screen__[0-9a-f]{8}\.mp4$/);
+  assert.equal(fs.readFileSync(moved, 'utf8'), 'take-bytes-two');
+  assert.equal(fs.readFileSync(destination, 'utf8'), 'take-bytes-one', 'the earlier take is never overwritten');
+});
+
+test('cloneOrCopy clones on macOS, falls back to a copy when cp fails, and never overwrites', () => {
+  const dir = tmpDir('capcutctl-clone-');
+  const src = path.join(dir, 'big.bin');
+  const bytes = Buffer.alloc(CLONE_MIN_BYTES + 17);
+  for (let i = 0; i < bytes.length; i += 4096) bytes[i] = i % 251;
+  fs.writeFileSync(src, bytes);
+  if (process.platform === 'darwin') {
+    const via = cloneOrCopy(src, path.join(dir, 'clone.bin'));
+    assert.equal(via, 'clone');
+    assert.ok(fs.readFileSync(path.join(dir, 'clone.bin')).equals(bytes));
+  }
+  let tried = 0;
+  const failing = () => { tried++; throw new Error('cp: clonefile failed'); };
+  assert.equal(cloneOrCopy(src, path.join(dir, 'copy.bin'), { platform: 'darwin', exec: failing }), 'copy');
+  assert.equal(tried, 1);
+  assert.ok(fs.readFileSync(path.join(dir, 'copy.bin')).equals(bytes));
+  assert.throws(() => cloneOrCopy(src, path.join(dir, 'copy.bin')), error => error.code === 'EEXIST');
+});
+
 test('media.localize relinks every outside video into the project', () => {
   const f = fixture();
   applySpec(f.project, { version: 1, operations: [addOp(f)] }, { forceRunning: true });
@@ -142,6 +190,37 @@ test('add places a muted clip on a new named overlay below the face, ids match a
   assert.equal(new Set(ids).size, 1);
   const report = doctor(f.project, { checkFiles: true });
   assert.equal(report.errors, 0, report.issues.map(i => i.message).join('; '));
+});
+
+test('add under the face by default says so; --layer top goes over it, below the graphics lanes', () => {
+  const graphics = () => ({ id: 'TM', type: 'video', flag: 2, attribute: 0, name: 'mograph-1', segments: [] });
+  const f = fixture({ extraTracks: [graphics()] });
+  const report = applySpec(f.project, { version: 1, operations: [addOp(f)] }, { forceRunning: true })
+    .result.find(g => g.group === 'root').operations[0];
+  let doc = readJson(path.join(f.project, 'draft_info.json'));
+  assert.deepEqual(doc.tracks.map(t => t.name || t.id), ['T0', 'broll', 'content', 'mograph-1']);
+  assert.equal(report.underPrincipal, true);
+  assert.equal(report.hint, 'run capcutctl layout auto');
+
+  const top = applySpec(f.project, { version: 1, operations: [addOp(f, { track: 'over', layer: 'top', desc: 'over' })] },
+    { forceRunning: true }).result.find(g => g.group === 'root').operations[0];
+  assert.equal(top.underPrincipal, undefined);
+  doc = readJson(path.join(f.project, 'draft_info.json'));
+  assert.deepEqual(doc.tracks.map(t => t.name || t.id), ['T0', 'broll', 'content', 'over', 'mograph-1']);
+  const rank = name => doc.tracks.find(t => t.name === name).segments.map(s => s.track_render_index);
+  assert.ok(rank('broll')[0] < rank('content')[0] && rank('content')[0] < rank('over')[0], 'render order follows the stack');
+  assert.equal(doctor(f.project).errors, 0);
+
+  // A track on the other side of the face is never silently reused under another --layer.
+  assert.throws(() => applySpec(f.project, { version: 1, operations: [addOp(f, { at: 6, layer: 'top' })] }, { forceRunning: true }),
+    err => err.code === 'TRACK_PLACEMENT');
+  assert.throws(() => applySpec(f.project, { version: 1, operations: [addOp(f, { track: 'over', at: 6, layer: 'under-face' })] },
+    { forceRunning: true }), err => err.code === 'TRACK_PLACEMENT');
+
+  // With no graphics lane, a top track goes to the top of the stack.
+  const g = fixture();
+  applySpec(g.project, { version: 1, operations: [addOp(g, { layer: 'top' })] }, { forceRunning: true });
+  assert.deepEqual(readJson(path.join(g.project, 'draft_info.json')).tracks.map(t => t.name || t.id), ['T0', 'content', 'broll']);
 });
 
 test('add refuses overlap on the named overlay rather than committing a warning', () => {
@@ -206,6 +285,41 @@ test('replace-media keeps keyframes and does not clone the segment', () => {
   const mat = after.materials.videos.find(m => m.id === next.material_id);
   assert.equal(mat.path, other);
   assert.equal(mat.width, 1080);
+});
+
+test('replace-media --derived-offset moves the source window and its keys into the derived file', () => {
+  const setup = () => {
+    const f = fixture();
+    applySpec(f.project, { version: 1, operations: [addOp(f, { src: 30 })] }, { forceRunning: true });
+    const id = readJson(path.join(f.project, 'draft_info.json')).tracks.find(t => t.name === 'broll').segments[0].id;
+    applySpec(f.project, { version: 1, operations: [
+      { op: 'keyframe.scale', selector: { id }, path: [{ t: 30.5, v: [1.2, 1.2, 0, 0] }], ease: false }] }, { forceRunning: true });
+    const trimmed = path.join(f.temp, 'screen-trimmed.mp4');
+    fs.writeFileSync(trimmed, 'trimmed-bytes');
+    const swap = extra => ({ op: 'replace.media', selector: { id }, path: trimmed, derivedFrom: f.broll,
+      width: 1080, height: 2652, mediaDuration: 100_000_000, ...extra });
+    const clip = () => readJson(path.join(f.project, 'draft_info.json')).tracks.find(t => t.name === 'broll').segments[0];
+    return { f, swap, clip };
+  };
+
+  const a = setup();
+  applySpec(a.f.project, { version: 1, operations: [a.swap({ derivedOffset: 25, remapDerivedWindow: true })] }, { forceRunning: true });
+  const timeline = readJson(path.join(a.f.timelineDir, 'draft_info.json')).tracks.find(t => t.name === 'broll').segments[0];
+  for (const seg of [a.clip(), timeline]) {
+    assert.deepEqual(seg.source_timerange, { start: 5_000_000, duration: 2_000_000 });
+    for (const block of seg.common_keyframes) assert.deepEqual(block.keyframe_list.map(k => k.time_offset), [5_500_000]);
+  }
+  assert.equal(doctor(a.f.project).errors, 0);
+
+  const b = setup();
+  assert.throws(() => applySpec(b.f.project, { version: 1, operations: [b.swap({ derivedOffset: 31, remapDerivedWindow: true })] },
+    { forceRunning: true }), err => err.code === 'SOURCE_BEFORE_START');
+  assert.equal(b.clip().source_timerange.start, 30_000_000);
+
+  // Recorded but not remapped when the flag is absent (blur and denoise derive full-length files).
+  applySpec(b.f.project, { version: 1, operations: [b.swap({ derivedOffset: 25 })] }, { forceRunning: true });
+  assert.equal(b.clip().source_timerange.start, 30_000_000);
+  assert.equal(b.clip().common_keyframes[0].keyframe_list[0].time_offset, 30_500_000);
 });
 
 test('replace.media all replaces every selected segment and removes stale origin metadata', () => {
@@ -279,6 +393,77 @@ test('trim rewrites the source window and speed', () => {
   assert.equal(seg.source_timerange.start, 20_000_000);
   assert.equal(seg.source_timerange.duration, 8_000_000);
   assert.equal(seg.speed, 4);
+});
+
+test('trim reports the speed change and the old window on a B-roll clip', () => {
+  const f = fixture();
+  applySpec(f.project, { version: 1, operations: [addOp(f)] }, { forceRunning: true });
+  const id = readJson(path.join(f.project, 'draft_info.json')).tracks.find(t => t.name === 'broll').segments[0].id;
+  const result = applySpec(f.project, { version: 1, operations: [{ op: 'clip.trim', selector: { id }, src: [20, 28] }] }, { forceRunning: true });
+  const report = result.result.find(g => g.group === 'root').operations[0];
+  assert.equal(report.speedChanged, true);
+  assert.equal(report.speedFrom, 1);
+  assert.equal(report.speed, 4);
+  assert.deepEqual(report.was, [10, 12]);
+  assert.deepEqual(report.target, [1, 3]);
+});
+
+test('trim keeps the talking head at 1x: another length refuses, a slip or --retime does not', () => {
+  const f = fixture();
+  const draft = path.join(f.project, 'draft_info.json');
+  const before = fs.readFileSync(draft, 'utf8');
+  const trimFace = extra => ({ op: 'clip.trim', selector: { id: 'SUBJECT' }, ...extra });
+  assert.throws(() => applySpec(f.project, { version: 1, operations: [trimFace({ src: [0, 6] })] }, { forceRunning: true }),
+    err => err.code === 'PRINCIPAL_TRACK' && /faces stay 1x/i.test(err.message) && /--retime/.test(err.message));
+  assert.equal(fs.readFileSync(draft, 'utf8'), before, 'a refused trim leaves the draft untouched');
+
+  applySpec(f.project, { version: 1, operations: [trimFace({ src: [2, 7] })] }, { forceRunning: true });
+  let face = readJson(draft).tracks.find(t => t.name === 'content').segments[0];
+  assert.equal(face.speed, 1);
+  assert.deepEqual([face.source_timerange.start, face.target_timerange.duration], [2_000_000, 5_000_000]);
+
+  const result = applySpec(f.project, { version: 1, operations: [trimFace({ src: [2, 8], retime: true })] }, { forceRunning: true });
+  const report = result.result.find(g => g.group === 'root').operations[0];
+  assert.deepEqual(report.target, [0, 6]);
+  assert.equal(report.speedChanged, false);
+  face = readJson(draft).tracks.find(t => t.name === 'content').segments[0];
+  assert.equal(face.speed, 1);
+  assert.equal(face.target_timerange.duration, 6_000_000);
+  assert.equal(doctor(f.project).errors, 0);
+});
+
+test('trim --retime on a mid-track face clip refuses: no gap or overlap on the talking-head track', () => {
+  const f = fixture();
+  for (const dir of [f.project, f.timelineDir]) {
+    for (const name of ['draft_info.json', 'draft_info.json.bak', 'template-2.tmp']) {
+      const file = path.join(dir, name);
+      if (!fs.existsSync(file)) continue;
+      const doc = readJson(file);
+      const face = doc.tracks.find(t => t.name === 'content').segments;
+      face.push({ ...structuredClone(face[0]), id: 'SUBJECT-2', desc: 'scene 2',
+        source_timerange: { start: 10_000_000, duration: 5_000_000 }, target_timerange: { start: 5_000_000, duration: 5_000_000 } });
+      fs.writeFileSync(file, stableJson(doc));
+    }
+  }
+  const draft = path.join(f.project, 'draft_info.json');
+  const before = fs.readFileSync(draft, 'utf8');
+  const retime = src => ({ version: 1, operations: [{ op: 'clip.trim', selector: { id: 'SUBJECT' }, src, retime: true }] });
+  assert.throws(() => applySpec(f.project, retime([0, 4]), { forceRunning: true }),
+    err => err.code === 'PRINCIPAL_TRACK' && /SUBJECT-2/.test(err.message) && /a gap/.test(err.message));
+  assert.equal(fs.readFileSync(draft, 'utf8'), before, 'a refused retime leaves the draft untouched');
+  // The last face clip may still change length: nothing follows it.
+  applySpec(f.project, { version: 1, operations: [{ op: 'clip.trim', selector: { id: 'SUBJECT-2' }, src: [10, 16], retime: true }] }, { forceRunning: true });
+  const last = readJson(draft).tracks.find(t => t.name === 'content').segments.find(s => s.id === 'SUBJECT-2');
+  assert.equal(last.target_timerange.duration, 6_000_000);
+});
+
+test('trim --retime refuses to grow a clip over its neighbour', () => {
+  const f = fixture();
+  applySpec(f.project, { version: 1, operations: [addOp(f), addOp(f, { at: 4, desc: 'second' })] }, { forceRunning: true });
+  const first = readJson(path.join(f.project, 'draft_info.json')).tracks.find(t => t.name === 'broll').segments[0].id;
+  assert.throws(() => applySpec(f.project, { version: 1, operations: [
+    { op: 'clip.trim', selector: { id: first }, src: [10, 14], retime: true }] }, { forceRunning: true }),
+  err => err.code === 'CLIP_OVERLAP');
 });
 
 test('fade clones a harvested audio_fade extra onto the clip, same id on both documents', () => {
@@ -543,7 +728,7 @@ test('replace-media and trim refuse upfront instead of rolling the transaction b
 
 /** A project dir carrying only the sidecar the park reads. */
 function parked({ start, end }) {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-park-'));
+  const temp = tmpDir('capcutctl-park-');
   fs.mkdirSync(path.join(temp, '.capcutctl'), { recursive: true });
   fs.writeFileSync(path.join(temp, '.capcutctl', 'created.json'),
     JSON.stringify({ preserved: { start, end } }));
@@ -580,7 +765,7 @@ test('localizing does not copy an un-relinked sibling back over the relink', () 
   // CapCut repeats material ids. The pass that makes the duplicates agree picked its winner
   // by `duration > 0` alone, so a sibling still pointing at a file that no longer exists —
   // the very condition localize is run to fix — overwrote the path just localized.
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-loc-'));
+  const temp = tmpDir('capcutctl-loc-');
   const project = path.join(temp, 'Project');
   fs.mkdirSync(project, { recursive: true });
   const take = path.join(temp, 'take-a');
@@ -605,7 +790,7 @@ test('two different takes with the same name and the same size get different fil
   // Byte size alone decided whether a colliding destination could be reused, and the copy
   // went ahead either way — so the second take silently overwrote the first and every
   // material already pointing there played the wrong footage.
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-collide-'));
+  const temp = tmpDir('capcutctl-collide-');
   const project = path.join(temp, 'Project');
   fs.mkdirSync(project, { recursive: true });
   const make = (root, bytes) => {
@@ -752,4 +937,109 @@ test('polish leaves no overlapping segments on any lane, end to end', () => {
   const clicks = doc.tracks.find(t => t.name === 'polish-callout');
   assert.ok(clicks && clicks.segments.length === 2, 'both callouts got a click');
   assert.ok(doc.tracks.find(t => t.name === 'polish-sfx').segments.length > 0, 'and the seams got wooshes');
+});
+
+// ---- speed and media writes reach every copy, and only this clip's copy --------------------
+
+const speedDoc = speeds => ({
+  duration: 20_000_000, fps: 30, canvas_config: { width: 1080, height: 1920 },
+  materials: {
+    videos: [{ id: 'V', type: 'video', path: '/media/v.mp4', duration: 60_000_000, width: 1080, height: 1920 }],
+    speeds,
+  },
+  tracks: [{ id: 'T', type: 'video', flag: 2, name: 'broll', segments: ['a', 'b'].map((id, i) => ({
+    id, material_id: 'V', extra_material_refs: id === 'a' || speeds.some(s => s.__shared) ? ['S1'] : [], speed: 1,
+    source_timerange: { start: i * 10_000_000, duration: 4_000_000 },
+    target_timerange: { start: i * 4_000_000, duration: 4_000_000 },
+  })) },
+  // The talking head: longer and gapless, so `broll` is not the principal track that trim
+  // keeps at 1x.
+  { id: 'F', type: 'video', flag: 2, name: 'face', segments: [{
+    id: 'face', material_id: 'V', extra_material_refs: [], speed: 1,
+    source_timerange: { start: 0, duration: 20_000_000 },
+    target_timerange: { start: 0, duration: 20_000_000 },
+  }] }],
+});
+const trim = seed => ({ op: 'clip.trim', selector: { id: 'a' }, src: [0, 8], __seed: seed });
+
+test('trim writes every identical copy of a speed material, so no conflict is left behind', async () => {
+  const { applyOperations, validateDocument } = await import('../src/core.mjs');
+  const doc = speedDoc([{ id: 'S1', type: 'speed', speed: 1, mode: 0, curve_speed: null },
+    { id: 'S1', type: 'speed', speed: 1, mode: 0, curve_speed: null }]);
+  applyOperations(doc, [trim('SEED')], { group: 'root' });
+  assert.deepEqual(doc.materials.speeds.map(s => [s.id, s.speed]), [['S1', 2], ['S1', 2]]);
+  assert.ok(!validateDocument(doc, { checkFiles: false }).some(i => i.code === 'CONFLICTING_MATERIAL_ID'));
+});
+
+test('trim clones a speed shared with another clip; the sibling keeps its own speed', async () => {
+  const { applyOperations, validateDocument } = await import('../src/core.mjs');
+  const shared = () => speedDoc([{ id: 'S1', type: 'speed', speed: 1, mode: 0, curve_speed: null, __shared: true }]);
+  const doc = shared();
+  applyOperations(doc, [trim('SEED')], { group: 'root' });
+  const [a, b] = doc.tracks[0].segments;
+  assert.equal(b.extra_material_refs[0], 'S1');
+  assert.notEqual(a.extra_material_refs[0], 'S1');
+  const speedOf = id => doc.materials.speeds.find(s => s.id === id).speed;
+  assert.equal(speedOf(a.extra_material_refs[0]), 2);
+  assert.equal(speedOf('S1'), 1);
+  assert.ok(!validateDocument(doc, { checkFiles: false }).some(i => i.code === 'SHARED_SEGMENT_EXTRA'));
+  const again = shared();
+  applyOperations(again, [trim('SEED')], { group: 'timeline:x' });
+  assert.equal(again.tracks[0].segments[0].extra_material_refs[0], a.extra_material_refs[0], 'same seed, same clone id');
+});
+
+test('material.patch refuses a speed several clips share unless shared: true', async () => {
+  const { applyOperations, CapcutError } = await import('../src/core.mjs');
+  const doc = speedDoc([{ id: 'S1', type: 'speed', speed: 1, mode: 0, curve_speed: null, __shared: true }]);
+  assert.throws(() => applyOperations(doc, [{ op: 'material.patch', selector: { id: 'S1' }, set: { speed: 3 } }], { group: 'root' }),
+    error => error instanceof CapcutError && error.code === 'SHARED_MATERIAL');
+  assert.equal(doc.materials.speeds[0].speed, 1);
+  applyOperations(doc, [{ op: 'material.patch', selector: { id: 'S1' }, set: { speed: 3 }, shared: true }], { group: 'root' });
+  assert.equal(doc.materials.speeds[0].speed, 3);
+  // A video material shared by both clips is patched on purpose (stage, repair) and not refused.
+  applyOperations(doc, [{ op: 'material.patch', selector: { id: 'V' }, set: { material_name: 'v' } }], { group: 'root' });
+});
+
+test('replace.media writes every identical copy of the video material; differing copies refuse', () => {
+  const f = fixture();
+  applySpec(f.project, { version: 1, operations: [addOp(f)] }, { forceRunning: true });
+  const duplicate = mutate => {
+    for (const dir of [f.project, f.timelineDir]) {
+      const d = readJson(path.join(dir, 'draft_info.json'));
+      const id = d.tracks.find(t => t.name === 'broll').segments[0].material_id;
+      const copy = structuredClone(d.materials.videos.find(m => m.id === id));
+      mutate(copy);
+      d.materials.videos.push(copy);
+      for (const name of ['draft_info.json', 'draft_info.json.bak', 'template-2.tmp']) fs.writeFileSync(path.join(dir, name), stableJson(d));
+    }
+  };
+  duplicate(() => {});
+  const seg = readJson(path.join(f.project, 'draft_info.json')).tracks.find(t => t.name === 'broll').segments[0];
+  const other = path.join(f.temp, 'other.mp4');
+  fs.writeFileSync(other, 'other');
+  applySpec(f.project, { version: 1, operations: [{
+    op: 'replace.media', selector: { id: seg.id }, path: other, width: 1080, height: 1920, mediaDuration: 20_000_000,
+  }] }, { forceRunning: true });
+  const copies = readJson(path.join(f.project, 'draft_info.json')).materials.videos.filter(m => m.id === seg.material_id);
+  assert.equal(copies.length, 2);
+  assert.deepEqual(copies.map(m => m.path), [other, other]);
+  assert.equal(doctor(f.project).errors, 0);
+
+  duplicate(copy => { copy.duration = 1_000_000; });
+  assert.throws(() => applySpec(f.project, { version: 1, operations: [{
+    op: 'replace.media', selector: { id: seg.id }, path: other, width: 1080, height: 1920, mediaDuration: 20_000_000,
+  }] }, { forceRunning: true }), error => error.code === 'CONFLICTING_MATERIAL_ID' && /capcutctl sync/.test(error.message));
+});
+
+test('pace setSpeed on a shared speed material leaves the sibling clip at 1x', async () => {
+  const { setSpeed } = await import('../src/pace.mjs');
+  const doc = speedDoc([{ id: 'S1', type: 'speed', speed: 1, mode: 0, curve_speed: null, __shared: true }]);
+  const [a, b] = doc.tracks[0].segments;
+  setSpeed(doc, a, 2);
+  assert.equal(b.extra_material_refs[0], 'S1');
+  assert.equal(doc.materials.speeds.find(s => s.id === 'S1').speed, 1);
+  assert.equal(doc.materials.speeds.find(s => s.id === a.extra_material_refs[0]).speed, 2);
+  const twin = speedDoc([{ id: 'S1', type: 'speed', speed: 1, mode: 0, curve_speed: null, __shared: true }]);
+  setSpeed(twin, twin.tracks[0].segments[0], 2);
+  assert.equal(twin.tracks[0].segments[0].extra_material_refs[0], a.extra_material_refs[0], 'both mirrors mint the same clone');
 });

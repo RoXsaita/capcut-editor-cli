@@ -23,6 +23,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PRESETS = path.join(HERE, '..', '..', 'presets');
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-sfx-preset-'));
+process.once('exit', () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } });
 const stand_in = path.join(dir, 'sound.dat');
 fs.writeFileSync(stand_in, 'sfx-fixture-bytes');
 

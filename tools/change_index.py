@@ -23,8 +23,13 @@ still indexes: a truncated final line is skipped, not fatal.
 """
 import json
 import math
+import os
+import sys
 from collections import namedtuple
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import rl2_take
 
 # Mean absolute luma delta a frame must reach to count as "something happened". Measured
 # across six takes at 0.25/0.5/1.0/2.0: the moment count stays roughly flat while the
@@ -44,28 +49,37 @@ SNAP_WINDOW = 1.0
 CHANGE = "change.ndjson"
 TRACE = "trace.ndjson"
 SESSION = "session.json"
+# The only trace rows the focus spans read. See _read_ndjson.
+FOCUS_NEEDLE = b'"focus_change"'
 
 Moment = namedtuple("Moment", "start end peak blocks mask")
 FocusSpan = namedtuple("FocusSpan", "start end app")
 
 
-def _read_ndjson(path):
+def _read_ndjson(path, needle=None):
     """Rows of an ndjson file, skipping anything unparseable.
 
     Deliberately lenient about the last line. A take whose writer died mid-record still
     has a complete index up to that point, and refusing the whole file over a half-written
     final line would throw away the part that is fine.
+
+    `needle` (bytes) skips every line that does not contain it before any JSON is parsed.
+    A trace.ndjson runs to hundreds of megabytes of pointer rows and the focus spans need
+    only its few focus_change rows. It is a prefilter, not a test: callers still check the
+    parsed row's type, because a pointer row can carry the same text somewhere else.
     """
     rows = []
     try:
-        with open(path, encoding="utf-8") as handle:
+        with open(path, "rb") as handle:
             for line in handle:
+                if needle is not None and needle not in line:
+                    continue
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     row = json.loads(line)
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, UnicodeDecodeError):
                     continue
                 if isinstance(row, dict):
                     rows.append(row)
@@ -156,7 +170,7 @@ def _moments_of(rows, min_score, gap):
     return [Moment(*run) for run in runs]
 
 
-def _focus_of(rows, session, duration):
+def _focus_of(rows, session, duration, offset=0.0):
     clock = session.get("clock")
     origin = (clock or {}).get("first_frame_host") if isinstance(clock, dict) else None
     if not isinstance(origin, (int, float)) or not math.isfinite(origin):
@@ -173,7 +187,7 @@ def _focus_of(rows, session, duration):
         host, app = row.get("host"), row.get("app")
         if not isinstance(host, (int, float)) or not math.isfinite(host) or not app:
             continue
-        marks.append((min(max(float(host) - float(origin), 0.0), duration), str(app)))
+        marks.append((min(max(float(host) - float(origin) - offset, 0.0), duration), str(app)))
     marks.sort(key=lambda mark: mark[0])
 
     spans = []
@@ -253,6 +267,24 @@ def load(media, duration, min_score=MIN_SCORE, gap=MERGE_GAP):
         return None, "media duration is missing or invalid"
 
     rows = _read_ndjson(directory / CHANGE)
+    session = _read_json(directory / SESSION)
+    take_parts = rl2_take.parts(directory, session)
+    offset = 0.0
+    if len(take_parts) > 1:
+        # A restarted take: this media is one of its parts. Its frames are the rows inside
+        # that part, moved onto the part's own file clock; rows in a restart gap are in no
+        # file and are dropped.
+        part = rl2_take.part_for_media(take_parts, media)
+        if part is None:
+            return None, (f"{Path(media).name} is not one of {directory.name}'s video parts "
+                          f"({rl2_take.listing(take_parts)})")
+        offset = part.start_vt
+        placed = []
+        for row in rows:
+            at = rl2_take.locate(take_parts, row.get("vt"))
+            if at is not None and at[0] == part.file:
+                placed.append({**row, "vt": at[1]})
+        rows = placed
     frames = [row for row in rows
               if isinstance(row.get("vt"), (int, float)) and math.isfinite(row["vt"])]
     if not frames:
@@ -264,6 +296,6 @@ def load(media, duration, min_score=MIN_SCORE, gap=MERGE_GAP):
                       f"{duration:.1f}s — a trimmed or derived copy, not this take")
 
     moments = _moments_of(rows, min_score, gap)
-    focus = _focus_of(_read_ndjson(directory / TRACE), _read_json(directory / SESSION), duration)
+    focus = _focus_of(_read_ndjson(directory / TRACE, FOCUS_NEEDLE), session, duration, offset)
     return ChangeIndex(directory, duration, moments, focus, len(frames),
                        min_score=min_score, merge_gap=gap), None

@@ -1,13 +1,55 @@
-import { allSegments, documentFingerprint, loadProject, materialIndex } from './core.mjs';
+import { allSegments, documentFingerprint, loadProject, materialIndex, sha256 } from './core.mjs';
 
 const r3 = n => Math.round(n * 1000) / 1000;
+const shortHash = value => sha256(JSON.stringify(value)).slice(0, 12);
 
-function materialPath(doc, id) {
-  const hit = materialIndex(doc).get(id);
-  return hit?.value?.path || null;
+/**
+ * What a segment's extras DO, per material kind, by an allow-list of fields. Whole material
+ * bodies are never compared: CapCut rewrites ids, names and bookkeeping on every save, and a
+ * diff of that noise would bury the one re-speed or re-frame that matters.
+ */
+const REF_FIELDS = {
+  speeds: m => ({ speed: m.speed ?? null, curve_speed: m.curve_speed ?? null, mode: m.mode ?? null }),
+  material_animations: m => ({ animations: (m.animations || []).map(x => ({
+    resource_id: x?.resource_id ?? null, type: x?.type ?? null, start: x?.start ?? null, duration: x?.duration ?? null })) }),
+  transitions: m => ({ effect: m.effect_id ?? m.resource_id ?? m.name ?? null, duration: m.duration ?? null }),
+  common_mask: m => ({ resource_type: m.resource_type ?? null, config: m.config ?? null }),
+  masks: m => ({ resource_type: m.resource_type ?? null, config: m.config ?? null }),
+  canvases: m => ({ type: m.type ?? null, color: m.color ?? null, image: m.image ?? null }),
+};
+const MASK_KINDS = new Set(['common_mask', 'masks']);
+
+function keyframeHash(segment) {
+  const keys = (segment.common_keyframes || []).flatMap(group => (group.keyframe_list || []).map(k => [
+    group.property_type ?? null, k?.time_offset ?? null, k?.values ?? null, k?.curveType ?? null]));
+  return keys.length ? shortHash(keys) : null;
+}
+
+function refsOf(segment, index) {
+  const out = [];
+  for (const ref of segment.extra_material_refs || []) {
+    const hit = index.get(ref);
+    const project = hit && REF_FIELDS[hit.kind];
+    if (project) out.push({ kind: hit.kind, ...project(hit.value) });
+  }
+  return out.length ? out : null;
+}
+
+function maskOf(segment, index) {
+  const masks = (segment.extra_material_refs || []).map(ref => index.get(ref))
+    .filter(hit => hit && MASK_KINDS.has(hit.kind)).map(hit => REF_FIELDS[hit.kind](hit.value));
+  if (segment.enable_video_mask == null && !masks.length) return null;
+  return `${segment.enable_video_mask ?? null}:${masks.length ? shortHash(masks) : 'none'}`;
+}
+
+function textOf(segment, index) {
+  const hit = index.get(segment.material_id);
+  if (hit?.kind !== 'texts') return undefined;
+  try { return JSON.parse(hit.value.content || '{}').text ?? null; } catch { return hit.value.content ?? null; }
 }
 
 export function summarizeDoc(doc) {
+  const index = materialIndex(doc);
   return {
     duration: r3((doc.duration || 0) / 1e6),
     fingerprint: documentFingerprint(doc),
@@ -25,9 +67,17 @@ export function summarizeDoc(doc) {
         ? [r3(e.segment.source_timerange.start / 1e6), r3((e.segment.source_timerange.start + e.segment.source_timerange.duration) / 1e6)]
         : null,
       material: e.segment.material_id,
-      path: materialPath(doc, e.segment.material_id),
+      path: index.get(e.segment.material_id)?.value?.path || null,
       volume: e.segment.volume,
-      speed: e.segment.speed
+      speed: e.segment.speed,
+      // Reframes, camera moves, masks, re-speeds and re-captions: each changes what plays
+      // without moving the clip, so `--allow` must see them.
+      clip: e.segment.clip ?? null,
+      keyframes: keyframeHash(e.segment),
+      mask: maskOf(e.segment, index),
+      refs: refsOf(e.segment, index),
+      ...(e.track.type === 'text' || index.get(e.segment.material_id)?.kind === 'texts'
+        ? { text: textOf(e.segment, index) ?? null } : {})
     })),
     // material_name is carried for the reader but never compared: it is the field CapCut
     // rewrites as noise when it re-saves a material under an id it already used.
@@ -50,9 +100,12 @@ export function summarizeProject(dir) {
 }
 
 /**
- * The tolerated set from dedupeMaterials in core.mjs. CapCut legitimately re-saves the
- * same logical material under an id it already used, differing only in noise, so a diff
- * that compared whole objects reported a document as different from itself.
+ * The fields a diff compares for a material. CapCut legitimately re-saves the same logical
+ * material under an id it already used, differing only in noise, so a diff that compared
+ * whole objects reported a document as different from itself. Broader than what
+ * dedupeMaterials in core.mjs tolerates: dedupe merges loosely only MEDIA copies (same
+ * non-empty path, frame size, type and material_name, duration within a frame); every other
+ * kind merges only when byte-identical.
  */
 const MATERIAL_FIELDS = ['path', 'width', 'height', 'duration', 'type', 'name'];
 

@@ -115,6 +115,23 @@ uv tool install mlx-whisper          # the fast path on Apple silicon, and the d
 .venv/bin/python -m pip install -e '.[whisper]'   # portable fallback; use --model small (or another plain name)
 ```
 
+Caption generation (`captions` without `--cues`) needs the `[captions]` extra plus one
+speech-recognition module, and both must be importable by the interpreter `capcutctl`
+resolves (the one `preflight` names), not just installed somewhere:
+
+```bash
+.venv/bin/python -m pip install -e '.[captions]' mlx-whisper   # or faster-whisper off Apple silicon
+```
+
+A `uv tool install mlx-whisper` alone puts the module in its own tool environment, so it
+serves `cut` but not `captions`. Without an ASR module `captions` refuses up front with
+`PYTHON_MISSING_DEPENDENCY`, and `preflight` shows a non-blocking **Caption generation**
+row; `captions --cues FILE` places prepared cues and needs none of it.
+
+`preflight` also reports the profile's room plate (`brand.background.plate`) and, when set,
+its background pipeline as non-blocking rows. An unset plate only means the room is left as
+shot; preflight never installs anything for the pipeline.
+
 `preflight` exits 1 if the install cannot work, and names the fix for each problem.
 The overlay artwork the built-in layouts need is bundled in `assets/`, so
 `layout split-screen` / `circle` / `screen` work immediately. The SFX palette is the

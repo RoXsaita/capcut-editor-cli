@@ -35,7 +35,7 @@
  * from the centre (8f) and the label rises word by word from 10f (3f stagger). Hold 45f after
  * the count (or params.hold); 6f out.
  */
-const COUNT = 15, OUT = 6, S0 = 0.72;
+const COUNT = 15, OUT = 6, S0 = 0.72, BLUR_IN = 8, BLUR_OUT = 5;
 const hold = (params, mg) => (params.hold != null ? mg.holdFrames(params, 0) : 45);
 function parse(params) {
   const raw = String(params.value == null ? '' : params.value).replace(/[,\s]/g, '');
@@ -90,7 +90,8 @@ MG.define({
       group.appendChild(label);
       spans = mg.words(label, String(params.label));
     }
-    const lay = mg.layout(params, { margin: 32 + 24 });
+    // Margin: crop pad + travel + what the shadows and the entrance/exit blur paint past the stack.
+    const lay = mg.layout(params, { margin: 32 + 24 + mg.maxReach(group) + 3 * Math.max(BLUR_IN, BLUR_OUT) });
     // Fit the whole stack to the band; the numeral and label scale together.
     let k = 1;
     for (let i = 0; i < 4; i++) {
@@ -138,7 +139,7 @@ MG.define({
     const pop = win(t, 0, F(8));
     const settle = mg.pulse(t, F(COUNT - 1), F(6));
     s.num.style.transform = `translateY(${(1 - ease.enter(pop)) * 28}px) scale(${(S0 + (1 - S0) * ease.pop(pop)) * (1 + 0.03 * settle)})`;
-    s.num.style.filter = `blur(${(1 - ease.enter(pop)) * 8}px)`;
+    s.num.style.filter = `blur(${(1 - ease.enter(pop)) * BLUR_IN}px)`;
     mg.show(s.num, ease.enter(Math.min(1, pop * 2)));
     for (const [el, start] of [[s.pre, 11], [s.post, 11]]) {
       if (!el) continue;
@@ -156,7 +157,7 @@ MG.define({
       span.style.transform = `translateY(${(1 - p) * 18}px)`;
     });
     s.group.style.transform = `translateY(${-q * 16}px)`;
-    s.group.style.filter = q > 0 ? `blur(${q * 5}px)` : 'none';
+    s.group.style.filter = q > 0 ? `blur(${q * BLUR_OUT}px)` : 'none';
     s.group.style.opacity = String(1 - q);
     if (s.slab) {
       const a = ease.enter(win(t, 0, F(8)));

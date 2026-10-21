@@ -253,17 +253,20 @@ export async function runVariant(projectDir, { hook, name = null, opening = null
   }
   // The duplicate is registered in CapCut's library, which CapCut owns while it runs.
   assertCapcutClosed({ forceRunning, probe: processProbe || undefined });
-  const { copyDraftTree, rewritePaths, isText, listFiles } = await import('./stage.mjs');
-  const { registerDraft } = await import('./create.mjs');
+  const { cloneDraft } = await import('./stage.mjs');
+  const { registerDraft, unregisterDraft } = await import('./create.mjs');
+  // Everything that can refuse for reasons outside the draft (a broken profile) refuses before
+  // anything is copied or registered.
+  let gateWith = null;
+  if (gate) {
+    const { gateReport } = await import('./gate.mjs');
+    const { loadProfile } = await import('./profile.mjs');
+    gateWith = { gateReport, profile: profile || loadProfile() };
+  }
   const dest = path.join(root, target);
-  copyDraftTree(projectDir, dest);
+  let registration = null;
   try {
-    for (const rel of listFiles(dest).filter(isText)) {
-      const file = path.join(dest, rel);
-      const text = fs.readFileSync(file, 'utf8');
-      const moved = rewritePaths(text, projectDir, dest);
-      if (moved !== text) fs.writeFileSync(file, moved);
-    }
+    cloneDraft(projectDir, dest);
     const draftId = uuid();
     const metaFile = path.join(dest, 'draft_meta_info.json');
     if (fs.existsSync(metaFile)) {
@@ -271,20 +274,33 @@ export async function runVariant(projectDir, { hook, name = null, opening = null
       fs.writeFileSync(metaFile, stableJson({ ...readJson(metaFile), draft_name: target, draft_fold_path: dest,
         draft_root_path: root, draft_id: draftId, tm_draft_create: now, tm_draft_modified: now, tm_draft_removed: 0 }));
     }
+    // The new opening moves the end of the edit; the copied contentEnd describes the original.
+    // Drop it here and the variant transaction records the live value (with a parked range).
+    const createdFile = path.join(dest, '.capcutctl', 'created.json');
+    if (fs.existsSync(createdFile)) {
+      const created = readJson(createdFile);
+      if (created && typeof created === 'object' && 'contentEnd' in created) {
+        delete created.contentEnd;
+        fs.writeFileSync(createdFile, stableJson(created));
+      }
+    }
     const tx = applySpec(dest, { version: 1, name: 'variant', operations: [op] }, { forceRunning: true, label: `variant-${hook.id}` });
     const durationUs = loadProject(dest).groups[0].doc.duration || 0;
-    const registration = registerDraft(root, dest, target, draftId, durationUs);
+    registration = registerDraft(root, dest, target, draftId, durationUs);
     let report = null;
-    if (gate) {
-      const { gateReport } = await import('./gate.mjs');
-      const { loadProfile } = await import('./profile.mjs');
+    if (gateWith) {
       const state = loadProject(dest);
       const doc = (state.groups.find(g => g.name.startsWith('timeline:')) || state.groups[0]).doc;
-      report = gateReport(doc, { projectDir: dest, profile: profile || loadProfile() });
+      report = gateWith.gateReport(doc, { projectDir: dest, profile: gateWith.profile });
     }
     return { created: true, project: dest, name: target, from: projectDir, plan: tx.result[0].operations[0],
       snapshot: tx.snapshot, ...registration, gate: report };
   } catch (error) {
+    // The folder goes, so its library entry must go too: CapCut lists a registered draft whose
+    // folder is missing as a broken project.
+    if (registration?.registered) {
+      try { unregisterDraft(root, dest); } catch { /* the original error is the one to report */ }
+    }
     fs.rmSync(dest, { recursive: true, force: true });
     throw error;
   }

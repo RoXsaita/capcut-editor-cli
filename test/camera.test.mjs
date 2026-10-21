@@ -105,3 +105,35 @@ test('linked frame follows focus on its own time base; separate owners stay unch
   assert.throws(() => opScaleKeyframe(d,{selector:{id:s.id},at:1}),{code:'MOTION_SPEED_CURVE'});
   assert.throws(() => opScaleKeyframe(doc(clip('hidden',{clip:{alpha:0}})),{selector:{id:'hidden'},at:1}),{code:'MOTION_HIDDEN'});
 });
+
+test('a focus rect a rounding past the split row clamps to it; a real overshoot names the visible band', () => {
+  const masked = rotation => {
+    const s = clip('screen', { extra_material_refs: ['mask'], enable_video_mask: true });
+    const d = doc(s);
+    d.materials.common_mask.push({ id: 'mask', resource_type: 'line', config: { rotation, centerY: .4 } });
+    return { s, d };
+  };
+  const keysOf = s => s.common_keyframes.map(k => [k.property_type, k.keyframe_list.map(p => p.values[0])]);
+  const seam = (scale, ty) => 960 - ty * 960 + (324 - 540) * .5625 * scale;   // row 324 of 1080
+  for (const [rotation, focus, clamped] of [
+    [0, [600, 100, 300, 224.5], [600, 100, 300, 224]],          // upper half: bottom 0.5px past row 324
+    [180, [600, 323.5, 300, 200], [600, 324, 300, 199.5]],      // lower half: top 0.5px above row 324
+  ]) {
+    const a = masked(rotation), b = masked(rotation);
+    const result = opScaleKeyframe(a.d, { selector: { id: 'screen' }, at: 1, focus, hold: 1, ease: false });
+    opScaleKeyframe(b.d, { selector: { id: 'screen' }, at: 1, focus: clamped, hold: 1, ease: false });
+    assert.deepEqual(keysOf(a.s), keysOf(b.s), `rotation ${rotation}: keys differ from the clamped rect`);
+    assert.deepEqual(result.focus, clamped);
+    assert.match(result.note, /clamped/);
+    const initial = seam(1.4, -.2);
+    for (const t of [92, 92.2, 92.4, 94, 94.8]) {
+      assert.ok(Math.abs(seam(value(a.s, 'KFTypeScaleX', t), value(a.s, 'KFTypePositionY', t)) - initial) < 1e-6, 'seam moved');
+    }
+  }
+  const { s, d } = masked(0);
+  const before = structuredClone(s);
+  assert.throws(() => opScaleKeyframe(d, { selector: { id: 'screen' }, at: 1, focus: [600, 100, 300, 274], hold: 1 }),
+    err => err.code === 'FOCUS_MASKED' && /split row \d/.test(err.message)
+      && JSON.stringify(err.details.visibleSource) === JSON.stringify([0, 324]));
+  assert.deepEqual(s, before);
+});

@@ -7,6 +7,7 @@ import { applySpec, assertCapcutClosed, CapcutError, loadProject, principalEndUs
 import { principalTrack } from './polish.mjs';
 import { layoutAudit } from './layouts.mjs';
 import { pythonForTool } from './python.mjs';
+import { isCaptionTrack } from './captions.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -43,7 +44,10 @@ export async function runCaptions(projectDir,args,options={}) {
     bundle=Array.isArray(value)?{version:1,cues:value}:(value.bundle || value);
     if(!bundle || (bundle.version!=null && bundle.version!==1))fail('CAPTION_INPUT','Unsupported cue bundle version.');
   }else{
-    if(doc.tracks.some(t=>t.name?.startsWith('captions:')))fail('CAPTION_CONFLICT','Caption track already exists. Keep manual edits; explicitly remove it before regenerating.');
+    // Refuse before paying for ASR. Every caption layer counts (an SRT or CapCut's own too).
+    const existing=doc.tracks.filter(t=>isCaptionTrack(doc,t));
+    if(existing.length && !args.replace)fail('CAPTION_CONFLICT',`Caption layers already exist: ${existing.map(t=>t.name||'(unnamed)').join(', ')}. `
+      +'Keep them, or run `capcutctl captions --replace` to swap them for new captions (hand corrections on them are lost).');
     let trackIndex;
     if(args.track!=null){
       const matches=doc.tracks.map((t,i)=>({t,i})).filter(({t,i})=>t.name===String(args.track)||String(i)===String(args.track));
@@ -78,7 +82,9 @@ export async function runCaptions(projectDir,args,options={}) {
   }
   const result=applySpec(projectDir,{version:1,name:'captions',operations:[{
     op:'captions',name:args.name||'suheil',cues:bundle.cues,language:args.lang||bundle.language||'ar',
+    ...(args.replace?{replace:true}:{}),
   }]},options);
-  return {...result,bundle,review:{status:'needs_review',native_verified:false},
+  const warnings=Array.isArray(bundle.warnings)?bundle.warnings:[];
+  return {...result,...(warnings.length?{warnings}:{}),bundle,review:{status:'needs_review',native_verified:false},
     warning:'Editable text layers, not burned media. Native visual parity is experimental; inspect in CapCut.'};
 }

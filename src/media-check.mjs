@@ -187,7 +187,7 @@ const EDGE = 0.05;
  * at before posting (a 1-2 frame flash may be a deliberate flash transition; a held frame
  * may be a deliberate hold). Every flagged moment lands in `inspect`, ready for export-grid.
  */
-export function checkExportReport(scan, { profile = loadProfile(), expected = null, target = null, peak = null } = {}) {
+export function checkExportReport(scan, { profile = loadProfile(), expected = null, target = null, peak = null, project = null } = {}) {
   const checks = [];
   const inspect = new Set();
   const add = (id, level, ok, message, value = null, want = null) => checks.push({ id, level, ok, message, value, target: want });
@@ -260,7 +260,10 @@ export function checkExportReport(scan, { profile = loadProfile(), expected = nu
       add('loudness', 'WARN', Math.abs(off) <= 1, `integrated ${lufs} LUFS (${off >= 0 ? '+' : ''}${off} LU from ${lufsTarget})`, lufs, lufsTarget);
     }
     if (truePeak != null) {
-      add('true-peak', 'FAIL', truePeak <= peakLimit + 0.05, `true peak ${truePeak} dBTP (limit ${peakLimit})`, truePeak, peakLimit);
+      // Loudness already on target: only the peak is off, so limit it without re-matching the clips.
+      const peakOnly = truePeak > peakLimit + 0.05 && lufs != null && Math.abs(lufs - lufsTarget) <= 1
+        ? `: capcutctl loudness --project ${project || 'NAME'} --peak-only, then re-export` : '';
+      add('true-peak', 'FAIL', truePeak <= peakLimit + 0.05, `true peak ${truePeak} dBTP (limit ${peakLimit})${peakOnly}`, truePeak, peakLimit);
     }
   }
 

@@ -6,7 +6,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import {
   applyAdjust, gradeBuffer, scope, solveGrade, planGrade, measureSources, opGradeApply, opGradeReset, opGradeLayer,
-  resolveGradeSource, resolveMediaPath, ROLE_TARGETS
+  resolveGradeSource, resolveMediaPath, ROLE_TARGETS, ROLE_WEIGHTS, grabFrame
 } from '../src/grade.mjs';
 
 const US = s => Math.round(s * 1e6);
@@ -313,4 +313,69 @@ test('draft-relative media paths resolve to the file on disk', () => {
     '/p/proj/Resources/CapcutctlMedia/x.mp4');
   assert.equal(resolveMediaPath('/abs/x.mp4', '/p/proj'), '/abs/x.mp4');
   assert.equal(resolveMediaPath('', '/p/proj'), null);
+});
+
+/* ---- pooled measurement --------------------------------------------------- */
+
+function darkThenBright(dir) {
+  const file = path.join(dir, 'face-light-change.mp4');
+  execFileSync('ffmpeg', [
+    '-v', 'error',
+    '-f', 'lavfi', '-i', 'color=c=0x2a2622:s=64x36:r=10:d=2',
+    '-f', 'lavfi', '-i', 'color=c=0xe0c4a8:s=64x36:r=10:d=2',
+    '-filter_complex', '[0:v][1:v]concat=n=2:v=1[v]', '-map', '[v]',
+    '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-y', file,
+  ], { stdio: 'ignore' });
+  return file;
+}
+
+function twoClipDoc(file) {
+  const at = (id, start, srcIn) => ({
+    id, material_id: 'FACE',
+    target_timerange: { start: US(start), duration: US(1.5) },
+    source_timerange: { start: US(srcIn), duration: US(1.5) },
+    extra_material_refs: [],
+  });
+  return {
+    duration: US(3), materials: { videos: [{ id: 'FACE', type: 'video', path: file }], effects: [] },
+    tracks: [{ type: 'video', flag: 2, name: 'face', segments: [at('dark', 0, 0.2), at('bright', 1.5, 2.2)] }],
+  };
+}
+
+test('grade solves against every sampled frame, not the first one', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcut-grade-'));
+  const file = darkThenBright(dir);
+  const d = twoClipDoc(file);
+  const target = { black: 4, white: 240, maxClipped: 0.5 };
+  const plan = planGrade(d, dir, { target });
+  const row = plan.sources[0];
+  assert.equal(row.role, 'face');
+  assert.ok(row.sliders && Object.keys(row.sliders).length, row);
+  assert.ok(row.spread && row.spread.mid > 25, row.spread);
+  assert.match(row.warning, /mid luma varies/);
+  // What the old code did: solve on the first decodable sample alone.
+  const sampled = measureSources(d, dir, { samples: 3 })[0].sampledAt;
+  const first = grabFrame(file, sampled[0]);
+  const firstOnly = solveGrade(first.buf, target, {
+    weights: ROLE_WEIGHTS.face,
+    bounds: { saturation: [0, 0.4] },
+  }).sliders;
+  assert.notDeepEqual(
+    Object.fromEntries(Object.entries(firstOnly).filter(([, v]) => Math.abs(v) >= 0.01)), row.sliders);
+  // The bright shot does not blow out under the pooled grade; under the first-frame grade it did.
+  const bright = grabFrame(file, sampled.at(-1));
+  assert.ok(scope(gradeBuffer(bright.buf, firstOnly)).clipped > target.maxClipped);
+  assert.ok(scope(gradeBuffer(bright.buf, row.sliders)).clipped <= target.maxClipped,
+    scope(gradeBuffer(bright.buf, row.sliders)));
+  // And the plan stays plain JSON: the decoded frames ride off the record.
+  assert.ok(JSON.stringify(plan).length < 20000);
+});
+
+test('self-reference on a face whose light changes asks for (almost) nothing', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcut-grade-'));
+  const file = darkThenBright(dir);
+  const plan = planGrade(twoClipDoc(file), dir, { reference: path.basename(file) });
+  const row = plan.sources[0];
+  for (const value of Object.values(row.sliders)) assert.ok(Math.abs(value) < 0.05, row.sliders);
+  assert.deepEqual(row.after, row.before);
 });

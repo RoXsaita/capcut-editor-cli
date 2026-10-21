@@ -19,6 +19,7 @@ import { lintBroll, momentsFromSidecar, isBrollSegment } from './broll-lint.mjs'
 import { peakUpscale, UPSCALE_REFUSE } from './crispness.mjs';
 import { sourceToTimeline } from './signature.mjs';
 import { loadTranscript } from './stress.mjs';
+import { principalTrack } from './polish.mjs';
 import { pythonForTool } from './python.mjs';
 
 const r3 = n => Math.round(n * 1000) / 1000;
@@ -39,6 +40,8 @@ export const MATCH_WRITER_OPS = Object.freeze([
 export const ACTION_VERBS = new Set([
   'click', 'tap', 'hit', 'press', 'open', 'run', 'type', 'select', 'submit',
   'drag', 'scroll', 'hover', 'focus', 'publish',
+  // Levantine Arabic: press, press (colloquial), open, type, choose, download/drop.
+  'اضغط', 'ضغطت', 'كبس', 'اكبس', 'كبست', 'افتح', 'فتحت', 'اكتب', 'كتبت', 'اختار', 'اختر', 'نزل',
 ]);
 
 const RESULT_RE = /\b(result|appears?|shows?|showed|answer|done|output|lands?|settled|finished)\b/i;
@@ -51,6 +54,12 @@ const STOPWORDS = new Set([
   'has', 'had', 'not', 'no', 'yes', 'ok', 'okay', 'gonna', 'going', 'let', 'lets', 'i\'m',
   'he', 'she', 'they', 'them', 'his', 'her', 'our', 'your', 'what', 'when', 'where', 'who',
   'how', 'why', 'look', 'see', 'watch', 'right', 'left', 'one', 'two',
+  // Levantine fillers, particles and prepositions: he talks in Arabic, the screen is English,
+  // and none of these name an element. زر (button) stays: it is a noun the screen can show.
+  'يعني', 'هلق', 'هلأ', 'هلا', 'هيك', 'شي', 'كتير', 'بس', 'منيح', 'يلا', 'خلص', 'طيب',
+  'انو', 'إنو', 'انه', 'إنه', 'اللي', 'هاد', 'هادا', 'هاي', 'هون', 'هونيك', 'كمان', 'لسا',
+  'لأنو', 'لانو', 'على', 'من', 'في', 'عن', 'مع', 'إلى', 'الى', 'لل', 'انا', 'أنا', 'انت',
+  'إنت', 'احنا', 'نحنا', 'هو', 'هي', 'هم', 'كيف', 'شو', 'ليش', 'وين', 'متل', 'مثل', 'تمام',
 ]);
 
 const REGION_WEIGHT = Object.freeze({
@@ -158,10 +167,26 @@ function regionWeight(box) {
   return REGION_WEIGHT[box?.region] ?? REGION_WEIGHT.unknown;
 }
 
-function boxHitsToken(box, token) {
+/**
+ * Does an OCR box show this sentence token? Word by word, never raw substrings: the old
+ * two-way `includes` let a 1–2 character box ("o", "In") hit every token that contains it.
+ * A hit is an equal word, a shared prefix whose shorter side is ≥4 characters ("Publishing"
+ * shows "publish"), or the whole box with spaces removed (≥4 characters) inside the token
+ * ("Git Hub" shows "github"). A box word under 3 characters only ever matches by equality.
+ */
+export function boxHitsToken(box, token) {
   const text = String(box?.text || '').toLowerCase();
   if (!text || !token) return false;
-  return text.includes(token) || token.includes(text.replace(/\s+/g, ''));
+  const words = text.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  for (const word of words) {
+    if (word === token) return true;
+    if (word.length < 3) continue;
+    const shorter = Math.min(word.length, token.length);
+    if (shorter >= 4 && (word.startsWith(token) || token.startsWith(word))) return true;
+  }
+  if (words.some(word => word.length < 3)) return false;
+  const compact = words.join('');
+  return compact.length >= 4 && token.includes(compact);
 }
 
 /**
@@ -397,6 +422,10 @@ export function planShotOps(shot, {
       at,
       speed: 20,
       resultAt: shot.resultAt,
+      // match picked this out-point itself, not an editor's cut: a short 1× shot's result may
+      // run on past it, by at most the shot's own length (ramp still stops at the material
+      // end and the next shot from the same file).
+      reachForward: duration,
     });
   }
   return ops;
@@ -542,6 +571,8 @@ export function matchShots({
     return shot;
   });
 
+  clampToNext(shots, { screen, width, height, mediaDuration, track });
+
   const counts = { place: 0, flag: 0, none: 0 };
   for (const shot of shots) counts[shot.decision] += 1;
   return {
@@ -556,6 +587,61 @@ export function matchShots({
   };
 }
 
+/** Below this a shot cut short to make room for the next one is too brief to read. */
+export const MIN_CLAMPED_HOLD = 0.4;
+
+/**
+ * A short sentence is padded to MIN_HOLD, which can run past the start of the next placed
+ * shot on the same lane; `--apply` then overlapped and rolled the whole transaction back.
+ * Walk the placed shots in timeline order: cut a shot back to the next one's start when that
+ * still leaves ≥ MIN_CLAMPED_HOLD on screen, otherwise demote it to a flag. Walked from the
+ * end so a demoted shot no longer counts as anyone's "next".
+ */
+function clampToNext(shots, planOptions) {
+  const placed = shots.filter(shot => shot.decision === 'place' && Number.isFinite(shot.timeline?.start))
+    .sort((a, b) => a.timeline.start - b.timeline.start);
+  let next = placed.at(-1);
+  for (let i = placed.length - 2; i >= 0; i--) {
+    const shot = placed[i];
+    const gap = r3(next.timeline.start - shot.timeline.start);
+    if (shot.onScreen <= gap + 1e-6) { next = shot; continue; }
+    if (gap >= MIN_CLAMPED_HOLD) {
+      shot.onScreen = gap;
+      shot.source = { ...shot.source, out: r3(shot.source.in + gap) };
+      shot.reasons = [...(shot.reasons || []), 'clamped-to-next'];
+      shot.ops = planShotOps(shot, planOptions);
+      next = shot;
+    } else {
+      shot.decision = 'flag';
+      shot.reasons = [...(shot.reasons || []), 'overlaps-next'];
+      shot.ops = [];
+    }
+  }
+}
+
+function assertNoScreenOverlap(operations) {
+  const byTrack = new Map();
+  for (const op of operations) {
+    if (op.op !== 'layout.screen') continue;
+    const key = String(op.track ?? 'screen');
+    if (!byTrack.has(key)) byTrack.set(key, []);
+    byTrack.get(key).push(op);
+  }
+  for (const [track, ops] of byTrack) {
+    const ordered = [...ops].sort((a, b) => Number(a.at) - Number(b.at));
+    for (let i = 1; i < ordered.length; i++) {
+      const prev = ordered[i - 1], cur = ordered[i];
+      if (Number(prev.at) + Number(prev.duration) > Number(cur.at) + 1e-6) {
+        throw new CapcutError(
+          `match: ${prev.desc || 'a shot'} (${prev.at}s for ${prev.duration}s) overlaps ${cur.desc || 'the next shot'} `
+          + `(${cur.at}s) on track ${track}. Shorten or drop one in shots.json, then match --apply --shots.`,
+          { code: 'CLIP_OVERLAP', exitCode: 2, details: { track, shots: [prev.desc, cur.desc] } },
+        );
+      }
+    }
+  }
+}
+
 export function shotsToSpec(result, extras = {}) {
   const operations = [];
   for (const shot of result.shots || []) {
@@ -565,6 +651,7 @@ export function shotsToSpec(result, extras = {}) {
       : planShotOps(shot, extras);
     for (const op of ops) operations.push(op);
   }
+  assertNoScreenOverlap(operations);
   return { version: 1, name: 'match', operations };
 }
 
@@ -624,21 +711,24 @@ export function loadBoxesAtTimes(media, times, { cacheDir } = {}) {
   }
 }
 
-function principalMediaPath(doc, projectDir) {
-  try {
-    const videos = new Map((doc.materials?.videos || []).map(material => [material.id, material]));
-    for (const track of doc.tracks || []) {
-      if (track.type !== 'video' || track.flag === 0) continue;
-      for (const segment of track.segments || []) {
-        const material = videos.get(segment.material_id);
-        if (!material?.path) continue;
-        if (material.type && material.type !== 'video') continue;
-        if (isBrollSegment(segment, material)) continue;
-        return resolveMediaPath(material.path, projectDir) || material.path;
-      }
+/** The talking head's media and material: the principal track, never a screen recording. */
+function principalMedia(doc, projectDir) {
+  const videos = new Map((doc.materials?.videos || []).map(material => [material.id, material]));
+  let tracks;
+  try { tracks = [principalTrack(doc).track]; } catch {
+    // No gapless principal: the first non-B-roll video, as before.
+    tracks = (doc.tracks || []).filter(track => track.type === 'video' && track.flag !== 0);
+  }
+  for (const track of tracks) {
+    for (const segment of track.segments || []) {
+      const material = videos.get(segment.material_id);
+      if (!material?.path) continue;
+      if (material.type && material.type !== 'video') continue;
+      if (isBrollSegment(segment, material)) continue;
+      return { path: resolveMediaPath(material.path, projectDir) || material.path, material };
     }
-  } catch { /* no principal */ }
-  return null;
+  }
+  return { path: null, material: null };
 }
 
 /**
@@ -657,8 +747,10 @@ export function loadMatchInputs({
       clicks: clicks || [],
     };
   }
-  const facePath = face || (doc ? principalMediaPath(doc, projectDir) : null);
-  const loadedTranscript = loadTranscript(facePath, { cacheDir, transcript, words });
+  const principal = !face && doc ? principalMedia(doc, projectDir) : { path: null, material: null };
+  const facePath = face || principal.path;
+  const loadedTranscript = loadTranscript(facePath, { cacheDir, transcript, words,
+    material: principal.material, projectDir });
   if (!loadedTranscript) {
     throw new CapcutError(
       'match needs a Whisper transcript for the talking head. Pass --face FILE or inject words.',

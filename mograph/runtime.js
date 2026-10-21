@@ -42,6 +42,9 @@
  *   MG.show(el, opacity)   opacity that also hides at 0, keeping invisible states out of the crop
  *   MG.pulse(t, start, dur)  one 0→1→0 bump (never a loop)
  *   MG.holdFrames(params, words), MG.readSign(text), MG.image(src)
+ *   MG.reach(el)           how far el paints past its box per side (shadows + filter), {l,r,t,b,max};
+ *   MG.maxReach(el)        the largest reach of el or a descendant. bounds() widens the crop by the
+ *                          same reach, so derive a layout margin from it (plus any animated blur, 3×)
  * ready() also reports `words`: the number of .mg-word spans (Arabic is animated by word).
  */
 (function () {
@@ -311,10 +314,77 @@
     return img;
   }
 
+  // ---- paint reach -------------------------------------------------------------------------
+  // A layout rect is not what Chrome paints: text-shadow, box-shadow and filter blur/drop-shadow
+  // spill past it. The crop box and the layout margins both need that spill, per side.
+  /** Split a computed list on the commas outside parentheses ("rgba(0, 0, 0, .4) 0px 3px 4px, …"). */
+  function splitList(value) {
+    const out = [];
+    let depth = 0, start = 0;
+    for (let i = 0; i < value.length; i++) {
+      const c = value[i];
+      if (c === '(') depth++;
+      else if (c === ')') depth--;
+      else if (c === ',' && depth === 0) { out.push(value.slice(start, i)); start = i + 1; }
+    }
+    out.push(value.slice(start));
+    return out.map(s => s.trim()).filter(Boolean);
+  }
+  /** The px lengths of one shadow, colour functions removed (computed values are always px). */
+  const lengths = part => (part.replace(/[a-z-]+\([^()]*\)/gi, ' ').match(/-?\d*\.?\d+(?:e[+-]?\d+)?px/gi) || []).map(parseFloat);
+  const noReach = () => ({ l: 0, r: 0, t: 0, b: 0 });
+  function addShadow(reach, x, y, blur, spread) {
+    const e = Math.max(0, blur + spread);
+    reach.l = Math.max(reach.l, e - x); reach.r = Math.max(reach.r, e + x);
+    reach.t = Math.max(reach.t, e - y); reach.b = Math.max(reach.b, e + y);
+    return reach;
+  }
+  /** Reach of an element's own filter: drop-shadow like a shadow, blur(N) as 3N (three sigma). */
+  function filterReach(cs) {
+    const reach = noReach();
+    const value = cs.filter;
+    if (!value || value === 'none') return reach;
+    const re = /(blur|drop-shadow)\(((?:[^()]|\([^()]*\))*)\)/gi;
+    let blur = 0, m;
+    while ((m = re.exec(value))) {
+      if (m[1].toLowerCase() === 'blur') blur += 3 * (lengths(m[2])[0] || 0);
+      else { const [x = 0, y = 0, b = 0] = lengths(m[2]); addShadow(reach, x, y, b, 0); }
+    }
+    for (const side of ['l', 'r', 't', 'b']) reach[side] += blur;
+    return reach;
+  }
+  /** Reach of an element's text-shadow and box-shadow (inset shadows paint inside: skipped). */
+  function shadowReach(cs) {
+    const reach = noReach();
+    for (const prop of ['textShadow', 'boxShadow']) {
+      const value = cs[prop];
+      if (!value || value === 'none') continue;
+      for (const part of splitList(value)) {
+        if (/\binset\b/i.test(part)) continue;
+        const [x = 0, y = 0, blur = 0, spread = 0] = lengths(part);
+        addShadow(reach, x, y, blur, prop === 'boxShadow' ? spread : 0);
+      }
+    }
+    return reach;
+  }
+  /**
+   * How far `el` paints past its layout box per side, in its own CSS px: shadows plus its own
+   * filter. `max` is the largest side, for a template that derives its layout margin from it.
+   */
+  function reach(el) {
+    const cs = getComputedStyle(el);
+    const s = shadowReach(cs), f = filterReach(cs);
+    const out = { l: s.l + f.l, r: s.r + f.r, t: s.t + f.t, b: s.b + f.b };
+    out.max = Math.max(out.l, out.r, out.t, out.b);
+    return out;
+  }
+  /** The largest reach of `el` or anything inside it: a layout margin for a whole group. */
+  const maxReach = el => Math.max(reach(el).max, ...[...el.querySelectorAll('*')].map(c => reach(c).max));
+
   const MG = {
     input, tokens, fps, F, clamp, lerp, bezier, backOut, ease, win, envelope, words, digits,
     isArabic, color, random: s => mulberry32(s >>> 0),
-    rgba, cssVars, layout, place, fitFont, show, pulse, holdFrames, readSign, image,
+    rgba, cssVars, layout, place, fitFont, show, pulse, holdFrames, readSign, image, reach, maxReach,
     define(spec) {
       const params = input.params || {};
       let state = null;
@@ -347,18 +417,44 @@
             words: root.querySelectorAll('.mg-word').length,
           };
         })(),
-        /** Union of every visible element's box across `samples` instants, padded, in canvas px. */
+        /**
+         * Union of every visible element's PAINTED box (its rect widened by its shadows, its own
+         * filter and its ancestors' filters) across `samples` instants and every frame time,
+         * padded, in canvas px.
+         */
         bounds(samples = 24) {
           let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-          for (let i = 0; i <= samples; i++) {
-            spec.seek(duration * i / samples, state, MG);
+          const times = [];
+          for (let i = 0; i <= samples; i++) times.push(duration * i / samples);
+          const frames = Math.max(1, Math.round(duration * fps));
+          for (let i = 0; i < frames; i++) times.push(i / fps);
+          // A transform scales what the element paints: canvas px per CSS px of its own box.
+          const scaleOf = (el, r) => { const w = el.offsetWidth; return w > 0 && r.width > 0 ? r.width / w : 1; };
+          for (const t of times) {
+            spec.seek(t, state, MG);
+            const filters = new Map();          // ancestor filter reach, in canvas px, this instant
+            const inherited = el => {
+              const sum = noReach();
+              for (let a = el.parentElement; a; a = a.parentElement) {
+                if (!filters.has(a)) {
+                  const f = filterReach(getComputedStyle(a));
+                  const k = scaleOf(a, a.getBoundingClientRect());
+                  filters.set(a, { l: f.l * k, r: f.r * k, t: f.t * k, b: f.b * k });
+                }
+                const f = filters.get(a);
+                sum.l += f.l; sum.r += f.r; sum.t += f.t; sum.b += f.b;
+                if (a === state.root) break;
+              }
+              return sum;
+            };
             for (const el of state.root.querySelectorAll('*')) {
               const r = el.getBoundingClientRect();
               if (!r.width || !r.height) continue;
               const cs = getComputedStyle(el);
               if (cs.visibility === 'hidden' || cs.display === 'none') continue;
-              x0 = Math.min(x0, r.left); y0 = Math.min(y0, r.top);
-              x1 = Math.max(x1, r.right); y1 = Math.max(y1, r.bottom);
+              const own = reach(el), up = inherited(el), k = scaleOf(el, r);
+              x0 = Math.min(x0, r.left - own.l * k - up.l); y0 = Math.min(y0, r.top - own.t * k - up.t);
+              x1 = Math.max(x1, r.right + own.r * k + up.r); y1 = Math.max(y1, r.bottom + own.b * k + up.b);
             }
           }
           spec.seek(0, state, MG);

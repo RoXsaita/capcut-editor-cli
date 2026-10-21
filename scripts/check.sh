@@ -20,7 +20,6 @@ for arg in "$@"; do
         *) printf 'unknown option: %s\n' "$arg" >&2; exit 2 ;;
     esac
 done
-# CI sets this so the workflow and a local --strict run mean the same thing.
 [ "${CI_REQUIRE_ALL_GATES:-}" = 1 ] && strict=1
 
 status=0
@@ -59,14 +58,19 @@ node_status=$?
 node_pass=$(printf '%s' "$node_out" | grep -oE '^# pass [0-9]+' | grep -oE '[0-9]+$')
 node_fail=$(printf '%s' "$node_out" | grep -oE '^# fail [0-9]+' | grep -oE '[0-9]+$')
 node_skip=$(printf '%s' "$node_out" | grep -oE '^# skipped [0-9]+' | grep -oE '[0-9]+$')
+# The distinct reasons the skipped tests gave (TAP `ok N - name # SKIP reason`), so the hint
+# names what is missing instead of guessing.
+skip_reasons=$(printf '%s\n' "$node_out" | grep -oE '# SKIP.*$' | sed -E 's/^# SKIP *//' | sort -u \
+    | awk 'NF' | paste -sd ';' - | sed 's/;/; /g')
 if [ "$node_status" -eq 0 ] && [ "${node_fail:-1}" = 0 ] && [ "${node_pass:-0}" -gt 0 ]; then
     note=""
     # A skipped test is a gate that did not run. ffmpeg gates the cut.recut suite, so on a
     # machine without it this number is not zero — say so instead of implying full coverage.
     [ "${node_skip:-0}" -gt 0 ] && note=" — ${node_skip} skipped"
     ok "node (${node_pass} passing${note})"
+    [ "${node_skip:-0}" -gt 0 ] && [ -n "$skip_reasons" ] && printf 'skipped because: %s\n' "$skip_reasons"
     if [ "$strict" -eq 1 ] && [ "${node_skip:-0}" -gt 0 ]; then
-        fail "node tests skipped ${node_skip} (required under --strict; install ffmpeg)"
+        fail "node tests skipped ${node_skip} (required under --strict; ${skip_reasons:-see the TAP output})"
     fi
 else
     printf '%s\n' "$node_out" | awk '/^not ok/ { remaining=35 } remaining > 0 { print; remaining-- }'
@@ -97,6 +101,10 @@ if [ -n "$py" ]; then
         fail "aroll selftest"
     fi
     if "$py" tools/frame_qa.py --selftest; then ok "frame qa"; else fail "frame qa selftest"; fi
+    if "$py" tools/claude_timeline.py --selftest; then ok "claude timeline redaction"; else fail "claude timeline selftest"; fi
+    if "$py" -m unittest discover -s tools/watcher -p 'test_*.py'; then ok "watcher privacy gates"; else
+        fail "watcher privacy tests"
+    fi
     if command -v ffmpeg >/dev/null 2>&1; then
         if "$py" tools/xray.py selftest; then ok "xray"; else fail "xray selftest"; fi
     else
@@ -104,6 +112,18 @@ if [ -n "$py" ]; then
     fi
 else
     skip "python selftests" "no interpreter"
+fi
+
+stage "caption engine"
+# CI installs the optional [captions] extra and runs this; without it the engine cannot import.
+if [ -z "$py" ]; then
+    skip "caption engine" "no interpreter"
+elif "$py" -c 'import pysubs2, arabic_reshaper, bidi' >/dev/null 2>&1; then
+    if "$py" -m unittest discover -s test -p test_caption_generate.py; then ok "caption engine"; else
+        fail "caption engine tests"
+    fi
+else
+    skip "caption engine" "pip install -e '.[captions]'"
 fi
 
 stage "python compiles"
@@ -166,6 +186,18 @@ elif [ -x tools/vision/face ]; then
     ok "built"
 else
     skip "vision face helper" "swiftc -O -o tools/vision/face tools/vision/face.swift"
+fi
+
+stage "vision swift typecheck"
+# Each helper is its own program (each has top-level code), so typecheck them one at a time.
+if [ "$(uname -s)" != "Darwin" ]; then
+    printf 'SKIP vision swift typecheck — macOS only\n'
+elif have swiftc; then
+    for helper in ocr face frames; do
+        if swiftc -typecheck "tools/vision/$helper.swift"; then ok "$helper.swift"; else fail "swiftc -typecheck $helper.swift"; fi
+    done
+else
+    skip "vision swift typecheck" "xcode-select --install"
 fi
 
 printf '\n'

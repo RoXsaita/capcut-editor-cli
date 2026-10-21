@@ -22,11 +22,30 @@ import {
   resolvePython,
 } from '../src/python.mjs';
 
-for (const script of ['find-index.py', 'change-index.py', 'find-accurate-frames.py',
-  'frame-qa-accuracy.py']) {
+// Every standalone Python regression script in test/ runs here, each under its own HOME so a
+// cache one writes cannot satisfy the next. A hard-coded list left five of them (A-roll and
+// audio-index) unrun for weeks. test_caption_generate.py needs the optional [captions] extra
+// and has its own CI step and check.sh stage.
+const PY_SCRIPTS = fs.readdirSync(fileURLToPath(new URL('.', import.meta.url)))
+  .filter(name => name.endsWith('.py') && name !== 'test_caption_generate.py')
+  .sort();
+
+test('the Python regression scripts are discovered', () => {
+  assert.ok(PY_SCRIPTS.length > 0, 'no test/*.py found; the listing below would pass vacuously');
+});
+
+for (const script of PY_SCRIPTS) {
   test(`${script} media regressions`, () => {
     const python = resolvePython().executable;
-    execFileSync(python, [fileURLToPath(new URL(script, import.meta.url))], { stdio: 'pipe' });
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-pyhome-'));
+    try {
+      // -I: isolated, so a suite reaches tools/ through its own sys.path line, never the cwd
+      // or a PYTHONPATH that happens to be set.
+      execFileSync(python, ['-I', fileURLToPath(new URL(script, import.meta.url))],
+        { stdio: 'pipe', env: { ...process.env, HOME: home } });
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 }
 
@@ -266,8 +285,8 @@ test('preflight reports the interpreter the commands will actually spawn', () =>
   const rows = preflightPython({
     env: {}, refresh: true, probe, imports: stubImports({ 'python3.12': { has: RUNTIME_IMPORTS } }),
   });
-  assert.equal(rows.length, 2);
-  assert.ok(rows.every(row => row.ok));
+  assert.equal(rows.length, 3);
+  assert.ok(rows.slice(0, 2).every(row => row.ok));
   assert.equal(rows[0].interpreter, 'python3.12');
   assert.match(rows[0].detail, /3\.12\.4/);
 
@@ -281,8 +300,51 @@ test('preflight reports the interpreter the commands will actually spawn', () =>
 
   // No interpreter at all: two failing rows, both actionable, neither a stack trace.
   const none = preflightPython({ env: {}, refresh: true, probe: stubProbe({}), imports: stubImports({}) });
-  assert.equal(none.length, 2);
-  assert.ok(none.every(row => row.ok === false && row.fix));
+  assert.equal(none.length, 3);
+  assert.ok(none.slice(0, 2).every(row => row.ok === false && row.fix));
+  assert.equal(none[2].name, 'Caption generation');
+  assert.equal(none[2].blocking, false);
+});
+
+test('caption generation needs one ASR module in the interpreter it spawns, never as a blocker', () => {
+  // The worker imports mlx_whisper and faster_whisper lazily, after mixing the narration.
+  // preflight said "ready" with neither importable; `uv tool install mlx-whisper` alone does
+  // not put it in the interpreter capcutctl resolves.
+  const probe = stubProbe({ 'python3': { version: [3, 12, 0] } });
+  const base = ['numpy', 'PIL', 'pysubs2'];
+  const options = has => ({ env: {}, refresh: true, probe, imports: stubImports({ 'python3': { has } }) });
+
+  assert.throws(() => pythonForTool('caption_generate.py', options(base)), error => {
+    assert.equal(error.code, 'PYTHON_MISSING_DEPENDENCY');
+    assert.equal(error.exitCode, 2);
+    assert.deepEqual(error.details.missing, ['mlx_whisper', 'faster_whisper']);
+    assert.match(error.details.fix, /mlx-whisper/);
+    assert.match(error.details.fix, /"python3" -m pip install mlx-whisper/);
+    assert.match(error.details.fix, /uv tool install/);
+    return true;
+  });
+  assert.doesNotThrow(() => pythonForTool('caption_generate.py', options([...base, 'mlx_whisper'])),
+    'mlx_whisper alone is enough');
+  assert.doesNotThrow(() => pythonForTool('caption_generate.py', options([...base, 'faster_whisper'])),
+    'faster_whisper alone is enough');
+  // A hard import still wins the message: it names the module, not the ASR group.
+  assert.throws(() => pythonForTool('caption_generate.py', options(['numpy', 'PIL', 'mlx_whisper'])),
+    error => error.code === 'PYTHON_MISSING_DEPENDENCY' && error.details.missing.join() === 'pysubs2');
+
+  const row = preflightPython(options([...RUNTIME_IMPORTS, 'pysubs2']))
+    .find(r => r.name === 'Caption generation');
+  assert.equal(row.ok, false);
+  assert.equal(row.blocking, false);
+  assert.match(row.detail, /captions --cues/);
+  assert.match(row.fix, /mlx-whisper/);
+  const ready = preflightPython(options([...RUNTIME_IMPORTS, 'pysubs2', 'faster_whisper']))
+    .find(r => r.name === 'Caption generation');
+  assert.equal(ready.ok, true);
+  assert.equal(ready.blocking, false);
+  const noSubs = preflightPython(options([...RUNTIME_IMPORTS, 'mlx_whisper']))
+    .find(r => r.name === 'Caption generation');
+  assert.equal(noSubs.ok, false);
+  assert.match(noSubs.fix, /pip install pysubs2/);
 });
 
 test('the real interpreter on this machine satisfies the contract preflight reports', () => {

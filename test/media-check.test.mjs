@@ -116,6 +116,16 @@ test('check-export: no audio is a failure; --target and --peak override the prof
   assert.equal(custom.checks.find(c => c.id === 'true-peak').ok, false);
 });
 
+test('check-export: a true-peak over on target loudness names loudness --peak-only', () => {
+  const message = (loudness, opts = {}) => checkExportReport(scan({ loudness }), { profile, target: -14, peak: -1, ...opts })
+    .checks.find(c => c.id === 'true-peak').message;
+  assert.match(message({ lufs: -13.5, truePeak: 0.3, lra: 3 }, { project: 'Demo' }),
+    /: capcutctl loudness --project Demo --peak-only, then re-export$/);
+  assert.match(message({ lufs: -14.2, truePeak: 0.3, lra: 3 }), /--project NAME --peak-only/);
+  assert.doesNotMatch(message({ lufs: -18, truePeak: 0.3, lra: 3 }), /peak-only/, 'off target: the full loudness pass, not peak-only');
+  assert.doesNotMatch(message({ lufs: -14, truePeak: -1.5, lra: 3 }), /peak-only/, 'under the ceiling: no hint');
+});
+
 test('expectedDelivery reads the project canvas and content length, else the profile', async () => {
   assert.deepEqual(await expectedDelivery(null, profile),
     { source: 'profile', width: profile.canvas.width, height: profile.canvas.height, fps: profile.canvas.fps, duration: null });

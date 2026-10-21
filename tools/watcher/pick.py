@@ -11,7 +11,9 @@ From an rl2 take (change.ndjson + trace.ndjson + screen-clean.mp4) pick the mome
   drift   - nothing picked for a while but the screen kept changing (streaming agent output)
 Then: merge near ones, drop ones where nothing changed since the last pick (block masks), cap at
 --per-15 per 15-min window by priority, extract 1280-px JPEGs, OCR them on device, drop OCR
-near-duplicates, and run the privacy gates (privacy.py). Writes to --out:
+near-duplicates, and run the privacy gates (privacy.py). A frame whose frontmost app is unknown is
+marked no_image (watch.py sends its text only): the app gate is the only cover for a frame with no
+readable text. Writes to --out:
   keyframes/kNN.jpg, keyframes.json, timeline.json, privacy.json, pick-stats.json
 
 Dropped frames are decoded into a temp dir and deleted; they never reach --out.
@@ -198,14 +200,35 @@ def merge(cands):
     return merged
 
 
+UNKNOWN_APP = "?unknown"
+
+
+def _names_app(e):
+    return e["type"] == "focus_change" or (e["type"] in ("click", "drag") and e.get("app"))
+
+
 def frontmost(events, t):
+    """Frontmost app at t. Before the first focus_change of a take rl2 says nothing, so: the app of
+    the first later click/drag if no focus_change comes before it (that app was already in front),
+    else UNKNOWN_APP."""
     app = None
     for e in events:
         if e["vt"] > t:
             break
-        if e["type"] == "focus_change" or (e["type"] == "click" and e.get("app")):
+        if _names_app(e):
             app = e["app"]
-    return app
+    if app:
+        return app
+    nxt = next((e for e in events if e["vt"] > t and _names_app(e)), None)
+    return nxt["app"] if nxt and nxt["type"] != "focus_change" else UNKNOWN_APP
+
+
+def gate_app(app, apps):
+    """Gate 1 -> (rule, no_image). An unknown app is not dropped (most of a take would go), but the
+    frame is never sent as an image: OCR is then the only gate, and it is blind to text-free screens."""
+    if rule := privacy.check_app(app, apps):
+        return rule, False
+    return None, app == UNKNOWN_APP
 
 
 def build_timeline(events, apps, rules):
@@ -215,28 +238,30 @@ def build_timeline(events, apps, rules):
     last_title = None
     for e in events:
         t = round(e["vt"], 1)
+        app_rule = privacy.check_app(e.get("app"), apps)
+        app = f"[withheld: {app_rule}]" if app_rule else e.get("app")
         if e["type"] == "focus_change":
-            if check := privacy.check_app(e["app"], apps):
-                tl.append({"vt": t, "ev": "app", "app": "[withheld: app]"})
-                filtered.append({"stage": "trace", "vt": t, "rule": check, "what": "focus_change"})
-            else:
-                tl.append({"vt": t, "ev": "app", "app": e["app"]})
+            if app_rule:
+                filtered.append({"stage": "trace", "vt": t, "rule": app_rule, "what": "focus_change"})
+            tl.append({"vt": t, "ev": "app", "app": app})
         elif e["type"] == "typing_burst" and e.get("keys", 0) >= 3:
             tl.append({"vt": t, "ev": "typed", "keys": e["keys"], "secs": round(e["vt_end"] - e["vt"], 1)})
         elif e["type"] == "scroll_burst" and e.get("ticks", 0) >= 5:
             tl.append({"vt": t, "ev": "scrolled", "ticks": e["ticks"]})
         elif e["type"] == "drag":
-            tl.append({"vt": t, "ev": "dragged", "app": e.get("app"), "px": round(e.get("distance", 0))})
+            if app_rule:
+                filtered.append({"stage": "trace", "vt": t, "rule": app_rule, "what": "drag"})
+            tl.append({"vt": t, "ev": "dragged", "app": app, "px": round(e.get("distance", 0))})
         elif e["type"] == "click":
             title = (e.get("target") or {}).get("title")
             if not title or title == last_title:
                 continue
             last_title = title
-            rule = privacy.check_text(title, rules) or privacy.check_app(e.get("app"), apps)
+            rule = app_rule or privacy.check_text(title, rules)
             if rule:
                 filtered.append({"stage": "trace", "vt": t, "rule": rule, "what": "click title"})
                 title = f"[withheld: {rule}]"
-            tl.append({"vt": t, "ev": "clicked", "app": e.get("app"), "control": title[:90]})
+            tl.append({"vt": t, "ev": "clicked", "app": app, "control": title[:90]})
     return tl, filtered
 
 
@@ -257,6 +282,21 @@ def extract(video, vt, dst):
 
 def ocr_lines(rec, min_conf=0.3):
     return [ln["text"].strip() for ln in rec["lines"] if ln["conf"] >= min_conf and ln["text"].strip()]
+
+
+def gate_ocr(rec, rules, min_conf=0.3):
+    """Gate 2 -> (stage, rule, lines). stage is None when the frame passes; lines are then the text
+    kept for dedupe and the prompt (min_conf applies here only). The gate itself reads every line,
+    whatever its confidence: a half-read "payment method" is still a billing page. A missing or
+    failed OCR record drops the frame, since an unread frame is not a text-free one."""
+    if rec is None:
+        return "ocr-missing", "ocr-missing", []
+    if rec.get("error") or not isinstance(rec.get("lines"), list):
+        return "ocr-error", f"ocr-{rec.get('error') or 'malformed'}", []
+    every = [(ln.get("text") or "").strip() for ln in rec["lines"]]
+    if rule := privacy.check_text("\n".join(x for x in every if x), rules):
+        return "ocr", rule, []
+    return None, None, ocr_lines(rec, min_conf)
 
 
 def main():
@@ -306,8 +346,9 @@ def main():
     # gate 1: app denylist, before decoding anything
     gated = []
     for k in capped:
-        if rule := privacy.check_app(k["app"], apps):
-            filtered.append({"stage": "app", "vt": round(k["vt"], 1), "rule": rule, "app": k["app"]})
+        rule, k["no_image"] = gate_app(k["app"], apps)
+        if rule:
+            filtered.append({"stage": "app", "vt": round(k["vt"], 1), "rule": rule})
         else:
             gated.append(k)
 
@@ -324,14 +365,15 @@ def main():
         recs = {}
         if gated:
             res = subprocess.run([exe] + [k["tmp"] for k in gated], check=True, capture_output=True, text=True)
-            recs = {json.loads(ln)["file"]: json.loads(ln) for ln in res.stdout.splitlines()}
+            recs = {json.loads(ln)["file"]: json.loads(ln) for ln in res.stdout.splitlines() if ln.strip()}
         timing["ocr_s"] = round(time.time() - t, 2)
         final, prev_lines = [], set()
         for k in gated:
-            lines = ocr_lines(recs.get(os.path.basename(k["tmp"]), {"lines": []}))
-            # gate 2: OCR text
-            if rule := privacy.check_text("\n".join(lines), rules):
-                filtered.append({"stage": "ocr", "vt": round(k["vt"], 1), "rule": rule, "app": k["app"]})
+            # gate 2: OCR text. A frame with no known app keeps every line (it goes as text only)
+            stage, rule, lines = gate_ocr(recs.get(os.path.basename(k["tmp"])), rules,
+                                          min_conf=0 if k["no_image"] else 0.3)
+            if stage:
+                filtered.append({"stage": stage, "vt": round(k["vt"], 1), "rule": rule, "app": k["app"]})
                 continue
             s = set(lines)
             if prev_lines and k["priority"] > 0 and s and len(s & prev_lines) / len(s | prev_lines) >= 0.92:
@@ -354,6 +396,8 @@ def main():
             shutil.move(k["tmp"], os.path.join(a.out, "keyframes", f"{kid}.jpg"))
             rec = {"id": kid, "take": name, "vt": round(k["vt"], 2), "app": k["app"], "reasons": k["reasons"],
                    "changed_blocks": k["changed_blocks"], "ocr": k["ocr"]}
+            if k["no_image"]:
+                rec["no_image"] = True
             for f in ("keys", "ticks", "peak_blocks"):
                 if f in k:
                     rec[f] = k[f]

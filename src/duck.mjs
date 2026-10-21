@@ -79,7 +79,8 @@ function speechRegions(doc, op, context, opts) {
     const media = materials.get(segment.material_id);
     if (!cache.has(segment.material_id)) {
       const file = resolveMediaPath(media?.path, context.projectDir) || media?.path;
-      cache.set(segment.material_id, sourceRegions(file, op));
+      // The material, not just its path: a denoised face reaches its original's index.
+      cache.set(segment.material_id, sourceRegions(file, { ...op, material: media, projectDir: context.projectDir }));
       sources.push({ material: segment.material_id, source: cache.get(segment.material_id).source });
     }
     const st = segment.source_timerange, tt = segment.target_timerange;
@@ -129,6 +130,14 @@ function gainAt(points, time) {
     if (time <= b) return b === a ? bv : av + (bv - av) * (time - a) / (b - a);
   }
   return points.at(-1)[1];
+}
+
+/**
+ * The speech the duck keys from, resolved the way the duck will (energy index, else transcript),
+ * or DUCK_NO_SPEECH_INDEX. `build` calls it before its first write.
+ */
+export function speechSpans(doc, op = {}, context = {}) {
+  return speechRegions(doc, op, context, settings(op));
 }
 
 export function planDuckMusic(doc, op = {}, context = {}) {

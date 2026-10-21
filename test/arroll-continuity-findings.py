@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-from aroll import cmd_cut, cmd_index
+from aroll import cmd_cut, cmd_index, seam_repeat_findings
 from audio_index import AudioIndex
 
 
@@ -96,6 +96,73 @@ class ArollContinuousSpeechTest(unittest.TestCase):
             with patch("aroll.AudioIndex.build_or_load", return_value=silent):
                 self.assertEqual(cmd_cut(cut_args(normal_index, normal_plan, "0,1", "0,1")), 0)
             self.assertEqual([item["beats"] for item in json.loads(normal_plan.read_text())["timeline"]], [[0], [1]])
+
+
+def word(text, start, end):
+    return {"text": text, "start": start, "end": end, "segment": 0}
+
+
+class SeamRepeatTest(unittest.TestCase):
+    def test_a_phrase_on_both_sides_of_a_splice_is_one_finding(self):
+        words = [word("we", 0.0, 0.3), word("open", 0.3, 0.6), word("X", 0.6, 0.8), word("Y", 0.8, 1.0),
+                 word("X", 5.0, 5.2), word("Y", 5.2, 5.4), word("then", 5.4, 5.7), word("go", 5.7, 6.0)]
+        clips = [{"id": 0, "src_in": 0.0, "src_out": 1.0}, {"id": 3, "src_in": 5.0, "src_out": 6.0}]
+        findings = seam_repeat_findings(words, clips)
+        self.assertEqual(len(findings), 1, findings)
+        self.assertIn("b0->b3 SEAM_REPEAT", findings[0])
+        self.assertIn("'x y'", findings[0])
+
+    def test_one_shared_word_a_distant_repeat_and_source_neighbours_are_clean(self):
+        one = [word("we", 0.0, 0.3), word("open", 0.3, 0.6), word("it", 0.6, 1.0),
+               word("it", 5.0, 5.2), word("closes", 5.2, 5.6)]
+        clips = [{"id": 0, "src_in": 0.0, "src_out": 1.0}, {"id": 1, "src_in": 5.0, "src_out": 6.0}]
+        self.assertEqual(seam_repeat_findings(one, clips), [])
+
+        far = [word("X", 0.0, 0.1), word("Y", 0.1, 0.2)] + [
+            word(f"w{i}", 0.2 + i * 0.1, 0.3 + i * 0.1) for i in range(7)] + [
+            word("X", 5.0, 5.1), word("Y", 5.1, 5.2)]
+        clips = [{"id": 0, "src_in": 0.0, "src_out": 1.0}, {"id": 1, "src_in": 5.0, "src_out": 6.0}]
+        self.assertEqual(seam_repeat_findings(far, clips), [], "more than k tokens away")
+
+        # Source neighbours share the boundary words through the pad; a word instance is never
+        # its own repeat.
+        neighbours = [word("a", 0.0, 0.4), word("b", 0.4, 0.8), word("c", 0.8, 1.0),
+                      word("d", 1.05, 1.3), word("e", 1.3, 1.6)]
+        clips = [{"id": 0, "src_in": 0.0, "src_out": 1.0}, {"id": 1, "src_in": 1.03, "src_out": 1.6}]
+        self.assertEqual(seam_repeat_findings(neighbours, clips), [])
+        self.assertEqual(seam_repeat_findings(None, clips), [])
+
+    def test_a_coalesced_span_is_one_clip_and_has_no_seam_to_compare(self):
+        words = [word("X", 0.6, 0.8), word("Y", 0.8, 1.0), word("X", 1.1, 1.3), word("Y", 1.3, 1.5)]
+        coalesced = [{"id": 0, "beats": [0, 1], "src_in": 0.5, "src_out": 1.6}]
+        self.assertEqual(seam_repeat_findings(words, coalesced), [])
+
+    def test_cut_refuses_a_seam_repeat_unless_forced_and_rebuilds_row_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            media = root / "face.mp4"
+            media.write_bytes(b"fixture media")
+            index = root / "face.aroll.json"
+            index.write_text(json.dumps({
+                "media": str(media), "fps": 30.0, "source_duration": 4.0,
+                "words": [word("open", 0.1, 0.5), word("the", 0.5, 0.7), word("app", 0.7, 0.95),
+                          word("the", 2.05, 2.3), word("app", 2.3, 2.6), word("now", 2.6, 2.95)],
+                "beats": [
+                    {"id": 0, "text": "stale words", "src_in": 0.0, "src_out": 1.0, "dur": 1.0},
+                    {"id": 1, "text": "the app now", "src_in": 2.0, "src_out": 3.0, "dur": 1.0},
+                ], "default_keep": [0, 1],
+            }))
+            silent = AudioIndex([-20.0] * 100 + [-70.0] * 100 + [-20.0] * 100 + [-70.0] * 100, 0.01)
+            plan_path = root / "repeat.plan.json"
+            args = cut_args(index, plan_path, "0,1", "0,1")
+            args.force, args.project = False, "Repeat Project"
+            with patch("aroll.AudioIndex.build_or_load", return_value=silent), \
+                    patch("aroll.subprocess.run") as run:
+                self.assertEqual(cmd_cut(args), 1)
+            run.assert_not_called()
+            plan = json.loads(plan_path.read_text())
+            self.assertTrue(any("SEAM_REPEAT" in f and "'the app'" in f for f in plan["lint"]), plan["lint"])
+            self.assertEqual(plan["timeline"][0]["text"], "open the app")
 
 
 if __name__ == "__main__":

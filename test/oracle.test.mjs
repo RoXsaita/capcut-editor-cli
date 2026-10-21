@@ -7,11 +7,12 @@ import {
   captureProject, diffCaptures, canonicalize, classifyRecord, indexRecords, walkTree,
   SUCCESS_VERDICTS, VERDICTS,
 } from '../src/oracle.mjs';
+import { tmpDir } from './helpers/tmp.mjs';
 
 /* Two synthetic directories stand in for "what we wrote" and "what came back out of CapCut".
    No CapCut UI runs here, by design: the harness compares directories a human captured. */
 
-const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-oracle-'));
+const tmp = () => tmpDir('capcutctl-oracle-');
 
 const write = (dir, relative, value) => {
   const file = path.join(dir, relative);

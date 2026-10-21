@@ -179,6 +179,60 @@ test('diff --allow: a material swapped under an out-of-scope clip is out of scop
     ['material:added:V2', 'segment:changed:FACE']);
 });
 
+function scopedRich() {
+  const doc = twoClips();
+  doc.materials.speeds = [{ id: 'SPD', type: 'speed', speed: 1, mode: 0, curve_speed: null }];
+  doc.materials.texts = [{ id: 'TXT', type: 'text', material_name: 'cap', content: JSON.stringify({ text: 'hello', styles: [] }) }];
+  for (const t of doc.tracks) t.segments[0].extra_material_refs = ['SPD'];
+  doc.tracks.push({ id: 'T3', type: 'text', flag: 1, name: 'captions:x', segments: [{
+    id: 'CAP', material_id: 'TXT', extra_material_refs: [], target_timerange: { start: 0, duration: 1_000_000 },
+  }] });
+  return doc;
+}
+
+test('diff --allow: reframes, keyframes, re-speeds and re-captions outside the scope are caught', () => {
+  const base = scopedRich();
+  const fieldsOf = scope => Object.keys(scope.outOfScope[0]?.fields || {});
+
+  const reframed = structuredClone(base);
+  reframed.tracks[0].segments[0].clip.scale = { x: 2.5, y: 2.5 };
+  let scope = scoped(base, reframed, 'SHOT');
+  assert.equal(scope.ok, false);
+  assert.ok(fieldsOf(scope).includes('clip'));
+  assert.deepEqual(scope.outOfScope[0].fields.clip.to.scale, { x: 2.5, y: 2.5 });
+
+  const keyed = structuredClone(base);
+  keyed.tracks[0].segments[0].common_keyframes = [{ property_type: 'KFTypeScaleX',
+    keyframe_list: [{ id: 'K', time_offset: 0, values: [1.2], curveType: 'Line' }] }];
+  scope = scoped(base, keyed, 'SHOT');
+  assert.equal(scope.ok, false);
+  assert.ok(fieldsOf(scope).includes('keyframes'));
+
+  // A shared speed changed under the allowed clip re-speeds the out-of-scope face too.
+  const respeed = structuredClone(base);
+  respeed.materials.speeds[0].speed = 2;
+  scope = scoped(base, respeed, 'SHOT');
+  assert.equal(scope.ok, false);
+  assert.deepEqual(scope.outOfScope.map(f => f.id), ['FACE']);
+  assert.ok(fieldsOf(scope).includes('refs'));
+
+  const recaptioned = structuredClone(base);
+  recaptioned.materials.texts[0].content = JSON.stringify({ text: 'goodbye', styles: [] });
+  scope = scoped(base, recaptioned, 'track:broll');
+  assert.equal(scope.ok, false);
+  assert.deepEqual(scope.outOfScope[0].fields.text, { from: 'hello', to: 'goodbye' });
+
+  // CapCut's save noise is not a change.
+  const noisy = structuredClone(base);
+  noisy.materials.texts[0].material_name = 'renamed';
+  noisy.materials.speeds[0].platform = 'all';
+  noisy.materials.videos[0].material_name = 'a.mp4';
+  assert.equal(scoped(base, noisy, 'SHOT').ok, true);
+
+  const same = diffSummaries(summarizeDoc(base), summarizeDoc(structuredClone(base)));
+  assert.deepEqual([same.segments.changed, same.segments.added, same.segments.removed], [[], [], []]);
+});
+
 test('parseAllow refuses an empty selector list', () => {
   assert.throws(() => parseAllow(''), /at least one/);
   assert.throws(() => parseAllow('track:'), /empty track selector/);

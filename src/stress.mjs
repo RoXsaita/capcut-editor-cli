@@ -10,9 +10,8 @@
  * binds to a hardcoded drafts path.
  */
 import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { CapcutError, resolveMediaPath } from './core.mjs';
+import { findIndexFile, findIndexForMaterial, shiftEnergy, shiftTranscript } from './video-index.mjs';
 import { opScaleKeyframe } from './add.mjs';
 import { assertNoDoublePunch } from './punch.mjs';
 import { principalTrack } from './polish.mjs';
@@ -23,6 +22,36 @@ import { profileValue } from './profile.mjs';
 const US = s => Math.round(s * 1e6);
 const S = us => (us || 0) / 1e6;
 const r3 = n => Math.round(n * 1000) / 1000;
+
+/**
+ * cut's calibrated seam thresholds (tools/audio_index.py SOFT, SEAM_HEAD_MAX_S, SEAM_TOTAL_MAX_S;
+ * change them together): under SOFT_DB is silence, and a seam is dead air when the incoming
+ * side opens on more than SEAM_HEAD_MAX_S of it, or both sides together hold more than
+ * SEAM_TOTAL_MAX_S. Measured on a cut the creator called flawless (good seams ≤0.28s head,
+ * ≤0.39s total) against the one seam he caught by ear (0.35s head).
+ */
+export const SOFT_DB = -45;
+export const SEAM_HEAD_MAX_S = 0.30;
+export const SEAM_TOTAL_MAX_S = 0.45;
+
+/** Seconds of silence (under `thresh`) starting at media time t, in the energy10 series, capped. */
+export function headSilence(energy, t, { thresh = SOFT_DB, cap = 2.0 } = {}) {
+  const bin = Number(energy.bin) || 0.01, i0 = Math.floor(t / bin + 1e-9);
+  let n = 0;
+  while (n * bin < cap && levelAt(energy, i0 + n) < thresh) n++;
+  return n * bin;
+}
+
+/** Seconds of silence ending at media time t. */
+export function tailSilence(energy, t, { thresh = SOFT_DB, cap = 2.0 } = {}) {
+  const bin = Number(energy.bin) || 0.01, i0 = Math.floor(t / bin + 1e-9);
+  let n = 0;
+  while (n * bin < cap && levelAt(energy, i0 - n - 1) < thresh) n++;
+  return n * bin;
+}
+
+// Outside the series reads as silence, as audio_index.at does.
+const levelAt = (energy, i) => (i >= 0 && i < energy.db.length ? Number(energy.db[i]) : -99);
 
 // Style numbers come from the profile (presets/profile.json → camera.stress).
 export const STRESS_SCALE = profileValue('camera.stress.scale');
@@ -218,69 +247,59 @@ export function planStressPunches({
   };
 }
 
-function defaultCacheDir() {
-  return path.join(os.homedir(), 'Downloads', '.video-index');
+function speechIndex(mediaPath, kind, { cacheDir, material, projectDir } = {}) {
+  const hit = material
+    ? findIndexForMaterial(material, projectDir || null, kind, { cacheDir })
+    : findIndexFile(mediaPath, kind, { cacheDir });
+  return hit.file ? { file: hit.file, offset: Number(hit.offset) || 0 } : null;
 }
 
-function stemsFor(file) {
-  const base = path.basename(file).replace(/\.[^.]+$/, '');
-  const out = [base];
-  const unprefixed = base.replace(/^[^_]+__/, '');
-  if (unprefixed !== base && unprefixed.length >= 8) out.push(unprefixed);
-  for (const value of [...out]) {
-    const bare = value.replace(/__[0-9a-f]{8}$/, '');
-    if (bare !== value) out.push(bare);
-  }
-  return [...new Set(out)];
-}
-
-export function loadEnergy10(mediaPath, { cacheDir, energy } = {}) {
+/**
+ * The energy10 series for a face, from `op.energy` or the shared index. Pass `material`
+ * (and `projectDir`) to also reach a derived file's original; its offset is applied.
+ */
+export function loadEnergy10(mediaPath, { cacheDir, energy, material, projectDir } = {}) {
   if (energy && Array.isArray(energy.db)) return energy;
-  if (!mediaPath) return null;
-  const root = cacheDir || defaultCacheDir();
-  if (!fs.existsSync(root)) return null;
-  const names = fs.readdirSync(root).filter(name => name.includes('.energy10'));
-  for (const stem of stemsFor(mediaPath)) {
-    const hit = names.filter(name => name.startsWith(`${stem}.`)).sort()[0];
-    if (!hit) continue;
-    try {
-      const parsed = JSON.parse(fs.readFileSync(path.join(root, hit), 'utf8'));
-      if (Array.isArray(parsed?.db) && parsed.db.length) return parsed;
-    } catch { /* next stem */ }
-  }
+  if (!mediaPath && !material) return null;
+  const hit = speechIndex(mediaPath, 'energy10', { cacheDir, material, projectDir });
+  if (!hit) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(hit.file, 'utf8'));
+    if (Array.isArray(parsed?.db) && parsed.db.length) return shiftEnergy(parsed, hit.offset);
+  } catch { /* unreadable */ }
   return null;
 }
 
-export function loadTranscript(mediaPath, { cacheDir, transcript, words, wordsFile } = {}) {
+/**
+ * The Whisper transcript for a face: injected, `wordsFile` (shifted by `wordsOffset`), or the
+ * shared index, shifted into the media's time when it belongs to a derived file's original.
+ */
+export function loadTranscript(mediaPath, { cacheDir, transcript, words, wordsFile, wordsOffset = 0, material, projectDir } = {}) {
   if (transcript && (Array.isArray(transcript.segments) || Array.isArray(transcript))) return transcript;
   if (Array.isArray(words) && words.length) return { segments: [{ words }] };
   if (wordsFile && fs.existsSync(wordsFile)) {
-    return JSON.parse(fs.readFileSync(wordsFile, 'utf8'));
+    return shiftTranscript(JSON.parse(fs.readFileSync(wordsFile, 'utf8')), Number(wordsOffset) || 0);
   }
-  if (!mediaPath) return null;
-  const root = cacheDir || defaultCacheDir();
-  if (!fs.existsSync(root)) return null;
-  const names = fs.readdirSync(root).filter(name => name.includes('.whisper'));
-  for (const stem of stemsFor(mediaPath)) {
-    const hit = names.filter(name => name.startsWith(`${stem}.`)).sort()[0];
-    if (!hit) continue;
-    try {
-      return JSON.parse(fs.readFileSync(path.join(root, hit), 'utf8'));
-    } catch { /* next stem */ }
+  if (!mediaPath && !material) return null;
+  const hit = speechIndex(mediaPath, 'whisper', { cacheDir, material, projectDir });
+  if (!hit) return null;
+  try {
+    return shiftTranscript(JSON.parse(fs.readFileSync(hit.file, 'utf8')), hit.offset);
+  } catch {
+    return null;
   }
-  return null;
 }
 
-function principalMediaPath(doc, projectDir, trackIndex = null) {
+function principalMedia(doc, projectDir, trackIndex = null) {
   const { track } = principalTrack(doc, trackIndex);
   const videos = new Map((doc.materials?.videos || []).map(material => [material.id, material]));
   for (const segment of track.segments || []) {
     const material = videos.get(segment.material_id);
     if (!material?.path) continue;
     if (material.type && material.type !== 'video') continue;
-    return resolveMediaPath(material.path, projectDir) || material.path;
+    return { path: resolveMediaPath(material.path, projectDir) || material.path, material };
   }
-  return null;
+  return { path: null, material: null };
 }
 
 function clipAt(track, at) {
@@ -311,13 +330,15 @@ export function opStressZoom(doc, op = {}, context = {}) {
     throw new CapcutError('no full-face scenes found (every principal clip carries a mask).', { exitCode: 2 });
   }
 
-  const mediaPath = principalMediaPath(doc, context.projectDir, trackIndex);
-  const energy = loadEnergy10(mediaPath, { cacheDir: op.cacheDir, energy: op.energy });
+  const { path: mediaPath, material } = principalMedia(doc, context.projectDir, trackIndex);
+  const lookup = { cacheDir: op.cacheDir, material, projectDir: context.projectDir };
+  const energy = loadEnergy10(mediaPath, { ...lookup, energy: op.energy });
   const transcript = loadTranscript(mediaPath, {
-    cacheDir: op.cacheDir,
+    ...lookup,
     transcript: op.transcript,
     words: op.words,
     wordsFile: op.wordsFile,
+    wordsOffset: op.wordsOffset,
   });
   const mapper = sourceToTimeline(doc, trackIndex);
   const planned = planStressPunches({

@@ -10,13 +10,19 @@ import {
   buildCutRecutSpec,
   buildScreenLayoutSpec,
   buildArrollArgs,
+  ctaPatternEnv,
+  hasEditorialDecision,
+  isInPlaceCut,
   main,
   parseArgs,
   serializeCloseFailure,
   statusPayload,
   setOutput,
 } from '../src/cli.mjs';
-import { resetPythonCache } from '../src/python.mjs';
+import { resetPythonCache, resolvePython } from '../src/python.mjs';
+import { writeCliProject } from './helpers/cli-project.mjs';
+import { buildProject } from './helpers/polish-project.mjs';
+import { applySpec } from '../src/core.mjs';
 
 const stableJson = value => `${JSON.stringify(value, null, 2)}\n`;
 
@@ -47,168 +53,6 @@ function writeFakePython(file, bodyLines = []) {
   fs.chmodSync(file, 0o755);
 }
 
-
-function writeCliProject(root, media) {
-  const project = path.join(root, 'project');
-  const timelineId = 'CLI-TIMELINE';
-  const timelineDir = path.join(project, 'Timelines', timelineId);
-  const doc = {
-    id: timelineId,
-    name: 'CLI fixture',
-    duration: 3_000_000,
-    fps: 30,
-    canvas_config: { ratio: '9:16', width: 1080, height: 1920, background: null },
-    materials: {
-      videos: [{ id: 'VIDEO', type: 'video', path: media, duration: 3_000_000, width: 1080, height: 1920 }],
-      audios: [],
-      common_mask: [],
-      speeds: [],
-      audio_fades: [],
-      transitions: [],
-    },
-    tracks: [
-      { id: 'COVER', type: 'video', flag: 0, segments: [] },
-      {
-        id: 'CONTENT', type: 'video', flag: 2, name: 'content', segments: [{
-          id: 'SEGMENT', material_id: 'VIDEO', extra_material_refs: [],
-          enable_video_mask: false, speed: 1, volume: 1,
-          source_timerange: { start: 0, duration: 3_000_000 },
-          target_timerange: { start: 0, duration: 3_000_000 },
-          clip: { scale: { x: 1, y: 1 }, transform: { x: 0, y: 0 }, rotation: 0, alpha: 1 },
-        }],
-      },
-    ],
-  };
-  for (const dir of [project, timelineDir]) {
-    fs.mkdirSync(dir, { recursive: true });
-    for (const name of ['draft_info.json', 'draft_info.json.bak', 'template-2.tmp']) {
-      fs.writeFileSync(path.join(dir, name), stableJson(doc));
-    }
-  }
-  fs.mkdirSync(path.join(project, 'Timelines'), { recursive: true });
-  fs.writeFileSync(path.join(project, 'Timelines', 'project.json'), stableJson({
-    main_timeline_id: timelineId, timelines: [{ id: timelineId }],
-  }));
-  fs.writeFileSync(path.join(project, 'draft_meta_info.json'), stableJson({ draft_name: doc.name }));
-  fs.writeFileSync(path.join(project, 'draft_virtual_store.json'), stableJson({ draft_materials: [] }));
-  return project;
-}
-
-test('field-report CLI flags parse as booleans and --into remains a target value', () => {
-  const args = parseArgs(['cut', 'face.mp4', '--into', 'existing', '--keep', '0,2', '--force']);
-  assert.deepEqual(args._, ['cut', 'face.mp4']);
-  assert.equal(args.into, 'existing');
-  assert.equal(args.keep, '0,2');
-  assert.equal(args.force, true);
-
-  const status = parseArgs(['status', '--json', '--wait-for-close']);
-  assert.equal(status.json, true);
-  assert.equal(status.waitForClose, true);
-});
-
-test('reviewed A-roll flags preserve order and repeated inward trims across the Node handoff', () => {
-  const args = parseArgs([
-    'cut', 'face.mp4', '--into', 'existing', '--review', 'decisions.json',
-    '--trim-beat', '10:out=-1.16', '--trim-beat', '18:out=-1.72', '--fps', '24',
-  ]);
-  assert.deepEqual(args.trimBeat, ['10:out=-1.16', '18:out=-1.72']);
-  assert.deepEqual(buildArrollArgs(args, 'face.mp4'), [
-    'face.mp4', '--review', 'decisions.json',
-    '--trim-beat', '10:out=-1.16', '--trim-beat', '18:out=-1.72', '--fps', '24',
-  ]);
-  const ordered = parseArgs(['cut', 'face.mp4', '--order', '2,0', '--keep', '0,2']);
-  assert.deepEqual(buildArrollArgs(ordered, 'face.mp4'), [
-    'face.mp4', '--keep', '0,2', '--order', '2,0',
-  ]);
-  const recovery = parseArgs([
-    'cut', 'face.mp4', '--keep', '4',
-    '--recover-beat', '4:out=0.8', '--recover-beat', '4:in=0.2',
-  ]);
-  assert.deepEqual(recovery.recoverBeat, ['4:out=0.8', '4:in=0.2']);
-  assert.deepEqual(buildArrollArgs(recovery, 'face.mp4'), [
-    'face.mp4', '--keep', '4',
-    '--recover-beat', '4:out=0.8', '--recover-beat', '4:in=0.2',
-  ]);
-});
-
-test('layout screen emits the named transactional core contract', () => {
-  const spec = buildScreenLayoutSpec({
-    media: 'recording.mp4', at: 2.5, duration: 8,
-    sourceStart: 4, sourceDuration: 8,
-    width: 720, height: 1050, mediaDuration: 20_000_000,
-  });
-  const op = spec.operations[0];
-  assert.equal(op.op, FIELD_REPORT_OPERATIONS.screenLayout);
-  assert.equal(op.op, 'layout.screen');
-  assert.equal(op.preset, 'screenRecording');
-  assert.equal(op.frame, 'screen-frame');
-  assert.equal(op.track, 'screen');
-  assert.equal(op.src, 4);
-  assert.equal(op.srcDur, 8);
-  assert.ok(op.media.endsWith('/recording.mp4'));
-});
-
-test('cut --into emits an anchored recut contract without project JSON writes', () => {
-  const sourceToken = { ino: 1, size: 2, mtime_ns: 3, content_hash: 'same' };
-  const spec = buildCutRecutSpec({
-    projectDir: '/tmp/existing-project',
-    planFile: '/tmp/face.plan.json',
-    plan: {
-      media: '/tmp/face.mp4',
-      kept: [0, 2],
-      order: [2, 0],
-      sourceToken,
-      source_token: sourceToken,
-      editorial: { order: [2, 0] },
-      adjustments: [{ beat: 2, offsets: { outOffset: -0.2 } }],
-      repairs: ['b2 OUT 2.500 -> 2.300 (trough)'],
-      duration: 4.5,
-      lint: [],
-      handoff: { operations: [{ op: 'clip.fade', at: 0, track: 'content', in: 0.067, out: 0.067 }] },
-      timeline: [
-        { beat: 0, tl_in: 0, tl_out: 2, src_in: 10, dur: 2, text: 'one' },
-        { beat: 2, tl_in: 2, tl_out: 4.5, src_in: 20, dur: 2.5, text: 'two' },
-      ],
-    },
-  });
-  const op = spec.operations[0];
-  assert.equal(op.op, FIELD_REPORT_OPERATIONS.cutRecut);
-  assert.equal(op.op, 'cut.recut');
-  assert.deepEqual(op.preserve, ['broll', 'layout', 'sfx', 'music']);
-  assert.equal(op.retimeAnchored, true);
-  assert.equal(op.plan.timeline.length, 2);
-  assert.deepEqual(op.plan.order, [2, 0]);
-  assert.deepEqual(op.plan.sourceToken, sourceToken);
-  assert.deepEqual(op.plan.adjustments, [{ beat: 2, offsets: { outOffset: -0.2 } }]);
-  assert.deepEqual(op.plan.repairs, ['b2 OUT 2.500 -> 2.300 (trough)']);
-  assert.equal(op.audioRamps.length, 1);
-  assert.match(op.planFile, /face\.plan\.json$/);
-});
-
-test('status payload is branchable and close failures retain the Builder D error shape', () => {
-  const payload = statusPayload({ running: true, pids: ['42'] }, { waitForClose: true });
-  assert.equal(payload.state, 'running');
-  assert.equal(payload.closed, false);
-  assert.deepEqual(payload.pids, ['42']);
-  assert.equal(payload.waitForClose, true);
-
-  const unknown = statusPayload({
-    state: 'unknown', running: false, closed: false, unknown: true,
-    pids: [], probeError: { code: 'ENOENT', message: 'pgrep missing' },
-  });
-  assert.equal(unknown.state, 'unknown');
-  assert.equal(unknown.closed, false);
-  assert.equal(unknown.unknown, true);
-  assert.equal(unknown.probeError.code, 'ENOENT');
-
-  const failure = serializeCloseFailure({
-    code: 'CAPCUT_RUNNING', exitCode: 2, message: 'save dialog refused quit',
-    details: { pids: ['42'] },
-  });
-  assert.deepEqual(failure, {
-    code: 'CAPCUT_RUNNING', exitCode: 2, message: 'save dialog refused quit', details: { pids: ['42'] },
-  });
-});
 
 test('main cut --into builds the recut spec and allowlists Python arroll flags', async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-cli-main-'));
@@ -458,8 +302,10 @@ test('bootstrap version works and failed JSON preflight remains branchable by ex
 
 test('status preserves unknown process state and rejects ignored arguments', () => {
   const cli = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'bin', 'capcutctl.mjs');
+  // Without pgrep on PATH the probe cannot answer; ASSUME_RUNNING would answer for it.
+  const { CAPCUTCTL_ASSUME_RUNNING: _assumed, ...env } = process.env;
   const unknown = spawnSync(process.execPath, [cli, 'status', '--json'], {
-    encoding: 'utf8', env: { ...process.env, PATH: '' },
+    encoding: 'utf8', env: { ...env, PATH: '' },
   });
   assert.equal(unknown.status, 3, unknown.stderr || unknown.stdout);
   const payload = JSON.parse(unknown.stdout);
@@ -476,4 +322,115 @@ test('status preserves unknown process state and rejects ignored arguments', () 
     const invalid = spawnSync(process.execPath, [cli, ...argv], { encoding: 'utf8' });
     assert.equal(invalid.status, 2, invalid.stderr || invalid.stdout);
   }
+});
+
+
+test('cut --into=P routes to the transactional recut, and --recover-beat alone is a decision', () => {
+  const args = parseArgs(['cut', 'v.mp4', '--into=P', '--recover-beat=3:out=0.8']);
+  assert.equal(args.into, 'P');
+  assert.deepEqual(args.recoverBeat, ['3:out=0.8']);
+  // `--into=P` used to miss the router and reach aroll.py, which laid fades over the old cut.
+  assert.equal(isInPlaceCut(['cut', 'v.mp4', '--into=P']), true);
+  assert.equal(isInPlaceCut(['cut', 'v.mp4', '--in-place']), true);
+  assert.equal(isInPlaceCut(['cut', 'v.mp4', '--project', 'P']), false);
+  assert.equal(hasEditorialDecision({ recoverBeat: ['3:out=0.8'] }), true);
+  assert.equal(hasEditorialDecision({ trimBeat: [] }), false);
+  assert.equal(hasEditorialDecision({}), false);
+  // A boolean given a value is a mistake, not `true`.
+  assert.throws(() => parseArgs(['cut', 'v.mp4', '--force=yes']), error => error.exitCode === 2);
+});
+
+test('aroll.py refuses --into unless capcutctl cut routed it there', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-aroll-into-'));
+  try {
+    const media = path.join(temp, 'face.mp4');
+    fs.writeFileSync(media, 'fixture media');
+    const script = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'tools', 'aroll.py');
+    const env = { ...process.env };
+    delete env.CAPCUTCTL_IN_PLACE_CUT;
+    const run = spawnSync(resolvePython().executable, [script, media, '--into', path.join(temp, 'project'), '--keep', '0'],
+      { encoding: 'utf8', env });
+    assert.notEqual(run.status, 0);
+    assert.match(run.stderr, /capcutctl cut VIDEO --into PROJECT/);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test('Python tools call back into THIS capcutctl, and cut forwards --root and --force-running', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-tool-env-'));
+  const media = path.join(temp, 'face.mp4');
+  const log = path.join(temp, 'python-call.json');
+  const fakePython = path.join(temp, 'python3');
+  fs.writeFileSync(media, 'fixture media');
+  writeFakePython(fakePython, [
+    "fs.writeFileSync(process.env.CAPCUT_TEST_ARG_LOG, JSON.stringify({ args,",
+    "  node: process.env.CAPCUTCTL_NODE, bin: process.env.CAPCUTCTL_BIN }));",
+  ]);
+  const bin = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'bin', 'capcutctl.mjs');
+  const run = spawnSync(process.execPath, [
+    bin, 'cut', media, '--keep', '0', '--project', 'A-roll', '--root', temp, '--force-running', '--dry-run',
+  ], { encoding: 'utf8', env: { ...process.env, CAPCUTCTL_PYTHON: fakePython, CAPCUT_TEST_ARG_LOG: log } });
+  try {
+    assert.equal(run.status, 0, run.stderr || run.stdout);
+    const call = JSON.parse(fs.readFileSync(log, 'utf8'));
+    assert.equal(fs.realpathSync(call.bin), fs.realpathSync(bin), 'CAPCUTCTL_BIN names this checkout');
+    assert.equal(call.node, process.execPath);
+    assert.deepEqual(call.args.slice(call.args.indexOf('--root'), call.args.indexOf('--root') + 2), ['--root', temp]);
+    assert.ok(call.args.includes('--force-running'));
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test('preview with no --to, and qa --project, forward the live content range to Python', async () => {
+  const project = buildProject();
+  const temp = path.dirname(project);
+  const log = path.join(temp, 'env.json');
+  const fakePython = path.join(temp, 'python3');
+  writeFakePython(fakePython, [
+    "fs.writeFileSync(process.env.CAPCUT_TEST_ARG_LOG, JSON.stringify({ args, range: process.env.CAPCUTCTL_CONTENT_RANGE_US ?? null }));",
+  ]);
+  // A stale snapshot in created.json must not be what Python sees.
+  fs.mkdirSync(path.join(project, '.capcutctl'), { recursive: true });
+  fs.writeFileSync(path.join(project, '.capcutctl', 'created.json'), JSON.stringify({ contentEnd: 5_000_000 }));
+  const bin = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'bin', 'capcutctl.mjs');
+  const env = { ...process.env, CAPCUTCTL_PYTHON: fakePython, CAPCUT_TEST_ARG_LOG: log };
+  try {
+    let run = spawnSync(process.execPath, [bin, 'preview', '--project', project, '--out', path.join(temp, 'p.mp4')], { encoding: 'utf8', env });
+    assert.equal(run.status, 0, run.stderr || run.stdout);
+    let seen = JSON.parse(fs.readFileSync(log, 'utf8'));
+    assert.equal(seen.range, '0,8000000');
+    assert.ok(!seen.args.includes('--to'));
+    run = spawnSync(process.execPath, [bin, 'qa', `--project=${project}`, '--times', '1'], { encoding: 'utf8', env });
+    assert.equal(run.status, 0, run.stderr || run.stdout);
+    seen = JSON.parse(fs.readFileSync(log, 'utf8'));
+    assert.equal(seen.range, '0,8000000');
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test('an apply refreshes a stale created.contentEnd when a parked range exists, and a rerun writes nothing', () => {
+  const project = buildProject();
+  const file = path.join(project, '.capcutctl', 'created.json');
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ contentEnd: 5_000_000, preserved: { start: 20_000_000, end: 30_000_000 } }));
+    const op = { op: 'segment.patch', selector: { id: 'A' }, set: { volume: 0.9 } };
+    applySpec(project, { version: 1, operations: [op] }, { forceRunning: true });
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).contentEnd, 8_000_000);
+    const again = applySpec(project, { version: 1, operations: [op] }, { forceRunning: true });
+    assert.equal(again.committed, false);
+  } finally {
+    fs.rmSync(path.dirname(project), { recursive: true, force: true });
+  }
+});
+
+test('cut forwards the profile CTA role patterns to aroll.py as one JSON env var', () => {
+  const env = ctaPatternEnv();
+  const patterns = JSON.parse(env.CAPCUTCTL_CTA_PATTERNS);
+  assert.ok(Array.isArray(patterns) && patterns.length > 0);
+  assert.ok(patterns.every(value => typeof value === 'string'));
+  assert.ok(patterns.some(value => new RegExp(value, 'i').test('follow for more')));
 });

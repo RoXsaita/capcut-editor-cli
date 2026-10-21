@@ -2,7 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import { CapcutError, loadPreset, seededId, localizeMedia, principalEndUs, resolveMediaPath } from './core.mjs';
+import { CapcutError, allSegments, loadPreset, seededId, localizeMedia, principalEndUs, resolveMediaPath, removeUnreferencedMaterials } from './core.mjs';
+import { principalTrack } from './polish.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fail = (code, message) => { throw new CapcutError(`${code}: ${message}`, {code}); };
@@ -54,6 +55,27 @@ export function isCaptionTrack(doc, track) {
   if ((track.name || '').startsWith('captions')) return true;
   const subtitles = new Set((doc.materials?.texts || []).filter(m => m.type === 'subtitle').map(m => m.id));
   return (track.segments || []).some(s => subtitles.has(s.material_id));
+}
+
+/** What wrote a caption track: this command (captions:NAME), CapCut's auto-captions, or an SRT import. */
+function captionTrackKind(doc, track) {
+  if ((track.name || '').startsWith('captions:')) return 'captions';
+  const subtitles = new Set((doc.materials?.texts || []).filter(m => m.type === 'subtitle').map(m => m.id));
+  return (track.segments || []).some(s => subtitles.has(s.material_id)) ? 'subtitle' : 'srt';
+}
+
+function captionTrackList(doc, tracks) {
+  return tracks.map(t => `${t.name || '(unnamed)'} (${captionTrackKind(doc, t)}, ${(t.segments || []).length} words)`).join(', ');
+}
+
+/** Splice caption tracks out and drop the text materials nothing else uses. */
+function removeCaptionTracks(doc, tracks) {
+  const gone = new Set(tracks);
+  const ids = new Set(tracks.flatMap(t => (t.segments || []).flatMap(s => [s.material_id, ...(s.extra_material_refs || [])])).filter(Boolean));
+  const removed = tracks.map(t => ({ name: t.name || '(unnamed)', kind: captionTrackKind(doc, t), words: (t.segments || []).length }));
+  doc.tracks = doc.tracks.filter(t => !gone.has(t));
+  removeUnreferencedMaterials(doc, ids);
+  return removed;
 }
 
 export function opCaptionsRestyle(doc, op, context = {}) {
@@ -115,14 +137,22 @@ export function opCaptions(doc, op, context = {}) {
   const language = op.language || 'ar';
   const fingerprint = hash({name, cues, language, profile:'suheil-native-v1'});
   const trackName = `captions:${name}`;
-  const owned = doc.tracks.filter(t => t.name?.startsWith('captions:'));
-  if (owned.length) {
-    const track = owned[0];
-    if (owned.length === 1 && track.name === trackName) {
+  // Every caption layer counts, whoever wrote it: an SRT import or CapCut's auto-captions under
+  // new ones is the double-captions failure the gate refuses.
+  const existing = doc.tracks.filter(t => isCaptionTrack(doc, t));
+  let replaced = null;
+  if (existing.length) {
+    const track = existing[0];
+    if (existing.length === 1 && track.name === trackName) {
       const marker = `${trackName}:${fingerprint}:${ownedDigest(doc,track)}`;
       if (track.segments.length && track.segments.every(s => s.desc === marker)) return {changed:0, unchanged:true, name};
     }
-    fail('CAPTION_CONFLICT', 'Caption layers already exist or were edited. Preserve them; explicitly remove them before generating a replacement.');
+    if (!op.replace) {
+      fail('CAPTION_CONFLICT', `Caption layers already exist or were edited: ${captionTrackList(doc, existing)}. `
+        + 'Keep them, or run `capcutctl captions --replace` to swap every caption layer for the new words '
+        + '(hand corrections on them are lost).');
+    }
+    replaced = removeCaptionTracks(doc, existing);
   }
   // One style for every word, Arabic or English (2026-10-11: "I want the English captions to
   // match the Arabic ones"). Changa covers Latin, so Latin words no longer fall back to Arial.
@@ -155,6 +185,145 @@ export function opCaptions(doc, op, context = {}) {
   (doc.materials.texts ||= []).push(...materials); doc.tracks.push(track);
   const marker = `${trackName}:${fingerprint}:${ownedDigest(doc,track)}`;
   for (const seg of track.segments) seg.desc = marker;
-  return {changed:cues.length,name,track:track.id,editable:true,nativeVerified:false,
+  return {changed:cues.length,name,track:track.id,editable:true,nativeVerified:false,...(replaced ? {replaced} : {}),
     warning:'Native font/stroke pixel parity and Arabic playback still require CapCut visual review.'};
+}
+
+/* ---------------- placement against the face ---------------- */
+
+const secs = us => (us || 0) / 1e6;
+const r2 = n => Math.round(n * 100) / 100;
+const startS = s => secs(s.target_timerange?.start);
+const endS = s => secs((s.target_timerange?.start || 0) + (s.target_timerange?.duration || 0));
+/** Bottom-percent position (5–85) ↔ CapCut's transform.y, and its centre in px from the top. */
+const yOf = position => (position - 50) / 50;
+const centreOf = y => 960 - y * 960;
+const POSITION_PROPS = new Set(['KFTypePositionX', 'KFTypePositionY']);
+
+function faceLayout(face) {
+  const ty = face.clip?.transform?.y ?? 0, sc = face.clip?.scale?.y ?? 1;
+  const layout = ty <= -0.2 ? 'split' : ty >= 0.2 ? 'split-top' : 'full';
+  let band;
+  if (layout === 'split') band = [990, 1920];
+  else if (layout === 'split-top') band = [0, 930];
+  else { const top = 960 - ty * 960 - 960 * sc; band = [top + 0.10 * 1920 * sc, top + 0.75 * 1920 * sc]; }
+  return { layout, band, scale: sc, key: `${layout}:${Math.round(sc * 100)}:${Math.round(ty * 100)}` };
+}
+
+/** The principal faces and the full-frame scenes, read once per document. */
+export function captionContext(doc) {
+  let principal = null;
+  try { principal = principalTrack(doc); } catch { return null; }
+  // Only a CLI-marked scene is known to cover the face; a transparent overlay (a slab) is not.
+  const videos = new Map((doc.materials?.videos || []).map(m => [m.id, m]));
+  const scenes = allSegments(doc).filter(({ segment }) => videos.get(segment.material_id)?.capcutctl_mograph?.scene)
+    .map(({ segment }) => [startS(segment), endS(segment)]);
+  return { faces: principal.track.segments || [], covered: t => scenes.some(([a, b]) => a <= t && t < b) };
+}
+
+/**
+ * Where a caption word sits against the face under it. Full face: the head fills about
+ * 10–75% of the clip height, so a caption belongs in the bottom band (position ≤ ~22). Split
+ * with the face below the seam: the caption rides the seam, never inside the face half.
+ * Null when no face is under the word; `covered` when a full-frame scene hides the face.
+ */
+export function captionPlacement(doc, segment, context = captionContext(doc)) {
+  if (!context) return null;
+  const t = (startS(segment) + endS(segment)) / 2;
+  const face = context.faces.find(f => startS(f) <= t && t < endS(f));
+  if (!face) return null;
+  if (context.covered(t)) return { t, face, covered: true };
+  const y = segment.clip?.transform?.y ?? 0;
+  const cy = centreOf(y);
+  const { layout, band, scale } = faceLayout(face);
+  return { t, face, layout, band, scale, y, covered: false, onFace: cy > band[0] && cy < band[1] };
+}
+
+/** The position a word on this face belongs at, or null when no house position clears it. */
+function clearPosition({ layout, band }) {
+  if (layout !== 'full') return 50;
+  for (const position of [20, ...Array.from({ length: 15 }, (_, i) => 19 - i)]) {
+    const cy = centreOf(yOf(position));
+    if (!(cy > band[0] && cy < band[1])) return position;
+  }
+  return null;
+}
+
+/** A word that crosses a change of face layout, with how much of it sits on each side. */
+function layoutStraddle(context, segment) {
+  const a = startS(segment), b = endS(segment);
+  for (let i = 1; i < context.faces.length; i++) {
+    const cut = startS(context.faces[i]);
+    if (!(cut > a + 1e-6 && cut < b - 1e-6)) continue;
+    if (faceLayout(context.faces[i - 1]).key === faceLayout(context.faces[i]).key) continue;
+    return { cut, before: cut - a, after: b - cut };
+  }
+  return null;
+}
+
+const CLAMP_SHARE = 0.7;
+const CLAMP_MIN_S = 0.08;
+
+/**
+ * Re-derive caption positions after the layout changed under them. Only words on the face
+ * move: a split face takes the seam (50), a full face the bottom band (20, or the highest
+ * position in 5–19 that clears a punched-in face). Words with position keyframes and words
+ * under a full-frame scene are left alone. `clamp` trims a word that straddles a layout cut
+ * to the side that holds ≥70% of it, when ≥80ms remain; without it the word is reported.
+ */
+export function opCaptionsReposition(doc, op = {}, context = {}) {
+  const ctx = captionContext(doc);
+  const tracks = (doc.tracks || []).filter(t => t.type === 'text' && (t.name || '').startsWith('captions:'));
+  if (!tracks.length) fail('CAPTION_NONE', 'No captions:* track to reposition.');
+  const moved = [], unresolved = [], straddling = [], trimmed = [], keyframed = [];
+  for (const track of tracks) {
+    const marker = stampState(doc, track);
+    for (const segment of track.segments || []) {
+      if ((segment.common_keyframes || []).some(k => POSITION_PROPS.has(k.property_type) && (k.keyframe_list || []).length)) {
+        keyframed.push(r2(startS(segment)));
+        continue;
+      }
+      if (ctx) {
+        const straddle = layoutStraddle(ctx, segment);
+        if (straddle) {
+          const tt = segment.target_timerange, total = straddle.before + straddle.after;
+          const keepBefore = straddle.before / total >= CLAMP_SHARE && straddle.before >= CLAMP_MIN_S;
+          const keepAfter = straddle.after / total >= CLAMP_SHARE && straddle.after >= CLAMP_MIN_S;
+          const row = { t: r2(startS(segment)), cut: r2(straddle.cut) };
+          if (op.clamp && (keepBefore || keepAfter)) {
+            const cutUs = Math.round(straddle.cut * 1e6);
+            if (keepBefore) tt.duration = cutUs - tt.start;
+            else { tt.duration = tt.start + tt.duration - cutUs; tt.start = cutUs; }
+            trimmed.push({ ...row, kept: keepBefore ? 'before' : 'after' });
+          } else straddling.push({ ...row, clampable: keepBefore || keepAfter });
+        }
+      }
+      const place = captionPlacement(doc, segment, ctx);
+      if (!place || place.covered || !place.onFace) continue;
+      const position = clearPosition(place);
+      if (position == null) { unresolved.push({ t: r2(place.t), layout: place.layout, scale: place.scale }); continue; }
+      segment.clip ||= {};
+      segment.clip.transform = { ...(segment.clip.transform || { x: 0 }), y: yOf(position) };
+      moved.push({ t: r2(startS(segment)), layout: place.layout, from: r2(place.y), to: yOf(position), position });
+    }
+    if (marker) restamp(doc, track, marker);
+  }
+  return { changed: moved.length + trimmed.length, moved, unresolved, straddling, trimmed, keyframed,
+    ...(straddling.length && !op.clamp ? { hint: 'words straddle a layout cut; --clamp trims them to one side' } : {}) };
+}
+
+/** The generation marker on a still-untouched captions track: `NAME:fingerprint:digest`. */
+function stampState(doc, track) {
+  const desc = track.segments?.[0]?.desc || '';
+  if (!desc.startsWith(`${track.name}:`) || !track.segments.every(s => s.desc === desc)) return null;
+  const rest = desc.slice(track.name.length + 1);
+  const at = rest.lastIndexOf(':');
+  if (at < 0 || rest.slice(at + 1) !== ownedDigest(doc, track)) return null;   // already hand-edited
+  return { fingerprint: rest.slice(0, at) };
+}
+
+/** Keep an untouched track recognisable, so an identical `captions` run stays a no-op. */
+function restamp(doc, track, { fingerprint }) {
+  const marker = `${track.name}:${fingerprint}:${ownedDigest(doc, track)}`;
+  for (const segment of track.segments) segment.desc = marker;
 }

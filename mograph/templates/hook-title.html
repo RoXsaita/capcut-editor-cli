@@ -27,7 +27,7 @@
  * Total 45–75f by default (hold = max(minHold, perWordHold × words)); 6f out.
  * Type is tokens.type.hook (120px), broken into at most two balanced lines, shrunk only to fit the band.
  */
-const OUT = 6, S0 = 1.16, WIPE = 6;
+const OUT = 6, S0 = 1.16, WIPE = 6, BLUR_OUT = 6;
 const countWords = p => String(p.text || '').trim().split(/\s+/).filter(Boolean).length;
 function timing(n, params, tokens, mg) {
   const f = tokens.frames;
@@ -61,9 +61,11 @@ MG.define({
     line.style.fontSize = `${size}px`;
     group.appendChild(line);
     const spans = mg.words(line, text);
-    // Margin: crop pad + the slam's overshoot around the widest word.
+    // Margin: crop pad + the slam's overshoot around the widest word + what the shadows and the
+    // exit blur paint past the type (the crop box grows by the same reach).
     const widest = Math.max(...spans.map(s => s.getBoundingClientRect().width));
-    const lay = mg.layout(params, { margin: 32 + widest * (S0 - 1) / 2 + 8 });
+    const paint = mg.maxReach(group) + 3 * BLUR_OUT;
+    const lay = mg.layout(params, { margin: 32 + widest * (S0 - 1) / 2 + 8 + paint });
     // Two balanced lines when one line would not fit (profile: maxLines 2).
     const full = line.getBoundingClientRect().width;
     if (full > lay.safe.w && spans.length > 1) {
@@ -129,7 +131,7 @@ MG.define({
     // One settle beat for the whole line as the last word lands, then the exit lift.
     const land = mg.pulse(t, F(s.inEnd - 1), F(6));
     s.group.style.transform = `translateY(${-q * 18}px) scale(${1 + 0.018 * land})`;
-    s.group.style.filter = q > 0 ? `blur(${q * 6}px)` : 'none';
+    s.group.style.filter = q > 0 ? `blur(${q * BLUR_OUT}px)` : 'none';
     mg.show(s.group, 1 - q);
     if (s.slab) mg.show(s.slab, ease.enter(win(t, 0, F(s.f.micro))));
     if (s.hl) {

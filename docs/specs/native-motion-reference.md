@@ -5,7 +5,7 @@ See [the implementation checkpoint](native-motion-progress.md) for the actual co
 
 ## Source
 
-- User-supplied URL: https://youtu.be/hEV-gkypeV8?is=V8KQhtbq5Yon23XU
+- User-supplied URL: https://youtu.be/hEV-gkypeV8
 - Video: **You CAN Animate Like After Effect in CapCut**, Matt Loui.
 - Source duration: 602 seconds, from yt-dlp metadata.
 - Evidence: downloaded video, English original automatic captions, inspected reference frames.

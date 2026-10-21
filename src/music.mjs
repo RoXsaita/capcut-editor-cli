@@ -1,12 +1,15 @@
 import crypto from 'node:crypto';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { CapcutError, stableJson, clone, seededId, requireBinary, contentEndUs, LOCAL_MEDIA_DIR, resolveMediaPath } from './core.mjs';
+import { CapcutError, stableJson, clone, seededId, requireBinary, contentEndUs, resolveMediaPath } from './core.mjs';
 import { geminiApiKey, loadEnv } from './env.mjs';
 import { audioSegment, ensureAudioTrack, pictureChanges, sfxPresets } from './polish.mjs';
 import { opDuckMusic } from './duck.mjs';
 import { profileValue } from './profile.mjs';
+import { detachLibraryIdentity, localizeAudioFile, probeAudioDuration } from './local-audio.mjs';
+
+export { probeAudioDuration };
 
 const US = s => Math.round(s * 1e6);
 const S = us => us / 1e6;
@@ -190,19 +193,6 @@ export async function generateLyria({ prompt, model = 'lyria-3-pro-preview', tim
   return Buffer.from(chunks.at(-1), 'base64');
 }
 
-export function probeAudioDuration(file) {
-  try {
-    const out = execFileSync('ffprobe', [
-      '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', file,
-    ], { encoding: 'utf8' }).trim();
-    const n = Number(out);
-    if (!n) throw new Error('empty');
-    return n;
-  } catch {
-    throw new CapcutError(`could not probe audio duration of ${path.basename(file)}`, { code: 'PROBE_FAILED', exitCode: 2 });
-  }
-}
-
 /**
  * Onset peaks from PCM via ffmpeg. Min gap 0.32s (~188 BPM ceiling) so we keep
  * musical beats, not every hi-hat. No extra deps.
@@ -331,39 +321,6 @@ export function ctaBoundary(doc, projectDir = null) {
   return Math.min(...(nearEnd.length ? nearEnd : starts));
 }
 
-/** Copy the bed into the draft under a content-hash name CapCut cannot remap. */
-function placeMusicFile(projectDir, source, { dryRun = false } = {}) {
-  source = path.resolve(source);
-  if (!projectDir) return source;
-  const stamp = crypto.createHash('sha1').update(fs.readFileSync(source)).digest('hex').slice(0, 12);
-  const dest = path.join(projectDir, LOCAL_MEDIA_DIR, `finish-music-${stamp}${path.extname(source) || '.mp3'}`);
-  if (path.resolve(source) === path.resolve(dest)) return dest;
-  if (!dryRun) {
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    fs.copyFileSync(source, dest);
-  }
-  return dest;
-}
-
-/** Library identity left on a cloned template makes CapCut swap our file for Hyperpop. */
-function detachLibraryIdentity(material) {
-  material.effect_id = '';
-  material.resource_id = '';
-  material.music_id = '';
-  material.pgc_id = '';
-  material.pgc_name = '';
-  material.unique_id = '';
-  material.local_material_id = '';
-  material.third_resource_id = '';
-  material.formula_id = '';
-  material.query = '';
-  material.search_id = '';
-  material.music_source = '';
-  material.category_name = 'local';
-  material.app_id = 0;
-  return material;
-}
-
 /**
  * Place (or replace) the generated bed. Picture stays locked. Optional source
  * offset slides the music so detected beats land on picture changes.
@@ -393,7 +350,7 @@ export function opMusic(doc, op, context = {}) {
   lane.segments = (lane.segments || []).filter(s => (s.desc || '') !== 'finish:music');
   doc.materials.audios = (doc.materials.audios || []).filter(a => a.name !== 'finish-music');
 
-  const placed = placeMusicFile(context.projectDir, file, { dryRun: context.dryRun });
+  const placed = localizeAudioFile(context.projectDir, file, { dryRun: context.dryRun });
   const templates = Object.values(sfxPresets().audioTemplates);
   const tpl = templates.find(m => m.type === 'music') || templates[0];
   const material = detachLibraryIdentity(clone(tpl));
@@ -505,6 +462,21 @@ function buildMusicState(projectDir, doc, {
     wouldGenerate: !selected && Boolean(resolved.brief && (regen || stale)),
     volume,
   };
+}
+
+/**
+ * What `prepareMusic` would refuse, found before anything is written: no brief and no file
+ * (MUSIC_BRIEF_REQUIRED), or a bed to generate with no Gemini key (NO_API_KEY). `build` runs it
+ * before its first stage, so a missing brief or key does not strand committed graphics.
+ */
+export function musicPreflight(projectDir, doc, options = {}) {
+  const state = buildMusicState(projectDir, doc, options);
+  let keyMissing = false;
+  if (state.wouldGenerate) { loadEnv(); keyMissing = !geminiApiKey(); }
+  const code = state.needsBrief ? 'MUSIC_BRIEF_REQUIRED' : keyMissing ? 'NO_API_KEY' : null;
+  const error = state.needsBrief ? MUSIC_BRIEF_REQUIRED
+    : keyMissing ? 'no GEMINI_API_KEY to generate the music bed: pass sound.music.file (a local track), or set the key in cli/.env.' : null;
+  return { needsBrief: state.needsBrief, wouldGenerate: state.wouldGenerate, keyMissing, code, error, file: state.file };
 }
 
 export async function prepareMusic(projectDir, doc, {

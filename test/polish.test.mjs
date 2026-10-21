@@ -519,3 +519,291 @@ test('polish planners stop at contentEnd and ignore parked Preset 3 parts-bin fo
   assert.deepEqual(result.callouts, []);
   assert.deepEqual(result.interactions, []);
 });
+
+/** Every material id that occurs more than once across all buckets. */
+function repeatedIds(d) {
+  const seen = new Set(), repeated = new Set();
+  for (const values of Object.values(d.materials || {})) {
+    if (!Array.isArray(values)) continue;
+    for (const m of values) {
+      if (!m?.id) continue;
+      if (seen.has(m.id)) repeated.add(m.id);
+      seen.add(m.id);
+    }
+  }
+  return [...repeated];
+}
+
+test('sliceAt gives every cloned extra its own id (a speed plus two effects do not collide)', () => {
+  const d = doc();
+  d.materials.speeds = [{ id: 'SP', type: 'speed', speed: 1 }];
+  d.materials.effects = [
+    { id: 'E1', type: 'sharpen', value: 0.3, bind_segment_id: 's0' },
+    { id: 'E2', type: 'clear', value: 0.1, bind_segment_id: '' },
+  ];
+  const t = d.tracks[2];
+  t.segments[0].extra_material_refs = ['SP', 'E1', 'E2'];
+  assert.equal(sliceAt(d, t, 2, 'k', 'seed-x'), 'split');
+  const [left, right] = t.segments;
+  assert.deepEqual(left.extra_material_refs, ['SP', 'E1', 'E2']);
+  assert.equal(new Set(right.extra_material_refs).size, 3);
+  assert.equal(right.extra_material_refs.some(r => left.extra_material_refs.includes(r)), false);
+  assert.deepEqual(repeatedIds(d), []);
+  assert.equal(d.materials.effects.length, 4);
+  const effects = new Map(d.materials.effects.map(m => [m.id, m]));
+  // bound to the old segment (or unbound) -> bound to the right half now
+  assert.equal(effects.get(right.extra_material_refs[1]).bind_segment_id, right.id);
+  assert.equal(effects.get(right.extra_material_refs[2]).bind_segment_id, right.id);
+  assert.equal(effects.get('E1').bind_segment_id, 's0');
+  // deterministic under a seed: both mirror documents mint the same ids
+  const again = doc();
+  again.materials.speeds = structuredClone(d.materials.speeds.slice(0, 1));
+  again.materials.effects = [
+    { id: 'E1', type: 'sharpen', value: 0.3, bind_segment_id: 's0' },
+    { id: 'E2', type: 'clear', value: 0.1, bind_segment_id: '' },
+  ];
+  again.tracks[2].segments[0].extra_material_refs = ['SP', 'E1', 'E2'];
+  sliceAt(again, again.tracks[2], 2, 'k', 'seed-x');
+  assert.deepEqual(again.tracks[2].segments[1].extra_material_refs, right.extra_material_refs);
+});
+
+test('sliceAt refuses a clip with a native intro/outro animation and leaves the doc unchanged', async () => {
+  const { opAnimation } = await import('../src/animations.mjs');
+  const d = doc();
+  const t = d.tracks[2];
+  t.segments = [seg(0, 6, 100), seg(6, 24, 200)];
+  t.segments[0].id = 'ANIM';
+  opAnimation(d, { selector: { id: 'ANIM' }, intro: 'fade-in', outro: 'fade-out', __seed: 'anim' });
+  const before = JSON.stringify(d);
+  assert.equal(sliceAt(d, t, 3, 'k', 'seed'), 'animated');
+  assert.equal(JSON.stringify(d), before);
+
+  // a seam at 3s inside the animated clip is reported, not cut
+  const d2 = doc();
+  d2.tracks[2].segments = [seg(0, 6, 100), seg(6, 24, 200)];
+  d2.tracks[2].segments[0].id = 'ANIM';
+  opAnimation(d2, { selector: { id: 'ANIM' }, intro: 'fade-in', outro: 'fade-out', __seed: 'anim' });
+  d2.tracks[1].segments = [seg(0, 3, 0, { id: 'b1' }), seg(3, 3, 50, { id: 'b2' })];
+  const r2 = opPolish(d2, { __seed: 'ANIM2' });
+  assert.ok(r2.animatedSoNotSliced?.includes(3), JSON.stringify(r2));
+  assert.ok(r2.keyframedSoNotSliced.includes(3));
+  assert.equal(d2.tracks[2].segments.filter(s => s.id === 'ANIM').length, 1);
+  assert.equal(d2.tracks[2].segments.find(s => s.id === 'ANIM').target_timerange.duration, US(6));
+});
+
+/** A project directory whose meta ledger records `ids` as polish transitions. */
+function ledgerProject(ids) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'polish-ledger-'));
+  fs.mkdirSync(path.join(dir, '.capcutctl'), { recursive: true });
+  const materials = Object.fromEntries(ids.map(id => [id, { kind: 'transitions', path: null, fields: { capcutctl_polish: true } }]));
+  fs.writeFileSync(path.join(dir, '.capcutctl', 'meta-ledger.json'), JSON.stringify({ version: 1, materials, segments: {} }));
+  return dir;
+}
+
+test('polish takes back only its own transitions; a hand-made one survives at its cut', () => {
+  const d = doc();
+  // face cut at 12s carries a hand-made transition; one stale polish transition (CapCut
+  // stripped its mark on save, the ledger still knows it) sits on the B-roll.
+  d.materials.transitions = [
+    { id: 'HAND', name: 'Hand Wipe', duration: US(0.4) },
+    { id: 'OLD-POLISH', name: 'Flash', duration: US(0.3) },
+  ];
+  d.tracks[2].segments[0].extra_material_refs = ['HAND'];
+  d.tracks[1].segments[0].extra_material_refs = ['OLD-POLISH'];
+  const dir = ledgerProject(['OLD-POLISH']);
+  const first = opPolish(d, { __seed: 'OWN' }, { projectDir: dir });
+  assert.equal(first.removedTransitions, 1);
+  assert.equal(first.keptHandTransitions, 1);
+  assert.equal(first.legacyClearAll, undefined);
+  const holders = () => allRefs(d).filter(([, r]) => r === 'HAND');
+  assert.equal(holders().length, 1);
+  const face = d.tracks[2].segments;
+  const holder = face.find(s => (s.extra_material_refs || []).includes('HAND'));
+  assert.equal(holder.target_timerange.start + holder.target_timerange.duration, US(12));
+  assert.deepEqual(first.seamKeptByHand, [12]);
+  assert.equal(first.cues.some(c => c.t === 12), false, 'no polish seam on top of the hand-made one');
+  assert.equal(d.materials.transitions.filter(m => m.id !== 'HAND').every(m => m.capcutctl_polish === true), true);
+
+  const snapshot = JSON.stringify(d);
+  const second = opPolish(d, { __seed: 'OWN' }, { projectDir: dir });
+  assert.equal(JSON.stringify(d), snapshot, 'a second run with the same seed changes nothing');
+  assert.deepEqual(second.cues, first.cues);
+  assert.equal(second.keptHandTransitions, 1);
+  assert.equal(holders().length, 1);
+  assert.deepEqual(repeatedIds(d), []);
+});
+
+function allRefs(d) {
+  const out = [];
+  for (const t of d.tracks) for (const s of t.segments || []) for (const r of s.extra_material_refs || []) out.push([s.id, r]);
+  return out;
+}
+
+test('a cut inside a segment with a hand-made transition moves the transition to the right half', () => {
+  const d = doc();
+  d.materials.transitions = [{ id: 'HAND', name: 'Hand Wipe', duration: US(0.4) }];
+  d.tracks[2].segments[0].extra_material_refs = ['HAND'];
+  assert.equal(sliceAt(d, d.tracks[2], 6, 'k', 'seed'), 'split');
+  const [left, right] = d.tracks[2].segments;
+  assert.deepEqual(left.extra_material_refs, []);
+  assert.deepEqual(right.extra_material_refs, ['HAND']);
+  assert.equal(d.materials.transitions.length, 1);
+});
+
+test('a legacy draft with no marks and no ledger is cleared once, then only polish transitions go', () => {
+  const d = doc();
+  d.materials.transitions = [{ id: 'UNMARKED', name: 'Flash', duration: US(0.3) }];
+  d.tracks[2].segments[0].extra_material_refs = ['UNMARKED'];
+  const first = opPolish(d, { __seed: 'LEGACY' });
+  assert.equal(first.legacyClearAll, true);
+  assert.equal(first.removedTransitions, 1);
+  assert.equal(d.materials.transitions.some(m => m.id === 'UNMARKED'), false);
+  assert.equal(allRefs(d).some(([, r]) => r === 'UNMARKED'), false);
+  const second = opPolish(d, { __seed: 'LEGACY' });
+  assert.equal(second.legacyClearAll, undefined);
+  assert.equal(second.removedTransitions, first.transitions);
+});
+
+test('reruns of polish, callouts and signature leave no orphan extras behind', async () => {
+  const { opSignature } = await import('../src/signature.mjs');
+  const d = doc();
+  d.materials.videos.push({ id: 'RECT', type: 'gif', path: '/x/rect-16-9-1080x608.gif' });
+  d.tracks.push(track('video', [{ ...seg(4, 2), id: 'rect1', material_id: 'RECT' }]));
+  const count = () => Object.values(d.materials).reduce((n, v) => n + (Array.isArray(v) ? v.length : 0), 0);
+  const run = seed => {
+    opPolish(d, { __seed: `${seed}-polish` });
+    opCalloutSfx(d, { __seed: `${seed}-callout` });
+    opSignature(d, { endcard: { text: 'Follow' }, __seed: `${seed}-sig` });
+  };
+  run('one');
+  const afterOne = count();
+  assert.ok(d.tracks.find(t => t.name === 'polish-sfx').segments.length >= 3, 'three seams placed');
+  run('two');
+  assert.equal(count(), afterOne);
+  run('two');
+  assert.equal(count(), afterOne, 'a stable seed does not stack duplicate ids either');
+  const live = new Set(allRefs(d).map(([, r]) => r));
+  for (const { segment } of d.tracks.flatMap(t => (t.segments || []).map(segment => ({ segment })))) live.add(segment.material_id);
+  for (const kind of ['speeds', 'placeholder_infos', 'beats', 'sound_channel_mappings', 'vocal_separations']) {
+    for (const m of d.materials[kind] || []) assert.ok(live.has(m.id), `${kind} ${m.id} is referenced`);
+  }
+  assert.deepEqual(repeatedIds(d), []);
+});
+
+/**
+ * A deterministic multi-track draft: face cuts with circle/split masks, B-roll of several files
+ * and framings, callout plates and mograph overlays. Same generator as the snapshot fixture.
+ */
+function syntheticDraft(n, withMasks, seed) {
+  let rng = seed;
+  const rand = () => ((rng = (rng * 1103515245 + 12345) % 2147483648) / 2147483648);
+  const s = (id, start, dur, srcStart = 0, extra = {}) => ({
+    id, material_id: 'M',
+    target_timerange: { start: US(start), duration: US(dur) },
+    source_timerange: { start: US(srcStart), duration: US(dur) },
+    extra_material_refs: [], clip: { scale: { x: 1, y: 1 }, transform: { x: 0, y: 0 } }, ...extra,
+  });
+  const face = [], broll = [], plates = [];
+  let t = 0;
+  for (let i = 0; i < n; i++) {
+    const d = 0.5 + rand() * 2.5;
+    face.push(s(`f${i}`, t, d, 100 + t, withMasks && rand() < 0.5 ? { extra_material_refs: [rand() < 0.5 ? 'CIRC' : 'SPLIT'] } : {}));
+    if (rand() < 0.7) {
+      const mat = ['B1', 'B2', 'B3', 'GIF'][Math.floor(rand() * 4)];
+      broll.push(s(`b${i}`, t, d * (0.5 + rand() * 0.5), rand() * 50, {
+        material_id: mat, desc: rand() < 0.2 ? 'layout:screen-recording' : `broll:${i % 3}`,
+        clip: { scale: { x: rand() < 0.3 ? 1.5 : 1, y: 1 }, transform: { x: 0, y: 0 } },
+      }));
+    }
+    if (rand() < 0.15) plates.push(s(`p${i}`, t, 0.6, 0, { material_id: 'RECT', desc: 'callout' }));
+    if (rand() < 0.1) plates.push(s(`m${i}`, t + 0.2, 0.6, 0, { material_id: 'B1', desc: 'mograph:x' }));
+    t += d;
+  }
+  return {
+    duration: US(t + 3), fps: 30,
+    materials: {
+      videos: [
+        { id: 'M', type: 'video', path: '/a/face.mp4' },
+        { id: 'B1', type: 'video', path: '/a/one.mp4' },
+        { id: 'B2', type: 'video', path: '/a/two__screen.mp4' },
+        { id: 'B3', type: 'photo', path: '/a/still.png' },
+        { id: 'GIF', type: 'video', path: '/a/rect-thing.gif' },
+        { id: 'RECT', type: 'video', path: '/a/arrow-1.gif' },
+      ],
+      common_mask: [{ id: 'CIRC', name: 'Circle' }, { id: 'SPLIT', name: 'Split', resource_type: 'line' }],
+    },
+    tracks: [
+      { type: 'video', id: 't0', flag: 0, segments: [] },
+      { type: 'video', id: 'tb', segments: broll },
+      { type: 'video', id: 'tf', segments: face },
+      { type: 'video', id: 'tp', segments: plates },
+    ],
+  };
+}
+
+test('the planners give the same answers as before they shared one context (snapshot)', () => {
+  const expected = JSON.parse(fs.readFileSync(new URL('./fixtures/polish-planners.snapshot.json', import.meta.url), 'utf8'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'polish-snap-'));
+  fs.mkdirSync(path.join(dir, '.capcutctl'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.capcutctl', 'created.json'),
+    JSON.stringify({ template: 'Preset 3', preserved: { start: US(30), end: US(40) } }));
+  for (const [name, n, masks, projectDir] of [['small', 8, false, null], ['masks', 30, true, null], ['masks-created', 40, true, dir]]) {
+    const d = syntheticDraft(n, masks, 777 + n);
+    const o = { projectDir };
+    const actual = JSON.parse(JSON.stringify({
+      pictureChanges: pictureChanges(d, o), cutPoints: cutPoints(d, o), planPolish: planPolish(d, o),
+      planMotivated: planPolish(d, { ...o, motivated: true }), coldOpen: coldOpen(d, o),
+    }));
+    assert.deepEqual(actual, expected[name], name);
+  }
+});
+
+test('planning a 240-clip draft stays fast (no per-segment content-end recompute)', () => {
+  const d = syntheticDraft(240, true, 4242);
+  const started = performance.now();
+  pictureChanges(d);
+  cutPoints(d);
+  planPolish(d, { motivated: true });
+  coldOpen(d);
+  const ms = performance.now() - started;
+  assert.ok(ms < 1000, `${Math.round(ms)} ms`);
+});
+
+test('the meta ledger remembers which transitions polish placed, so a CapCut save cannot orphan them', async () => {
+  const { metaRecord, restoreMeta } = await import('../src/repair.mjs');
+  const d = doc();
+  opPolish(d, { __seed: 'LEDGER' });
+  const placed = d.materials.transitions.map(m => m.id);
+  assert.ok(placed.length > 0);
+  const record = metaRecord([d]);
+  for (const id of placed) assert.equal(record.materials[id]?.fields?.capcutctl_polish, true);
+  // a native save strips the mark; the ledger puts it back
+  const saved = structuredClone(d);
+  for (const m of saved.materials.transitions) delete m.capcutctl_polish;
+  restoreMeta(saved, record);
+  assert.equal(saved.materials.transitions.every(m => m.capcutctl_polish === true), true);
+});
+
+test('the meta ledger forgets a legacy layout:<name> tag on the face, but still restores plate descs', async () => {
+  const { metaRecord, nextLedger, restoreMeta } = await import('../src/repair.mjs');
+  const legacy = { materials: {}, tracks: [{ type: 'video', segments: [
+    { id: 'FACE', material_id: 'M', desc: 'layout:split-screen' },
+    { id: 'BAR', material_id: 'P', desc: 'layout:seam-bar' }] }] };
+  // a ledger an older version wrote (raw, tag included), and the draft after layout apply cleared it
+  const previous = { version: 1, materials: {}, segments: {
+    FACE: { material_id: 'M', fields: { desc: 'layout:split-screen' } },
+    BAR: { material_id: 'P', fields: { desc: 'layout:seam-bar' } } } };
+  const cleared = structuredClone(legacy);
+  cleared.tracks[0].segments[0].desc = '';
+  cleared.tracks[0].segments[0].capcutctl_layout = 'split-screen';
+  const ledger = nextLedger(previous, [cleared]);
+  assert.equal(ledger.segments.FACE.fields.desc, undefined, 'the cleared tag is not carried forward');
+  assert.equal(metaRecord([legacy]).segments.FACE, undefined, 'a snapshot with the tag does not record it');
+  // even a raw record that still holds it does not put it back; a stripped plate desc is restored
+  const saved = structuredClone(cleared);
+  saved.tracks[0].segments[1].desc = '';
+  const restored = restoreMeta(saved, previous);
+  assert.equal(saved.tracks[0].segments[0].desc, '');
+  assert.equal(saved.tracks[0].segments[1].desc, 'layout:seam-bar');
+  assert.deepEqual(restored, [{ segment: 'BAR', key: 'desc' }]);
+});

@@ -142,6 +142,7 @@ test('reviewProject writes the proxy, EDL, frames and labelled sheet for the con
     const proxyCommand = commands.find(args => args.includes('--preview'));
     assert.equal(proxyCommand[proxyCommand.indexOf('--from') + 1], '0');
     assert.equal(proxyCommand[proxyCommand.indexOf('--to') + 1], '10');
+    assert.equal(proxyCommand[proxyCommand.indexOf('--max-minutes') + 1], '0', 'review turns the preview budget off by default');
     const sheetCommand = commands.find(args => args.includes('--sheet'));
     assert.ok(sheetCommand.some(arg => arg.includes('contact-sheet.png')));
   } finally {
@@ -149,6 +150,30 @@ test('reviewProject writes the proxy, EDL, frames and labelled sheet for the con
     else process.env.CAPCUT_REVIEW_TEST_LOG = previous;
     fs.rmSync(temp, { recursive: true, force: true });
   }
+});
+
+test('a preview that overruns its budget is PREVIEW_TOO_SLOW, and review forwards --max-minutes', t => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-review-budget-'));
+  t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
+  const project = path.join(temp, 'project');
+  const runner = path.join(temp, 'runner.cjs');
+  const log = path.join(temp, 'commands.ndjson');
+  fs.mkdirSync(project, { recursive: true });
+  fs.writeFileSync(path.join(project, 'draft_info.json'), JSON.stringify(fixture()));
+  fs.writeFileSync(runner, [
+    '#!/usr/bin/env node',
+    "const fs = require('node:fs');",
+    "const args = process.argv.slice(2);",
+    `fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + '\\n');`,
+    "if (args.includes('--preview')) process.exit(3);",
+  ].join('\n'));
+  fs.chmodSync(runner, 0o755);
+  assert.throws(() => reviewProject(project, { outputRoot: path.join(temp, 'outputs'), python: runner, ffmpeg: runner, maxMinutes: 5 }),
+    error => error.code === 'PREVIEW_TOO_SLOW' && error.exitCode === 3 && /--max-minutes/.test(error.message));
+  const proxyCommand = fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse).find(args => args.includes('--preview'));
+  assert.equal(proxyCommand[proxyCommand.indexOf('--max-minutes') + 1], '5');
+  assert.throws(() => reviewProject(project, { outputRoot: path.join(temp, 'outputs'), python: runner, maxMinutes: -1 }),
+    { code: 'BAD_MAX_MINUTES' });
 });
 
 test('review cannot replace the project, its source media, or unrelated output contents', t => {

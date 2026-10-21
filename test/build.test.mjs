@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { readJson, stableJson } from '../src/core.mjs';
+import { listSnapshots, readJson, restoreProjectSnapshot, stableJson } from '../src/core.mjs';
 import { resolveAnchor, resolveAnchors } from '../src/anchors.mjs';
 import { sourceToTimeline } from '../src/signature.mjs';
 import { gateReport } from '../src/gate.mjs';
@@ -99,8 +99,10 @@ test('build places graphics on their words, is a no-op when nothing changed, and
   assert.equal(placed().length, 1);
   const lead = 3 / 30;
   assert.ok(Math.abs(placed()[0].target_timerange.start / 1e6 - (5 - lead)) < 1 / 30, 'lands its lead frames before the word');
-  assert.ok(fs.existsSync(path.join(dir, 'mograph', 'kw.mov')));
-  assert.equal(readJson(path.join(dir, 'mograph', 'kw.json')).anchor.say, 'أسرع');
+  const sidecar = readJson(path.join(dir, 'mograph', 'kw.json'));
+  assert.match(path.basename(sidecar.file), /^kw-[0-9a-f]{16}\.mov$/, 'rendered under its fingerprint');
+  assert.ok(fs.existsSync(sidecar.file));
+  assert.equal(sidecar.anchor.say, 'أسرع');
   assert.ok(first.gate.checks.length > 5);
 
   const bytes = fs.readFileSync(path.join(dir, 'draft_info.json'), 'utf8');
@@ -141,4 +143,126 @@ test('harvest --profile measures the drafts it is given and writes only what the
   assert.equal(profile.seams.hardCutsByDefault, true, 'no transitions in the drafts');
   assert.deepEqual(profile.provenance.drafts, [path.basename(dir)]);
   assert.equal(profile.tokens, undefined, 'tokens are not guessed from drafts');
+});
+
+// ---- build state travels with snapshots ----------------------------------------------------
+
+const quiet = extra => normalizePlan({ version: 1, logos: false, layout: false, camera: { stress: false },
+  sound: { seams: false, loudness: false }, ...extra });
+const descs = dir => docOf(dir).tracks.flatMap(tr => tr.segments || []).map(s => s.desc);
+const earliest = dir => listSnapshots(dir).at(-1).name;
+
+test('build is not "up to date" after a restore took its outputs away', async () => {
+  const dir = buildProject();
+  const plan = quiet({ endcard: {} });
+  await runBuild(dir, plan, { forceRunning: true });
+  assert.ok(descs(dir).includes('sig:endcard'));
+  assert.equal((await runBuild(dir, plan, { forceRunning: true })).upToDate, true, 'two builds in a row stay a no-op');
+  restoreProjectSnapshot(dir, earliest(dir), { forceRunning: true });
+  assert.ok(!descs(dir).includes('sig:endcard'));
+  assert.equal(fs.existsSync(path.join(dir, '.capcutctl', 'build.json')), false, 'the pre-build snapshot had no build state');
+  const again = await runBuild(dir, plan, { forceRunning: true });
+  assert.notEqual(again.upToDate, true);
+  assert.ok(descs(dir).includes('sig:endcard'), 'the endcard is back');
+});
+
+test('build rebuilds when its recorded outputs are gone even if the hash still matches', async () => {
+  const dir = buildProject();
+  const plan = quiet({ endcard: {} });
+  await runBuild(dir, plan, { forceRunning: true });
+  // A legacy snapshot (taken before build.json was captured) says nothing about build state:
+  // restore strips only the hash and keeps `shots`.
+  const snapshot = path.join(dir, '.capcutctl', 'history', earliest(dir));
+  const manifest = readJson(path.join(snapshot, 'manifest.json'));
+  manifest.absent = manifest.absent.filter(item => item !== '.capcutctl/build.json');
+  fs.writeFileSync(path.join(snapshot, 'manifest.json'), stableJson(manifest));
+  const stateFile = path.join(dir, '.capcutctl', 'build.json');
+  fs.writeFileSync(stateFile, stableJson({ ...readJson(stateFile), shots: 'kept-shots-key' }));
+  restoreProjectSnapshot(dir, path.basename(snapshot), { forceRunning: true });
+  const state = readJson(stateFile);
+  assert.equal(state.hash, undefined);
+  assert.equal(state.shots, 'kept-shots-key');
+
+  // A hash that matches but EVERY output gone (a restore that did not carry build.json) also
+  // rebuilds; only some gone is a hand edit and is kept (build-stages.test.mjs).
+  const rebuilt = await runBuild(dir, plan, { forceRunning: true });
+  assert.notEqual(rebuilt.upToDate, true);
+  const outputs = readJson(stateFile).outputs;
+  assert.ok(outputs.length >= 1);
+  rewrite(dir, doc => { for (const tr of doc.tracks) tr.segments = (tr.segments || []).filter(s => !outputs.includes(s.id)); });
+  const missing = await runBuild(dir, plan, { forceRunning: true });
+  assert.notEqual(missing.upToDate, true);
+  assert.equal(missing.stages.reason, 'build outputs missing (restore?)');
+  assert.ok(descs(dir).includes('sig:endcard'));
+});
+
+test('shots re-apply after a restore to before them, without stacking', async () => {
+  const dir = buildProject();
+  const broll = path.join(path.dirname(dir), 'screen.mp4');
+  fs.writeFileSync(broll, 'screen');
+  const shots = path.join(path.dirname(dir), 'shots.json');
+  fs.writeFileSync(shots, JSON.stringify([{ decision: 'place', ops: [{ op: 'clip.add', media: broll, at: 1, duration: 2, src: 0,
+    track: 'broll', volume: 0, width: 1080, height: 1920, mediaDuration: 20_000_000 }] }]));
+  const plan = quiet({ shots });
+  const first = await runBuild(dir, plan, { forceRunning: true });
+  assert.equal(first.stages.shots.applied, 1);
+  const brolls = () => docOf(dir).tracks.filter(tr => tr.name === 'broll').flatMap(tr => tr.segments || []).length;
+  assert.equal(brolls(), 1);
+  restoreProjectSnapshot(dir, earliest(dir), { forceRunning: true });
+  assert.equal(brolls(), 0);
+  const again = await runBuild(dir, plan, { forceRunning: true });
+  assert.ok(again.stages.shots.applied > 0);
+  assert.equal(brolls(), 1, 'applied once, not stacked');
+
+  // A legacy restore keeps the shots key: a plain build trusts it, --force sees the clips are gone.
+  const stateFile = path.join(dir, '.capcutctl', 'build.json');
+  const kept = readJson(stateFile);
+  restoreProjectSnapshot(dir, earliest(dir), { forceRunning: true });
+  fs.writeFileSync(stateFile, stableJson({ ...kept, hash: undefined }));
+  assert.equal((await runBuild(dir, plan, { forceRunning: true })).stages.shots.applied, 0);
+  assert.equal(brolls(), 0);
+  assert.equal((await runBuild(dir, plan, { forceRunning: true, force: true })).stages.shots.applied, 1);
+  assert.equal(brolls(), 1);
+});
+
+test('a first build that fails only on captions names the next command and still exits 1', async t => {
+  const { main, setOutput, buildNextHint } = await import('../src/cli.mjs');
+  const dir = buildProject();
+  const edit = path.join(path.dirname(dir), 'edit.json');
+  fs.writeFileSync(edit, JSON.stringify({ version: 1, logos: false, layout: false, camera: { stress: false },
+    sound: { seams: false, loudness: false }, endcard: {} }));
+  let stdout = '';
+  t.after(setOutput(chunk => { stdout += String(chunk); return true; }));
+  const previous = process.exitCode;
+  t.after(() => { process.exitCode = previous; });
+
+  // The real fixture fails more than captions (it is a static full face): no hint, still 1.
+  await main(['build', '--project', dir, '--edit', edit, '--force-running']);
+  assert.equal(process.exitCode, 1);
+  assert.match(stdout, /FAIL captions/);
+  assert.doesNotMatch(stdout, /^next:/m, 'other failures are real: no "just add captions" hint');
+
+  // The same build with every other check passing: captions is the only thing left.
+  const real = await runBuild(dir, normalizePlan(JSON.parse(fs.readFileSync(edit, 'utf8'))), { forceRunning: true });
+  const onlyCaptions = { ...real.gate, verdict: 'FAIL',
+    checks: real.gate.checks.map(c => (c.id === 'captions' ? c : { ...c, ok: true })) };
+  assert.ok(onlyCaptions.checks.some(c => c.id === 'captions' && !c.ok && /^no captions/.test(c.message)));
+  const stub = { readEditPlan: file => JSON.parse(fs.readFileSync(file, 'utf8')),
+    runBuild: async () => ({ hash: 'stub', gate: onlyCaptions }) };
+  stdout = '';
+  process.exitCode = undefined;
+  await main(['build', '--project', dir, '--edit', edit, '--force-running'], { build: stub });
+  assert.equal(process.exitCode, 1, 'the draft is not ready to post: the exit code does not change');
+  assert.match(stdout, new RegExp(`^next: capcutctl captions --project '${dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'$`, 'm'));
+
+  stdout = '';
+  await main(['build', '--project', dir, '--edit', edit, '--force-running', '--json'], { build: stub });
+  assert.doesNotMatch(stdout, /next:/, '--json output is unchanged');
+
+  // Double captions is a different failure with its own fix.
+  const doubled = { ...onlyCaptions, checks: onlyCaptions.checks.map(c => (c.id === 'captions'
+    ? { ...c, message: '2 caption layers (a, b): double captions — keep one' } : c)) };
+  assert.equal(buildNextHint(doubled, 'P'), null);
+  assert.equal(buildNextHint({ ...onlyCaptions, verdict: 'PASS' }, 'P'), null);
+  assert.equal(buildNextHint(onlyCaptions, 'Plain'), 'next: capcutctl captions --project Plain');
 });
