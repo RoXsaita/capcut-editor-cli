@@ -8,7 +8,7 @@ import { carryLevels, snapshotLevels } from './levels.mjs';
 import { hasClipAnimations } from './animations.mjs';
 import { resolveClip } from './add.mjs';
 import { partForMedia, takeParts, vtInPart } from './rl2-take.mjs';
-import { readMetaRecord } from './repair.mjs';
+import { isLayoutPlateDesc, readMetaRecord } from './repair.mjs';
 import { detachLibraryIdentity, localizeAudioFile, probeAudioDuration } from './local-audio.mjs';
 
 export function sfxPresets() {
@@ -401,7 +401,8 @@ export function ensureAudioTrack(doc, name, mintFn = mint) {
 }
 
 function isLayoutOrPlate(doc, segment, videos = videosById(doc)) {
-  if ((segment.desc || '').startsWith('layout:')) return true;
+  // A plate or screen layer; a legacy `layout:<name>` tag older versions put on the face is not one.
+  if (isLayoutPlateDesc(segment.desc)) return true;
   const m = videos.get(segment.material_id);
   return Boolean(m && m.type && m.type !== 'video');
 }

@@ -154,6 +154,16 @@ test('seam-silence: a split in place is no seam, --pause covers a deliberate one
   assert.equal(f, null, 'at 2x the 0.2 + 0.4s run plays as 0.3s');
 });
 
+test('seam-silence: a legacy layout:<name> tag on the face is still A-roll; plates are not', () => {
+  const tagged = seamDraft();
+  for (const s of tagged.doc.tracks[1].segments) s.desc = 'layout:split-screen';
+  const result = seamSilences(tagged.doc, { energyFor: tagged.energyFor });
+  assert.deepEqual([result.seams, result.findings.length], [1, 1]);
+  const plate = seamDraft();
+  plate.doc.tracks[1].segments[1].desc = 'layout:seam-bar';
+  assert.equal(seamSilences(plate.doc, { energyFor: plate.energyFor }).seams, 0);
+});
+
 test('seam-silence: no energy index is a WARN, not a pass', () => {
   const row = seamRow({ doc: seamDraft().doc, energyFor: () => null });
   assert.equal(row.level, 'WARN');

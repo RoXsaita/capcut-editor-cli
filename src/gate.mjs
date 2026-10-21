@@ -22,6 +22,7 @@ import { firstPictureProof, finishScorecard } from './finish.mjs';
 import { safeZoneViolations } from './mograph-geometry.mjs';
 import { loadProfile } from './profile.mjs';
 import { findCircleScenes, splitGaps } from './layouts.mjs';
+import { isLayoutPlateDesc } from './repair.mjs';
 import { SEAM_HEAD_MAX_S, SEAM_TOTAL_MAX_S, headSilence, loadEnergy10, tailSilence } from './stress.mjs';
 
 const S = us => (us || 0) / 1e6;
@@ -315,7 +316,8 @@ export function seamSilences(doc, { projectDir = null, pauses = [], fps = 30, en
   const frameUs = 1e6 / (fps || 30);
   const clips = (principal.track.segments || [])
     .filter(s => s.target_timerange && s.source_timerange && videos.get(s.material_id)?.type !== 'photo'
-      && !(s.desc || '').startsWith('layout:'))
+      // Plates and screen layers are not A-roll; a legacy `layout:<name>` tag on the face is.
+      && !isLayoutPlateDesc(s.desc))
     .sort((a, b) => a.target_timerange.start - b.target_timerange.start);
   const findings = [], unchecked = new Set();
   let seams = 0;

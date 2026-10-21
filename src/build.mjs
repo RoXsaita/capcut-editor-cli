@@ -360,6 +360,12 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
   const outputsGone = previousOutputs.length > 0 && missingOutputs.length === previousOutputs.length;
   if (!force && !dryRun && state.hash === hash) {
     if (!outputsGone) {
+      // Pauses are outside the hash; a pause added since the last build still reaches build.json,
+      // which is where export reads what the final gate allows.
+      const pauses = plan.pauses || [];
+      if (JSON.stringify(state.pauses || []) !== JSON.stringify(pauses)) {
+        fs.writeFileSync(stateFile, stableJson({ ...state, pauses }));
+      }
       const gate = gateReport(doc, { projectDir, profile, ...(plan.pauses?.length ? { pauses: plan.pauses } : {}) });
       if (Array.isArray(state.skipped)) foldBuildStages(gate, state.skipped);
       return { upToDate: true, hash, gate, skipped: Array.isArray(state.skipped) ? state.skipped : [],
@@ -620,7 +626,7 @@ export async function runBuild(projectDir, plan, { dryRun = false, force = false
       // up-to-date path re-reports them), the polish transitions it owns, and what export gates with
       logos: logoPlan.skipped ? (Number(state.logos) || 0) : logoPlan.logos.length,
       skipped, seamTransitions,
-      profile: profileFile ? path.resolve(profileFile) : null, style: plan.style || null };
+      profile: profileFile ? path.resolve(profileFile) : null, style: plan.style || null, pauses: plan.pauses || [] };
     fs.writeFileSync(stateFile, stableJson(next));
   }
   // Layout ops that could not lay a room plate (no brand.background.plate) say so; the summary

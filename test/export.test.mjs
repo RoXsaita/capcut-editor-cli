@@ -222,3 +222,13 @@ test('the final gate judges with the profile file and style the build recorded; 
   assert.equal(fallback.gate.verdict, 'WARN');
   assert.match(fallback.gate.checks.join('\n'), /gate-profile: PROFILE_MISSING/);
 });
+
+test('the final gate allows the pauses the build recorded from edit.json, plus --pause', async () => {
+  const { project, video } = finalProject();
+  fs.mkdirSync(path.join(project, '.capcutctl'));
+  fs.writeFileSync(path.join(project, '.capcutctl', 'build.json'), JSON.stringify({ version: 1, pauses: [12.3] }));
+  let seen = null;
+  const spy = options => { seen = options.pauses; return passing(); };
+  await finalGates({ video }, { projectDir: project, doc: {}, args: { noReview: true, pause: '40,12.3' }, xray: () => ({}), gate: spy });
+  assert.deepEqual(seen, [12.3, 40]);
+});

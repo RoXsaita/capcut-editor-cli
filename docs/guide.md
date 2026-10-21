@@ -34,7 +34,9 @@ Graphics are anchored to **source words**, so a recut rebuilds exactly; an uncha
 unchanged cut is a no-op (a build-placed clip you deleted in CapCut stays deleted: build names it,
 and `--force` re-places it). A deliberate pause at a seam is declared as `"pauses": [12.3]`
 (timeline seconds): the build's seam-silence gate allows it, and declaring one does not rebuild.
-The standalone `capcutctl gate` does not read edit.json; give it the same pause as `--pause 12.3`.
+Build records them in `.capcutctl/build.json`, and the final gate in `export` allows them too
+(plus any `--pause`). The standalone `capcutctl gate` does not read edit.json; give it the same
+pause as `--pause 12.3`.
 Levels you set by hand survive a rebuild: a replaced graphic, pop,
 endcard or seam cue keeps the volume and fade its predecessor had (seam and signature cues when
 they land within 0.25 s of where they were). The loudness step holds the mix at or under the

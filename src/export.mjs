@@ -203,7 +203,11 @@ export async function finalGates(result, { projectDir, doc, args, xray = exportX
   const { profile, file: profileFile, style, warning } = await finalProfile(projectDir, args);
   const xrayDir = typeof args.xray === 'string' ? args.xray : `${result.video.replace(/\.mp4$/i, '')}.xray`;
   result.xray = xray(result.video, projectDir, xrayDir, { speech: true });
-  const pauses = [args.pause].flat().filter(v => v != null).flatMap(v => String(v).split(',')).map(Number).filter(Number.isFinite);
+  // The pauses edit.json declared (build.json records them) plus any --pause given here.
+  const recorded = projectDir ? readBuildState(projectDir).pauses : null;
+  const pauses = [...new Set([...(Array.isArray(recorded) ? recorded : []),
+    ...[args.pause].flat().filter(v => v != null && v !== true).flatMap(v => String(v).split(','))]
+    .map(Number).filter(Number.isFinite))];
   const report = gate ? gate({ doc, projectDir, profile, xrayDir, pauses })
     : foldXray(gateReport(doc, { projectDir, profile, pauses }), xrayDir, projectDir, { profile, draft: doc, pauses });
   report.profile = { name: profile.name, file: profileFile, style };

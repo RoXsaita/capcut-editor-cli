@@ -338,6 +338,9 @@ test('edit.json "pauses" reach the build gate, and declaring one does not rebuil
   const paused = await runBuild(dir, quiet({ pauses: [4.1] }), RUN);
   assert.equal(paused.upToDate, true, 'a pause changes only what the gate allows');
   assert.equal(seam(paused).ok, true);
+  const recorded = () => readJson(path.join(dir, '.capcutctl', 'build.json')).pauses;
+  assert.deepEqual(recorded(), [4.1], 'the no-op still records the pause for the export gate');
   const fresh = await runBuild(dir, quiet({ pauses: [4.1] }), { ...RUN, force: true });
   assert.equal(seam(fresh).ok, true, 'and the full build gate sees it too');
+  assert.deepEqual(recorded(), [4.1]);
 });

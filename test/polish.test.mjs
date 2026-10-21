@@ -783,3 +783,27 @@ test('the meta ledger remembers which transitions polish placed, so a CapCut sav
   restoreMeta(saved, record);
   assert.equal(saved.materials.transitions.every(m => m.capcutctl_polish === true), true);
 });
+
+test('the meta ledger forgets a legacy layout:<name> tag on the face, but still restores plate descs', async () => {
+  const { metaRecord, nextLedger, restoreMeta } = await import('../src/repair.mjs');
+  const legacy = { materials: {}, tracks: [{ type: 'video', segments: [
+    { id: 'FACE', material_id: 'M', desc: 'layout:split-screen' },
+    { id: 'BAR', material_id: 'P', desc: 'layout:seam-bar' }] }] };
+  // a ledger an older version wrote (raw, tag included), and the draft after layout apply cleared it
+  const previous = { version: 1, materials: {}, segments: {
+    FACE: { material_id: 'M', fields: { desc: 'layout:split-screen' } },
+    BAR: { material_id: 'P', fields: { desc: 'layout:seam-bar' } } } };
+  const cleared = structuredClone(legacy);
+  cleared.tracks[0].segments[0].desc = '';
+  cleared.tracks[0].segments[0].capcutctl_layout = 'split-screen';
+  const ledger = nextLedger(previous, [cleared]);
+  assert.equal(ledger.segments.FACE.fields.desc, undefined, 'the cleared tag is not carried forward');
+  assert.equal(metaRecord([legacy]).segments.FACE, undefined, 'a snapshot with the tag does not record it');
+  // even a raw record that still holds it does not put it back; a stripped plate desc is restored
+  const saved = structuredClone(cleared);
+  saved.tracks[0].segments[1].desc = '';
+  const restored = restoreMeta(saved, previous);
+  assert.equal(saved.tracks[0].segments[0].desc, '');
+  assert.equal(saved.tracks[0].segments[1].desc, 'layout:seam-bar');
+  assert.deepEqual(restored, [{ segment: 'BAR', key: 'desc' }]);
+});
