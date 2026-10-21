@@ -563,10 +563,14 @@ def decode_audio(video, rate=48000):
     return np.frombuffer(r.stdout, np.float32).reshape(-1, 2), rate
 
 
-_EBU_LINE = re.compile(r"t:\s*([\d.]+)\s+TARGET.*?M:\s*(-?[\d.]+|-inf)\s+S:\s*(-?[\d.]+|-inf)")
-# The same frame-log line with peak=true carries FTPK: the true peak of that 100 ms frame,
-# one value per channel.
-_EBU_FTPK = re.compile(r"t:\s*([\d.]+)\s+TARGET[^\n]*?FTPK:\s*((?:-?[\d.]+|-inf)(?:\s+(?:-?[\d.]+|-inf))*)\s+dBFS")
+# One ebur128 frame-log line per 100 ms: "t: 1.2  TARGET:-23 LUFS  M: -20.1 S: -21.0 ... FTPK: -3.1 -3.4 dBFS".
+# Each line is read once, so the momentary and true-peak series always line up; a value ffmpeg
+# prints as -inf, inf or nan (versions differ) is None rather than a dropped frame.
+_EBU_FRAME = re.compile(r"t:\s*([\d.]+)\s+TARGET")
+_EBU_M = re.compile(r"\bM:\s*(\S+)")
+_EBU_S = re.compile(r"\bS:\s*(\S+)")
+# With peak=true the same line carries FTPK: the true peak of that 100 ms frame, one value per channel.
+_EBU_FTPK = re.compile(r"FTPK:\s*(.*?)\s*dBFS")
 TRUE_PEAK_FRAME_S = 0.1
 
 
@@ -581,11 +585,18 @@ def loudness(video):
     def grab(pattern):
         m = re.search(pattern, summary, re.S)
         return float(m.group(1)) if m and m.group(1) not in ("-inf", "inf") else None
-    series = [(float(t), _num(m), _num(s)) for t, m, s in _EBU_LINE.findall(text)]
-    ftpk = []
-    for t, vals in _EBU_FTPK.findall(text):
-        peaks = [v for v in (_num(x) for x in vals.split()) if v is not None]
-        ftpk.append((float(t), max(peaks) if peaks else None))
+    series, ftpk = [], []
+    for line in text.splitlines():
+        frame = _EBU_FRAME.search(line)
+        if not frame:
+            continue
+        t = float(frame.group(1))
+        m, s = _EBU_M.search(line), _EBU_S.search(line)
+        series.append((t, _num(m.group(1)) if m else None, _num(s.group(1)) if s else None))
+        pk = _EBU_FTPK.search(line)
+        if pk:
+            peaks = [v for v in (_num(x) for x in pk.group(1).split()) if v is not None]
+            ftpk.append((t, max(peaks) if peaks else None))
     return {
         "integrated_lufs": grab(r"Integrated loudness:\s*I:\s*(-?[\d.]+|-inf)"),
         "lra_lu": grab(r"Loudness range:\s*LRA:\s*(-?[\d.]+)"),
@@ -624,7 +635,11 @@ def overlapping_sound(draft, t0, t1):
 
 
 def _num(v):
-    return None if v in ("-inf", "inf") else float(v)
+    try:
+        x = float(v)
+    except ValueError:
+        return None
+    return x if math.isfinite(x) else None
 
 
 def _db(x):
@@ -1776,7 +1791,8 @@ def cmd_selftest(_args):
         hot = hot_peaks(lo["frame_true_peak"], -1.0)
         check("the hottest true-peak window holds the clipping at 3.0s",
               bool(hot) and hot[0]["t0"] - 0.15 <= 3.0 <= hot[0]["t1"] + 0.15, f"{hot}")
-        check("momentary series is unchanged by the true-peak log", len(lo["momentary"]) == len(lo["frame_true_peak"]) > 0)
+        check("momentary series is unchanged by the true-peak log", len(lo["momentary"]) == len(lo["frame_true_peak"]) > 0,
+              f"{len(lo['momentary'])} momentary, {len(lo['frame_true_peak'])} true-peak frames")
     noted = proxy_notes([{"property": "video.one_or_two_frame_glitch", "verdict": "FAIL", "detail": "1 event(s)"},
                          {"property": "video.stutter", "verdict": "UNKNOWN", "detail": "1 event(s)"},
                          {"property": "export.canvas", "verdict": "FAIL", "detail": "360x640 at 6 fps"},
