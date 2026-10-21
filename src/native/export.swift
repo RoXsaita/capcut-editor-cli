@@ -137,20 +137,32 @@ func scrollHome(_ pixels: Int32, _ layout: [CGRect], attempt: Int = 0) {
     wheel.location = p; wheel.post(tap: .cghidEventTap)
     Thread.sleep(forTimeInterval: 0.6)
 }
-// The card is clicked at its centre (as click() does) only when that point is the card
-// itself or something inside it, never a CapCut sheet or another app's window above it.
+// BEGIN cardHitAccepted: pure, so test/export-hit.test.mjs compiles it on its own.
+// `hit` and `card` are ancestry chains, the element first and its parents after it.
+// CapCut's Qt hit test stops at the window (a sheet when one is open), never the card,
+// so a hit is the card's when it is the card, inside the card, or a container the card
+// sits in. A sheet, another window or a sibling over the card is none of those.
+func cardHitAccepted<T>(hit: [T], card: [T], same: (T, T) -> Bool) -> Bool {
+    guard let h = hit.first, let c = card.first else { return false }
+    return hit.contains { same($0, c) } || card.contains { same($0, h) }
+}
+// END cardHitAccepted
+func ancestry(_ e: AXUIElement) -> [AXUIElement] {
+    var chain = [e]
+    while chain.count < 32, let parent = attr(chain[chain.count - 1], kAXParentAttribute) { chain.append(parent as! AXUIElement) }
+    return chain
+}
+// The card is clicked at its centre (as click() does) only when CapCut owns that point and
+// the hit is the card, inside it or one of its containers: never a CapCut sheet, another
+// CapCut window, or another app's window above it.
 func clickCard(_ card: AXUIElement) {
     guard let r = rect(card) else { fail("EXPORT_CONTROL_GEOMETRY") }
     let p = CGPoint(x: r.midX, y: r.midY)
     let (hit, owner) = capcutHit(p)
-    guard var e = hit else { occluded(p, owner) }
-    var inside = rect(e).map { r.insetBy(dx: -1, dy: -1).contains($0) } ?? false
-    for _ in 0..<12 where !inside {
-        if CFEqual(e, card) { inside = true; break }
-        guard let parent = attr(e, kAXParentAttribute) else { break }
-        e = parent as! AXUIElement
+    guard let h = hit else { occluded(p, owner) }
+    if !cardHitAccepted(hit: ancestry(h), card: ancestry(card), same: { CFEqual($0, $1) }) {
+        occluded(p, "another CapCut element (" + text(h, kAXRoleAttribute) + ")", over: "the project card")
     }
-    if !inside { occluded(p, "another CapCut element (" + text(hit!, kAXRoleAttribute) + ")", over: "the project card") }
     click(card)
 }
 if find(target) == nil {
