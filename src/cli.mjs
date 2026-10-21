@@ -1552,7 +1552,9 @@ export async function main(argv, dependencies = {}) {
       const { resolveMediaPath } = await import('./core.mjs');
       const dir = resolveProject(args.project, root);
       if (isStageDir(dir)) args.forceRunning = true;
-      targets.push(...projectAlphaLeaks(await loadWorking(dir), dir, { resolve: resolveMediaPath }).map(l => l.file));
+      const { leaks, unchecked } = projectAlphaLeaks(await loadWorking(dir), dir, { resolve: resolveMediaPath });
+      for (const u of unchecked) process.stderr.write(`note: not checked: ${path.basename(u.file)} (${u.reason})\n`);
+      targets.push(...leaks.map(l => l.file));
     }
     if (!args.dryRun && !args.check) assertCapcutClosed({ forceRunning: Boolean(args.forceRunning) });
     const { straightAlphaLeak } = await import('./alpha.mjs');
@@ -2215,7 +2217,7 @@ export async function main(argv, dependencies = {}) {
     const { loadProfile, applyStyle } = await import('./profile.mjs');
     const profile = applyStyle(loadProfile({ file: args.profile || null }), args.style || null);
     const { doc, restored } = await loadWorking(projectDir, { withRestored: true });
-    const report = gateReport(doc, { projectDir, profile });
+    const report = gateReport(doc, { projectDir, profile, pauses: pauseList(args.pause) });
     if (args.xray) {
       const { foldXray } = await import('./gate.mjs');
       foldXray(report, args.xray, projectDir, { profile, draft: doc, pauses: pauseList(args.pause) });

@@ -25,6 +25,10 @@ import wave
 from pathlib import Path
 
 SPEECH, SOFT, SIL = -28.0, -45.0, -55.0     # dB thresholds, tuned on this user's cam audio
+# Seam dead air (see lint): incoming-side silence, and tail + head together. SOFT and these two
+# are mirrored in src/stress.mjs (SOFT_DB, SEAM_HEAD_MAX_S, SEAM_TOTAL_MAX_S) for the gate's
+# draft-level seam-silence check; change them together.
+SEAM_HEAD_MAX_S, SEAM_TOTAL_MAX_S = 0.30, 0.45
 FIRST_WORD_CLIP_TOLERANCE_FRAMES = 0.5
 SOURCE_SAMPLE_BYTES = 64 * 1024
 ENERGY_INDEX_VERSION = 2
@@ -449,7 +453,7 @@ def lint(idx, spans, fps=30.0, first_word_starts=None, loud_threshold=SOFT):
         if i+1 < len(spans):
             nl, na, _, _ = _span_fields(spans[i+1])
             tail, head = idx.tail_silence(b), idx.head_silence(na)
-            if head > 0.30:
+            if head > SEAM_HEAD_MAX_S:
                 on = idx.onset_after(na)
                 if on is None:
                     f.append(f"{lbl}->{nl} SEAM  {head:.2f}s dead air on the incoming side "
@@ -457,7 +461,7 @@ def lint(idx, spans, fps=30.0, first_word_starts=None, loud_threshold=SOFT):
                 else:
                     f.append(f"{lbl}->{nl} SEAM  {head:.2f}s dead air on the incoming side "
                              f"(tail {tail:.2f}s) -> move {nl} IN to {on-2*frame:.3f}")
-            elif tail + head > 0.45:
+            elif tail + head > SEAM_TOTAL_MAX_S:
                 f.append(f"{lbl}->{nl} SEAM  {tail+head:.2f}s total stitched pause "
                          f"(tail {tail:.2f} + head {head:.2f})")
     return f

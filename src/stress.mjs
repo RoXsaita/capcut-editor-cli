@@ -23,6 +23,36 @@ const US = s => Math.round(s * 1e6);
 const S = us => (us || 0) / 1e6;
 const r3 = n => Math.round(n * 1000) / 1000;
 
+/**
+ * cut's calibrated seam thresholds (tools/audio_index.py SOFT, SEAM_HEAD_MAX_S, SEAM_TOTAL_MAX_S;
+ * change them together): under SOFT_DB is silence, and a seam is dead air when the incoming
+ * side opens on more than SEAM_HEAD_MAX_S of it, or both sides together hold more than
+ * SEAM_TOTAL_MAX_S. Measured on a cut the creator called flawless (good seams ≤0.28s head,
+ * ≤0.39s total) against the one seam he caught by ear (0.35s head).
+ */
+export const SOFT_DB = -45;
+export const SEAM_HEAD_MAX_S = 0.30;
+export const SEAM_TOTAL_MAX_S = 0.45;
+
+/** Seconds of silence (under `thresh`) starting at media time t, in the energy10 series, capped. */
+export function headSilence(energy, t, { thresh = SOFT_DB, cap = 2.0 } = {}) {
+  const bin = Number(energy.bin) || 0.01, i0 = Math.floor(t / bin + 1e-9);
+  let n = 0;
+  while (n * bin < cap && levelAt(energy, i0 + n) < thresh) n++;
+  return n * bin;
+}
+
+/** Seconds of silence ending at media time t. */
+export function tailSilence(energy, t, { thresh = SOFT_DB, cap = 2.0 } = {}) {
+  const bin = Number(energy.bin) || 0.01, i0 = Math.floor(t / bin + 1e-9);
+  let n = 0;
+  while (n * bin < cap && levelAt(energy, i0 - n - 1) < thresh) n++;
+  return n * bin;
+}
+
+// Outside the series reads as silence, as audio_index.at does.
+const levelAt = (energy, i) => (i >= 0 && i < energy.db.length ? Number(energy.db[i]) : -99);
+
 // Style numbers come from the profile (presets/profile.json → camera.stress).
 export const STRESS_SCALE = profileValue('camera.stress.scale');
 export const STRESS_MARGIN_DB = profileValue('camera.stress.marginDb');

@@ -8,6 +8,7 @@ import { setSpeed } from './pace.mjs';
 import { profileValue } from './profile.mjs';
 import { blurredBackgrounds, isBlurEffect } from './house-rules.mjs';
 import { CAMERA_PROPERTIES } from './add.mjs';
+import { isBrollSegment } from './broll-lint.mjs';
 import { execFileSync } from 'node:child_process';
 import {
   CapcutError, clone, seededId, allSegments, selectSegments, loadProject, loadPreset,
@@ -634,6 +635,67 @@ export function layoutAudit(doc, trackIndex = null, projectDir = null) {
       return { id: s.id, at: Math.round(start / 1000) / 1000, end: Math.round(end / 1000) / 1000,
                brollUnder: covers(start, end), is, want, change };
     });
+}
+
+/** Seconds of an empty split or circle half the gate lets through (a seam's slack is not a stretch). */
+export const SPLIT_GAP_MIN_RUN = 0.3;
+
+/**
+ * Split-screen and circle stretches with nothing behind the face: the other half (or the whole
+ * frame around the avatar) shows the canvas or the room plate. A stretch is filled by picture:
+ * B-roll (isBrollSegment), a still that is not a sig:/layout:/blurred/background plate, or a
+ * rendered full-frame mograph scene; an alpha-0 or hidden clip fills nothing. Returns
+ * [{ id, look, t, end }] in seconds, gaps of at least `minRun`, merged across clip boundaries.
+ * `layout auto` is untouched: this is the gate's question, not the planner's.
+ */
+export function splitGaps(doc, projectDir = null, { minRun = SPLIT_GAP_MIN_RUN } = {}) {
+  let principal;
+  try { principal = principalTrack(doc); } catch { return []; }
+  const masks = new Set((doc.materials?.common_mask || []).map(m => m.id));
+  const videos = new Map((doc.materials?.videos || []).map(m => [m.id, m]));
+  const blurred = new Set(blurredBackgrounds(doc).map(b => b.id));
+  let plateName = null;
+  try { const raw = profileValue('brand.background.plate'); plateName = raw ? path.basename(String(raw)) : null; } catch { /* no profile */ }
+  const footage = footageStillIds(doc, projectDir);
+  const visible = s => Number(s.clip?.alpha ?? 1) > 0 && s.screen_layout_hidden !== true
+    && !(s.common_keyframes || []).some(g => g.property_type === 'KFTypeAlpha' && (g.keyframe_list || []).length
+      && g.keyframe_list.every(k => (k.values || []).every(v => Number(v) <= 0)));
+  const fills = [];
+  for (const { track, trackIndex, segment: s } of allSegments(doc)) {
+    if (track.type !== 'video' || trackIndex === principal.index || track.hidden === true || track.visible === false) continue;
+    if (!s.target_timerange || !visible(s)) continue;
+    const m = videos.get(s.material_id);
+    const desc = String(s.desc || '');
+    const scene = Boolean(m?.capcutctl_mograph?.scene);
+    const still = Boolean(m && m.type && m.type !== 'video') && !desc.startsWith('sig:') && !desc.startsWith('layout:')
+      && !blurred.has(s.id) && !(plateName && path.basename(m.path || '') === plateName);
+    if (!(scene || still || footage.has(s.material_id) || isBrollSegment(s, m))) continue;
+    fills.push([s.target_timerange.start, s.target_timerange.start + s.target_timerange.duration]);
+  }
+  fills.sort((a, b) => a[0] - b[0]);
+  const raw = [];
+  for (const seg of [...(principal.track.segments || [])].sort((a, b) => a.target_timerange.start - b.target_timerange.start)) {
+    const look = currentLook(doc, seg, masks);
+    if (look !== 'split-screen' && look !== 'circle') continue;
+    const a = seg.target_timerange.start, b = a + seg.target_timerange.duration;
+    let cursor = a;
+    for (const [x, y] of fills) {
+      if (y <= cursor || x >= b) continue;
+      if (x > cursor) raw.push({ id: seg.id, look, a: cursor, b: x });
+      cursor = Math.max(cursor, y);
+      if (cursor >= b) break;
+    }
+    if (cursor < b) raw.push({ id: seg.id, look, a: cursor, b });
+  }
+  const merged = [];
+  for (const g of raw) {
+    const last = merged.at(-1);
+    if (last && g.a - last.b <= 20000) { last.b = Math.max(last.b, g.b); if (g.look === 'circle') last.look = 'circle'; continue; }
+    merged.push({ ...g });
+  }
+  const r2 = n => Math.round(n * 100) / 100;
+  return merged.filter(g => (g.b - g.a) / 1e6 >= minRun - 1e-9)
+    .map(g => ({ id: g.id, look: g.look, t: r2(g.a / 1e6), end: r2(g.b / 1e6) }));
 }
 
 function currentLook(doc, segment, masks) {

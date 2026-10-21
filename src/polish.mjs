@@ -130,7 +130,8 @@ function coveringBroll(doc, t, principalIndex, ctx) {
   return found;
 }
 
-function coveringLayout(doc, t, principal, ctx = null) {
+/** The principal clip's look at time t, read from its mask: 'circle', 'split-screen', 'full-face' or 'none'. */
+export function coveringLayout(doc, t, principal, ctx = null) {
   if (!principal) return 'none';
   const us = US(t);
   let masks = ctx?.masks;

@@ -16,12 +16,13 @@ import { spawnSync } from 'node:child_process';
 import { allSegments, contentEndUs, maxSegmentEndUs, resolveMediaPath } from './core.mjs';
 import { projectAlphaLeaks } from './alpha.mjs';
 import { blurredBackgrounds, captionStyleDrift } from './house-rules.mjs';
-import { coldOpen, cutPoints, pictureChanges, principalTrack } from './polish.mjs';
+import { coldOpen, coveringLayout, cutPoints, pictureChanges, principalTrack } from './polish.mjs';
 import { captionContext, captionPlacement, isCaptionTrack } from './captions.mjs';
 import { firstPictureProof, finishScorecard } from './finish.mjs';
 import { safeZoneViolations } from './mograph-geometry.mjs';
 import { loadProfile } from './profile.mjs';
-import { findCircleScenes } from './layouts.mjs';
+import { findCircleScenes, splitGaps } from './layouts.mjs';
+import { SEAM_HEAD_MAX_S, SEAM_TOTAL_MAX_S, headSilence, loadEnergy10, tailSilence } from './stress.mjs';
 
 const S = us => (us || 0) / 1e6;
 const r2 = n => Math.round(n * 100) / 100;
@@ -40,9 +41,14 @@ export function graphicEvents(doc) {
   const videos = new Map((doc.materials?.videos || []).map(m => [m.id, m]));
   const out = [];
   const seen = new Set();
+  const captionTracks = new Map();
+  const captionTrack = track => {
+    if (!captionTracks.has(track)) captionTracks.set(track, isCaptionTrack(doc, track));
+    return captionTracks.get(track);
+  };
   for (const { track, trackIndex: index, segment } of allSegments(doc)) {
     const desc = segment.desc || '';
-    if ((track.name || '').startsWith('captions:')) continue;   // word captions are subtitles, not graphic beats
+    if (captionTrack(track)) continue;   // word captions are subtitles, not graphic beats
     const isGraphic = GRAPHIC.test(desc) || (track.name || '').startsWith('motion:')
       || track.type === 'text' || (principal && index > principal.index && track.type === 'video'
         && !desc.startsWith('layout:') && !(track.name || '').startsWith('sig-') && !/^mograph-\d+$/.test(track.name || '')
@@ -62,26 +68,51 @@ export function graphicEvents(doc) {
   return out.sort((a, b) => a.t - b.t);
 }
 
-/** Camera ramps: every keyframe leg whose value changes, in timeline seconds. */
+/**
+ * The moves one clip's keyframes make, in timeline seconds. Per moving property: keys sorted,
+ * pairs that do not change dropped, and consecutive legs joined into one run while they touch,
+ * move the same way and at a rate within RUN_RATE of the run's own, so a per-frame ramp is one
+ * move (not 30) and a snap followed by a slow drift stays a snap.
+ */
+const RUN_RATE = 3;
+export function moveLegs(segment) {
+  const t0 = startOf(segment), speed = speedOf(segment) || 1;
+  // time_offset is SOURCE time (what CapCut writes and core's recut remaps), so a clip cut
+  // from 187s holds keys near 187s, not near 0.
+  const src0 = S(segment.source_timerange?.start || 0);
+  const at = offset => t0 + (S(offset) - src0) / speed;
+  const runs = [];
+  for (const block of segment.common_keyframes || []) {
+    if (!MOVE_PROPS.has(block.property_type)) continue;
+    const keys = [...(block.keyframe_list || [])].sort((a, b) => a.time_offset - b.time_offset);
+    let run = null;
+    for (let i = 1; i < keys.length; i++) {
+      const a = keys[i - 1], b = keys[i];
+      const va = a.values?.[0] ?? 0, vb = b.values?.[0] ?? 0;
+      const ta = at(a.time_offset), tb = at(b.time_offset);
+      if (Math.abs(va - vb) < 1e-6 || tb <= ta) { if (run) { runs.push(run); run = null; } continue; }
+      const rate = Math.abs(vb - va) / (tb - ta), sign = Math.sign(vb - va);
+      const runRate = run ? Math.abs(run.to - run.from) / (run.end - run.start) : 0;
+      if (run && Math.abs(run.end - ta) < 1e-6 && run.sign === sign
+          && Math.max(rate, runRate) <= RUN_RATE * Math.min(rate, runRate)) {
+        run.end = tb; run.to = vb;
+        continue;
+      }
+      if (run) runs.push(run);
+      run = { start: ta, end: tb, from: va, to: vb, sign, property: block.property_type };
+    }
+    if (run) runs.push(run);
+  }
+  return runs.map(({ sign: _sign, ...r }) => r).sort((x, y) => x.start - y.start);
+}
+
+/** Camera moves: every keyframe run whose value changes, in timeline seconds. */
 export function cameraMoves(doc) {
   const out = [];
   for (const { track, segment } of allSegments(doc)) {
     if (track.type !== 'video') continue;
     if (GRAPHIC.test(segment.desc || '')) continue;
-    const t0 = startOf(segment), speed = speedOf(segment) || 1;
-    // time_offset is SOURCE time (what CapCut writes and core's recut remaps), so a clip cut
-    // from 187s holds keys near 187s, not near 0.
-    const src0 = S(segment.source_timerange?.start || 0);
-    const at = offset => r2(t0 + (S(offset) - src0) / speed);
-    for (const block of segment.common_keyframes || []) {
-      if (!MOVE_PROPS.has(block.property_type)) continue;
-      const keys = [...(block.keyframe_list || [])].sort((a, b) => a.time_offset - b.time_offset);
-      for (let i = 1; i < keys.length; i++) {
-        const a = keys[i - 1], b = keys[i];
-        if (Math.abs((a.values?.[0] ?? 0) - (b.values?.[0] ?? 0)) < 1e-6) continue;
-        out.push({ t: at(a.time_offset), end: at(b.time_offset), property: block.property_type });
-      }
-    }
+    for (const run of moveLegs(segment)) out.push({ t: r2(run.start), end: r2(run.end), property: run.property });
   }
   // Scale + position of one move are one move.
   const merged = [];
@@ -124,23 +155,69 @@ function maxGap(times, from, to) {
   return worst;
 }
 
+/** Every stretch in [from, to] with no event for longer than `limit`, worst first. */
+export function gapsOver(times, from, to, limit) {
+  const pts = [from, ...times.filter(t => t > from && t < to), to].sort((a, b) => a - b);
+  const out = [];
+  for (let i = 1; i < pts.length; i++) {
+    const gap = pts[i] - pts[i - 1];
+    if (gap > limit + 1e-9) out.push({ gap: r2(gap), from: r2(pts[i - 1]), to: r2(pts[i]) });
+  }
+  return out.sort((a, b) => b.gap - a.gap || a.from - b.from);
+}
+
+/** The white ring sits this much wider than the circle mask it frames (presets/layouts.json). */
+const RING_PAD = 1.25;
+
+/**
+ * The avatar of a circle face on the canvas, in px from the top-left: centre from the clip's
+ * transform, radius from the circle mask's width × the clip scale, padded out to the white ring.
+ */
+export function circleBox(doc, face) {
+  const W = Number(doc.canvas_config?.width) || 1080, H = Number(doc.canvas_config?.height) || 1920;
+  const media = (doc.materials?.videos || []).find(m => m.id === face.material_id) || {};
+  const mw = Number(media.width) || W, mh = Number(media.height) || H;
+  const fit = Math.min(W / mw, H / mh);
+  const masks = new Map((doc.materials?.common_mask || []).map(m => [m.id, m]));
+  const mask = (face.extra_material_refs || []).map(id => masks.get(id)).find(Boolean);
+  const maskWidth = Number(mask?.config?.width) || 1;
+  const scale = face.clip?.scale?.x ?? 1;
+  const r = (maskWidth * mw * fit * scale) / 2 * RING_PAD;
+  const cx = W / 2 + (face.clip?.transform?.x ?? 0) * W / 2;
+  const cy = H / 2 - (face.clip?.transform?.y ?? 0) * H / 2;
+  return { x0: Math.round(cx - r), x1: Math.round(cx + r), y0: Math.round(cy - r), y1: Math.round(cy + r) };
+}
+
 /**
  * Captions that sit on the face. Captions are native text, so qa cannot draw them and only a
  * watch in CapCut shows them; this is the geometric version. Full face: the head fills about
  * 10–75% of the clip height, so a caption belongs in the bottom band (position ≤ ~22). Split
- * with the face below the seam: the caption rides the seam, never inside the face half.
+ * with the face below the seam: the caption rides the seam, never inside the face half. Circle:
+ * the caption keeps clear of the avatar and its ring. Every caption layer counts, whoever wrote it.
  */
 export function captionsOnFace(doc) {
   const context = captionContext(doc);
   if (!context) return [];
+  let principal = null;
+  try { principal = principalTrack(doc); } catch { return []; }
+  const H = Number(doc.canvas_config?.height) || 1920;
   const out = [];
-  for (const { track, segment } of allSegments(doc)) {
-    if (!(track.name || '').startsWith('captions:')) continue;
-    const place = captionPlacement(doc, segment, context);
-    if (!place || place.covered || !place.onFace) continue;
-    out.push({ t: r2(startOf(segment)), y: place.y, layout: place.layout });
+  for (const track of doc.tracks || []) {
+    if (!isCaptionTrack(doc, track)) continue;
+    for (const segment of track.segments || []) {
+      const place = captionPlacement(doc, segment, context);
+      if (!place || place.covered) continue;
+      if (coveringLayout(doc, place.t, principal) === 'circle') {
+        const box = circleBox(doc, place.face);
+        const cy = H / 2 - place.y * H / 2;
+        if (cy > box.y0 && cy < box.y1) out.push({ t: r2(startOf(segment)), y: place.y, layout: 'circle', box });
+        continue;
+      }
+      if (!place.onFace) continue;
+      out.push({ t: r2(startOf(segment)), y: place.y, layout: place.layout });
+    }
   }
-  return out;
+  return out.sort((a, b) => a.t - b.t);
 }
 
 /**
@@ -196,19 +273,78 @@ export function openingSnaps(doc, { within = 0.6, snap = 0.15 } = {}) {
   const out = [];
   for (const { track, segment } of allSegments(doc)) {
     if (track.type !== 'video' || GRAPHIC.test(segment.desc || '')) continue;
-    const t0 = startOf(segment), speed = speedOf(segment) || 1, src0 = S(segment.source_timerange?.start || 0);
-    const at = offset => t0 + (S(offset) - src0) / speed;
-    for (const block of segment.common_keyframes || []) {
-      if (!MOVE_PROPS.has(block.property_type)) continue;
-      const keys = [...(block.keyframe_list || [])].sort((a, b) => a.time_offset - b.time_offset);
-      for (let i = 1; i < keys.length; i++) {
-        const a = at(keys[i - 1].time_offset), b = at(keys[i].time_offset);
-        if (Math.abs((keys[i - 1].values?.[0] ?? 0) - (keys[i].values?.[0] ?? 0)) < 1e-3) continue;
-        if (a - t0 > 1e-3 && a - t0 < within && b - a < snap) { out.push({ t: r2(a), track: track.name || '' }); break; }
+    const t0 = startOf(segment);
+    // A run keyed at the first frame, or from before the window into it, still shows on screen
+    // after the cut; only a run that has finished by the first frame is invisible.
+    for (const run of moveLegs(segment)) {
+      if (Math.abs(run.to - run.from) < 1e-3) continue;
+      if (run.end - run.start <= snap + 1e-3 && run.end > t0 + 1e-3 && run.start < t0 + within) {
+        out.push({ t: r2(Math.max(run.start, t0)), track: track.name || '' });
+        break;
       }
     }
   }
   return [...new Map(out.map(o => [`${o.track}:${o.t}`, o])).values()].sort((x, y) => x.t - y.t);
+}
+
+/**
+ * Dead air at the A-roll seams, from the same energy index and thresholds `cut` lints with
+ * (stress.mjs SOFT_DB / SEAM_*): for each pair of adjacent principal clips, the silence that ends
+ * clip A and the silence that opens clip B, in timeline seconds (÷ speed), plus any empty gap
+ * between them. Dead air when the head is over SEAM_HEAD_MAX_S or the whole pause is over
+ * SEAM_TOTAL_MAX_S, unless a declared pause (timeline seconds) falls inside it. A clip split in
+ * place (same media, contiguous source and timeline) is not a seam. `energyFor(material)` is
+ * injectable; by default it reads the index `cut` wrote. Returns { seams, findings, unchecked }.
+ */
+export function seamSilences(doc, { projectDir = null, pauses = [], fps = 30, energyFor = null } = {}) {
+  let principal = null;
+  try { principal = principalTrack(doc); } catch { return { seams: 0, findings: [], unchecked: [] }; }
+  const videos = new Map((doc.materials?.videos || []).map(m => [m.id, m]));
+  const cache = new Map();
+  const energy = material => {
+    if (!cache.has(material.id)) {
+      let e = null;
+      try {
+        e = energyFor ? energyFor(material)
+          : loadEnergy10(resolveMediaPath(material.path, projectDir) || material.path, { material, projectDir });
+      } catch { e = null; }
+      cache.set(material.id, Array.isArray(e?.db) && e.db.length ? e : null);
+    }
+    return cache.get(material.id);
+  };
+  const frameUs = 1e6 / (fps || 30);
+  const clips = (principal.track.segments || [])
+    .filter(s => s.target_timerange && s.source_timerange && videos.get(s.material_id)?.type !== 'photo'
+      && !(s.desc || '').startsWith('layout:'))
+    .sort((a, b) => a.target_timerange.start - b.target_timerange.start);
+  const findings = [], unchecked = new Set();
+  let seams = 0;
+  for (let i = 1; i < clips.length; i++) {
+    const A = clips[i - 1], B = clips[i];
+    const aEndUs = A.target_timerange.start + A.target_timerange.duration;
+    const gapUs = Math.max(0, B.target_timerange.start - aEndUs);
+    const aSrcEnd = A.source_timerange.start + A.source_timerange.duration;
+    if (A.material_id === B.material_id && gapUs <= frameUs
+        && Math.abs(B.source_timerange.start - aSrcEnd) <= frameUs) continue;   // a split, not a seam
+    seams++;
+    const ma = videos.get(A.material_id), mb = videos.get(B.material_id);
+    const ea = ma ? energy(ma) : null, eb = mb ? energy(mb) : null;
+    if (!ea || !eb) {
+      for (const [m, e] of [[ma, ea], [mb, eb]]) if (!e) unchecked.add(path.basename(m?.path || A.material_id));
+      continue;
+    }
+    const tail = tailSilence(ea, S(aSrcEnd)) / (speedOf(A) || 1);
+    const head = headSilence(eb, S(B.source_timerange.start)) / (speedOf(B) || 1);
+    const at = S(aEndUs), gap = S(gapUs), total = tail + gap + head;
+    if (!(head > SEAM_HEAD_MAX_S + 1e-9 || total > SEAM_TOTAL_MAX_S + 1e-9)) continue;
+    const from = at - tail, to = at + gap + head;
+    if (pauses.some(p => p >= from - 0.1 && p <= to + 0.1)) continue;
+    // Ripple out the silence but keep ~0.1s of it beside the words on each side.
+    const cutFrom = r2(at - Math.max(0, tail - 0.1)), cutTo = r2(at + gap + Math.max(0, head - 0.1));
+    findings.push({ t: r2(at), tail: r2(tail), head: r2(head), gap: r2(gap), total: r2(total),
+      ...(cutTo > cutFrom ? { ripple: { from: cutFrom, to: cutTo } } : {}) });
+  }
+  return { seams, findings, unchecked: [...unchecked] };
 }
 
 /** Caption layers with words on them, whoever wrote them (captions:*, SRT, CapCut auto-captions). */
@@ -251,12 +387,13 @@ export function draftTailSeconds(doc) {
   return S(Math.max(maxSegmentEndUs(doc), Number.isFinite(doc?.duration) ? doc.duration : 0));
 }
 
-export function gateReport(doc, { projectDir = null, profile = loadProfile() } = {}) {
+export function gateReport(doc, { projectDir = null, profile = loadProfile(), pauses = [], energyFor = null } = {}) {
   const d = profile.density;
   const fps = profile.canvas.fps;
   const end = S(contentEndUs(doc, projectDir));
   const checks = [];
-  const add = (id, level, ok, message, value = null, target = null) => checks.push({ id, level, ok, message, value, target });
+  const add = (id, level, ok, message, value = null, target = null, extra = null) =>
+    checks.push({ id, level, ok, message, value, target, ...(extra || {}) });
 
   const graphics = graphicEvents(doc).filter(g => g.t < end);
   const moves = cameraMoves(doc).filter(m => m.t < end);
@@ -277,8 +414,16 @@ export function gateReport(doc, { projectDir = null, profile = loadProfile() } =
   add('first-picture', 'FAIL', first.ok, first.ok ? 'first picture is proof' : 'first 5s are full-face with no screen');
 
   // Rhythm.
+  // Every stretch over the limit, not just the worst: an agent that fixes one should not have
+  // to re-run the gate to find the next. Fix them with a punch or a graphic on the spoken beat.
   const stat = maxGap(visual, 0, end);
-  add('max-static', 'FAIL', stat.gap <= d.maxStatic, `longest stretch without a visual change: ${stat.gap}s (${stat.from}–${stat.to}s)`, stat.gap, d.maxStatic);
+  const stretches = gapsOver(visual, 0, end, d.maxStatic);
+  const listed = stretches.slice(0, 6).map(g => `${g.gap}s (${g.from}–${g.to}s)`).join(', ')
+    + (stretches.length > 6 ? `, +${stretches.length - 6} more` : '');
+  add('max-static', 'FAIL', stat.gap <= d.maxStatic, stretches.length
+    ? `${stretches.length} stretch(es) without a visual change over ${d.maxStatic}s: ${listed}`
+    : `longest stretch without a visual change: ${stat.gap}s (${stat.from}–${stat.to}s)`, stat.gap, d.maxStatic,
+  stretches.length ? { stretches } : null);
   const opening = maxGap(visual, 0, Math.min(end, d.openingSeconds));
   add('opening-density', 'WARN', opening.gap <= d.openingMaxGap, `opening ${d.openingSeconds}s: longest gap ${opening.gap}s (${opening.from}–${opening.to}s)`, opening.gap, d.openingMaxGap);
   const droughts = [];
@@ -329,8 +474,11 @@ export function gateReport(doc, { projectDir = null, profile = loadProfile() } =
   const logos = graphics.filter(g => g.kind === 'logo').map(g => g.t);
   const chipClash = graphics.filter(g => g.template === 'brand-chip' && logos.some(t => Math.abs(t - g.t) <= d.brandChipLogoGap));
   const onFace = captionsOnFace(doc).filter(c => c.t < end);
+  const faceFix = onFace.some(c => c.layout !== 'circle')
+    ? 'full face → position 20, split → the seam (50) — capcutctl captions --reposition --project NAME' : '';
+  const circleFix = onFace.some(c => c.layout === 'circle') ? 'circle → keep clear of the avatar' : '';
   add('caption-face', 'FAIL', !onFace.length, onFace.length
-    ? `${onFace.length} caption(s) on the face, first at ${onFace.slice(0, 4).map(c => `${c.t}s (${c.layout}, y=${c.y})`).join(', ')}: full face → position 20, split → the seam (50) — capcutctl captions --reposition --project NAME`
+    ? `${onFace.length} caption(s) on the face, first at ${onFace.slice(0, 4).map(c => `${c.t}s (${c.layout}, y=${c.y})`).join(', ')}: ${[circleFix, faceFix].filter(Boolean).join('; ')}`
     : 'captions clear of the face');
   const snaps = openingSnaps(doc).filter(x => x.t < end);
   add('opening-snap', 'FAIL', !snaps.length, snaps.length
@@ -346,6 +494,11 @@ export function gateReport(doc, { projectDir = null, profile = loadProfile() } =
       + 'nothing under them but the canvas — set brand.background.plate in your profile, then capcutctl layout background '
       + '--project NAME (circles) or --at SECONDS (a card)'
     : 'every card and circle has the room plate under it');
+  const empty = splitGaps(doc, projectDir).filter(g => g.t < end);
+  add('layout-filled', 'FAIL', !empty.length, empty.length
+    ? `${empty.length} split/circle stretch(es) with nothing behind the face: ${empty.slice(0, 6).map(g => `${g.t}–${g.end}s (${g.look})`).join(', ')}${empty.length > 6 ? `, +${empty.length - 6} more` : ''}; `
+      + 'fill it (layout broll) or return to full face'
+    : 'every split and circle has picture behind the face');
   const drift = captionStyleDrift(doc);
   add('caption-style', 'FAIL', !drift.off.length, drift.off.length
     ? `${drift.off.length} caption word(s) not in the house caption style, first ${drift.off.slice(0, 4).map(w => `"${w.text}"@${w.t}s`).join(', ')}: every word takes ${drift.house} — capcutctl captions --restyle --project NAME`
@@ -383,40 +536,63 @@ export function gateReport(doc, { projectDir = null, profile = loadProfile() } =
   add('seam-variety', 'FAIL', names.length < 4 || share <= profile.seams.maxShare,
     top ? `${top[0]} is ${Math.round(share * 100)}% of ${names.length} transitions` : 'no transitions', r2(share), profile.seams.maxShare);
 
-  // Alpha overlays must be premultiplied: CapCut adds a straight file's hidden colour to the frame.
-  if (projectDir) {
-    let leaks = null;
-    try { leaks = projectAlphaLeaks(doc, projectDir, { resolve: resolveMediaPath }); } catch { leaks = null; }
-    if (leaks) add('alpha-premultiplied', 'FAIL', !leaks.length, leaks.length
-      ? `${leaks.length} overlay(s) carry straight alpha CapCut paints as a haze: ${leaks.map(l => path.basename(l.file)).join(', ')} — capcutctl alpha --project NAME`
-      : 'alpha overlays premultiplied');
+  // Dead air at the A-roll seams: measured before export, from cut's own energy index.
+  const silent = seamSilences(doc, { projectDir, pauses, fps, energyFor });
+  const deadAir = silent.findings.filter(f => f.t < end);
+  if (deadAir.length) {
+    add('seam-silence', 'FAIL', false, `${deadAir.length} seam(s) with dead air: ${deadAir.slice(0, 4).map(f => `${f.t}s `
+      + `(${f.total}s: tail ${f.tail} + ${f.gap ? `gap ${f.gap} + ` : ''}head ${f.head})${f.ripple ? ` → ripple --from ${f.ripple.from} --to ${f.ripple.to}` : ''}`).join('; ')}`
+      + `${deadAir.length > 4 ? `; +${deadAir.length - 4} more` : ''}: tighten the seam, or declare a deliberate pause with --pause SECONDS`
+      + `${silent.unchecked.length ? `; not checked: ${silent.unchecked.join(', ')}` : ''}`);
+  } else if (silent.unchecked.length) {
+    add('seam-silence', 'WARN', false, `not checked: no energy index for ${silent.unchecked.join(', ')} (run cut, which writes it)`);
+  } else {
+    add('seam-silence', 'FAIL', true, silent.seams ? `no dead air at ${silent.seams} seam(s)` : 'no seams');
   }
 
-  // Things the gate cannot see.
+  // Alpha overlays must be premultiplied: CapCut adds a straight file's hidden colour to the frame.
+  // The row is always there: an overlay the gate could not read is named, never passed.
+  const usedIds = new Set((doc.tracks || []).flatMap(t => (t.segments || []).map(s => s.material_id)));
+  const overlays = (doc.materials?.videos || []).some(m => usedIds.has(m.id) && /\.(mov|mxf)$/i.test(m.path || ''));
+  if (!overlays) add('alpha-premultiplied', 'FAIL', true, 'no alpha overlays');
+  else if (!projectDir) add('alpha-premultiplied', 'WARN', false, 'not checked: no project directory to resolve the overlays');
+  else {
+    let found = null, reason = null;
+    try { found = projectAlphaLeaks(doc, projectDir, { resolve: resolveMediaPath }); } catch (error) { reason = String(error.message || error).split('\n')[0]; }
+    if (!found) add('alpha-premultiplied', 'WARN', false, `not checked: ${reason}`);
+    else if (found.leaks.length) {
+      const skipped = found.unchecked.length ? `; not checked: ${found.unchecked.map(u => path.basename(u.file)).join(', ')}` : '';
+      add('alpha-premultiplied', 'FAIL', false, `${found.leaks.length} overlay(s) carry straight alpha CapCut paints as a haze: ${found.leaks.map(l => path.basename(l.file)).join(', ')} — capcutctl alpha --project NAME${skipped}`);
+    } else if (found.unchecked.length) {
+      add('alpha-premultiplied', 'WARN', false, `not checked: ${found.unchecked.map(u => `${path.basename(u.file)} (${u.reason})`).join(', ')}`);
+    } else add('alpha-premultiplied', 'FAIL', true, 'alpha overlays premultiplied');
+  }
+
+  // Things the gate cannot see. These two are true of nearly every draft, so they are NOTEs
+  // (one line in the hand-off), not WARNs that bury the real ones; an export X-ray clears them.
   const unverified = graphics.filter(g => g.kind === 'mograph' && !g.importVerified);
-  add('mograph-import', 'WARN', !unverified.length, unverified.length
+  add('mograph-import', 'NOTE', !unverified.length, unverified.length
     ? `${unverified.length} rendered graphic(s) not yet import-verified on this CapCut build (docs/mograph.md)` : 'rendered graphics verified or absent');
   const unseen = graphics.filter(g => g.kind === 'text' || g.kind === 'endcard' || g.desc.startsWith('motion:')).length;
-  add('unseen-layers', 'WARN', unseen === 0, unseen ? `unseen: ${unseen} native text/compound layer(s) — qa cannot render them; check in CapCut` : 'qa can render every graphic');
+  add('unseen-layers', 'NOTE', unseen === 0, unseen ? `unseen: ${unseen} native text/compound layer(s) — qa cannot render them; check in CapCut` : 'qa can render every graphic');
   add('b-roll-volume', 'WARN', !score.brollHot.length, score.brollHot.length ? `B-roll at full volume at ${score.brollHot.map(b => `${b.at}s`).join(', ')}` : 'B-roll audio is under the voice');
   add('music', 'WARN', score.music.present, score.music.present ? 'music bed present' : 'no music bed');
   if (score.crispness?.warnings?.length) add('crispness', 'WARN', false, `upscaled past ${score.crispness.warnAbove}×: ${score.crispness.warnings.map(w => `${w.at}s`).join(', ')}`);
   if (score.brollLint?.findings?.length) add('b-roll-lint', 'WARN', false, `${score.brollLint.findings.length} B-roll seam finding(s): run finish for details`);
 
-  const failed = checks.filter(c => !c.ok && c.level === 'FAIL');
-  const warned = checks.filter(c => !c.ok && c.level === 'WARN');
-  return {
-    verdict: failed.length ? 'FAIL' : warned.length ? 'WARN' : 'PASS',
+  return finaliseReport({
+    verdict: 'PASS',
     profile: profile.name,
     duration: r2(end),
-    failed: failed.map(c => c.id),
-    warned: warned.map(c => c.id),
+    failed: [],
+    warned: [],
+    noted: [],
     checks,
     metrics: { cuts: cuts.length, pictureChanges: changes.length, cameraMoves: moves.length, graphics: graphics.length,
       sfx: sfx.length, transitions: names.length, visualEvents: visual.length,
       eventsPer10s: end ? r2(visual.length / end * 10) : 0 },
     scope: 'Draft structure only. The gate cannot see pixels or hear the mix: check qa frames and a normal-speed watch with sound.',
-  };
+  });
 }
 
 /**
@@ -452,6 +628,9 @@ export function voiceEnvelope(video) {
   return { step: 0.01, db };
 }
 
+// The first word: 250 ms, 80% of it within 12 dB of the speech level.
+const ONSET_S = 0.25, ONSET_SHARE = 0.8, ONSET_DB = 12;
+
 /**
  * Speech timing on the export: the first word by firstWordBy, no stretch of silence over
  * maxSpeechGap inside the speech, and no word still sounding at the cut into the ender. The
@@ -471,9 +650,16 @@ export function speechGates(speech, { fin = {}, stop, enderAt = null, pauses = [
   const voiced = db.map(v => v >= level - 20);
   const last = words.at(-1);
   const end = at(stop);
-  // Onset: the first 80 ms of continuous voice.
+  // Onset: the first sustained voice, a loud step that starts ONSET_S where at least
+  // ONSET_SHARE of the steps are within ONSET_DB of the speech level. An opening whoosh (0.1s)
+  // or a music bed (well under the voice) is not the first word; `voiced` stays for gaps and the cut.
+  const loud = db.map(v => v >= level - ONSET_DB);
+  const span = Math.max(1, Math.round(ONSET_S / step));
   let onset = null;
-  for (let i = 0, run = 0; i < end; i++) { run = voiced[i] ? run + 1 : 0; if (run >= 8) { onset = (i - 7) * step; break; } }
+  for (let i = 0, count = loud.slice(0, span).filter(Boolean).length; i < end; i++) {
+    if (i > 0) count += (loud[i + span - 1] ? 1 : 0) - (loud[i - 1] ? 1 : 0);
+    if (loud[i] && count >= ONSET_SHARE * span) { onset = i * step; break; }
+  }
   let lastVoiced = null;
   for (let i = end - 1; i >= 0; i--) if (voiced[i]) { lastVoiced = i; break; }
   const gaps = [];
@@ -602,6 +788,14 @@ export function foldXray(report, xrayDir, projectDir, { profile = null, draft = 
     const video = doc.export?.path;
     const envelope = video && fs.existsSync(video) ? voiceEnvelope(video) : null;
     report.checks.push(...exportGates(doc, speech, { profile, enderAt: ender?.t ?? null, pauses, envelope }));
+  }
+  // The X-ray looked at the export's pixels: what the draft-only gate could not see has been seen.
+  const otherDraft = report.checks.some(c => c.id === 'xray-draft' && !c.ok && c.level === 'FAIL');
+  for (const c of otherDraft ? [] : report.checks) {
+    if ((c.id === 'mograph-import' || c.id === 'unseen-layers') && !c.ok) {
+      c.ok = true;
+      c.message = `${c.message} — seen in the export X-ray`;
+    }
   }
   report.xray = { dir: path.resolve(xrayDir), export: doc.export?.path, sha256: doc.export?.sha256, notChecked };
   report.scope = `Draft structure plus the export X-ray (every frame and sample measured). Not checked: ${notChecked.join(', ') || 'nothing'}.`;

@@ -205,7 +205,7 @@ export async function finalGates(result, { projectDir, doc, args, xray = exportX
   result.xray = xray(result.video, projectDir, xrayDir, { speech: true });
   const pauses = [args.pause].flat().filter(v => v != null).flatMap(v => String(v).split(',')).map(Number).filter(Number.isFinite);
   const report = gate ? gate({ doc, projectDir, profile, xrayDir, pauses })
-    : foldXray(gateReport(doc, { projectDir, profile }), xrayDir, projectDir, { profile, draft: doc, pauses });
+    : foldXray(gateReport(doc, { projectDir, profile, pauses }), xrayDir, projectDir, { profile, draft: doc, pauses });
   report.profile = { name: profile.name, file: profileFile, style };
   if (warning) report.checks.push({ id: 'gate-profile', level: 'WARN', ok: false, message: warning, value: null, target: null });
   noteRestoredMeta(report, metaRestored);
