@@ -20,6 +20,28 @@ macOS · CapCut Desktop · Node 20+ · MIT · unofficial, not affiliated with By
 
 <!-- Sections below are additive and self-contained so a rebase can resolve them one at a time. -->
 
+## What the agent runs
+
+Real output from the same project, replayed. Nothing here is mocked: each clip is the command's
+own text, with passing gate checks collapsed into one line.
+
+**`build` turns a cut into an edit, and it is still a CapCut project.** The timeline right
+after the A-roll cut, then after the build: proof shots, split and full-frame scenes, graphics,
+sound, music and 113 caption clips, each on its own native track.
+
+<p align="center"><img src="site/media/cli-timeline.gif" width="820" alt="Terminal: capcutctl timeline on the project after the A-roll cut shows a single content track of face clips. After the build, the same command shows tracks for proof, content, split and full-frame scenes, graphics, sound effects, motion graphics, music and captions."></p>
+
+**`gate` refuses to call it done.** On the cut alone it fails, and every FAIL names what is
+missing (the hook, the proof, captions, the ending) and how to fix it. Exit 1 stops the agent.
+
+<p align="center"><img src="site/media/cli-gate.gif" width="820" alt="Terminal: capcutctl gate prints gate: FAIL with FAIL lines for hook, proof, first-picture, max-static, captions and ending, warn lines for opening density, graphic cadence, a parked tail and no music, and exit 1."></p>
+
+**`xray` measures the real export, every frame and every sample.** On the posted short it
+passes loudness (−14.3 LUFS), freezes and flashes, and flags a −0.6 dBTP true peak and three
+short black runs to check frame by frame. Its sheets show the exact frames, numbered.
+
+<p align="center"><img src="site/media/cli-xray.gif" width="820" alt="Terminal: capcutctl xray scan on the posted export lists pass verdicts for the frame ledger, white flash, glitches, stutter, freezes, loudness, clipping and silence, FAIL for black frames and true peak, and look for audio clicks. It ends on a sheet of twelve exact frames from the short, each labelled with its frame number and time."></p>
+
 ## See it on a real video
 
 This short was edited end to end by Claude Code agents with `capcutctl` and the
