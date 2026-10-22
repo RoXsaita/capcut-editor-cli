@@ -136,7 +136,8 @@ export async function exportProject(projectDir, args) {
   fs.mkdirSync(path.dirname(out), { recursive: true });
   // ponytail: CapCut has no public headless renderer; a bounded native UI bridge uses its real engine.
   const stageName = `capcutctl-${randomUUID()}`;
-  const staged = run('swift', [path.join(HERE, 'native', 'export.swift'), path.basename(projectDir), stageName]);
+  // Finding an older project scrolls CapCut Home step by step, so allow more than a minute.
+  const staged = run('swift', [path.join(HERE, 'native', 'export.swift'), path.basename(projectDir), stageName], 300000);
   if (path.basename(staged) !== `${stageName}.mp4` || !path.isAbsolute(staged)) fail('EXPORT_BAD_STAGE_PATH');
   const probe = await waitForStagedExport(staged, expected);
   run('ffmpeg', ['-v', 'error', '-i', staged, '-f', 'null', '-'], 180000);

@@ -382,12 +382,16 @@ proof (`diff --allow`), and a creative log that outlives a session (`notes`).
 ## Native export bridge (macOS)
 
 `export` uses CapCut's real renderer through native accessibility controls and keyboard
-actions; it is not headless. CapCut must be open on Home with the project visible, or in
-the requested project. Swift, macOS Accessibility/Automation permission, and brief app
+actions; it is not headless. CapCut must be open on Home or in the requested project. From
+Home it waits for the project cards, then scrolls the page until the card with the exact
+title is fully on screen; `EXPORT_PROJECT_NOT_ON_HOME` means no card has that title, and
+`EXPORT_HOME_SCROLL_STUCK` means Home has more cards but did not scroll. It clicks only
+when CapCut owns the point under the card; anything over it stops with
+`EXPORT_POINT_OCCLUDED`. Swift, macOS Accessibility/Automation permission, and brief app
 focus are required. The command uses the current native export settings, verifies the
 project, stages a unique MP4 in CapCut's configured export folder, checks duration and
-decoding, then publishes the requested file. Existing output needs `--overwrite`.
-Unknown controls or lost focus stop with a named error; no blind click loop is attempted.
+decoding, then publishes the requested file. Existing output needs `--overwrite`. Unknown
+controls or lost focus stop with a named error; no blind click loop is attempted.
 `export-grid` uses ffmpeg and the declared Python runtime to create labelled frames from
 an existing video. Grids verify picture; review relevant normal-speed sections for sound
 and motion. A new export requires an explicit user request.
