@@ -21,7 +21,11 @@ test('export finds the Home card through the pure page geometry', () => {
 test('a visible first-row card is picked with no scroll; the wheel lands on the page, never beside its bar', { skip: !swiftc && 'swiftc not installed' }, () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-home-'));
   const main = path.join(dir, 'main.swift');
-  fs.writeFileSync(main, `import CoreGraphics
+  fs.writeFileSync(main, `#if canImport(CoreGraphics)
+import CoreGraphics
+#else
+import Foundation
+#endif
 ${block}
 let window = CGRect(x: 0, y: 33, width: 1728, height: 999)
 let bars = [CGRect(x: 186, y: 183, width: 10, height: 681), CGRect(x: 1684, y: 77, width: 10, height: 947)]
