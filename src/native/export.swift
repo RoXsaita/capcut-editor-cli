@@ -78,15 +78,37 @@ func homeWindow() -> CGRect? {
     guard let w = window else { return nil }
     return rect(w as! AXUIElement)
 }
-// One walk of the tree: the card that holds the exact title, only when it lies fully
-// inside the window, and where every card sits (unchanged after a scroll = page end).
-func homeState() -> (card: AXUIElement?, layout: [CGRect]) {
-    let nodes = all(root), cards = homeCards(nodes), layout = cards.compactMap(rect)
+// BEGIN homeGeometry: pure, so test/export-home.test.mjs compiles it on its own.
+// The page is the part of the window left of its vertical scroll bar and level with it
+// (CapCut's left sidebar has a shorter bar of its own). Without a bar it is the window.
+func homePage(window w: CGRect, bars: [CGRect]) -> CGRect {
+    guard let bar = bars.filter({ $0.minX > w.midX }).max(by: { $0.height < $1.height }) else { return w }
+    return CGRect(x: w.minX, y: max(w.minY, bar.minY), width: bar.minX - w.minX, height: min(w.maxY, bar.maxY) - max(w.minY, bar.minY))
+}
+// The card that holds the title, only when the title and the card's centre (where it is
+// clicked) are on the page. CapCut lists cards just above or below the page too.
+func pickCard(cards: [CGRect], title: CGRect, page: CGRect) -> Int? {
+    guard page.contains(title) else { return nil }
+    let point = CGPoint(x: title.midX, y: title.midY)
+    return cards.firstIndex { $0.contains(point) && page.contains(CGPoint(x: $0.midX, y: $0.midY)) }
+}
+// A wheel anywhere on the page scrolls it, over a card or not; beside the scroll bar,
+// outside the page, it does nothing.
+func wheelPoint(page: CGRect) -> CGPoint { CGPoint(x: page.midX, y: page.midY) }
+// END homeGeometry
+func pageRect() -> CGRect? {
+    guard let w = homeWindow() else { return nil }
+    return homePage(window: w, bars: all(root).filter { text($0, kAXRoleAttribute) == "AXScrollBar" }.compactMap(rect))
+}
+// One walk of the tree: the target's card when it can be clicked, how many titles are
+// listed, and where every card sits (unchanged after a scroll = page end).
+func homeState() -> (card: AXUIElement?, layout: [CGRect], titles: Int) {
+    let nodes = all(root), cards = homeCards(nodes), layout = cards.map { rect($0) ?? .null }
+    let titles = nodes.filter { text($0, kAXDescriptionAttribute).hasPrefix("HomePageDraftTitle:") }.count
     guard let title = nodes.first(where: { text($0, kAXTitleAttribute) == target || text($0, kAXDescriptionAttribute) == target }),
-          let tr = rect(title), let window = homeWindow() else { return (nil, layout) }
-    let point = CGPoint(x: tr.midX, y: tr.midY)
-    let card = cards.first { rect($0).map { $0.contains(point) && window.contains($0) } == true }
-    return (card, layout)
+          let tr = rect(title), let page = pageRect(),
+          let i = pickCard(cards: layout, title: tr, page: page) else { return (nil, layout, titles) }
+    return (cards[i], layout, titles)
 }
 // What is under a screen point, only when it belongs to CapCut. A floating panel from
 // another app (a recorder's guided-take or alarm panel, say) would take the wheel or the
@@ -104,30 +126,13 @@ func capcutHit(_ p: CGPoint) -> (element: AXUIElement?, owner: String) {
 func occluded(_ p: CGPoint, _ owner: String, over: String = "CapCut") -> Never {
     fail("EXPORT_POINT_OCCLUDED: \(owner) is over \(over) at (\(Int(p.x)), \(Int(p.y))); move it and retry")
 }
-// Home is one long Qt page and only the cards on screen are in the accessibility tree.
-// A wheel over a card does not move it; a wheel over the page body does. Once the grid
-// fills the window a fixed point lands on a card, so aim at the page outside the cards:
-// the fixed point that worked by hand while it is clear of every card, then the margin
-// right of the last column, then a gap between rows.
-func wheelPoints(_ layout: [CGRect], _ w: CGRect) -> [CGPoint] {
-    var points = [CGPoint(x: w.minX + w.width * 0.55, y: w.minY + w.height * 0.85)]
-    if let right = layout.map(\.maxX).max(), w.maxX - right >= 24 {
-        points.append(CGPoint(x: (right + w.maxX) / 2, y: w.minY + w.height * 0.85))
-    }
-    let rows = layout.sorted { $0.minY < $1.minY }
-    for (a, b) in zip(rows, rows.dropFirst()) where b.minY - a.maxY >= 8 && a.maxY > w.minY && b.minY < w.maxY {
-        points.append(CGPoint(x: w.midX, y: (a.maxY + b.minY) / 2)); break
-    }
-    return points.filter { p in w.contains(p) && !layout.contains { $0.insetBy(dx: -2, dy: -2).contains(p) } }
-}
-// Qt routes the wheel by hover, so move the pointer there first. `attempt` picks a later
-// point when the first one did not move the page.
-func scrollHome(_ pixels: Int32, _ layout: [CGRect], attempt: Int = 0) {
+// Home is one long Qt page; only cards near the screen are in the accessibility tree.
+// Qt routes the wheel by hover, so move the pointer there first. AXIncrement on the
+// page's scroll bar jumps a whole screen and skips rows, so the wheel steps instead.
+func scrollHome(_ pixels: Int32) {
     guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.lemon.lvoverseas" else { fail("EXPORT_FOCUS_LOST: retry when CapCut can keep focus briefly") }
-    guard let w = homeWindow() else { fail("EXPORT_HOME_GEOMETRY") }
-    let candidates = wheelPoints(layout, w)
-    guard !candidates.isEmpty else { fail("EXPORT_HOME_GEOMETRY: no page area outside the cards to scroll") }
-    let p = candidates[attempt % candidates.count]
+    guard let page = pageRect() else { fail("EXPORT_HOME_GEOMETRY") }
+    let p = wheelPoint(page: page)
     let (hit, owner) = capcutHit(p)
     if hit == nil { occluded(p, owner) }
     CGWarpMouseCursorPosition(p)
@@ -171,29 +176,29 @@ if find(target) == nil {
         guard AXUIElementPerformAction(back, kAXPressAction as CFString) == .success else { fail("EXPORT_HOME_FAILED") }
     }
 }
-// Cards take a few seconds to appear, after Back or on a freshly opened Home.
+// Cards take a few seconds to appear, after Back or on a freshly opened Home, and their
+// titles can follow later. Wait for the target, or for the cards and titles to settle.
 let cardsBy = Date().addingTimeInterval(10)
-while homeCards().isEmpty && Date() < cardsBy { Thread.sleep(forTimeInterval: 0.25) }
-if homeCards().isEmpty { fail("EXPORT_HOME_UNAVAILABLE: no project cards on CapCut Home") }
 var state = homeState()
-if state.card == nil { Thread.sleep(forTimeInterval: 1); state = homeState() }
+var settled = 0
+while state.card == nil && Date() < cardsBy && settled < 4 {
+    Thread.sleep(forTimeInterval: 0.25)
+    let next = homeState()
+    settled = !next.layout.isEmpty && next.titles > 0 && next.layout == state.layout && next.titles == state.titles ? settled + 1 : 0
+    state = next
+}
+if state.layout.isEmpty { fail("EXPORT_HOME_UNAVAILABLE: no project cards on CapCut Home") }
 // Older projects sit below the first row: page down, then back up, checking each step.
-// A card already cut off by the window edge means the page has more to show.
-let overflowed = homeWindow().map { w in state.layout.contains { $0.maxY > w.maxY + 1 || $0.minY < w.minY - 1 } } ?? false
+// A card cut off by the page edge means the page has more to show.
+let overflowed = pageRect().map { page in state.layout.contains { $0.maxY > page.maxY + 1 || $0.minY < page.minY - 1 } } ?? false
 var moved = false
 for pixels: Int32 in [-240, 240] where state.card == nil {
     var still = 0
     for _ in 0..<60 {
         let before = state.layout
-        scrollHome(pixels, before)
+        scrollHome(pixels)
         state = homeState()
         if state.card != nil { break }
-        if state.layout == before {
-            // Before calling it the end of the page, try the wheel at another point.
-            scrollHome(pixels, before, attempt: 1)
-            state = homeState()
-            if state.card != nil { break }
-        }
         if state.layout != before { moved = true }
         still = state.layout == before ? still + 1 : 0
         if still >= 2 { break }
