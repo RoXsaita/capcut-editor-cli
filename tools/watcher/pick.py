@@ -64,8 +64,10 @@ def take_start(take_dir):
 
 def wall_at(start, anchors, vt):
     """Local wall time of a vt. The vt clock stops while the Mac sleeps, so start + vt is early
-    after a sleep: add the time slept before vt (rl2_take.sleep_anchors)."""
-    return (start + timedelta(seconds=vt + rl2_take.slept_before(anchors, vt))).strftime("%Y-%m-%d %H:%M:%S")
+    after a sleep: add the time slept before vt (rl2_take.sleep_anchors). The sum is done on an
+    aware time, so a take that crosses a DST change still prints the true local time."""
+    wall = start.astimezone() + timedelta(seconds=vt + rl2_take.slept_before(anchors, vt))
+    return wall.astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def load_take(take_dir):

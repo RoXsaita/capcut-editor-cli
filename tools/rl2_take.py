@@ -130,12 +130,22 @@ def sleep_anchors(take_dir, wall0, session=None):
     start = {s.get("file"): s.get("start_vt") for s in session.get("video_segments") or [] if isinstance(s, dict)}
     anchors = [(0.0, 0.0)]
     resumes = []
-    for pause in (session.get("pause") or {}).get("pauses") or []:
-        resume = (pause or {}).get("resume") or {}
+    pause_block = session.get("pause")
+    pauses = pause_block.get("pauses") if isinstance(pause_block, dict) else None
+    for pause in pauses if isinstance(pauses, list) else []:
+        resume = pause.get("resume") if isinstance(pause, dict) else None
+        if not isinstance(resume, dict) or not isinstance(resume.get("wall"), str):
+            continue
         start_vt = start.get(resume.get("part"))
-        if isinstance(resume.get("wall"), str) and _finite(start_vt):
+        if not _finite(start_vt):
+            continue
+        try:
             wall = datetime.fromisoformat(resume["wall"].replace("Z", "+00:00"))
-            resumes.append((float(start_vt), (wall - wall0).total_seconds() - start_vt))
+        except ValueError:
+            continue    # a malformed stamp: skip this resume, as parts() skips bad segments
+        if wall.tzinfo is None:
+            continue    # no offset: the stamp's zone is unknown, so it cannot place a sleep
+        resumes.append((float(start_vt), (wall - wall0).total_seconds() - start_vt))
     for start_vt, slept in sorted(resumes):
         if slept - anchors[-1][1] >= SLEEP_JUMP:
             anchors.append((start_vt, slept))

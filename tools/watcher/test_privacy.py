@@ -194,6 +194,34 @@ class WallClock(unittest.TestCase):
         self.assertEqual(pick.wall_at(start, anchors, 120), "2026-10-28 12:16:50", "after it: + the 890 s slept")
         self.assertEqual(pick.wall_at(start, [(0.0, 0.0)], 120), "2026-10-28 12:02:00", "no pauses: start + vt")
 
+    def test_a_sleep_across_the_dst_change_prints_true_local_time(self):
+        # Warsaw leaves summer time at 03:00 on 25 Oct 2026: 23:00 + 6:01:40 of wall time is 04:01:40.
+        import time
+        old = os.environ.get("TZ")
+        os.environ["TZ"] = "Europe/Warsaw"
+        time.tzset()
+        try:
+            start = pick.take_start("screen-20261024-230000")
+            self.assertEqual(pick.wall_at(start, [(0.0, 0.0), (100.0, 21500.0)], 200),
+                             "2026-10-25 04:01:40", "vt 200 + 21500 s slept, across the DST change")
+        finally:
+            if old is None:
+                os.environ.pop("TZ")
+            else:
+                os.environ["TZ"] = old
+            time.tzset()
+
+    def test_malformed_resumes_are_skipped_not_fatal(self):
+        from datetime import UTC, datetime
+        wall0 = datetime(2026, 10, 28, 12, 0, tzinfo=UTC)
+        segments = [{"file": "screen.mp4", "start_vt": 0}, {"file": "screen-part02.mp4", "start_vt": 110}]
+        for pauses in ("x", ["x"], [{"resume": "x"}],
+                       [{"resume": {"part": "screen-part02.mp4", "wall": "not a time"}}],
+                       [{"resume": {"part": "screen-part02.mp4", "wall": "2026-10-28T12:16:40"}}]):
+            session = {"video_segments": segments, "pause": {"pauses": pauses}}
+            self.assertEqual(pick.rl2_take.sleep_anchors(None, wall0, session), [(0.0, 0.0)], repr(pauses))
+        self.assertEqual(pick.rl2_take.sleep_anchors(None, wall0, {"pause": "x"}), [(0.0, 0.0)])
+
 
 if __name__ == "__main__":
     unittest.main()

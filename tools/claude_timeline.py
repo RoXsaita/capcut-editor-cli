@@ -433,7 +433,10 @@ def main():
     take = find_take(a.take)
     t0, wall0, dur = take_clock(take)
     to_vt, slept = sleep_map(take, wall0)
-    w_hi = wall0 + timedelta(seconds=dur + slept)
+    # dur from frames.ndjson is vt, which skips the sleep; the mp4 mtime fallback is wall already.
+    fr = os.path.join(take, "frames.ndjson")
+    dur_is_vt = os.path.exists(fr) and bool((last_json_line(fr) or {}).get("vt"))
+    w_hi = wall0 + timedelta(seconds=dur + (slept if dur_is_vt else 0.0))
     focus, inputs = read_trace(take, t0)
     fvt = [f[0] for f in focus]
     meta = load_meta()

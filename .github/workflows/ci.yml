@@ -123,6 +123,9 @@ jobs:
       - name: Run Claude timeline redaction self-tests
         run: python tools/claude_timeline.py --selftest
 
+      - name: Test rl2 change index and sleep anchors
+        run: python test/change-index.py
+
       # The X-ray self-test builds and measures real media, so it needs ffmpeg like the node job.
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
