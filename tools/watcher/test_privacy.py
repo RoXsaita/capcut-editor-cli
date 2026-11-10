@@ -195,10 +195,10 @@ class WallClock(unittest.TestCase):
         self.assertEqual(pick.wall_at(start, [(0.0, 0.0)], 120), "2026-10-28 12:02:00", "no pauses: start + vt")
 
     def test_a_sleep_across_the_dst_change_prints_true_local_time(self):
-        # Warsaw leaves summer time at 03:00 on 25 Oct 2026: 23:00 + 6:01:40 of wall time is 04:01:40.
+        # Central Europe leaves summer time at 03:00 on 25 Oct 2026: 23:00 + 6:01:40 is 04:01:40.
         import time
         old = os.environ.get("TZ")
-        os.environ["TZ"] = "Europe/Warsaw"
+        os.environ["TZ"] = "CET-1CEST,M3.5.0,M10.5.0/3"
         time.tzset()
         try:
             start = pick.take_start("screen-20261024-230000")
@@ -221,6 +221,11 @@ class WallClock(unittest.TestCase):
             session = {"video_segments": segments, "pause": {"pauses": pauses}}
             self.assertEqual(pick.rl2_take.sleep_anchors(None, wall0, session), [(0.0, 0.0)], repr(pauses))
         self.assertEqual(pick.rl2_take.sleep_anchors(None, wall0, {"pause": "x"}), [(0.0, 0.0)])
+        self.assertEqual(pick.rl2_take.sleep_anchors(None, wall0, "x"), [(0.0, 0.0)])
+        self.assertEqual(pick.rl2_take.sleep_anchors(None, wall0, {"video_segments": 3}), [(0.0, 0.0)])
+        listed = {"video_segments": [{"file": ["x"], "start_vt": 0}, *segments],
+                  "pause": {"pauses": [{"resume": {"part": ["screen-part02.mp4"], "wall": "2026-10-28T12:16:40Z"}}]}}
+        self.assertEqual(pick.rl2_take.sleep_anchors(None, wall0, listed), [(0.0, 0.0)])
 
 
 if __name__ == "__main__":

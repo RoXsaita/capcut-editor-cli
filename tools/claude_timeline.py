@@ -208,6 +208,19 @@ def take_clock(take):
     return t0, wall0, dur
 
 
+def window_end(take, wall0, dur, slept):
+    """Wall time the take's search window ends. dur from frames.ndjson is vt, which skips the
+    time slept, so add it. The fallback dur (first mp4's mtime - birthtime) is wall but covers
+    part 1 only, so end at the last-written part instead."""
+    fr = os.path.join(take, "frames.ndjson")
+    if os.path.exists(fr) and (last_json_line(fr) or {}).get("vt"):
+        return wall0 + timedelta(seconds=dur + slept)
+    ends = [os.stat(p).st_mtime for p in (os.path.join(take, part.file) for part in rl2_take.parts(take))
+            if os.path.exists(p)]
+    end = wall0 + timedelta(seconds=dur)
+    return max(end, datetime.fromtimestamp(max(ends), UTC)) if ends else end
+
+
 def sleep_map(take, wall0):
     """-> (to_vt, slept_s): wall seconds after wall0 -> vt, and the wall time vt does not count.
 
@@ -433,10 +446,7 @@ def main():
     take = find_take(a.take)
     t0, wall0, dur = take_clock(take)
     to_vt, slept = sleep_map(take, wall0)
-    # dur from frames.ndjson is vt, which skips the sleep; the mp4 mtime fallback is wall already.
-    fr = os.path.join(take, "frames.ndjson")
-    dur_is_vt = os.path.exists(fr) and bool((last_json_line(fr) or {}).get("vt"))
-    w_hi = wall0 + timedelta(seconds=dur + (slept if dur_is_vt else 0.0))
+    w_hi = window_end(take, wall0, dur, slept)
     focus, inputs = read_trace(take, t0)
     fvt = [f[0] for f in focus]
     meta = load_meta()

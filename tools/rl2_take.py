@@ -48,7 +48,8 @@ def parts(take_dir, session=None):
     """
     session = _session(take_dir) if session is None else session
     listed = []
-    for segment in session.get("video_segments") or []:
+    segments = session.get("video_segments")
+    for segment in segments if isinstance(segments, list) else []:
         if not isinstance(segment, dict):
             continue
         file, start, frames = segment.get("file"), segment.get("start_vt"), segment.get("frames")
@@ -127,8 +128,12 @@ def sleep_anchors(take_dir, wall0, session=None):
     pauses is [(0.0, 0.0)].
     """
     session = _session(take_dir) if session is None else session
-    start = {s.get("file"): s.get("start_vt") for s in session.get("video_segments") or [] if isinstance(s, dict)}
     anchors = [(0.0, 0.0)]
+    if not isinstance(session, dict):
+        return anchors
+    segments = session.get("video_segments")
+    start = {s["file"]: s.get("start_vt") for s in segments if isinstance(s, dict) and isinstance(s.get("file"), str)} \
+        if isinstance(segments, list) else {}
     resumes = []
     pause_block = session.get("pause")
     pauses = pause_block.get("pauses") if isinstance(pause_block, dict) else None
@@ -136,7 +141,8 @@ def sleep_anchors(take_dir, wall0, session=None):
         resume = pause.get("resume") if isinstance(pause, dict) else None
         if not isinstance(resume, dict) or not isinstance(resume.get("wall"), str):
             continue
-        start_vt = start.get(resume.get("part"))
+        part = resume.get("part")
+        start_vt = start.get(part) if isinstance(part, str) else None
         if not _finite(start_vt):
             continue
         try:

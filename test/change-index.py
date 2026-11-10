@@ -298,6 +298,25 @@ class MultiPartTakeTests(unittest.TestCase):
             to_vt, slept = claude_timeline.sleep_map(tmp, wall0)
         self.assertEqual((to_vt(1010.0), slept), (1010.0, 0.0), "no pauses: unchanged mapping")
 
+    def test_claude_timeline_window_covers_every_part_after_a_sleep(self):
+        import os
+        from datetime import datetime, timedelta, timezone
+        wall0 = datetime(2026, 10, 28, 12, 0, 0, tzinfo=timezone.utc)
+        session = {"video_segments": [
+            {"file": "screen.mp4", "start_vt": 0, "end_vt": 100, "frames": 3000},
+            {"file": "screen-part02.mp4", "start_vt": 110, "end_vt": 200, "frames": 2700}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "session.json").write_text(json.dumps(session))
+            for name, end in (("screen.mp4", 100), ("screen-part02.mp4", 1090)):
+                (Path(tmp) / name).write_bytes(b"")
+                stamp = (wall0 + timedelta(seconds=end)).timestamp()
+                os.utime(Path(tmp) / name, (stamp, stamp))
+            self.assertEqual(claude_timeline.window_end(tmp, wall0, 100.0, 890.0),
+                             wall0 + timedelta(seconds=1090), "mtime fallback: ends at the last part")
+            (Path(tmp) / "frames.ndjson").write_text(json.dumps({"vt": 200.0}) + "\n")
+            self.assertEqual(claude_timeline.window_end(tmp, wall0, 200.0, 890.0),
+                             wall0 + timedelta(seconds=1090), "vt duration: + the time slept")
+
 
 class SnapTests(unittest.TestCase):
     def index(self, starts):
