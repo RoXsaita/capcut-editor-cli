@@ -209,25 +209,13 @@ def take_clock(take):
 
 
 def sleep_map(take, wall0):
-    """-> (to_vt, extra_s): wall seconds after wall0 -> vt, and the wall time vt does not count.
+    """-> (to_vt, slept_s): wall seconds after wall0 -> vt, and the wall time vt does not count.
 
-    vt runs on the host clock, which stops while the Mac sleeps, so after a sleep wall0 + vt is
-    hours early (rl2's own wall formula has the same fault). session.json records the wall time of
-    every resume: each part after one is anchored there. A wall time inside a pause maps to just
-    before the next part (a gap row); without pauses this is wall - wall0, as before.
+    The host clock stops while the Mac sleeps (rl2_take.sleep_anchors): after a sleep each part
+    is anchored at its resume. A wall time inside a sleep maps to just before the next part (a
+    gap row); without pauses this is wall - wall0, as before.
     """
-    sess = json.loads(Path(take, "session.json").read_text())
-    start = {s.get("file"): s.get("start_vt") for s in sess.get("video_segments") or [] if isinstance(s, dict)}
-    anchors = [(0.0, 0.0)]                     # (start_vt, drift = wall offset - vt)
-    for p in (sess.get("pause") or {}).get("pauses") or []:
-        rs = p.get("resume") or {}
-        sv = start.get(rs.get("part"))
-        if not rs.get("wall") or not isinstance(sv, (int, float)):
-            continue
-        drift = (datetime.fromisoformat(rs["wall"].replace("Z", "+00:00")) - wall0).total_seconds() - sv
-        if drift - anchors[-1][1] > 2.0:     # a real jump (sleep); smaller is wall-clock rounding
-            anchors.append((float(sv), drift))
-    anchors.sort()
+    anchors = rl2_take.sleep_anchors(take, wall0)
 
     def to_vt(w):
         i = max(k for k, (sv, d) in enumerate(anchors) if sv + d <= w or k == 0)

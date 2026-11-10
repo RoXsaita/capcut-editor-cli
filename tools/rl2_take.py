@@ -16,6 +16,7 @@ import json
 import math
 import re
 from collections import namedtuple
+from datetime import datetime
 from pathlib import Path
 
 SESSION = "session.json"
@@ -109,3 +110,38 @@ def listing(take_parts):
         end = "end" if part.end_vt is None else f"{part.end_vt:.2f}"
         return f"{part.file} {part.start_vt:.2f}-{end}s"
     return "parts: " + ", ".join(span(part) for part in take_parts)
+
+
+# A resume whose wall time is more than this past wall0 + start_vt hid a sleep; less is the
+# second-truncated wall stamp.
+SLEEP_JUMP = 2.0
+
+
+def sleep_anchors(take_dir, wall0, session=None):
+    """[(start_vt, slept_s)] in vt order: from start_vt on, wall = wall0 + vt + slept_s.
+
+    vt runs on the host clock, which stops while the Mac sleeps, so after a sleep wall0 + vt is
+    early by the time slept (rl2's own `start_wall + vt` has the same fault). session.json keeps
+    each resume's true wall time under pause.pauses; a part whose resume is SLEEP_JUMP or more
+    later than its vt says starts a new anchor. wall0 must be timezone-aware. A take with no
+    pauses is [(0.0, 0.0)].
+    """
+    session = _session(take_dir) if session is None else session
+    start = {s.get("file"): s.get("start_vt") for s in session.get("video_segments") or [] if isinstance(s, dict)}
+    anchors = [(0.0, 0.0)]
+    resumes = []
+    for pause in (session.get("pause") or {}).get("pauses") or []:
+        resume = (pause or {}).get("resume") or {}
+        start_vt = start.get(resume.get("part"))
+        if isinstance(resume.get("wall"), str) and _finite(start_vt):
+            wall = datetime.fromisoformat(resume["wall"].replace("Z", "+00:00"))
+            resumes.append((float(start_vt), (wall - wall0).total_seconds() - start_vt))
+    for start_vt, slept in sorted(resumes):
+        if slept - anchors[-1][1] >= SLEEP_JUMP:
+            anchors.append((start_vt, slept))
+    return anchors
+
+
+def slept_before(anchors, vt):
+    """Wall seconds the vt clock did not count before `vt` (add it to wall0 + vt)."""
+    return max((a for a in anchors if a[0] <= vt), default=(0.0, 0.0))[1]

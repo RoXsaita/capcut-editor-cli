@@ -173,5 +173,27 @@ class Rules(unittest.TestCase):
         self.assertEqual(apps, {"notes"})
 
 
+class WallClock(unittest.TestCase):
+    def test_a_keyframe_after_the_mac_slept_gets_its_true_wall_time(self):
+        # vt stops while the Mac sleeps: part 2 resumes 1000 s of wall time in, at vt 110.
+        from datetime import timedelta, timezone
+        with tempfile.TemporaryDirectory() as tmp:
+            take = os.path.join(tmp, "screen-20261028-120000")
+            os.mkdir(take)
+            start = pick.take_start(take)
+            resume = (start.astimezone() + timedelta(seconds=1000)).astimezone(timezone.utc)
+            with open(os.path.join(take, "session.json"), "w") as f:
+                json.dump({"video_segments": [
+                    {"file": "screen.mp4", "start_vt": 0, "end_vt": 100, "frames": 3000},
+                    {"file": "screen-part02.mp4", "start_vt": 110, "end_vt": 200, "frames": 2700}],
+                    "pause": {"pauses": [{"pause": {"closed_part": "screen.mp4", "reasons": ["sleep"]},
+                                          "resume": {"part": "screen-part02.mp4",
+                                                     "wall": resume.strftime("%Y-%m-%dT%H:%M:%SZ")}}]}}, f)
+            anchors = pick.rl2_take.sleep_anchors(take, start.astimezone())
+        self.assertEqual(pick.wall_at(start, anchors, 50), "2026-10-28 12:00:50", "before the sleep: start + vt")
+        self.assertEqual(pick.wall_at(start, anchors, 120), "2026-10-28 12:16:50", "after it: + the 890 s slept")
+        self.assertEqual(pick.wall_at(start, [(0.0, 0.0)], 120), "2026-10-28 12:02:00", "no pauses: start + vt")
+
+
 if __name__ == "__main__":
     unittest.main()
