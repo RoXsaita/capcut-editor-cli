@@ -176,12 +176,12 @@ class Rules(unittest.TestCase):
 class WallClock(unittest.TestCase):
     def test_a_keyframe_after_the_mac_slept_gets_its_true_wall_time(self):
         # vt stops while the Mac sleeps: part 2 resumes 1000 s of wall time in, at vt 110.
-        from datetime import timedelta, timezone
+        from datetime import UTC, timedelta
         with tempfile.TemporaryDirectory() as tmp:
             take = os.path.join(tmp, "screen-20261028-120000")
             os.mkdir(take)
             start = pick.take_start(take)
-            resume = (start.astimezone() + timedelta(seconds=1000)).astimezone(timezone.utc)
+            resume = (start.astimezone() + timedelta(seconds=1000)).astimezone(UTC)
             with open(os.path.join(take, "session.json"), "w") as f:
                 json.dump({"video_segments": [
                     {"file": "screen.mp4", "start_vt": 0, "end_vt": 100, "frames": 3000},
