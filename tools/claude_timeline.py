@@ -18,7 +18,8 @@ Clock. rl2 stamps events on the host clock; vt = host - session.json clock.first
 session.json has no sub-second wall time and created_wall can be stamped long after the start
 (watcher/pick.py), so the wall time of vt 0 is the screen.mp4 file's birth time (the file is
 created as capture starts), sanity-checked against the folder name (local time), which is the
-fallback. Transcript timestamps are UTC. Accuracy: about 1-2 s (a prompt bubble was absent at vt-2 and present at vt+1.4).
+fallback. Transcript timestamps are UTC. The host clock stops while the Mac sleeps, so a take that
+slept is anchored again at each resume's wall time (session.json pauses; sleep_map). Accuracy: about 1-2 s (a prompt bubble was absent at vt-2 and present at vt+1.4).
 
 On screen. rl2 records no window titles, so which session was visible is a guess. A prompt row
 counts as "typed at the screen" when a Send click or typing burst sits within a few seconds
@@ -205,6 +206,36 @@ def take_clock(take):
     if not dur:
         dur = os.stat(mp4).st_mtime - os.stat(mp4).st_birthtime
     return t0, wall0, dur
+
+
+def sleep_map(take, wall0):
+    """-> (to_vt, extra_s): wall seconds after wall0 -> vt, and the wall time vt does not count.
+
+    vt runs on the host clock, which stops while the Mac sleeps, so after a sleep wall0 + vt is
+    hours early (rl2's own wall formula has the same fault). session.json records the wall time of
+    every resume: each part after one is anchored there. A wall time inside a pause maps to just
+    before the next part (a gap row); without pauses this is wall - wall0, as before.
+    """
+    sess = json.loads(Path(take, "session.json").read_text())
+    start = {s.get("file"): s.get("start_vt") for s in sess.get("video_segments") or [] if isinstance(s, dict)}
+    anchors = [(0.0, 0.0)]                     # (start_vt, drift = wall offset - vt)
+    for p in (sess.get("pause") or {}).get("pauses") or []:
+        rs = p.get("resume") or {}
+        sv = start.get(rs.get("part"))
+        if not rs.get("wall") or not isinstance(sv, (int, float)):
+            continue
+        drift = (datetime.fromisoformat(rs["wall"].replace("Z", "+00:00")) - wall0).total_seconds() - sv
+        if drift - anchors[-1][1] > 2.0:     # a real jump (sleep); smaller is wall-clock rounding
+            anchors.append((float(sv), drift))
+    anchors.sort()
+
+    def to_vt(w):
+        i = max(k for k, (sv, d) in enumerate(anchors) if sv + d <= w or k == 0)
+        vt = w - anchors[i][1]
+        if i + 1 < len(anchors) and vt >= anchors[i + 1][0]:
+            vt = anchors[i + 1][0] - 0.01      # inside the pause the sleep hid: no file holds it
+        return vt
+    return to_vt, anchors[-1][1]
 
 
 def read_trace(take, t0):
@@ -413,7 +444,8 @@ def main():
 
     take = find_take(a.take)
     t0, wall0, dur = take_clock(take)
-    w_hi = wall0 + timedelta(seconds=dur)
+    to_vt, slept = sleep_map(take, wall0)
+    w_hi = wall0 + timedelta(seconds=dur + slept)
     focus, inputs = read_trace(take, t0)
     fvt = [f[0] for f in focus]
     meta = load_meta()
@@ -422,7 +454,7 @@ def main():
     for path in transcripts(wall0, w_hi):
         sid, title, short = session_of(path, meta)
         for wall, kind, txt, extra in events_of(path, wall0, w_hi):
-            rows.append({"vt": round((wall - wall0).total_seconds(), 2), "wall": wall.astimezone().strftime("%H:%M:%S"),
+            rows.append({"vt": round(to_vt((wall - wall0).total_seconds()), 2), "wall": wall.astimezone().strftime("%H:%M:%S"),
                          "session": title, "name": short, "cli": sid, "kind": kind, "_t": txt, **extra})
     rows.sort(key=lambda r: r["vt"])
 
