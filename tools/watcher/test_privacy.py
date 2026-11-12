@@ -173,5 +173,60 @@ class Rules(unittest.TestCase):
         self.assertEqual(apps, {"notes"})
 
 
+class WallClock(unittest.TestCase):
+    def test_a_keyframe_after_the_mac_slept_gets_its_true_wall_time(self):
+        # vt stops while the Mac sleeps: part 2 resumes 1000 s of wall time in, at vt 110.
+        from datetime import UTC, timedelta
+        with tempfile.TemporaryDirectory() as tmp:
+            take = os.path.join(tmp, "screen-20261028-120000")
+            os.mkdir(take)
+            start = pick.take_start(take)
+            resume = (start.astimezone() + timedelta(seconds=1000)).astimezone(UTC)
+            with open(os.path.join(take, "session.json"), "w") as f:
+                json.dump({"video_segments": [
+                    {"file": "screen.mp4", "start_vt": 0, "end_vt": 100, "frames": 3000},
+                    {"file": "screen-part02.mp4", "start_vt": 110, "end_vt": 200, "frames": 2700}],
+                    "pause": {"pauses": [{"pause": {"closed_part": "screen.mp4", "reasons": ["sleep"]},
+                                          "resume": {"part": "screen-part02.mp4",
+                                                     "wall": resume.strftime("%Y-%m-%dT%H:%M:%SZ")}}]}}, f)
+            anchors = pick.rl2_take.sleep_anchors(take, start.astimezone())
+        self.assertEqual(pick.wall_at(start, anchors, 50), "2026-10-28 12:00:50", "before the sleep: start + vt")
+        self.assertEqual(pick.wall_at(start, anchors, 120), "2026-10-28 12:16:50", "after it: + the 890 s slept")
+        self.assertEqual(pick.wall_at(start, [(0.0, 0.0)], 120), "2026-10-28 12:02:00", "no pauses: start + vt")
+
+    def test_a_sleep_across_the_dst_change_prints_true_local_time(self):
+        # Central Europe leaves summer time at 03:00 on 25 Oct 2026: 23:00 + 6:01:40 is 04:01:40.
+        import time
+        old = os.environ.get("TZ")
+        os.environ["TZ"] = "CET-1CEST,M3.5.0,M10.5.0/3"
+        time.tzset()
+        try:
+            start = pick.take_start("screen-20261024-230000")
+            self.assertEqual(pick.wall_at(start, [(0.0, 0.0), (100.0, 21500.0)], 200),
+                             "2026-10-25 04:01:40", "vt 200 + 21500 s slept, across the DST change")
+        finally:
+            if old is None:
+                os.environ.pop("TZ")
+            else:
+                os.environ["TZ"] = old
+            time.tzset()
+
+    def test_malformed_resumes_are_skipped_not_fatal(self):
+        from datetime import UTC, datetime
+        wall0 = datetime(2026, 10, 28, 12, 0, tzinfo=UTC)
+        segments = [{"file": "screen.mp4", "start_vt": 0}, {"file": "screen-part02.mp4", "start_vt": 110}]
+        for pauses in ("x", ["x"], [{"resume": "x"}],
+                       [{"resume": {"part": "screen-part02.mp4", "wall": "not a time"}}],
+                       [{"resume": {"part": "screen-part02.mp4", "wall": "2026-10-28T12:16:40"}}]):
+            session = {"video_segments": segments, "pause": {"pauses": pauses}}
+            self.assertEqual(pick.rl2_take.sleep_anchors(None, wall0, session), [(0.0, 0.0)], repr(pauses))
+        self.assertEqual(pick.rl2_take.sleep_anchors(None, wall0, {"pause": "x"}), [(0.0, 0.0)])
+        self.assertEqual(pick.rl2_take.sleep_anchors(None, wall0, "x"), [(0.0, 0.0)])
+        self.assertEqual(pick.rl2_take.sleep_anchors(None, wall0, {"video_segments": 3}), [(0.0, 0.0)])
+        listed = {"video_segments": [{"file": ["x"], "start_vt": 0}, *segments],
+                  "pause": {"pauses": [{"resume": {"part": ["screen-part02.mp4"], "wall": "2026-10-28T12:16:40Z"}}]}}
+        self.assertEqual(pick.rl2_take.sleep_anchors(None, wall0, listed), [(0.0, 0.0)])
+
+
 if __name__ == "__main__":
     unittest.main()

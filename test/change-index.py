@@ -270,6 +270,53 @@ class MultiPartTakeTests(unittest.TestCase):
         self.assertNotIn("screen.mp4", claude_timeline.row_line(rows[0], multi=False),
                          "a one-part take prints the same columns as before")
 
+    def test_claude_timeline_re_anchors_vt_after_the_mac_slept(self):
+        # The host clock stops in sleep: part 2 resumes at wall +1000 s but at vt 110.
+        # A 60 s idle pause (part 2 -> 3) keeps the clock running and must not re-anchor.
+        from datetime import datetime, timezone
+        wall0 = datetime(2026, 10, 28, 12, 0, 0, tzinfo=timezone.utc)
+        session = {"video_segments": [
+            {"file": "screen.mp4", "start_vt": 0, "end_vt": 100, "frames": 3000},
+            {"file": "screen-part02.mp4", "start_vt": 110, "end_vt": 200, "frames": 2700},
+            {"file": "screen-part03.mp4", "start_vt": 260.5, "end_vt": 300, "frames": 1200}],
+            "pause": {"pauses": [
+                {"pause": {"closed_part": "screen.mp4", "reasons": ["sleep"]},
+                 "resume": {"part": "screen-part02.mp4", "wall": "2026-10-28T12:16:40Z"}},
+                {"pause": {"closed_part": "screen-part02.mp4", "reasons": ["idle"]},
+                 "resume": {"part": "screen-part03.mp4", "wall": "2026-10-28T12:19:10Z"}}]}}
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "session.json").write_text(json.dumps(session))
+            to_vt, slept = claude_timeline.sleep_map(tmp, wall0)
+        self.assertEqual(slept, 890.0)
+        self.assertEqual(to_vt(50.0), 50.0, "before the sleep, vt is wall - wall0")
+        self.assertEqual(to_vt(1010.0), 120.0, "after it, vt counts from the resume")
+        self.assertEqual(to_vt(1151.0), 261.0, "an idle pause does not re-anchor")
+        self.assertAlmostEqual(to_vt(500.0), 109.99, msg="a wall time inside the sleep is a gap row")
+        session.pop("pause")
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "session.json").write_text(json.dumps(session))
+            to_vt, slept = claude_timeline.sleep_map(tmp, wall0)
+        self.assertEqual((to_vt(1010.0), slept), (1010.0, 0.0), "no pauses: unchanged mapping")
+
+    def test_claude_timeline_window_covers_every_part_after_a_sleep(self):
+        import os
+        from datetime import datetime, timedelta, timezone
+        wall0 = datetime(2026, 10, 28, 12, 0, 0, tzinfo=timezone.utc)
+        session = {"video_segments": [
+            {"file": "screen.mp4", "start_vt": 0, "end_vt": 100, "frames": 3000},
+            {"file": "screen-part02.mp4", "start_vt": 110, "end_vt": 200, "frames": 2700}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "session.json").write_text(json.dumps(session))
+            for name, end in (("screen.mp4", 100), ("screen-part02.mp4", 1090)):
+                (Path(tmp) / name).write_bytes(b"")
+                stamp = (wall0 + timedelta(seconds=end)).timestamp()
+                os.utime(Path(tmp) / name, (stamp, stamp))
+            self.assertEqual(claude_timeline.window_end(tmp, wall0, 100.0, 890.0),
+                             wall0 + timedelta(seconds=1090), "mtime fallback: ends at the last part")
+            (Path(tmp) / "frames.ndjson").write_text(json.dumps({"vt": 200.0}) + "\n")
+            self.assertEqual(claude_timeline.window_end(tmp, wall0, 200.0, 890.0),
+                             wall0 + timedelta(seconds=1090), "vt duration: + the time slept")
+
 
 class SnapTests(unittest.TestCase):
     def index(self, starts):

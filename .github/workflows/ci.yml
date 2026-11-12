@@ -20,7 +20,8 @@ concurrency:
 jobs:
   node:
     name: Node ${{ matrix.node-version }}
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to 26.04, where Playwright 1.56 has no Chromium build.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -121,6 +122,9 @@ jobs:
 
       - name: Run Claude timeline redaction self-tests
         run: python tools/claude_timeline.py --selftest
+
+      - name: Test rl2 change index and sleep anchors
+        run: python test/change-index.py
 
       # The X-ray self-test builds and measures real media, so it needs ffmpeg like the node job.
       - name: Install ffmpeg

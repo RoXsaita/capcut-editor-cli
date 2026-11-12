@@ -16,6 +16,7 @@ import json
 import math
 import re
 from collections import namedtuple
+from datetime import datetime
 from pathlib import Path
 
 SESSION = "session.json"
@@ -47,7 +48,8 @@ def parts(take_dir, session=None):
     """
     session = _session(take_dir) if session is None else session
     listed = []
-    for segment in session.get("video_segments") or []:
+    segments = session.get("video_segments")
+    for segment in segments if isinstance(segments, list) else []:
         if not isinstance(segment, dict):
             continue
         file, start, frames = segment.get("file"), segment.get("start_vt"), segment.get("frames")
@@ -109,3 +111,53 @@ def listing(take_parts):
         end = "end" if part.end_vt is None else f"{part.end_vt:.2f}"
         return f"{part.file} {part.start_vt:.2f}-{end}s"
     return "parts: " + ", ".join(span(part) for part in take_parts)
+
+
+# A resume whose wall time is more than this past wall0 + start_vt hid a sleep; less is the
+# second-truncated wall stamp.
+SLEEP_JUMP = 2.0
+
+
+def sleep_anchors(take_dir, wall0, session=None):
+    """[(start_vt, slept_s)] in vt order: from start_vt on, wall = wall0 + vt + slept_s.
+
+    vt runs on the host clock, which stops while the Mac sleeps, so after a sleep wall0 + vt is
+    early by the time slept (rl2's own `start_wall + vt` has the same fault). session.json keeps
+    each resume's true wall time under pause.pauses; a part whose resume is SLEEP_JUMP or more
+    later than its vt says starts a new anchor. wall0 must be timezone-aware. A take with no
+    pauses is [(0.0, 0.0)].
+    """
+    session = _session(take_dir) if session is None else session
+    anchors = [(0.0, 0.0)]
+    if not isinstance(session, dict):
+        return anchors
+    segments = session.get("video_segments")
+    start = {s["file"]: s.get("start_vt") for s in segments if isinstance(s, dict) and isinstance(s.get("file"), str)} \
+        if isinstance(segments, list) else {}
+    resumes = []
+    pause_block = session.get("pause")
+    pauses = pause_block.get("pauses") if isinstance(pause_block, dict) else None
+    for pause in pauses if isinstance(pauses, list) else []:
+        resume = pause.get("resume") if isinstance(pause, dict) else None
+        if not isinstance(resume, dict) or not isinstance(resume.get("wall"), str):
+            continue
+        part = resume.get("part")
+        start_vt = start.get(part) if isinstance(part, str) else None
+        if not _finite(start_vt):
+            continue
+        try:
+            wall = datetime.fromisoformat(resume["wall"].replace("Z", "+00:00"))
+        except ValueError:
+            continue    # a malformed stamp: skip this resume, as parts() skips bad segments
+        if wall.tzinfo is None:
+            continue    # no offset: the stamp's zone is unknown, so it cannot place a sleep
+        resumes.append((float(start_vt), (wall - wall0).total_seconds() - start_vt))
+    for start_vt, slept in sorted(resumes):
+        if slept - anchors[-1][1] >= SLEEP_JUMP:
+            anchors.append((start_vt, slept))
+    return anchors
+
+
+def slept_before(anchors, vt):
+    """Wall seconds the vt clock did not count before `vt` (add it to wall0 + vt)."""
+    return max((a for a in anchors if a[0] <= vt), default=(0.0, 0.0))[1]

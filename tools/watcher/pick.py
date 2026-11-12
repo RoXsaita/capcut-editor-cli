@@ -34,7 +34,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(1, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import privacy
+import rl2_take
 
 BIG_BLOCKS = 12      # of 64 (8x8 mask)
 BIG_SCORE = 7.0      # ~99th percentile on 165029
@@ -58,6 +60,14 @@ def take_start(take_dir):
     the cursor render and can be ~30 min late."""
     m = re.search(r"(\d{8})-(\d{6})", os.path.basename(take_dir.rstrip("/")))
     return datetime.strptime(m.group(1) + m.group(2), "%Y%m%d%H%M%S") if m else None
+
+
+def wall_at(start, anchors, vt):
+    """Local wall time of a vt. The vt clock stops while the Mac sleeps, so start + vt is early
+    after a sleep: add the time slept before vt (rl2_take.sleep_anchors). The sum is done on an
+    aware time, so a take that crosses a DST change still prints the true local time."""
+    wall = start.astimezone() + timedelta(seconds=vt + rl2_take.slept_before(anchors, vt))
+    return wall.astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def load_take(take_dir):
@@ -390,6 +400,7 @@ def main():
         final = sorted(trimmed, key=lambda k: k["vt"])
         stats["final"] = len(final)
         start = take_start(take)
+        anchors = rl2_take.sleep_anchors(take, start.astimezone()) if start else None
         out = []
         for n, k in enumerate(final, 1):
             kid = f"k{n:02d}"
@@ -402,7 +413,7 @@ def main():
                 if f in k:
                     rec[f] = k[f]
             if start:
-                rec["wall"] = (start + timedelta(seconds=k["vt"])).strftime("%Y-%m-%d %H:%M:%S")
+                rec["wall"] = wall_at(start, anchors, k["vt"])
             out.append(rec)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
