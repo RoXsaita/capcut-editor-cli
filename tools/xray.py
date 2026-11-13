@@ -996,13 +996,22 @@ def cmd_scan(args):
 def text_pass(args, video, ledger, info, out, draft):
     """Phase 3: captions, screen text, faces, and speech if asked. Never fatal to the scan."""
     import xray_text as xt
-    if getattr(args, "no_text", False):
-        return {"verdicts": [{"property": "captions", "verdict": "NOT CHECKED", "origin": "-",
-                              "detail": "--no-text"}], "captions": []}
     authored = None
     if draft is not None:
         authored = [{"t0": e["t0"], "t1": e["t1"], "text": e["text"], "track": e["track"]}
                     for e in draft["events"] if e["type"] == "text" and e.get("text")]
+    if getattr(args, "no_text", False):
+        # --no-text skips the frame OCR only; --speech still transcribes (the gate's speech and
+        # first/last-word checks need it, and Whisper does not use the OCR helper).
+        speech = None
+        if getattr(args, "speech", False):
+            try:
+                speech = xt.transcribe_export(video, out / "speech", lang=getattr(args, "lang", None))
+                _atomic_write(out / "speech.json", json.dumps(speech, ensure_ascii=False))
+            except xt.TextUnavailable:
+                speech = None
+        return {"verdicts": [{"property": "captions", "verdict": "NOT CHECKED", "origin": "-",
+                              "detail": "--no-text"}], "captions": [], "_authored": authored, "_speech": speech}
     speech = None
     try:
         if getattr(args, "speech", False):
