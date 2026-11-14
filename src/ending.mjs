@@ -82,8 +82,10 @@ export function captureLastFrame(doc, projectDir, { fps = 30, width = 1080, heig
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'capcutctl-ending-'));
   const out = path.join(dir, 'last-frame.png');
   try {
+    // setpts: after -ss the first decoded frame of off-grid media (a 25 fps twin) starts after 0, and
+    // overlay then emits the black canvas alone as frame 1 (13 Nov: a black ring on the follow ender).
     const run = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-ss', (atUs / 1e6).toFixed(6), '-i', media,
-      '-filter_complex', `color=c=black:s=${width}x${height}[bg];[0:v]${[...flip, `scale=${w}:${h}`].join(',')}[fg];[bg][fg]overlay=${x}:${y}:shortest=1,format=rgb24`,
+      '-filter_complex', `color=c=black:s=${width}x${height}[bg];[0:v]${['setpts=PTS-STARTPTS', ...flip, `scale=${w}:${h}`].join(',')}[fg];[bg][fg]overlay=${x}:${y}:shortest=1,format=rgb24`,
       '-frames:v', '1', '-map_metadata', '-1', '-fflags', '+bitexact', '-y', out], { encoding: 'utf8' });
     if (run.status !== 0 || !fs.existsSync(out)) fail('ENDING_FRAME_CAPTURE', `ffmpeg could not read the last frame of ${media}: ${(run.stderr || '').trim().split('\n')[0]}`);
     return { file: media, data: fs.readFileSync(out), at: atUs / 1e6, clip: segment.id, approximate: [...notes], onTop };

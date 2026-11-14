@@ -156,6 +156,17 @@ const pixel = (png, x, y) => {
   return [...raw.subarray((y * 1080 + x) * 3, (y * 1080 + x) * 3 + 3)].map(v => (v > 128 ? 1 : 0)).join('');
 };
 
+test('a 25 fps clip still captures a picture, not the black canvas (off-grid seek)', { skip: !hasFfmpeg && 'needs ffmpeg' }, t => {
+  const dir = buildProject(); t.after(() => fs.rmSync(path.dirname(dir), { recursive: true, force: true }));
+  const media = working(dir).materials.videos[0].path;
+  const run = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=white:s=144x256:r=25:d=15',
+    '-c:v', 'libx264', '-qp', '0', '-pix_fmt', 'yuv444p', '-f', 'mp4', media]);
+  assert.equal(run.status, 0, String(run.stderr));
+  rewrite(dir, doc => { Object.assign(doc.materials.videos[0], { width: 144, height: 256 }); });
+  const shot = captureLastFrame(working(dir), dir);
+  assert.equal(pixel(shot.data, 540, 960), '111', 'the 30 fps seek lands between two 25 fps frames; the frame must still be the source');
+});
+
 test('the captured frame is the last displayed source frame, placed with the clip transform', { skip: !hasFfmpeg && 'needs ffmpeg' }, t => {
   const dir = buildProject(); t.after(() => fs.rmSync(path.dirname(dir), { recursive: true, force: true }));
   withMedia(dir);
